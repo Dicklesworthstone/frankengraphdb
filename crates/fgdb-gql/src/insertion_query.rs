@@ -8,7 +8,7 @@ use crate::insertion::{
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
 use crate::{
     GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetBuildError, GraphSetColumnType,
-    GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier,
+    GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier, GraphSetSource,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 
@@ -367,8 +367,24 @@ impl PreparedGraphInsertQuery {
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        self.execute_governed_with_source(policy, source, allocate, checkpoint)
+    }
+
+    /// CREATE and its complete RETURN tail with one explicit graph source
+    /// owner. Factor-aware and ordinary sources use the same private proposal,
+    /// expression validation, allocation boundary and cumulative allowance.
+    pub fn execute_governed_with_source<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        // Every engine below (creation, aggregate, ordering, tail) sees one
+        // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
+        let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut creation_policy = policy;
         creation_policy.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),

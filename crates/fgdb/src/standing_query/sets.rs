@@ -34,6 +34,8 @@ pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
         StandingQuery::Constant(query) => Some(query.definition.columns()),
         StandingQuery::Closure(query) => Some(query.columns()),
         StandingQuery::Components(query) => Some(query.columns()),
+        StandingQuery::CoreNumbers(query) => query.columns(),
+        StandingQuery::TriangleCounts(query) => Some(query.columns()),
         StandingQuery::Set(query) => Some(&query.columns),
         StandingQuery::Join(query) => Some(query.columns()),
         StandingQuery::Projection(query) => Some(query.columns()),
@@ -61,6 +63,16 @@ pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphS
         StandingQuery::Constant(query) => query.definition.column_types().get(column).copied(),
         StandingQuery::Closure(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
         StandingQuery::Components(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
+        StandingQuery::TriangleCounts(_) => match column {
+            0 => Some(GraphSetColumnType::Vertex),
+            1 => Some(GraphSetColumnType::Scalar),
+            _ => None,
+        },
+        StandingQuery::CoreNumbers(query) if query.has_value_rows() => match column {
+            0 => Some(GraphSetColumnType::Vertex),
+            1 => Some(GraphSetColumnType::Scalar),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -70,6 +82,8 @@ pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Constant(query) => Some(&query.rows),
         StandingQuery::Closure(query) => Some(query.rows()),
         StandingQuery::Components(query) => Some(query.value_rows()),
+        StandingQuery::CoreNumbers(query) => query.value_rows(),
+        StandingQuery::TriangleCounts(query) => Some(query.rows()),
         StandingQuery::Set(query) => Some(&query.rows),
         StandingQuery::Join(query) => Some(query.rows()),
         StandingQuery::Projection(query) => Some(query.rows()),
@@ -85,6 +99,8 @@ pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Constant(query) => query.last_delta.as_ref(),
         StandingQuery::Closure(query) => query.delta(),
         StandingQuery::Components(query) => query.value_delta(),
+        StandingQuery::CoreNumbers(query) => query.value_delta(),
+        StandingQuery::TriangleCounts(query) => query.delta(),
         StandingQuery::Set(query) => query.last_delta.as_ref(),
         StandingQuery::Join(query) => query.delta(),
         StandingQuery::Projection(query) => query.delta(),

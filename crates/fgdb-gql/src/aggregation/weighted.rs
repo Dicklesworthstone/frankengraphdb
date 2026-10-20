@@ -26,6 +26,99 @@ use core::num::NonZeroU64;
 type TopologyKey = (VId, RelationId, VId);
 type VisitError<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 
+/// Each topology key once, ascending, beside its multiplicity: the ordered
+/// map's contents as one sorted array. Its readers only iterate it in key
+/// order or look a key up, so the array answers exactly as the map did,
+/// without a node allocation per key (a quarter of a 730k-edge triangle
+/// count was building and walking the map).
+///
+/// A topology weighed from a positioned graph also keeps each key's endpoint
+/// positions, in key order, for the visitors that index vertices by position.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(super) struct Topology {
+    entries: Vec<(TopologyKey, Multiplicity)>,
+    positions: Option<Vec<[u32; 2]>>,
+}
+
+impl Topology {
+    /// From keys that are already ascending and distinct.
+    fn from_sorted(entries: Vec<(TopologyKey, Multiplicity)>) -> Self {
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        Self {
+            entries,
+            positions: None,
+        }
+    }
+    /// From ascending distinct keys and each one's endpoint positions.
+    fn from_sorted_positioned(
+        entries: Vec<(TopologyKey, Multiplicity)>,
+        positions: Vec<[u32; 2]>,
+    ) -> Self {
+        debug_assert_eq!(entries.len(), positions.len());
+        Self {
+            positions: Some(positions),
+            ..Self::from_sorted(entries)
+        }
+    }
+    fn get(&self, key: &TopologyKey) -> Option<&Multiplicity> {
+        self.entries
+            .binary_search_by(|(known, _)| known.cmp(key))
+            .ok()
+            .map(|at| &self.entries[at].1)
+    }
+    #[cfg(test)]
+    fn contains_key(&self, key: &TopologyKey) -> bool {
+        self.get(key).is_some()
+    }
+    fn keys(&self) -> impl Iterator<Item = &TopologyKey> + '_ {
+        self.entries.iter().map(|(key, _)| key)
+    }
+    fn values(&self) -> impl Iterator<Item = &Multiplicity> + '_ {
+        self.entries.iter().map(|(_, weight)| weight)
+    }
+    /// The keys with their endpoints by position, when weighed positioned.
+    fn positioned_keys(&self) -> Option<impl Iterator<Item = (u32, RelationId, u32)> + '_> {
+        let positions = self.positions.as_ref()?;
+        Some(self.entries.iter().zip(positions).map(
+            |(&((_, relation, _), _), &[source, destination])| (source, relation, destination),
+        ))
+    }
+}
+
+impl IntoIterator for Topology {
+    type Item = (TopologyKey, Multiplicity);
+    type IntoIter = std::vec::IntoIter<(TopologyKey, Multiplicity)>;
+    /// Ascending by key, as the ordered map's owned iteration.
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'t> IntoIterator for &'t Topology {
+    type Item = (&'t TopologyKey, &'t Multiplicity);
+    type IntoIter = core::iter::Map<
+        core::slice::Iter<'t, (TopologyKey, Multiplicity)>,
+        fn(&'t (TopologyKey, Multiplicity)) -> (&'t TopologyKey, &'t Multiplicity),
+    >;
+    /// Ascending by key, as the ordered map iterated.
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter().map(|(key, weight)| (key, weight))
+    }
+}
+
+impl From<BTreeMap<TopologyKey, Multiplicity>> for Topology {
+    fn from(map: BTreeMap<TopologyKey, Multiplicity>) -> Self {
+        Self::from_sorted(map.into_iter().collect())
+    }
+}
+
+impl FromIterator<(TopologyKey, Multiplicity)> for Topology {
+    /// As collecting into the ordered map: a repeated key keeps its last weight.
+    fn from_iter<I: IntoIterator<Item = (TopologyKey, Multiplicity)>>(entries: I) -> Self {
+        entries.into_iter().collect::<BTreeMap<_, _>>().into()
+    }
+}
+
 /// None proves a POSITIVE multiplicity exceeds u64::MAX. It is never a capped
 /// numeric answer. Overflow matters only when a completed witness contributes
 /// to COUNT: a doomed path or support-only summary must not fail prematurely.
@@ -72,6 +165,533 @@ struct EdgeAccess {
     destination: usize,
     relation: RelationId,
     direction: GlaDirection,
+}
+
+/// A plain vertex scan: ScanVertices, then only Selects on that vertex, one
+/// projection of it, and the terminal order/page of an aggregate child
+/// (fgdb-61p1n). Each vertex binds once, so the GLA's identity-keyed predicate
+/// cache never hits: every test is a miss that pays a cache insert. This shape
+/// runs the same steps directly, charging exactly the GLA's events.
+struct VertexScan<'p> {
+    selects: Vec<&'p [VertexPredicate]>,
+    columns: &'p [ValueProjection],
+}
+
+fn vertex_scan(aggregate: &PreparedGraphAggregate) -> Option<VertexScan<'_>> {
+    let operators = aggregate.input.plan().operators();
+    if !matches!(operators.first(), Some(GlaOperator::ScanVertices)) {
+        return None;
+    }
+    let mut selects = Vec::new();
+    let mut columns = None;
+    for operator in &operators[1..] {
+        match operator {
+            GlaOperator::Select { slot, predicates }
+                if columns.is_none() && slot.ordinal() == 0 =>
+            {
+                selects.push(predicates.as_slice());
+            }
+            GlaOperator::ProjectValues { columns: output }
+                if columns.is_none()
+                    && output.iter().all(|column| match column {
+                        ValueProjection::Vertex { slot }
+                        | ValueProjection::Property { slot, .. } => slot.ordinal() == 0,
+                        _ => false,
+                    }) =>
+            {
+                columns = Some(output.as_slice());
+            }
+            GlaOperator::OrderByValues if columns.is_some() => {}
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } if columns.is_some() => {}
+            _ => return None,
+        }
+    }
+    Some(VertexScan {
+        selects,
+        columns: columns?,
+    })
+}
+
+/// The GLA's vertex scan, step for step: one Work per vertex, then per
+/// Select one Work, the predicate cache entry it would insert (each vertex
+/// is new to it), the literal comparison work and the test; then one Work
+/// and the projection's visit. A refused Select ends the vertex.
+fn visit_vertex_scan<'a, E, C, F, R, M, P>(
+    scan: &VertexScan<'_>,
+    vertices: impl IntoIterator<Item = VId>,
+    mut test_vertex: F,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    'vertices: for vertex in vertices {
+        control(GlaExecutionEvent::Work)?;
+        for predicates in &scan.selects {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for predicate in *predicates {
+                for _ in 0..predicate.comparison_work_units() {
+                    control(GlaExecutionEvent::Work)?;
+                }
+            }
+            if !test_vertex(vertex, predicates)? {
+                continue 'vertices;
+            }
+        }
+        control(GlaExecutionEvent::Work)?;
+        visit(
+            scan.columns,
+            &[Some(vertex)],
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    Ok(())
+}
+
+/// An aggregate over one directed typed edge whose only other operators are
+/// endpoint selections and a projection of its two endpoints (fgdb-61p1n).
+/// Each admitted edge that passes its endpoints is one binding, so weighing
+/// them into a topology first (a sort of every arrival, an index over the
+/// keys, a weight search per binding) cannot pay for itself.
+struct SingleScan<'p> {
+    access: EdgeAccess,
+    columns: &'p [ValueProjection],
+    /// Every column reads slot 0 alone: bindings that share their slot-0
+    /// vertex are the same input to every key and aggregate, so each such
+    /// anchor is visited once, weighted by its passing edges, in ascending
+    /// vertex order (the root order `RootGroups` requires). Otherwise only
+    /// an ungrouped aggregate of vertex columns qualifies, edge by edge.
+    anchored: bool,
+    /// The aggregate is ungrouped COUNT(*) over vertex columns: every passing
+    /// edge is the same input, whatever its endpoints, and no column read
+    /// can refuse, so the scan only counts them.
+    counts_only: bool,
+}
+
+fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
+    let operators = aggregate.input.plan().operators();
+    let Some(GlaOperator::ScanEdges {
+        relation,
+        direction,
+    }) = operators.first()
+    else {
+        return None;
+    };
+    if *direction == GlaDirection::Undirected {
+        return None;
+    }
+    let mut columns = None;
+    for operator in &operators[1..] {
+        match operator {
+            GlaOperator::Select { slot, .. } if columns.is_none() && slot.ordinal() < 2 => {}
+            GlaOperator::ProjectValues { columns: output } if columns.is_none() => {
+                columns = Some(output.as_slice());
+            }
+            GlaOperator::OrderByValues if columns.is_some() => {}
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } if columns.is_some() => {}
+            _ => return None,
+        }
+    }
+    let columns = columns?;
+    let anchored = columns.iter().all(|column| match column {
+        ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+            slot.ordinal() == 0
+        }
+        _ => false,
+    });
+    let vertices = columns
+        .iter()
+        .all(|column| matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() < 2));
+    if !anchored && !(vertices && aggregate.keys.is_empty()) {
+        return None;
+    }
+    let counts_only = aggregate.keys.is_empty()
+        && aggregate
+            .aggregates
+            .iter()
+            .all(|bound| bound.function == GraphAggregateFunction::CountRows)
+        && columns
+            .iter()
+            .all(|column| matches!(column, ValueProjection::Vertex { .. }));
+    Some(SingleScan {
+        access: EdgeAccess {
+            source: 0,
+            destination: 1,
+            relation: relation.one()?,
+            direction: *direction,
+        },
+        columns,
+        anchored,
+        counts_only,
+    })
+}
+
+/// Edges in arrival order, each charged one Work as the topology charges
+/// it. Endpoints are tested in `topology::Endpoints::admit`'s order: source
+/// then destination, each vertex once per side (once in all when both sides
+/// share their predicates), its verdict one ScratchEntry. Unanchored, a passing edge is visited with multiplicity
+/// one. Anchored, it joins its slot-0 vertex's count (a new anchor costs one
+/// ScratchEntry); each anchor is then visited once with that multiplicity,
+/// after re-reading its property columns once per further edge, as the
+/// weighted visitor re-reads them per further occurrence. Without columns
+/// (COUNT(*) alone) no anchor is kept: one visit carries every passing edge.
+/// For the counts, distinct counts and extrema `eligible` admits, each equals
+/// the topology's weighted sum over the same edges.
+fn visit_single_scan<'a, E, C, F, R, M, P>(
+    scan: &SingleScan<'_>,
+    plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+    mut test_vertex: F,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    let filters = endpoint_filters(plan.operators(), core::slice::from_ref(&scan.access));
+    let (from, to) = filters
+        .as_ref()
+        .and_then(|filters| filters.get(&scan.access.relation))
+        .map_or((&[][..], &[][..]), |(from, to)| {
+            (from.as_slice(), to.as_slice())
+        });
+    // Both sides under one predicate list (`(:N)-[:E]->(:N)`) give a vertex
+    // one verdict wherever it is reached: a second test could only repeat
+    // the first, so each vertex is read and charged once, not once per side.
+    let shared = from == to;
+    // Probed, never iterated: no order of theirs reaches a result.
+    let mut tested = [
+        crate::id_hash::IdMap::<VId, bool>::default(),
+        crate::id_hash::IdMap::<VId, bool>::default(),
+    ];
+    // Each side's newest verdict. Edges arrive grouped by an endpoint, so
+    // most probes repeat the one before; a known vertex charges nothing.
+    let mut newest: [Option<(VId, bool)>; 2] = [None; 2];
+    // Anchor -> (passing edges, the first partner): probed, then sorted.
+    let mut anchors = crate::id_hash::IdMap::<VId, (u64, VId)>::default();
+    // The anchor of the newest passing edge and how many passing edges
+    // followed its run's first, not yet added to its count.
+    let mut run: Option<(VId, u64)> = None;
+    // No column reads a binding, or an ungrouped COUNT(*) reads only vertex
+    // columns it never uses: every passing edge is the same input, so the
+    // scan only counts them, keeping the first binding.
+    let constant = scan.columns.is_empty() || scan.counts_only;
+    let mut total: Option<(u64, VId, VId)> = None;
+    for (source, relation, destination) in edges {
+        control(GlaExecutionEvent::Work)?;
+        if relation != scan.access.relation {
+            continue;
+        }
+        let mut passes = |side: usize, vertex: VId, predicates: &[VertexPredicate]| {
+            if predicates.is_empty() {
+                return Ok(true);
+            }
+            if let Some((known, verdict)) = newest[side]
+                && known == vertex
+            {
+                return Ok(verdict);
+            }
+            let verdict = match tested[if shared { 0 } else { side }].entry(vertex) {
+                std::collections::hash_map::Entry::Occupied(known) => *known.get(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let result = test_vertex(vertex, predicates)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    *entry.insert(result)
+                }
+            };
+            newest[side] = Some((vertex, verdict));
+            Ok::<_, VisitError<E, C>>(verdict)
+        };
+        if !passes(0, source, from)? || !passes(1, destination, to)? {
+            continue;
+        }
+        let (anchor, partner) = match scan.access.direction {
+            GlaDirection::Forward => (source, destination),
+            _ => (destination, source),
+        };
+        if constant {
+            match &mut total {
+                Some((count, ..)) => *count += 1,
+                None => total = Some((1, anchor, partner)),
+            }
+            continue;
+        }
+        if scan.anchored {
+            match &mut run {
+                Some((last, more)) if *last == anchor => *more += 1,
+                _ => {
+                    if let Some((last, more)) = run.take() {
+                        anchors
+                            .get_mut(&last)
+                            .expect("a run's anchor was entered")
+                            .0 += more;
+                    }
+                    match anchors.entry(anchor) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().0 += 1;
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            entry.insert((1, partner));
+                        }
+                    }
+                    run = Some((anchor, 0));
+                }
+            }
+            continue;
+        }
+        visit(
+            scan.columns,
+            &[Some(anchor), Some(partner)],
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    if let Some((count, anchor, partner)) = total {
+        return visit(
+            scan.columns,
+            &[Some(anchor), Some(partner)],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        );
+    }
+    if let Some((last, more)) = run {
+        anchors
+            .get_mut(&last)
+            .expect("a run's anchor was entered")
+            .0 += more;
+    }
+    let mut anchors: Vec<_> = anchors.into_iter().collect();
+    anchors.sort_unstable_by_key(|(anchor, _)| *anchor);
+    for (anchor, (count, partner)) in anchors {
+        for _ in 1..count {
+            for column in scan.columns {
+                if let ValueProjection::Property { key, .. } = column {
+                    control(GlaExecutionEvent::Work)?;
+                    property(anchor, *key)?;
+                }
+            }
+        }
+        visit(
+            scan.columns,
+            &[Some(anchor), Some(partner)],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        )?;
+    }
+    Ok(())
+}
+
+/// A positioned graph and its position-keyed vertex test, for a visitor
+/// that keeps per-vertex state by position. The host's readers are pure:
+/// the same answer for the same input, with no effect.
+pub(super) struct Positioned<'r, 'g, T, A> {
+    pub(super) graph: &'r PositionedGraph<'g, T>,
+    pub(super) test_at: A,
+}
+
+/// `visit_single_scan` over a positioned graph, event for event: the same
+/// arrivals, tests at the same first arrivals, the same entries, visits and
+/// multiplicities. A position stands for its identity in every comparison
+/// (the vertex table ascends strictly), so verdicts and anchors live in
+/// arrays by position instead of identity-keyed maps, and anchors are
+/// visited in ascending position, which is ascending identity. The readers
+/// are pure, so of an anchor's repeated property re-reads only the first
+/// is made; each still charges its Work.
+fn visit_positioned_single_scan<'a, E, C, T, A, R, M, P>(
+    scan: &SingleScan<'_>,
+    plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    positioned: Positioned<'_, '_, T, A>,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    let Positioned { graph, mut test_at } = positioned;
+    let filters = endpoint_filters(plan.operators(), core::slice::from_ref(&scan.access));
+    let (from, to) = filters
+        .as_ref()
+        .and_then(|filters| filters.get(&scan.access.relation))
+        .map_or((&[][..], &[][..]), |(from, to)| {
+            (from.as_slice(), to.as_slice())
+        });
+    let shared = from == to;
+    // A relation the graph does not hold matches no edge; each still arrives.
+    let relation = graph.relation(scan.access.relation);
+    // Each side's verdicts by position: 0 untested, 1 fails, 2 passes. One
+    // table when both sides share their predicates, none for a side without.
+    let table = |predicates: &[VertexPredicate]| {
+        if predicates.is_empty() {
+            Vec::new()
+        } else {
+            vec![0_u8; graph.len()]
+        }
+    };
+    let mut tested = [table(from), if shared { Vec::new() } else { table(to) }];
+    let mut newest: [Option<(u32, bool)>; 2] = [None; 2];
+    let constant = scan.columns.is_empty() || scan.counts_only;
+    let anchored = scan.anchored && !constant;
+    // Anchor -> passing edges and the first partner, by position.
+    let mut counts = if anchored {
+        vec![0_u64; graph.len()]
+    } else {
+        Vec::new()
+    };
+    let mut partners = if anchored {
+        vec![0_u32; graph.len()]
+    } else {
+        Vec::new()
+    };
+    let mut run: Option<(u32, u64)> = None;
+    let mut total: Option<(u64, u32, u32)> = None;
+    for edge in graph.edges() {
+        control(GlaExecutionEvent::Work)?;
+        if Some(edge.relation) != relation {
+            continue;
+        }
+        let mut passes = |side: usize, at: u32, predicates: &[VertexPredicate]| {
+            if predicates.is_empty() {
+                return Ok(true);
+            }
+            if let Some((known, verdict)) = newest[side]
+                && known == at
+            {
+                return Ok(verdict);
+            }
+            let verdicts = &mut tested[if shared { 0 } else { side }];
+            let verdict = match verdicts[at as usize] {
+                0 => {
+                    let result = test_at(at, predicates)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    verdicts[at as usize] = 1 + u8::from(result);
+                    result
+                }
+                known => known == 2,
+            };
+            newest[side] = Some((at, verdict));
+            Ok::<_, VisitError<E, C>>(verdict)
+        };
+        if !passes(0, edge.source, from)? || !passes(1, edge.destination, to)? {
+            continue;
+        }
+        let (anchor, partner) = match scan.access.direction {
+            GlaDirection::Forward => (edge.source, edge.destination),
+            _ => (edge.destination, edge.source),
+        };
+        if constant {
+            match &mut total {
+                Some((count, ..)) => *count += 1,
+                None => total = Some((1, anchor, partner)),
+            }
+            continue;
+        }
+        if scan.anchored {
+            match &mut run {
+                Some((last, more)) if *last == anchor => *more += 1,
+                _ => {
+                    if let Some((last, more)) = run.take() {
+                        counts[last as usize] += more;
+                    }
+                    if counts[anchor as usize] == 0 {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        counts[anchor as usize] = 1;
+                        partners[anchor as usize] = partner;
+                    } else {
+                        counts[anchor as usize] += 1;
+                    }
+                    run = Some((anchor, 0));
+                }
+            }
+            continue;
+        }
+        visit(
+            scan.columns,
+            &[Some(graph.vertex(anchor)), Some(graph.vertex(partner))],
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    if let Some((count, anchor, partner)) = total {
+        return visit(
+            scan.columns,
+            &[Some(graph.vertex(anchor)), Some(graph.vertex(partner))],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        );
+    }
+    if let Some((last, more)) = run {
+        counts[last as usize] += more;
+    }
+    for (at, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let anchor = graph.vertex(at as u32);
+        for further in 1..count {
+            for column in scan.columns {
+                if let ValueProjection::Property { key, .. } = column {
+                    control(GlaExecutionEvent::Work)?;
+                    if further == 1 {
+                        property(anchor, *key)?;
+                    }
+                }
+            }
+        }
+        visit(
+            scan.columns,
+            &[Some(anchor), Some(graph.vertex(partners[at]))],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        )?;
+    }
+    Ok(())
 }
 
 fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
@@ -352,41 +972,188 @@ fn reach_shape(aggregate: &PreparedGraphAggregate) -> Option<Reach<'_>> {
     })
 }
 
-/// Vertices reachable from `sources` within the reach bounds (minimum <= 1).
+/// A reach's arcs over dense vertex indices numbered in identity order, so an
+/// ascending index walk is an ascending identity walk. The walk kept ordered
+/// sets of identities and the arcs in an ordered map, about three tree
+/// operations per arc: half of a pokec three-hop reach over the ten million
+/// edges of its closure (fgdb-61p1n).
+struct ReachGraph {
+    /// Index to identity, ascending.
+    vertices: Vec<VId>,
+    /// Identity to index; probed only, never iterated into a result.
+    index: crate::id_hash::IdMap<VId, usize>,
+    /// The distinct successors of vertex `i`, ascending, are
+    /// `targets[starts[i]..starts[i + 1]]`.
+    starts: Vec<usize>,
+    targets: Vec<usize>,
+}
+
+impl ReachGraph {
+    /// From arcs over indices that `index` numbered in arrival order.
+    fn new(
+        mut index: crate::id_hash::IdMap<VId, usize>,
+        arrivals: Vec<VId>,
+        arcs: Vec<(usize, usize)>,
+    ) -> Self {
+        let mut ordered: Vec<(VId, usize)> = arrivals.into_iter().zip(0..).collect();
+        ordered.sort_unstable();
+        let mut rank = vec![0; ordered.len()];
+        for (at, &(_, arrival)) in ordered.iter().enumerate() {
+            rank[arrival] = at;
+        }
+        for at in index.values_mut() {
+            *at = rank[*at];
+        }
+        let vertices: Vec<VId> = ordered.into_iter().map(|(vertex, _)| vertex).collect();
+        let mut starts = vec![0; vertices.len() + 1];
+        for &(from, _) in &arcs {
+            starts[rank[from] + 1] += 1;
+        }
+        for at in 1..starts.len() {
+            starts[at] += starts[at - 1];
+        }
+        let mut fill = starts.clone();
+        let mut targets = vec![0; arcs.len()];
+        for (from, to) in arcs {
+            let from = rank[from];
+            targets[fill[from]] = rank[to];
+            fill[from] += 1;
+        }
+        // Sort each vertex's run and keep one of each parallel arc, moving the
+        // kept arcs down in place: every write lands at or below the read.
+        let mut kept = 0;
+        let mut begin = 0;
+        for vertex in 0..vertices.len() {
+            let end = starts[vertex + 1];
+            targets[begin..end].sort_unstable();
+            starts[vertex] = kept;
+            let mut last = None;
+            for read in begin..end {
+                let target = targets[read];
+                if last != Some(target) {
+                    targets[kept] = target;
+                    kept += 1;
+                    last = Some(target);
+                }
+            }
+            begin = end;
+        }
+        starts[vertices.len()] = kept;
+        targets.truncate(kept);
+        Self {
+            vertices,
+            index,
+            starts,
+            targets,
+        }
+    }
+
+    fn successors(&self, vertex: usize) -> &[usize] {
+        &self.targets[self.starts[vertex]..self.starts[vertex + 1]]
+    }
+}
+
+const REACHED: u8 = 1;
+const EXPANDED: u8 = 2;
+
+/// One search's marks over a ReachGraph. A search clears only the vertices
+/// the previous one touched, so a search per source costs what it reaches.
+struct ReachWalk {
+    marks: Vec<u8>,
+    touched: Vec<usize>,
+}
+
+impl ReachWalk {
+    fn new(vertices: usize) -> Self {
+        Self {
+            marks: vec![0; vertices],
+            touched: Vec::new(),
+        }
+    }
+
+    /// Sets `mark` on `vertex`; whether it was unset.
+    fn mark(&mut self, vertex: usize, mark: u8) -> bool {
+        let marks = self.marks[vertex];
+        if marks & mark != 0 {
+            return false;
+        }
+        if marks == 0 {
+            self.touched.push(vertex);
+        }
+        self.marks[vertex] = marks | mark;
+        true
+    }
+
+    fn clear(&mut self) {
+        for vertex in self.touched.drain(..) {
+            self.marks[vertex] = 0;
+        }
+    }
+}
+
+/// Vertices reachable from `sources` within the reach bounds (minimum <= 1),
+/// ascending. Breadth-first over ascending successors: each crossed arc is
+/// one unit of work and each newly reached vertex one scratch entry.
 fn reachable<E, C>(
     reach: &Reach<'_>,
-    adjacency: &BTreeMap<VId, Vec<VId>>,
+    graph: &ReachGraph,
+    walk: &mut ReachWalk,
     sources: &[VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeSet<VId>, VisitError<E, C>> {
-    let mut reached = BTreeSet::new();
+) -> Result<Vec<VId>, VisitError<E, C>> {
+    walk.clear();
     if reach.minimum > reach.maximum {
-        return Ok(reached);
+        return Ok(Vec::new());
     }
+    // A source on no arc reaches nothing, and nothing reaches it.
+    let mut isolated = Vec::new();
     if reach.minimum == 0 {
         for &source in sources {
             control(GlaExecutionEvent::ScratchEntry)?;
-            reached.insert(source);
+            match graph.index.get(&source) {
+                Some(&at) => {
+                    walk.mark(at, REACHED);
+                }
+                None => isolated.push(source),
+            }
         }
     }
-    let mut expanded: BTreeSet<VId> = sources.iter().copied().collect();
-    let mut frontier = sources.to_vec();
+    let mut frontier = Vec::new();
+    for source in sources {
+        if let Some(&at) = graph.index.get(source) {
+            walk.mark(at, EXPANDED);
+            frontier.push(at);
+        }
+    }
     let mut depth = 0;
     while !frontier.is_empty() && depth < reach.maximum {
         depth += 1;
         let mut next = Vec::new();
         for vertex in frontier {
-            for &neighbor in adjacency.get(&vertex).map_or(&[][..], Vec::as_slice) {
+            for &neighbor in graph.successors(vertex) {
                 control(GlaExecutionEvent::Work)?;
-                if reached.insert(neighbor) {
+                if walk.mark(neighbor, REACHED) {
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                if expanded.insert(neighbor) {
+                if walk.mark(neighbor, EXPANDED) {
                     next.push(neighbor);
                 }
             }
         }
         frontier = next;
+    }
+    let mut found: Vec<usize> = walk
+        .touched
+        .iter()
+        .copied()
+        .filter(|&at| walk.marks[at] & REACHED != 0)
+        .collect();
+    found.sort_unstable();
+    let mut reached: Vec<VId> = found.into_iter().map(|at| graph.vertices[at]).collect();
+    if !isolated.is_empty() {
+        reached.extend(isolated);
+        reached.sort_unstable();
+        reached.dedup();
     }
     Ok(reached)
 }
@@ -416,12 +1183,14 @@ where
         Multiplicity,
     ) -> Result<(), VisitError<E, C>>,
 {
-    let mut admitted = BTreeSet::new();
+    let mut admitted = Vec::new();
     for vertex in vertices {
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
-        admitted.insert(vertex);
+        admitted.push(vertex);
     }
+    admitted.sort_unstable();
+    admitted.dedup();
     let mut sources = Vec::new();
     for &vertex in &admitted {
         let mut selected = true;
@@ -435,7 +1204,15 @@ where
             sources.push(vertex);
         }
     }
-    let mut adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+    let mut index = crate::id_hash::IdMap::<VId, usize>::default();
+    let mut arrivals = Vec::new();
+    let mut dense = |vertex: VId| {
+        *index.entry(vertex).or_insert_with(|| {
+            arrivals.push(vertex);
+            arrivals.len() - 1
+        })
+    };
+    let mut arcs = Vec::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if relation != reach.relation {
@@ -447,12 +1224,10 @@ where
             (destination, source)
         };
         control(GlaExecutionEvent::ScratchEntry)?;
-        adjacency.entry(from).or_default().push(to);
+        arcs.push((dense(from), dense(to)));
     }
-    for neighbors in adjacency.values_mut() {
-        neighbors.sort_unstable();
-        neighbors.dedup();
-    }
+    let graph = ReachGraph::new(index, arrivals, arcs);
+    let mut walk = ReachWalk::new(graph.vertices.len());
     let mut emit = |source: VId,
                     target: VId,
                     property: &mut R,
@@ -473,13 +1248,13 @@ where
     };
     if reach.reads_source {
         for &source in &sources {
-            for target in reachable(reach, &adjacency, &[source], &mut control)? {
+            for target in reachable(reach, &graph, &mut walk, &[source], &mut control)? {
                 emit(source, target, &mut property, &mut control)?;
             }
         }
     } else if let Some(&witness) = sources.first() {
         // No column reads the source: any admitted source witnesses the pair.
-        for target in reachable(reach, &adjacency, &sources, &mut control)? {
+        for target in reachable(reach, &graph, &mut walk, &sources, &mut control)? {
             emit(witness, target, &mut property, &mut control)?;
         }
     }
@@ -722,13 +1497,26 @@ fn chain_counts<E, C>(
     hops: &BTreeMap<RelationId, Hops>,
     sources: &[VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeMap<VId, u128>, VisitError<E, C>> {
+) -> Result<Vec<(VId, u128)>, VisitError<E, C>> {
     let empty = Hops::default();
     let hop = |at: usize| hops.get(&chain.relations[at]).unwrap_or(&empty);
-    let mut levels: Vec<BTreeMap<VId, u128>> = vec![sources.iter().map(|&a| (a, 1)).collect()];
+    // Each level accumulates in an id-hash map, pair by pair in the order the
+    // ordered levels produce them (so an overflow stops at the same pair), and
+    // is then frozen as a vector sorted by vertex: later passes read it in
+    // the same order a BTreeMap would, and look vertices up by binary search.
+    let mut first: Vec<(VId, u128)> = sources.iter().map(|&a| (a, 1)).collect();
+    first.sort_unstable_by_key(|&(vertex, _)| vertex);
+    first.dedup_by_key(|&mut (vertex, _)| vertex);
+    let mut levels: Vec<Vec<(VId, u128)>> = vec![first];
     for at in 0..chain.relations.len() {
-        let mut next = BTreeMap::<VId, u128>::new();
-        for (&vertex, &walks) in &levels[at] {
+        // Sized by the level's pairs, so the map never rehashes as it fills.
+        let pairs = levels[at]
+            .iter()
+            .map(|&(vertex, _)| hop(at).out.get(&vertex).map_or(0, BTreeMap::len))
+            .fold(0_usize, usize::saturating_add);
+        let mut next =
+            crate::id_hash::IdMap::<VId, u128>::with_capacity_and_hasher(pairs, Default::default());
+        for &(vertex, walks) in &levels[at] {
             for (&far, &multiplicity) in hop(at).out.get(&vertex).into_iter().flatten() {
                 control(GlaExecutionEvent::Work)?;
                 let slot = next.entry(far).or_insert(0);
@@ -741,8 +1529,15 @@ fn chain_counts<E, C>(
         for _ in &next {
             control(GlaExecutionEvent::ScratchEntry)?;
         }
+        let mut next: Vec<(VId, u128)> = next.into_iter().collect();
+        next.sort_unstable_by_key(|&(vertex, _)| vertex);
         levels.push(next);
     }
+    let walks_into = |level: &[(VId, u128)], vertex: VId| {
+        level
+            .binary_search_by_key(&vertex, |&(vertex, _)| vertex)
+            .map_or(0, |at| level[at].1)
+    };
     let same = |i: usize, j: usize| chain.relations[i] == chain.relations[j];
     // Three-hop edge coincidences summed over the sources once, per endpoint:
     // N12 (the same loop twice at a source, then a third edge) and N13 (an
@@ -780,9 +1575,13 @@ fn chain_counts<E, C>(
             }
         }
     }
-    let mut counts = BTreeMap::<VId, u128>::new();
+    // Each endpoint's count, ascending by vertex. A length's level is
+    // distinct and sorted, so its new endpoints arrive in order and merge
+    // into the earlier lengths' afterwards; the charges are a map's.
+    let mut counts = Vec::<(VId, u128)>::new();
     for &length in &chain.lengths {
-        for (&end, &walks) in &levels[length] {
+        let mut fresh = Vec::<(VId, u128)>::new();
+        for &(end, walks) in &levels[length] {
             control(GlaExecutionEvent::Work)?;
             let source = sources.binary_search(&end).is_ok();
             let mut trails = walks;
@@ -792,7 +1591,7 @@ fn chain_counts<E, C>(
             if chain.trail && length == 3 {
                 // trails = walks - N12 - N23 - N13 + 2 N123, all walk counts.
                 let n23 = if same(1, 2) {
-                    let into = levels[1].get(&end).copied().unwrap_or(0);
+                    let into = walks_into(&levels[1], end);
                     hop(1).loops(end).checked_mul(into).ok_or_else(overflow)?
                 } else {
                     0
@@ -813,15 +1612,39 @@ fn chain_counts<E, C>(
                     .saturating_sub(reused);
             }
             if trails > 0 {
-                if !counts.contains_key(&end) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
+                match counts.binary_search_by_key(&end, |&(vertex, _)| vertex) {
+                    Ok(at) => {
+                        let total = &mut counts[at].1;
+                        *total = total.checked_add(trails).ok_or_else(overflow)?;
+                    }
+                    Err(_) => {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        fresh.push((end, trails));
+                    }
                 }
-                let total = counts.entry(end).or_insert(0);
-                *total = total.checked_add(trails).ok_or_else(overflow)?;
             }
         }
+        counts = merge_disjoint(counts, fresh);
     }
     Ok(counts)
+}
+
+/// Two vectors ascending by vertex with no vertex in both, as one.
+fn merge_disjoint(a: Vec<(VId, u128)>, b: Vec<(VId, u128)>) -> Vec<(VId, u128)> {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    while let (Some(&(x, _)), Some(&(y, _))) = (a.peek(), b.peek()) {
+        merged.extend(if x < y { a.next() } else { b.next() });
+    }
+    merged.extend(a);
+    merged.extend(b);
+    merged
 }
 
 /// Feed the aggregate one binding per (source, endpoint) pair of a short chain,
@@ -857,7 +1680,10 @@ where
             admitted.insert(vertex);
         }
     }
-    let mut hops = BTreeMap::<RelationId, Hops>::new();
+    // Each relation's oriented edges, charged as they arrive, then counted
+    // once from their sorted order into the same multiplicity maps (built in
+    // bulk), not with two tree searches per edge.
+    let mut arrivals: Vec<(RelationId, Vec<(VId, VId)>)> = Vec::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if !chain.relations.contains(&relation) {
@@ -869,13 +1695,45 @@ where
             (destination, source)
         };
         control(GlaExecutionEvent::ScratchEntry)?;
-        let hop = hops.entry(relation).or_default();
-        let slot = hop.out.entry(from).or_default().entry(to).or_insert(0);
-        *slot = slot.checked_add(1).ok_or_else(overflow)?;
-        if from == to {
-            let loops = hop.loops.entry(from).or_insert(0);
-            *loops = loops.checked_add(1).ok_or_else(overflow)?;
+        let at = match arrivals.iter().position(|(known, _)| *known == relation) {
+            Some(at) => at,
+            None => {
+                arrivals.push((relation, Vec::new()));
+                arrivals.len() - 1
+            }
+        };
+        arrivals[at].1.push((from, to));
+    }
+    let mut hops = BTreeMap::<RelationId, Hops>::new();
+    for (relation, mut pairs) in arrivals {
+        crate::id_sort::sort_by_leading_identity(&mut pairs, |pair| pair.0.0, <[_]>::sort_unstable);
+        let mut out = Vec::new();
+        let mut loops = Vec::new();
+        let mut at = 0;
+        while at < pairs.len() {
+            let from = pairs[at].0;
+            let mut targets = Vec::new();
+            while at < pairs.len() && pairs[at].0 == from {
+                let to = pairs[at].1;
+                let start = at;
+                while at < pairs.len() && pairs[at] == (from, to) {
+                    at += 1;
+                }
+                let count = (at - start) as u128;
+                if from == to {
+                    loops.push((from, count));
+                }
+                targets.push((to, count));
+            }
+            out.push((from, targets.into_iter().collect()));
         }
+        hops.insert(
+            relation,
+            Hops {
+                out: out.into_iter().collect(),
+                loops: loops.into_iter().collect(),
+            },
+        );
     }
     // A fixed chain binds its source from its first atom's edges: an edge
     // scan admits no vertex table unless rows are read, so the admitted
@@ -900,6 +1758,7 @@ where
             sources.push(vertex);
         }
     }
+    let mut bindings = vec![None; chain.last + 1];
     let mut emit = |source: VId,
                     target: VId,
                     bindings_count: u128,
@@ -911,8 +1770,8 @@ where
                 return Ok(());
             }
         }
-        // Only the source and endpoint slots are projected; transit slots stay unbound.
-        let mut bindings = vec![None; chain.last + 1];
+        // Only the source and endpoint slots are projected; transit slots stay
+        // unbound. Every pair writes both, so one buffer serves them all.
         bindings[0] = Some(source);
         bindings[chain.last] = Some(target);
         // One emitted binding carries all of this pair's bindings: None
@@ -981,9 +1840,15 @@ fn normalized(
 /// endpoint-triple multiplicities. With it, atoms whose bound keys are equal
 /// must choose distinct parallel relationships: k of them over m occurrences
 /// admit m·(m-1)···(m-k+1) choices, none when k > m (fgdb-ujaad).
+/// `simple` says every topology key weighs one (no parallel edges, decided
+/// once per evaluation). Then a binding's weight is one, or, under DIFFERENT
+/// EDGES, nothing when it takes one key twice, so no key is searched: the
+/// same Work events, without a topology search per atom per binding (a fifth
+/// of a directed triangle count over epinions).
 fn binding_weight<E, C>(
     accesses: &[EdgeAccess],
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
+    simple: bool,
     bindings: &[Option<VId>],
     distinct: bool,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -1009,7 +1874,7 @@ fn binding_weight<E, C>(
             GlaDirection::Reverse => (destination, access.relation, source),
             GlaDirection::Undirected => normalized(source, access.relation, destination, true),
         };
-        if !distinct {
+        if !distinct && !simple {
             weight = weight.product(topology.get(&*slot).copied().ok_or_else(unavailable)?);
         }
     }
@@ -1022,6 +1887,13 @@ fn binding_weight<E, C>(
         }
         control(GlaExecutionEvent::Work)?;
         let group = keys[at..].iter().filter(|key| **key == keys[at]).count() as u64;
+        if simple {
+            // One occurrence: a key taken twice has none left for the second.
+            if group > 1 {
+                return Ok(None);
+            }
+            continue;
+        }
         let available = topology.get(&keys[at]).copied().ok_or_else(unavailable)?;
         let Some(count) = available.exact_count() else {
             // More than u64::MAX occurrences: the product stays above-count.
@@ -1135,16 +2007,19 @@ fn endpoint_filters(operators: &[GlaOperator], accesses: &[EdgeAccess]) -> Optio
         .then_some(filters)
 }
 
-pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn visit_bindings<'a, 'g, E, C, T, A, F, R, M, P>(
     aggregate: &PreparedGraphAggregate,
     vertices: impl IntoIterator<Item = VId>,
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+    positioned: Option<Positioned<'_, 'g, T, A>>,
     mut test_vertex: F,
     property: R,
     mut control: M,
     mut visit: P,
 ) -> Result<(), VisitError<E, C>>
 where
+    A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -1179,6 +2054,9 @@ where
             visit,
         );
     }
+    if let Some(scan) = vertex_scan(aggregate) {
+        return visit_vertex_scan(&scan, vertices, test_vertex, property, control, visit);
+    }
     if !eligible(aggregate) {
         return plan.visit_value_bindings(
             vertices,
@@ -1190,6 +2068,12 @@ where
                 visit(columns, bindings, property, control, Multiplicity::ONE)
             },
         );
+    }
+    if let Some(scan) = single_scan(aggregate) {
+        if let Some(positioned) = positioned {
+            return visit_positioned_single_scan(&scan, plan, positioned, property, control, visit);
+        }
+        return visit_single_scan(&scan, plan, edges, test_vertex, property, control, visit);
     }
 
     let mut accesses = Vec::new();
@@ -1236,13 +2120,29 @@ where
     }
 
     let filters = endpoint_filters(plan.operators(), &accesses);
-    let topology = topology::weigh(
-        edges,
-        &undirected,
-        filters.as_ref(),
-        &mut test_vertex,
-        &mut control,
-    )?;
+    // A positioned graph weighs by position unless an undirected relation
+    // needs the online normalization.
+    let mut positioned = positioned.filter(|_| undirected.is_empty());
+    let weighed = match &mut positioned {
+        Some(Positioned { graph, test_at }) => {
+            topology::weigh_positioned(graph, filters.as_ref(), test_at, &mut control)
+        }
+        None => None,
+    };
+    let topology = match weighed {
+        Some(weighed) => weighed?,
+        None => topology::weigh(
+            edges,
+            &undirected,
+            filters.as_ref(),
+            &mut test_vertex,
+            &mut control,
+        )?,
+    };
+    // A topology weighed by position is searched by position.
+    let graph = positioned.as_ref().map(|positioned| positioned.graph);
+    let vertex = |at: u32| graph.map_or(VId(0), |graph| graph.vertex(at));
+    let positioned = graph.map(|graph| (graph.len(), &vertex as &dyn Fn(u32) -> VId));
 
     // Properties and positive predicates depend on vertex bindings, not edge
     // occurrences. Keep the original plan and ALL slots whenever either is
@@ -1275,6 +2175,7 @@ where
     };
     let needs_original_bindings = needs_original_bindings(plan);
     if needs_original_bindings || distinct {
+        let simple = topology.values().all(|weight| *weight == Multiplicity::ONE);
         // Keep all slots and the complete multiplicity/read callback. Only a
         // topology prefix followed by late reads may use intersection; its
         // guarded fallback is the original visitor, with no extra events.
@@ -1282,12 +2183,13 @@ where
             plan,
             vertices,
             &topology,
+            positioned,
             test_vertex,
             property,
             control,
             |columns, bindings, property, control| {
                 let Some(weight) =
-                    binding_weight(&accesses, &topology, bindings, distinct, control)?
+                    binding_weight(&accesses, &topology, simple, bindings, distinct, control)?
                 else {
                     return Ok(());
                 };
@@ -1361,6 +2263,7 @@ where
         execution_plan,
         vertices,
         &topology,
+        positioned,
         &accesses,
         &forest,
         test_vertex,
@@ -1384,6 +2287,184 @@ mod tests {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
+    }
+
+    /// Every `text` over a sparse-identity multigraph of `width` vertices
+    /// and `arcs` edges in two relations (parallel edges, loops, arrivals in
+    /// no endpoint order) answers positioned with the identity evaluator's
+    /// value and statistics, makes no vertex test the identity run does not
+    /// (its pure readers may skip a repeat), stops at every `every`th host
+    /// checkpoint (and the first and last 40) with the same count, and
+    /// refuses at every sampled work and scratch limit alike.
+    fn positioned_matches_identity(
+        texts: &[&str],
+        width: u32,
+        arcs: usize,
+        every: usize,
+        single: bool,
+    ) {
+        use core::cell::Cell;
+        let mut vertices: Vec<(VId, ())> = (0..u128::from(width))
+            .map(|at| (VId(at * 7_919 + (at % 5) * (1 << 70)), ()))
+            .collect();
+        vertices.sort_unstable_by_key(|&(vid, _)| vid);
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % bound
+        };
+        let edges: Vec<PositionedEdge> = (0..arcs)
+            .map(|_| PositionedEdge {
+                source: next(u64::from(width)) as u32,
+                destination: next(u64::from(width)) as u32,
+                relation: next(2) as u32,
+            })
+            .collect();
+        let relations = [RelationId(1), RelationId(2)];
+        let graph = PositionedGraph::new(&vertices, &relations, &edges).unwrap();
+        let triples: Vec<_> = graph.triples().collect();
+        let values: Vec<CanonicalScalar> = (0..width)
+            .map(|at| CanonicalScalar::Int(i64::from(at % 7)))
+            .collect();
+        let passes = |vid: VId| vid.0 % 3 != 1;
+        let value = |vid: VId| {
+            vertices
+                .binary_search_by_key(&vid, |&(known, _)| known)
+                .ok()
+                .map(|at| &values[at])
+        };
+        let wide = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        for text in texts {
+            let q = query(text);
+            assert_eq!(single_scan(&q).is_some(), single, "{text}");
+            let run = |positioned: bool, policy, stop: Option<usize>| {
+                let (mut at, tests) = (0, Cell::new(0));
+                let checkpoint = || {
+                    at += 1;
+                    if Some(at) == stop { Err(at) } else { Ok(()) }
+                };
+                let test = |vid: VId| {
+                    tests.set(tests.get() + 1);
+                    Ok::<_, ()>(passes(vid))
+                };
+                let result = if positioned {
+                    q.execute_governed_positioned(
+                        edges.len() as u64,
+                        &graph,
+                        |vid, _| test(vid),
+                        |position, _| test(graph.vertex(position)),
+                        |vid, _| Ok(value(vid)),
+                        policy,
+                        checkpoint,
+                    )
+                } else {
+                    q.execute_governed(
+                        edges.len() as u64,
+                        graph.vertices(),
+                        triples.iter().copied(),
+                        |vid, _| test(vid),
+                        |vid, _| Ok(value(vid)),
+                        policy,
+                        checkpoint,
+                    )
+                };
+                (format!("{result:?}"), at, tests.get())
+            };
+            // The same outcome and host stops; pure readers let the
+            // positioned run skip a test that only repeats one it made.
+            let same = |positioned: (String, usize, usize), identity: (String, usize, usize)| {
+                (positioned.0 == identity.0 && positioned.1 == identity.1)
+                    .then_some(())
+                    .filter(|()| positioned.2 <= identity.2)
+                    .ok_or((positioned, identity))
+            };
+            let expected = run(false, wide, None);
+            assert!(expected.0.starts_with("Ok("), "{text}: {expected:?}");
+            same(run(true, wide, None), expected.clone())
+                .unwrap_or_else(|pair| panic!("{text}: {pair:?}"));
+            let total = expected.1;
+            for stop in
+                (1..=total).filter(|stop| stop % every == 0 || *stop <= 40 || total - stop < 40)
+            {
+                same(run(true, wide, Some(stop)), run(false, wide, Some(stop)))
+                    .unwrap_or_else(|pair| panic!("{text} stop {stop}: {pair:?}"));
+            }
+            let completed = q
+                .execute_governed(
+                    edges.len() as u64,
+                    graph.vertices(),
+                    triples.iter().copied(),
+                    |vid, _| Ok::<_, ()>(passes(vid)),
+                    |vid, _| Ok(value(vid)),
+                    wide,
+                    || Ok::<_, usize>(()),
+                )
+                .unwrap();
+            let step = every as u64;
+            let sampled =
+                move |total: u64| (0..=total).filter(move |at| at % step == 0 || total - at <= 3);
+            for limit in sampled(completed.evaluator.work_units) {
+                let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX);
+                same(run(true, policy, None), run(false, policy, None))
+                    .unwrap_or_else(|pair| panic!("{text} work {limit}: {pair:?}"));
+            }
+            for limit in sampled(completed.evaluator.scratch_entries) {
+                let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit);
+                same(run(true, policy, None), run(false, policy, None))
+                    .unwrap_or_else(|pair| panic!("{text} scratch {limit}: {pair:?}"));
+            }
+        }
+    }
+
+    /// **A POSITIONED SINGLE SCAN IS THE IDENTITY SCAN, EVENT FOR EVENT.**
+    /// Shared, one-sided and absent endpoint predicates; forward and
+    /// reverse; counted, anchored with and without a property column, and
+    /// unanchored: every host checkpoint stop is compared.
+    #[test]
+    fn positioned_single_scans_answer_and_refuse_as_identity_scans() {
+        positioned_matches_identity(
+            &[
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
+                "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b:L) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+                "MATCH (a:L)-[:R]->(b) RETURN a.n AS id, COUNT(*) AS d ORDER BY d DESC, id ASC LIMIT 3",
+                "MATCH (a:L)<-[:R]-(b) RETURN a, COUNT(*) AS c GROUP BY a",
+                "MATCH (a)-[:R]->(b:L) RETURN a, COUNT(*) AS c GROUP BY a",
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(b) AS n, MIN(b) AS lo, MAX(a) AS hi",
+            ],
+            40,
+            300,
+            1,
+            true,
+        );
+    }
+
+    /// **A POSITIONED TOPOLOGY IS THE IDENTITY TOPOLOGY, EVENT FOR EVENT.**
+    /// Triangles and four-cycles (distinct and repeatable edges, labelled,
+    /// grouped, with a trailing property selection), a chain, a wedge with an
+    /// identity test and an undirected cycle (weighed by identity) answer and
+    /// refuse alike, whether their tries are keyed by position or identity.
+    #[test]
+    fn positioned_topologies_answer_and_refuse_as_identity_topologies() {
+        positioned_matches_identity(
+            &[
+                "MATCH (a:L)-[:R]->(b:L)-[:R]->(c:L)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a, COUNT(*) AS n GROUP BY a",
+                "MATCH REPEATABLE ELEMENTS (a:L)-[:R]->(b)-[:R]->(c)-[:R]->(d)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.n = c.n RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]-(b)-[:R]-(c)-[:R]-(a) RETURN COUNT(*) AS n",
+            ],
+            24,
+            120,
+            9,
+            false,
+        );
     }
 
     #[test]
@@ -1469,64 +2550,114 @@ mod tests {
 
     #[test]
     fn distinct_edge_counts_equal_the_identified_evaluator() {
-        let edges = distinct_edge_graph();
+        let parallel = distinct_edge_graph();
+        // The same graph without parallel edges, where every weight is one
+        // and binding_weight searches no key.
+        let mut seen = BTreeSet::new();
+        let simple: Vec<_> = parallel
+            .iter()
+            .copied()
+            .filter(|&(_, source, relation, destination)| {
+                seen.insert((source, relation, destination))
+            })
+            .collect();
+        assert!(simple.len() < parallel.len());
+        for edges in [&parallel, &simple] {
+            let properties = BTreeMap::from([
+                (VId(0), CanonicalScalar::Int(7)),
+                (VId(1), CanonicalScalar::Null),
+                (VId(2), CanonicalScalar::Int(7)),
+                (VId(3), CanonicalScalar::Int(-2)),
+            ]);
+            let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+            for pattern in [
+                "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a)",
+                "(a)-[:R]->(b)-[:R]->(a)",
+                "(a)-[:R]->(b)-[:R]->(c)",
+                "(a)-[:R]->(b)<-[:R]-(c)",
+                "(a)-[:R]->(b)-[:R]->(c)-[:R]->(b)",
+                "(a)-[:R]-(b)-[:R]-(a)",
+                "(a)-[:R]->(b)-[:R]->(c) WHERE a.n=7",
+                "(a)-[:R]->(b)<-[:R]-(c) WHERE a<>c",
+            ] {
+                let prefix = format!(
+                    "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+                );
+                let factored = query(&format!("{prefix} GROUP BY a.n"));
+                // A hidden COLLECT keeps the same five aggregates on the identified
+                // evaluator, which enforces DIFFERENT EDGES by relationship identity.
+                let identified = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
+                    .with_aggregate_output_prefix(5)
+                    .unwrap();
+                assert!(counts_distinct_edges(&factored), "{pattern}");
+                assert!(!counts_distinct_edges(&identified), "{pattern}");
+                let run = |aggregate: &PreparedGraphAggregate| {
+                    aggregate
+                        .execute_governed_with_element_maps(
+                            edges.len() as u64,
+                            (0..5).map(VId),
+                            edges.iter().copied(),
+                            |vid, predicates| {
+                                Ok::<_, ()>(predicates.iter().all(|predicate| {
+                                    predicate.matches_borrowed(
+                                        None,
+                                        properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
+                                    )
+                                }))
+                            },
+                            |vid, _| Ok(properties.get(&vid)),
+                            |_, _| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            policy,
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap()
+                };
+                let actual = run(&factored);
+                let expected = run(&identified);
+                assert_eq!(actual.value, expected.value, "{pattern}");
+                assert_eq!(actual.rows, expected.rows, "{pattern}");
+            }
+        }
+    }
+
+    #[test]
+    fn simple_topologies_weigh_repeatable_bindings_one_without_a_search() {
+        let mut seen = BTreeSet::new();
+        let simple: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .filter(|&(_, source, relation, destination)| {
+                seen.insert((source, relation, destination))
+            })
+            .collect();
+        let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
         let properties = BTreeMap::from([
             (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
             (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
+            (VId(3), CanonicalScalar::Int(7)),
         ]);
-        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let all: Vec<VId> = (0..5).map(VId).collect();
         for pattern in [
-            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a)",
-            "(a)-[:R]->(b)-[:R]->(a)",
-            "(a)-[:R]->(b)-[:R]->(c)",
-            "(a)-[:R]->(b)<-[:R]-(c)",
-            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(b)",
-            "(a)-[:R]-(b)-[:R]-(a)",
-            "(a)-[:R]->(b)-[:R]->(c) WHERE a.n=7",
-            "(a)-[:R]->(b)<-[:R]-(c) WHERE a<>c",
+            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.n = 7",
+            "(a)-[:R]->(b)-[:R]->(c) WHERE a.n = 7",
+            "(a:L)-[:R]->(b)<-[:R]-(c {n: 7})",
         ] {
-            let prefix = format!(
-                "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
-            );
-            let factored = query(&format!("{prefix} GROUP BY a.n"));
-            // A hidden COLLECT keeps the same five aggregates on the identified
-            // evaluator, which enforces DIFFERENT EDGES by relationship identity.
-            let identified = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
-                .with_aggregate_output_prefix(5)
+            let text =
+                format!("MATCH REPEATABLE ELEMENTS {pattern} RETURN COUNT(*) AS c,MIN(b) AS lo");
+            let factored = query(&text);
+            let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
+                .with_aggregate_output_prefix(2)
                 .unwrap();
-            assert!(counts_distinct_edges(&factored), "{pattern}");
-            assert!(!counts_distinct_edges(&identified), "{pattern}");
-            let run = |aggregate: &PreparedGraphAggregate| {
-                aggregate
-                    .execute_governed_with_element_maps(
-                        edges.len() as u64,
-                        (0..5).map(VId),
-                        edges.iter().copied(),
-                        |vid, predicates| {
-                            Ok::<_, ()>(predicates.iter().all(|predicate| {
-                                predicate.matches_borrowed(
-                                    None,
-                                    properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
-                                )
-                            }))
-                        },
-                        |vid, _| Ok(properties.get(&vid)),
-                        |_, _| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        policy,
-                        || Ok::<_, ()>(()),
-                    )
-                    .unwrap()
-            };
-            let actual = run(&factored);
-            let expected = run(&identified);
-            assert_eq!(actual.value, expected.value, "{pattern}");
-            assert_eq!(actual.rows, expected.rows, "{pattern}");
+            assert!(eligible(&factored), "{text}");
+            assert!(!eligible(&enumerated), "{text}");
+            assert_eq!(
+                run_counted(&factored, &all, &simple, &labelled, &properties).value,
+                run_counted(&enumerated, &all, &simple, &labelled, &properties).value,
+                "{text}"
+            );
         }
     }
 
@@ -1875,6 +3006,222 @@ mod tests {
         assert_eq!(checked, 72);
     }
 
+    #[derive(Debug, PartialEq)]
+    enum ReachStep {
+        Charge(GlaExecutionEvent),
+        Test(VId),
+        Bind(VId, VId),
+    }
+
+    /// The ordered walk the dense one replaced (fgdb-61p1n): an ordered map
+    /// of sorted successor lists and ordered sets of reached and expanded
+    /// identities. Its steps, in order, are the dense walk's oracle.
+    fn ordered_reach(
+        reach: &Reach<'_>,
+        admitted: &[VId],
+        edges: &[(VId, RelationId, VId)],
+        selects: &dyn Fn(VId, &[VertexPredicate]) -> bool,
+    ) -> Vec<ReachStep> {
+        use GlaExecutionEvent::{ScratchEntry, Work};
+        use ReachStep::{Bind, Charge, Test};
+        let mut log = Vec::new();
+        let mut distinct = BTreeSet::new();
+        for &vertex in admitted {
+            log.extend([Charge(Work), Charge(ScratchEntry)]);
+            distinct.insert(vertex);
+        }
+        let mut sources = Vec::new();
+        for &vertex in &distinct {
+            let mut selected = true;
+            for predicates in &reach.source_predicates {
+                log.push(Test(vertex));
+                if !selects(vertex, predicates) {
+                    selected = false;
+                    break;
+                }
+            }
+            if selected {
+                sources.push(vertex);
+            }
+        }
+        let mut adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+        for &(source, relation, destination) in edges {
+            log.push(Charge(Work));
+            if relation != reach.relation {
+                continue;
+            }
+            let (from, to) = if reach.forward {
+                (source, destination)
+            } else {
+                (destination, source)
+            };
+            log.push(Charge(ScratchEntry));
+            adjacency.entry(from).or_default().push(to);
+        }
+        for successors in adjacency.values_mut() {
+            successors.sort_unstable();
+            successors.dedup();
+        }
+        let walk = |log: &mut Vec<ReachStep>, sources: &[VId]| {
+            let mut reached = BTreeSet::new();
+            if reach.minimum > reach.maximum {
+                return reached;
+            }
+            if reach.minimum == 0 {
+                for &source in sources {
+                    log.push(Charge(ScratchEntry));
+                    reached.insert(source);
+                }
+            }
+            let mut expanded: BTreeSet<VId> = sources.iter().copied().collect();
+            let mut frontier = sources.to_vec();
+            let mut depth = 0;
+            while !frontier.is_empty() && depth < reach.maximum {
+                depth += 1;
+                let mut next = Vec::new();
+                for vertex in frontier {
+                    for &successor in adjacency.get(&vertex).map_or(&[][..], Vec::as_slice) {
+                        log.push(Charge(Work));
+                        if reached.insert(successor) {
+                            log.push(Charge(ScratchEntry));
+                        }
+                        if expanded.insert(successor) {
+                            next.push(successor);
+                        }
+                    }
+                }
+                frontier = next;
+            }
+            reached
+        };
+        let emit = |log: &mut Vec<ReachStep>, source: VId, target: VId| {
+            for predicates in &reach.target_predicates {
+                log.push(Test(target));
+                if !selects(target, predicates) {
+                    return;
+                }
+            }
+            log.push(Bind(source, target));
+        };
+        if reach.reads_source {
+            for &source in &sources {
+                for target in walk(&mut log, &[source]) {
+                    emit(&mut log, source, target);
+                }
+            }
+        } else if let Some(&witness) = sources.first() {
+            for target in walk(&mut log, &sources) {
+                emit(&mut log, witness, target);
+            }
+        }
+        log
+    }
+
+    /// The dense reach walk binds, tests and charges exactly what the ordered
+    /// walk did, in the same order, over random multigraphs whose identities
+    /// arrive out of order, with parallel arcs, self-loops, another relation,
+    /// endpoints outside the admitted vertices, isolated and repeated admitted
+    /// vertices, and both orientations, bounds from zero to unbounded, and
+    /// grouped and ungrouped sources.
+    #[test]
+    fn dense_reach_steps_equal_the_ordered_walk_event_for_event() {
+        let texts = [
+            "MATCH (a)-[:R]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n",
+            "MATCH (a)<-[:R]-{0,2}(b) RETURN MIN(b.n) AS lo,MAX(b.n) AS hi",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->{0,4}(b) RETURN a,COUNT(DISTINCT b) AS n GROUP BY a",
+            "MATCH (a)-[:R]->{1,}(b) RETURN COUNT(DISTINCT b) AS n",
+            "MATCH (a)<-[:R]-{1,2}(b) WHERE a.n=1 RETURN a,MAX(b.n) AS hi GROUP BY a",
+            "MATCH (a)-[:R]->{0,3}(b) WHERE b.n IS NOT NULL RETURN COUNT(DISTINCT b) AS n",
+        ];
+        let aggregates: Vec<_> = texts.iter().map(|text| query(text)).collect();
+        let reaches: Vec<_> = texts
+            .iter()
+            .zip(&aggregates)
+            .map(|(text, aggregate)| reach_shape(aggregate).unwrap_or_else(|| panic!("{text}")))
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut checked, mut binds, mut tests) = (0, 0, 0);
+        for _ in 0..300 {
+            let count = 1 + random(14);
+            // Distinct identities whose order is unrelated to their arrival.
+            let ids: Vec<VId> = (0..count)
+                .map(|at| VId((u128::from(random(1 << 20)) << 8) | u128::from(at)))
+                .collect();
+            let mut properties = BTreeMap::new();
+            for &id in &ids {
+                if let Some(value) = [Some(0), Some(1), Some(2), None][random(4) as usize] {
+                    properties.insert(id, CanonicalScalar::Int(value));
+                } else if random(2) == 0 {
+                    properties.insert(id, CanonicalScalar::Null);
+                }
+            }
+            let pick = |random: &mut dyn FnMut(u64) -> u64| ids[random(count) as usize];
+            let edges: Vec<(VId, RelationId, VId)> = (0..random(3 * count))
+                .map(|_| {
+                    let relation = RelationId(if random(4) == 0 { 2 } else { 1 });
+                    (pick(&mut random), relation, pick(&mut random))
+                })
+                .collect();
+            let admitted: Vec<VId> = (0..random(count + 3)).map(|_| pick(&mut random)).collect();
+            let selects = |vertex: VId, predicates: &[VertexPredicate]| {
+                predicates.iter().all(|predicate| {
+                    predicate.matches_borrowed(
+                        None,
+                        properties
+                            .get(&vertex)
+                            .map(|value| (PropertyKeyId(1), value)),
+                    )
+                })
+            };
+            for (text, reach) in texts.iter().zip(&reaches) {
+                let log = std::cell::RefCell::new(Vec::new());
+                let dense = visit_reach_bindings::<(), (), _, _, _, _>(
+                    reach,
+                    admitted.iter().copied(),
+                    edges.iter().copied(),
+                    |vertex, predicates| {
+                        log.borrow_mut().push(ReachStep::Test(vertex));
+                        Ok(selects(vertex, predicates))
+                    },
+                    |_, _| Ok(None),
+                    |event| {
+                        log.borrow_mut().push(ReachStep::Charge(event));
+                        Ok(())
+                    },
+                    |_, bindings, _, _, _| {
+                        let (source, target) = (bindings[0].unwrap(), bindings[1].unwrap());
+                        log.borrow_mut().push(ReachStep::Bind(source, target));
+                        Ok(())
+                    },
+                );
+                assert!(dense.is_ok(), "{text}");
+                let dense = log.into_inner();
+                let ordered = ordered_reach(reach, &admitted, &edges, &selects);
+                assert_eq!(dense, ordered, "{text} over {edges:?} from {admitted:?}");
+                binds += dense
+                    .iter()
+                    .filter(|step| matches!(step, ReachStep::Bind(..)))
+                    .count();
+                tests += dense
+                    .iter()
+                    .filter(|step| matches!(step, ReachStep::Test(..)))
+                    .count();
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 300 * texts.len());
+        assert!(
+            binds > 1_000 && tests > 1_000,
+            "{binds} binds, {tests} tests"
+        );
+    }
+
     #[test]
     fn chain_counts_and_support_equal_trail_and_walk_enumeration() {
         let two = |text: &str| {
@@ -2026,6 +3373,341 @@ mod tests {
             "MATCH (a)-[:R]->{2,4}(b) RETURN COUNT(DISTINCT b) AS n",
         ] {
             assert!(chain_shape(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    /// The direct vertex scan is the GLA's vertex scan event for event: the
+    /// same Work/ScratchEntry sequence, the same vertex tests in the same
+    /// order and the same visited bindings, for unfiltered, labelled,
+    /// property-filtered and grouped shapes; and it stops at every event.
+    #[test]
+    fn vertex_scans_are_the_gla_scan_event_for_event() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            Event(GlaExecutionEvent),
+            Test(VId),
+            Visit(Vec<Option<VId>>),
+        }
+        let labelled = |vid: VId| !vid.0.is_multiple_of(3);
+        let value = CanonicalScalar::Int(7);
+        let other = CanonicalScalar::Int(1);
+        let property_of = |vid: VId| {
+            if vid.0.is_multiple_of(2) {
+                &value
+            } else {
+                &other
+            }
+        };
+        let vertices: Vec<VId> = (0..12).map(VId).collect();
+        for text in [
+            "MATCH (a) RETURN COUNT(*) AS n",
+            "MATCH (a:L) RETURN COUNT(*) AS n",
+            "MATCH (a:L {n: 7}) RETURN a,COUNT(*) AS n GROUP BY a",
+            "MATCH (a:L) WHERE a.n = 7 RETURN a.n,COUNT(*) AS n GROUP BY a.n",
+        ] {
+            let aggregate = query(text);
+            let scan = vertex_scan(&aggregate).unwrap_or_else(|| panic!("{text}"));
+            let trace = |direct: bool, stop: Option<usize>| {
+                let steps = core::cell::RefCell::new(Vec::new());
+                let mut events = 0;
+                let record = |step: Step| steps.borrow_mut().push(step);
+                let test = |vid: VId, predicates: &[VertexPredicate]| {
+                    record(Step::Test(vid));
+                    Ok::<_, VisitError<(), usize>>(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed(
+                            labelled(vid).then_some(fgdb_delta_types::LabelId(1)),
+                            Some((PropertyKeyId(1), property_of(vid))),
+                        )
+                    }))
+                };
+                let property = |vid: VId, _: PropertyKeyId| Ok(Some(property_of(vid)));
+                let control = |event: GlaExecutionEvent| {
+                    events += 1;
+                    record(Step::Event(event));
+                    if Some(events) == stop {
+                        Err(GqlQueryError::Interrupted(events))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = if direct {
+                    visit_vertex_scan(
+                        &scan,
+                        vertices.iter().copied(),
+                        test,
+                        property,
+                        control,
+                        |_, bindings, _, _, _| {
+                            record(Step::Visit(bindings.to_vec()));
+                            Ok(())
+                        },
+                    )
+                } else {
+                    aggregate.input.plan().visit_value_bindings(
+                        vertices.iter().copied(),
+                        [],
+                        test,
+                        property,
+                        control,
+                        |_, bindings, _, _| {
+                            record(Step::Visit(bindings.to_vec()));
+                            Ok(())
+                        },
+                    )
+                };
+                (result.map_err(|_| ()), steps.into_inner())
+            };
+            let (direct, direct_steps) = trace(true, None);
+            let (gla, gla_steps) = trace(false, None);
+            assert!(direct.is_ok() && gla.is_ok(), "{text}");
+            assert_eq!(direct_steps, gla_steps, "{text}");
+            let events = direct_steps
+                .iter()
+                .filter(|step| matches!(step, Step::Event(_)))
+                .count();
+            for stop in 1..=events {
+                let (result, steps) = trace(true, Some(stop));
+                assert!(result.is_err(), "{text}: {stop}");
+                let seen = steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Event(_)))
+                    .count();
+                assert_eq!(seen, stop, "{text}");
+            }
+        }
+        for text in [
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a), (b) RETURN COUNT(*) AS n",
+            "MATCH (a) WHERE a.n = a.n RETURN COUNT(*) AS n",
+        ] {
+            assert!(vertex_scan(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn single_edge_scans_visit_arrivals_with_enumeration_answers() {
+        let mut edges = distinct_edge_graph();
+        edges.push((EId(400), VId(4), RelationId(1), VId(2)));
+        edges.push((EId(401), VId(5), RelationId(1), VId(0)));
+        // Into the unlabelled 4 and 5, and into 1, which lacks n = 7.
+        edges.push((EId(404), VId(0), RelationId(1), VId(4)));
+        edges.push((EId(405), VId(2), RelationId(1), VId(5)));
+        edges.push((EId(406), VId(3), RelationId(1), VId(1)));
+        // Another relation: scanned by none of the patterns below.
+        edges.push((EId(402), VId(1), RelationId(2), VId(5)));
+        edges.push((EId(403), VId(0), RelationId(2), VId(1)));
+        let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
+        let properties = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(7)),
+            (VId(4), CanonicalScalar::Int(7)),
+        ]);
+        let all: Vec<VId> = (0..6).map(VId).collect();
+        let run = |aggregate: &PreparedGraphAggregate| {
+            run_counted(aggregate, &all, &edges, &labelled, &properties)
+        };
+        for pattern in [
+            "(a:L)-[:R]->(b:L)",
+            "(a)-[:R]->(b)",
+            "(a:L)<-[:R]-(b)",
+            "(a {n: 7})-[:R]->(b:L)",
+            "(a)<-[:R]-(b {n: 7})",
+            "(a)-[:R]->(b {n: 7})",
+            "(a:L)<-[:R]-(b:L)",
+        ] {
+            for (returns, group, anchored) in [
+                ("COUNT(*) AS c", "", true),
+                (
+                    "COUNT(*) AS c,COUNT(DISTINCT b) AS d,COUNT(a) AS e,MIN(b) AS lo,MAX(a) AS hi",
+                    "",
+                    false,
+                ),
+                ("a,COUNT(*) AS c", " GROUP BY a", true),
+                ("a.n,COUNT(*) AS c,MAX(a) AS hi", " GROUP BY a.n", true),
+                (
+                    "COUNT(a.n) AS k,COUNT(DISTINCT a.n) AS d,MIN(a.n) AS lo,COUNT(*) AS c",
+                    "",
+                    true,
+                ),
+            ] {
+                let text = format!("MATCH {pattern} RETURN {returns}");
+                let scanned = query(&format!("{text}{group}"));
+                // The prefix counts aggregate columns; a grouped query's
+                // first column is its key.
+                let aggregates = returns.split(',').count() - usize::from(!group.is_empty());
+                let enumerated = query(&format!("{text},COLLECT(b) AS bag{group}"))
+                    .with_aggregate_output_prefix(aggregates)
+                    .unwrap();
+                let scan = single_scan(&scanned);
+                assert_eq!(
+                    scan.map(|scan| scan.anchored),
+                    Some(anchored),
+                    "{text}{group}"
+                );
+                assert!(!eligible(&enumerated), "{text}{group}");
+                assert_eq!(run(&scanned).value, run(&enumerated).value, "{text}{group}");
+            }
+        }
+        for text in [
+            "MATCH (a)-[:R]->(b) RETURN b,COUNT(*) AS c GROUP BY b",
+            "MATCH (a)-[:R]->(b) RETURN a,COUNT(b) AS c GROUP BY a",
+            "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b) RETURN MIN(b.n) AS lo",
+            "MATCH (a)-[:R]->(a) RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b) WHERE a.n = b.n RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS c",
+        ] {
+            assert!(single_scan(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn anchored_scans_read_every_property_occurrence_and_keep_each_failure() {
+        let text = "MATCH (a:L)-[:R]->(b) RETURN a.n,COUNT(*) AS c";
+        let scanned = query(&format!("{text} GROUP BY a.n"));
+        let enumerated = query(&format!("{text},COLLECT(b) AS bag GROUP BY a.n"))
+            .with_aggregate_output_prefix(1)
+            .unwrap();
+        assert!(single_scan(&scanned).is_some_and(|scan| scan.anchored));
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let value = CanonicalScalar::Int(7);
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let execute = |aggregate: &PreparedGraphAggregate, fail_at: Option<usize>| {
+            let mut reads = 0;
+            let result = aggregate.execute_governed(
+                edges.len() as u64,
+                (0..5).map(VId),
+                edges.iter().copied(),
+                |vid, _| Ok::<_, usize>(vid != VId(4)),
+                |_, _| {
+                    reads += 1;
+                    if Some(reads) == fail_at {
+                        Err(reads)
+                    } else {
+                        Ok(Some(&value))
+                    }
+                },
+                policy,
+                || Ok::<_, ()>(()),
+            );
+            (result.map(|result| result.value), reads)
+        };
+        let (scanned_rows, scanned_reads) = execute(&scanned, None);
+        let (enumerated_rows, enumerated_reads) = execute(&enumerated, None);
+        assert_eq!(scanned_rows.unwrap(), enumerated_rows.unwrap());
+        // One read per passing edge, as the ordinary evaluator makes.
+        assert_eq!(scanned_reads, enumerated_reads);
+        for fail_at in 1..=scanned_reads {
+            let (result, reads) = execute(&scanned, Some(fail_at));
+            assert!(
+                matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(n))) if n == fail_at
+                ),
+                "{fail_at}"
+            );
+            assert_eq!(reads, fail_at);
+        }
+    }
+
+    #[test]
+    fn one_predicate_list_on_both_sides_tests_each_vertex_once() {
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        for (text, shared) in [
+            ("MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c", true),
+            ("MATCH (a:L)<-[:R]-(b:L) RETURN COUNT(*) AS c", true),
+            ("MATCH (a:L)-[:R]->(b {n: 7}) RETURN COUNT(*) AS c", false),
+        ] {
+            let aggregate = query(text);
+            assert!(single_scan(&aggregate).is_some(), "{text}");
+            let mut tested = Vec::new();
+            let value = CanonicalScalar::Int(7);
+            aggregate
+                .execute_governed(
+                    edges.len() as u64,
+                    (0..5).map(VId),
+                    edges.iter().copied(),
+                    |vid, predicates| {
+                        tested.push(vid);
+                        Ok::<_, ()>(predicates.iter().all(|predicate| {
+                            predicate.matches_borrowed(
+                                (vid != VId(4)).then_some(fgdb_delta_types::LabelId(1)),
+                                (vid != VId(1)).then_some((PropertyKeyId(1), &value)),
+                            )
+                        }))
+                    },
+                    |_, _| Ok(None),
+                    policy,
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let distinct: BTreeSet<_> = tested.iter().copied().collect();
+            assert_eq!(distinct.len() == tested.len(), shared, "{text}: {tested:?}");
+        }
+    }
+
+    #[test]
+    fn single_edge_scans_stop_at_every_checkpoint() {
+        // Unanchored, counted without anchors, and anchored in runs.
+        for (text, group, aggregates) in [
+            (
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c,MAX(b) AS hi",
+                "",
+                2,
+            ),
+            ("MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c", "", 1),
+            (
+                "MATCH (a:L)<-[:R]-(b) RETURN a,COUNT(*) AS c",
+                " GROUP BY a",
+                1,
+            ),
+        ] {
+            single_edge_scan_stops_at_every_checkpoint(text, group, aggregates);
+        }
+    }
+
+    fn single_edge_scan_stops_at_every_checkpoint(text: &str, group: &str, aggregates: usize) {
+        let aggregate = query(&format!("{text}{group}"));
+        let enumerated = query(&format!("{text},COLLECT(b) AS bag{group}"))
+            .with_aggregate_output_prefix(aggregates)
+            .unwrap();
+        assert!(single_scan(&aggregate).is_some());
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let execute = |aggregate: &PreparedGraphAggregate, stop: Option<usize>| {
+            let mut at = 0;
+            let result = aggregate.execute_governed(
+                edges.len() as u64,
+                (0..5).map(VId),
+                edges.iter().copied(),
+                |vid, _| Ok::<_, ()>(vid != VId(4)),
+                |_, _| Ok(None),
+                policy,
+                || {
+                    at += 1;
+                    if Some(at) == stop { Err(at) } else { Ok(()) }
+                },
+            );
+            (result, at)
+        };
+        let (completed, events) = execute(&aggregate, None);
+        let (expected, _) = execute(&enumerated, None);
+        assert_eq!(completed.unwrap().value, expected.unwrap().value);
+        for stop in 1..=events {
+            let (result, at) = execute(&aggregate, Some(stop));
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(n)) if n == stop));
+            assert_eq!(at, stop);
         }
     }
 

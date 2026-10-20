@@ -543,6 +543,9 @@ mod with_tests {
         assert_ne!(first.canonical_bytes(), second.canonical_bytes());
         let rows = vec![vec![int(1)], vec![int(2)], vec![int(2)]];
         assert_eq!(values(finish(&first, rows.clone(), 1)), vec![vec![int(10)]]);
+        // No row passes the filter: the global SUM's one row is NULL, the
+        // engine's SUM over no input (empty_input_releases_one_zero_count_
+        // and_null_sum_row), not 0.
         assert_eq!(
             values(finish(&second, rows, 1)),
             vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]]

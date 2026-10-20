@@ -112,12 +112,15 @@ struct State {
     // A retained incidence merge filters each refault's position permutation,
     // never its property locators or the versions of a matching identity.
     incidence: Option<incidence::Incidence>,
-    _head_charge: MemoryCharge,
+    // Root heads are admitted only when the root stream is first demanded.
+    // Incidence positions own their smaller, independently reserved heaps.
+    _head_charge: Option<MemoryCharge>,
 }
 
-/// A canonical k-way merge of immutable edge histories. Construction reserves
-/// O(block count) metadata, without reading payloads. First pull inserts the
-/// authenticated minimum key of each block. Each refault decodes at most one
+/// A canonical k-way merge of immutable edge histories. Construction creates
+/// an empty position without reserving its O(block count) root heap. First root
+/// pull reserves that heap and inserts each authenticated minimum key.
+/// Each refault decodes at most one
 /// format-bounded block and sorts its original positions, with controls before
 /// comparisons. Refault frequency can be up to once per historical row; this
 /// is bounded resident execution, not an optimal sequential-I/O claim.
@@ -132,10 +135,17 @@ struct State {
 /// the cursor terminal. Errors never become EOF on that pull; subsequent pulls
 /// are fused. Close/drop do not scan the unread suffix. Output reservations
 /// survive cursor/view drop. Initial root admission remains separately bounded.
+/// A relation-bound root reserves metadata for matching blocks only on first
+/// demand and never faults another relation. It visits admitted block summaries
+/// to count then seed matching heads; every visit is metered. The history,
+/// property and endpoint resolution laws are unchanged.
 pub struct BufferedEdgeScan<'source, V: Vfs> {
     partition: &'source mut BufferedPartition<V>,
     as_of: CommitSeq,
     blocks: usize,
+    // Root selection only. Independent/nested incidence requests own their
+    // own relation and may traverse other relations without widening this root.
+    relation: Option<RelationId>,
     state: Option<State>,
     work: EdgeScanWork,
 }
@@ -156,33 +166,20 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         as_of: CommitSeq,
         blocks: usize,
         limit: usize,
+        relation: Option<RelationId>,
     ) -> Result<Self, BufferedReadError> {
-        let bytes = blocks
-            .checked_mul(512)
-            .and_then(|n| n.checked_add(1024))
-            .ok_or(BufferedReadError::SizeOverflow)?;
-        let charge = partition.reserve_scan_bytes(cx, bytes)?;
-        let mut heads: Vec<Reverse<Head>> = Vec::new();
-        heads
-            .try_reserve_exact(blocks)
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        if heads
-            .capacity()
-            .checked_mul(size_of::<Reverse<Head>>())
-            .is_none_or(|allocated| allocated > bytes)
-        {
-            return Err(BufferedReadError::SizeOverflow);
-        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(Self {
             partition,
             as_of,
             blocks,
+            relation,
             state: Some(State {
-                heads,
+                heads: Vec::new(),
                 active: None,
                 initialized: false,
                 incidence: None,
-                _head_charge: charge,
+                _head_charge: None,
             }),
             work: EdgeScanWork { used: 0, limit },
         })
@@ -264,9 +261,57 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
         if !state.initialized {
+            if self.blocks != 0 {
+                // A caller may convert this position into a selective
+                // incidence stream without ever using the global root heap.
+                // Admit its complete backing only on actual root demand,
+                // before allocation or any authenticated head is consumed.
+                // Count selected heads before one cache-aware reservation.
+                // Growing a MemoryCharge directly would bypass reclamation of
+                // unpinned extent frames and falsely refuse under cache pressure.
+                let capacity = if let Some(relation) = self.relation {
+                    let mut matching = 0_usize;
+                    for block in 0..self.blocks {
+                        self.work.step(cx, observe)?;
+                        if self
+                            .partition
+                            .edge_scan_first(block, Some(relation))
+                            .is_some()
+                        {
+                            matching = matching
+                                .checked_add(1)
+                                .ok_or(BufferedReadError::SizeOverflow)?;
+                        }
+                    }
+                    matching
+                } else {
+                    self.blocks
+                };
+                let bytes = capacity
+                    .checked_mul(512)
+                    .and_then(|n| n.checked_add(1024))
+                    .ok_or(BufferedReadError::SizeOverflow)?;
+                let charge = self.partition.reserve_scan_bytes(cx, bytes)?;
+                let mut heads: Vec<Reverse<Head>> = Vec::new();
+                heads.try_reserve_exact(capacity).map_err(|_| {
+                    BufferedReadError::Memory(MemoryError::AllocationFailed { requested: bytes })
+                })?;
+                if heads
+                    .capacity()
+                    .checked_mul(size_of::<Reverse<Head>>())
+                    .is_none_or(|allocated| allocated > bytes)
+                {
+                    return Err(BufferedReadError::SizeOverflow.into());
+                }
+                state.heads = heads;
+                state._head_charge = Some(charge);
+            }
             for block in 0..self.blocks {
                 self.work.step(cx, observe)?;
-                if let Some((eid, created)) = self.partition.edge_scan_first(block) {
+                if let Some((eid, created)) = self.partition.edge_scan_first(block, self.relation) {
+                    // Exclude unrelated relations before heap insertion or any
+                    // payload/property refault. Every matching block remains
+                    // present even when its history is invisible at this cut.
                     heap_push(
                         &mut state.heads,
                         Reverse(Head {
@@ -364,8 +409,9 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
     }
 
     /// Resolve endpoints only for a visible edge in the requested relation.
-    /// None selects all relations. Mismatching/invisible identities still emit
-    /// their single candidate admission, but do not read any endpoint payload.
+    /// None adds no endpoint filter; a relation-bound root keeps its original
+    /// selection. Mismatching/invisible root identities still emit their single
+    /// candidate admission, but do not read any endpoint payload.
     pub async fn next_with_endpoints<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -512,7 +558,10 @@ fn heap_pop<T: Ord, E>(
     sift(values, 0, len, control)?;
     Ok(first)
 }
-fn sort<T: Ord, E>(values: &mut [T], control: &mut impl FnMut() -> Result<(), E>) -> Result<(), E> {
+pub(crate) fn sort<T: Ord, E>(
+    values: &mut [T],
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let len = values.len();
     for start in (0..len / 2).rev() {
         sift(values, start, len, control)?;

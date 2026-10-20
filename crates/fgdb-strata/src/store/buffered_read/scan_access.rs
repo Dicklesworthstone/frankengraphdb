@@ -2,14 +2,18 @@
 //! the admitted extent identity/checksum and the ordinary canonical decoders.
 
 use super::*;
-use crate::tiered::edge_scan::{BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork};
+use crate::tiered::edge_scan::{
+    BufferedEdgeDirection, BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork,
+};
+
+pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
 type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
 
 impl<V: Vfs> BufferedPartition<V> {
-    /// Open a pull-driven scan in stable EId order at one retained cut. Only
-    /// the head capacity is reserved here; no payload is read before demand.
+    /// Open a pull-driven scan in stable EId order at one retained cut. Root
+    /// head capacity and payload reads are deferred until actual root demand.
     /// Initial authenticated admission supplied each block's minimum EId, not
     /// its first adjacency-ordered entry. The cursor never builds an edge table.
     pub fn edge_scan(
@@ -20,11 +24,61 @@ impl<V: Vfs> BufferedPartition<V> {
         self.begin(cx, as_of)?;
         let blocks = self.blocks.len();
         let maximum = self.limits.max_work;
-        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum)
+        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum, None)
     }
 
-    pub(crate) fn edge_scan_first(&self, at: usize) -> Option<(EId, CommitSeq)> {
-        self.blocks[at].summary.map(|summary| summary.first_edge)
+    /// Scan one relation in stable EId order without faulting other relations.
+    /// Initial root admission still authenticates every block and property
+    /// patch and proves immutable endpoint/relation identity across histories.
+    /// The admitted block summaries therefore select complete EId histories;
+    /// filtering never substitutes for admission or the selected-row decoders.
+    ///
+    /// Opening allocates and reserves no root workspace. First demand counts
+    /// matching blocks, reserves their heads through cache-aware admission, and
+    /// seeds the merge. Every metadata visit consumes the ordinary work limit.
+    /// Payloads remain lazy, including empty results.
+    pub fn edge_scan_relation(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        relation: RelationId,
+    ) -> Result<BufferedEdgeScan<'_, V>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        let blocks = self.blocks.len();
+        let maximum = self.limits.max_work;
+        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum, Some(relation))
+    }
+
+    pub(crate) fn edge_scan_first(
+        &self,
+        at: usize,
+        relation: Option<RelationId>,
+    ) -> Option<(EId, CommitSeq)> {
+        self.blocks[at]
+            .summary
+            .filter(|summary| relation.is_none_or(|relation| summary.relation == relation))
+            .map(|summary| summary.first_edge)
+    }
+
+    pub(crate) fn edge_scan_incidence_blocks(
+        &self,
+        endpoint: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> BufferedIncidenceBlocks {
+        self.block_directory
+            .candidates(endpoint, relation, direction)
+    }
+
+    pub(crate) fn edge_scan_next_incidence_block<C>(
+        &self,
+        candidates: &mut BufferedIncidenceBlocks,
+        cx: &QueryCx,
+        work: &mut EdgeScanWork,
+        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    ) -> Result<Option<usize>, BufferedScanError<C>> {
+        self.block_directory
+            .next(candidates, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn reserve_scan_bytes(
@@ -153,9 +207,9 @@ impl<V: Vfs> BufferedPartition<V> {
         Ok(BufferedValue::from_reserved(image, charge))
     }
 
-    // Endpoint resolution shares the edge cursor's allowance. Range metadata
-    // excludes unrelated payloads, not versions of the requested identity.
-    // This is still a descriptor scan, not an indexed vertex point-lookup claim.
+    // Endpoint resolution shares the edge cursor's allowance. Its immutable
+    // interval directory prunes unrelated metadata and payloads, while every
+    // possibly matching history still enters the ordinary same-cut resolver.
     pub(crate) async fn edge_scan_vertex<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -165,8 +219,12 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
         let mut result: Option<BufferedValue<VertexRow>> = None;
-        for at in 0..self.patches.len() {
-            work.step(cx, observe)?;
+        let mut winner_at = 0;
+        let mut candidates = self.patch_directory.candidates(vid);
+        while let Some(at) = self
+            .patch_directory
+            .next(&mut candidates, &mut || work.step(cx, observe))?
+        {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
                 continue;
@@ -199,7 +257,7 @@ impl<V: Vfs> BufferedPartition<V> {
                     && row.created_at <= as_of
                     && result
                         .as_ref()
-                        .is_none_or(|old| old.created_at <= row.created_at)
+                        .is_none_or(|old| (old.created_at, winner_at) <= (row.created_at, at))
                 {
                     match result.as_mut() {
                         Some(old) => old.value = row.clone(),
@@ -208,6 +266,7 @@ impl<V: Vfs> BufferedPartition<V> {
                             result = Some(BufferedValue::from_reserved(row.clone(), charge));
                         }
                     }
+                    winner_at = at;
                 }
             }
         }

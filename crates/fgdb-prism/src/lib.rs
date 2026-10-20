@@ -27,6 +27,7 @@
 
 mod call;
 mod clustering;
+mod directed_clustering;
 mod execute;
 mod foundation;
 mod input;
@@ -42,11 +43,12 @@ pub use call::{
     FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
     FnxGraphKind, FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec,
     FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, FoundationAlgorithm,
-    MAX_FNX_CALL_BYTES, PageRankOptions,
+    MAX_FNX_CALL_BYTES, PageRankOptions, PageRankStoppingRule,
 };
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{
-    ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits, FnxResult, FnxValue,
+    ComplexityWitness, FNX_METER_RUN, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
+    FnxMeter, FnxResult, FnxValue,
 };
 pub use input::{
     FnxReadError, FnxReadOptions, FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits,

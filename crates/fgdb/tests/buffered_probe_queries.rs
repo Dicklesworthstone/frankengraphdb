@@ -306,6 +306,98 @@ fn cold_correlated_probes_match_literal_products_and_resident_historical_queries
 }
 
 #[test]
+fn buffered_edge_queries_seek_endpoint_patches_under_a_subquadratic_source_budget() {
+    let ((), report) = run_async_under_lab(0xe6_54, |root| async move {
+        const VERTICES: usize = 1024;
+        const EDGES: usize = VERTICES / 2;
+        const SOURCE_WORK: usize = 100_000;
+        const PADDING: PropertyKeyId = PropertyKeyId(10);
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        for start in (0..VERTICES).step_by(128) {
+            let mut batch = WriteBatch::new(R);
+            for id in start..start + 128 {
+                batch.create_vertex(
+                    VId(id as u128 + 1),
+                    vec![],
+                    vec![
+                        (P, CanonicalScalar::Int(id as i64)),
+                        (PADDING, CanonicalScalar::bytes(vec![0x5a; 2048]).unwrap()),
+                    ],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+        }
+        let mut edges = WriteBatch::new(R);
+        for id in 0..EDGES {
+            edges.add_edge(
+                EId(id as u128),
+                VId(2 * id as u128 + 1),
+                VId(2 * id as u128 + 2),
+                vec![],
+            );
+        }
+        db.write(&commit, edges).await.unwrap();
+        drop(db);
+        // Even without row decoding, the previous full descriptor scan for
+        // both endpoints exceeds this budget. A 16 KiB patch cannot hold eight
+        // rows whose scalar payload alone occupies 2048 bytes apiece.
+        assert!(2 * EDGES * VERTICES.div_ceil(7) > SOURCE_WORK);
+        let pool = memory();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            pool.clone(),
+            BufferedReadLimits {
+                max_root_bytes: 256 * 1024,
+                max_source_bytes: 8 * 1024 * 1024,
+                max_blocks: 1024,
+                max_vertex_patches: 1024,
+                max_work: SOURCE_WORK,
+                buffer: BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 2,
+                    max_extent_bytes: 16 * 1024,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let plan = prepare("MATCH (a)-[r:R]->(b) RETURN r, a.p, b.p");
+        let mut cursor = view
+            .stream_graph_edges_governed(&cx, &plan, policy())
+            .unwrap();
+        for id in 0..EDGES {
+            let output = cursor.next().await.unwrap().unwrap();
+            let (row, charge) = output.into_parts();
+            assert_eq!(
+                row.values(),
+                &[
+                    GraphValue::Edge(EId(id as u128)),
+                    GraphValue::Scalar(CanonicalScalar::Int(2 * id as i64)),
+                    GraphValue::Scalar(CanonicalScalar::Int(2 * id as i64 + 1)),
+                ],
+            );
+            drop(row);
+            drop(charge);
+        }
+        assert!(cursor.next().await.is_none());
+        assert!(cursor.next().await.is_none());
+        drop(cursor);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn captured_only_probes_use_same_cut_stored_and_missing_nulls() {
     let ((), report) = run_async_under_lab(0xe6_52, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

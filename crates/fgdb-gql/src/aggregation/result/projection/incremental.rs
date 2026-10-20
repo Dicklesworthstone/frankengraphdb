@@ -99,6 +99,19 @@ impl PreparedGraphAggregate {
         row: &GraphAggregateRow,
         govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<GraphAggregateRow, QueryError<E, C>> {
+        self.project_complete_output_with_elements(
+            row,
+            &mut crate::set_ops::no_element_reads,
+            govern,
+        )
+    }
+
+    pub(crate) fn project_complete_output_with_elements<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<GraphAggregateRow, QueryError<E, C>> {
         let mut govern: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> = govern;
         let govern = &mut govern;
         let columns = |column: usize| {
@@ -115,6 +128,7 @@ impl PreparedGraphAggregate {
             columns,
             width: row.keys.len() + row.values.len(),
             locals: Vec::new(),
+            read,
         };
         govern(GlaExecutionEvent::ScratchEntry)?;
         let mut keys = Vec::new();

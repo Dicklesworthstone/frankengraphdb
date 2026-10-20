@@ -298,6 +298,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: Vec::new(),
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
             }
         };
         let mut result = UnresolvedReadInput {
@@ -372,6 +373,15 @@ impl<'a> Parser<'a> {
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.read_comparisons = Some(Vec::new());
         self.parse_match_prefix()?;
+        // A continuation owns a separate ON join, not the leading-row
+        // product. Until that owner projects computed keys, require callers
+        // to expose them explicitly in WITH rather than losing a predicate.
+        if !self.read_row_fields.is_empty() {
+            return Err(expected(
+                at,
+                "projected row fields in WITH before a MATCH continuation",
+            ));
+        }
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
@@ -590,6 +600,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: incoming.iter().map(|(_, kind)| *kind).collect(),
                 correlations: keys,
+                row_fields: Vec::new(),
             },
             next,
             terminal,

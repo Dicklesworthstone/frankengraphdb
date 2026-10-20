@@ -1,5 +1,8 @@
 //! Public cold-incidence APIs over real Chronicle/Strata and injected MemVfs.
 //! Result vectors below belong only to the independent test oracle.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
@@ -461,6 +464,114 @@ fn buffered_incidence_refusal_is_not_eof_and_outputs_outlive_the_view() {
         assert!(memory.used() > 0);
         assert_eq!(row(&held, CommitSeq(1)), expected(1)[0]);
         drop(held);
+        assert_eq!(memory.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn first_cold_incidence_seeks_descriptors_without_reading_unrelated_graph_payloads() {
+    let ((), report) = run_async_under_lab(0xe6_36, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        // Each independent source adds a separate block. None of these source
+        // keys or destination intervals can contribute to endpoint zero.
+        let mut unrelated = WriteBatch::new(R);
+        for at in 0..256_u128 {
+            let source = VId(1000 + at * 2);
+            let target = VId(1001 + at * 2);
+            for vertex in [source, target] {
+                unrelated.create_vertex(vertex, vec![L], vec![(P, CanonicalScalar::Int(123))]);
+            }
+            unrelated.add_edge(
+                EId(1000 + at),
+                source,
+                target,
+                vec![(P, CanonicalScalar::Int(456))],
+            );
+        }
+        assert_eq!(
+            db.write(&contexts.commit(), unrelated).await.unwrap(),
+            CommitSeq(2)
+        );
+        let memory = pool();
+        let mut view = cold(&contexts, &vfs, memory.clone()).await;
+        assert_eq!(
+            view.buffer_stats().bypasses,
+            0,
+            "admission is distinct from payload refaults"
+        );
+        let baseline = memory.used();
+        let mut missing = view
+            .stream_adjacency(&cx, VId(500), None, BufferedEdgeDirection::Undirected)
+            .unwrap();
+        assert!(missing.next(&cx).await.unwrap().is_none());
+        assert!(missing.is_finished());
+        drop(missing);
+        assert_eq!(
+            view.buffer_stats().bypasses,
+            0,
+            "even the first absent seek faults no graph payload"
+        );
+        assert_eq!(
+            memory.used(),
+            baseline,
+            "no per-query graph routing survives exhaustion"
+        );
+
+        for cut in [CommitSeq(1), CommitSeq(2)] {
+            for direction in [
+                BufferedEdgeDirection::Outgoing,
+                BufferedEdgeDirection::Incoming,
+                BufferedEdgeDirection::Undirected,
+            ] {
+                let before = view.buffer_stats().bypasses;
+                let mut scan = view
+                    .stream_adjacency_at(&cx, IDS[0], Some(R), direction, cut, None)
+                    .unwrap();
+                let mut actual = Vec::new();
+                while let Some(value) = scan.next(&cx).await.unwrap() {
+                    actual.push(row(&value, cut));
+                }
+                drop(scan);
+                let expected: Vec<_> = expected(1)
+                    .into_iter()
+                    .filter(|row| matches(IDS[0], Some(R), direction, row))
+                    .collect();
+                assert_eq!(actual, expected);
+                assert!(
+                    view.buffer_stats().bypasses - before <= 32,
+                    "a neighborhood of three identities must not read 256 unrelated blocks"
+                );
+                assert_eq!(memory.used(), baseline);
+            }
+        }
+        // The same descriptor directory does not grant visibility at a future
+        // cut, and the retained view keeps its original immutable generation.
+        let mut update = WriteBatch::new(R);
+        update.delete_edge(EId(0));
+        db.write(&contexts.commit(), update).await.unwrap();
+        assert_eq!(view.frontier(), CommitSeq(2));
+        assert_eq!(
+            view.incident_edge_count(&cx, IDS[0], Some(R), BufferedEdgeDirection::Outgoing)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(matches!(
+            view.stream_adjacency_at(
+                &cx,
+                IDS[0],
+                Some(R),
+                BufferedEdgeDirection::Outgoing,
+                CommitSeq(3),
+                None
+            ),
+            Err(BufferedReadError::BeyondPublication { .. })
+        ));
+        drop(view);
         assert_eq!(memory.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

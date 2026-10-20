@@ -67,6 +67,68 @@ fn check_index(state: &IncrementalTriangles<usize>, n: usize) {
 }
 
 #[test]
+fn prepared_presence_reuses_normalized_support_and_aborts_with_the_triangle_guard() {
+    for quantifier in [TriangleQuantifier::Distinct, TriangleQuantifier::All] {
+        let mut state = IncrementalTriangles::new(quantifier);
+        let initial = edges([
+            ((0, 1), 2),
+            ((1, 0), 1),
+            ((1, 2), 1),
+            ((2, 0), 1),
+            ((3, 3), 1),
+        ]);
+        state.apply(&initial, LIMBS, &mut allow).unwrap();
+        let before = state.snapshot(LIMBS, &mut allow).unwrap();
+        let change = edges([
+            ((0, 1), -2), // One reverse support remains.
+            ((1, 2), -1),
+            ((2, 3), 1),
+            ((3, 2), 1), // Two new supports form one distinct neighbor.
+            ((3, 3), -1),
+            ((2, 0), -1),
+            ((0, 2), 1), // An orientation swap has zero normalized change.
+        ]);
+        for publish in [false, true] {
+            let pending = state.prepare(&change, LIMBS, &mut allow).unwrap();
+            let expected = vec![
+                ((0, 1), true, true),
+                ((1, 2), true, false),
+                ((2, 3), false, true),
+                ((3, 3), true, false),
+            ];
+            let presence = || {
+                pending
+                    .edge_presence_updates()
+                    .map(|(edge, old, next)| (*edge, old, next))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(presence(), expected);
+            assert_eq!(
+                presence(),
+                expected,
+                "inspection does not consume staged support"
+            );
+            if publish {
+                pending.commit();
+                assert_eq!(state.edge_weight(&0, &1), Some(&ZWeight::ONE));
+                assert_eq!(state.edge_weight(&1, &2), None);
+                assert_eq!(state.edge_weight(&2, &3), Some(&ZWeight::from_i128(2)));
+                assert_eq!(state.edge_weight(&3, &3), None);
+                assert!(state.snapshot(LIMBS, &mut allow).unwrap().is_empty());
+            } else {
+                drop(pending);
+                assert_eq!(state.edge_weight(&0, &1), Some(&ZWeight::from_i128(3)));
+                assert_eq!(state.edge_weight(&1, &2), Some(&ZWeight::ONE));
+                assert_eq!(state.edge_weight(&2, &3), None);
+                assert_eq!(state.edge_weight(&3, &3), Some(&ZWeight::ONE));
+                assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), before);
+            }
+            check_index(&state, 4);
+        }
+    }
+}
+
+#[test]
 fn every_four_vertex_transition_matches_independent_recomputation() {
     for quantifier in [TriangleQuantifier::Distinct, TriangleQuantifier::All] {
         for before in 0..64 {

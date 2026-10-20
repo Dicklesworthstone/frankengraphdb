@@ -36,6 +36,13 @@ pub const MANIFEST_FORMAT_V1: u16 = 1;
 /// Format version, versioned from day one (§16.6). A V2 record binds its root
 /// to the marker-chain commitment at its publication (fgdb-90hw).
 pub const MANIFEST_FORMAT_V2: u16 = 2;
+/// The V2 layout, written by a store whose objects may live in commit packs
+/// (fgdb-79kyi): a reader must look in packs, not only at loose paths. Every
+/// manifest is written as V3; V2 manifests, all of whose objects are loose,
+/// stay readable. A pre-pack reader refuses V3 by its version when it resolves
+/// the manifest, before it reads any partition object, so it can never
+/// mistake a packed object for a missing or damaged one.
+pub const MANIFEST_FORMAT_V3: u16 = 3;
 /// Durable object kind for the §5.1 logical-identity header — distinct from
 /// blocks (0x04d4), vertex patches (0x057f), and edge property patches
 /// (0x0580) for the reason each of those is distinct: equal payload bytes
@@ -159,7 +166,7 @@ pub fn encode_manifest(records: &[ManifestRecord]) -> Result<Vec<u8>, ManifestEr
     validate_records(records)?;
     let mut out = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
     out.extend_from_slice(&MANIFEST_MAGIC);
-    out.extend_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
+    out.extend_from_slice(&MANIFEST_FORMAT_V3.to_be_bytes());
     out.extend_from_slice(&count.to_be_bytes());
     for record in records {
         out.extend_from_slice(&record.graph.0.to_be_bytes());
@@ -177,7 +184,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestRecord>, ManifestErro
         return Err(ManifestError::NotAManifest);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if format != MANIFEST_FORMAT_V2 {
+    if format != MANIFEST_FORMAT_V2 && format != MANIFEST_FORMAT_V3 {
         return Err(ManifestError::UnsupportedFormat { format });
     }
     let count = u32::from_be_bytes(bytes[6..10].try_into().expect("fixed header"));

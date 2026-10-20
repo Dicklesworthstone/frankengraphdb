@@ -1,6 +1,9 @@
 //! Real buffered graph joins through the existing external ordering/stage host.
 //! Literal fixture expectations do not execute another copy of the join driver.
 
+#[path = "buffered_relational_join_tests.rs"]
+mod relational_join;
+
 use super::*;
 use crate::{BufferLimits, BufferedReadLimits, Database, DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::io::ReadBuf;

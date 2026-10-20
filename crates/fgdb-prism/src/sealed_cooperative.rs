@@ -1,4 +1,4 @@
-//! Cooperative ranks, weighted/hop distances, connectivity and local clustering.
+//! Cooperative ranks, eigenvectors, degree/core, distances and connectivity.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -12,14 +12,14 @@
 //! made cooperative by this module.
 
 use super::{
-    ComplexityWitness, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, PageRankOptions,
-    QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
-    checkpoint, directional_pass_work, finish_encoded, mul, reserve,
+    ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues,
+    PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add,
+    admit, checkpoint, execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
-use crate::{DijkstraOptions, SealedProjectionError};
+use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
@@ -109,6 +109,11 @@ impl FnxCallSpec {
                 | FnxAlgorithm::StronglyConnectedComponents
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::Foundation(
+                    FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::CoreNumber
+                        | FoundationAlgorithm::EigenvectorCentrality
+                )
         )
     }
 
@@ -203,11 +208,57 @@ impl FnxCallSpec {
                 )
                 .await;
             }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::core_number::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::eigenvector::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
+            }
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;
-            let pass =
-                directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
+            let pass = execution_pass_work(self, graph)?;
             let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                    admission.rows(n)?;
+                    (
+                        "fgdb-prism/sealed-degree-directory-cooperative-v1",
+                        pass,
+                        mul(n, size_of::<f64>())?,
+                        None,
+                    )
+                }
                 FnxAlgorithm::PageRank(options) => {
                     admit("iterations", options.max_iter(), limits.max_iterations)?;
                     admission.rows(n)?;
@@ -266,6 +317,12 @@ impl FnxCallSpec {
                 workspace,
                 memory.max_kernel_workspace_bytes,
             )?;
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+            ) {
+                require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+            }
             let mut control = Cooperate {
                 cx,
                 fuel: SealedScanBudget::new(quantum.get()),
@@ -273,6 +330,9 @@ impl FnxCallSpec {
                 yield_now,
             };
             let output = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                    degree_centrality(graph, &mut control).await?
+                }
                 FnxAlgorithm::PageRank(options) => pagerank(graph, options, &mut control).await?,
                 FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
                     bfs(
@@ -320,6 +380,24 @@ impl FnxCallSpec {
         })
         .await
     }
+}
+
+async fn degree_centrality<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    control.tick().await?;
+    let mut output = DegreeCentrality::new(graph.node_count())?;
+    for source in 0..graph.node_count() {
+        control.tick().await?;
+        output.push(graph.degree(source))?;
+    }
+    control.tick().await?;
+    output.finish()
 }
 
 // The heap and its exclusively borrowed repair both belong to this future.
@@ -751,7 +829,7 @@ where
 {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
-        algorithm: "pagerank_power_iteration".to_owned(),
+        algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -793,7 +871,7 @@ where
         next.push(0.0);
     }
     let base = (1.0 - options.alpha()) / population;
-    for _ in 0..options.max_iter() {
+    for iteration in 0..options.max_iter() {
         control.tick().await?;
         let mut dangling_mass = 0.0;
         for source in 0..n {
@@ -840,7 +918,7 @@ where
         }
         std::mem::swap(&mut ranks, &mut next);
         witness.nodes_touched = add(witness.nodes_touched, n)?;
-        if delta < population * options.tolerance() {
+        if options.iteration_complete(iteration + 1, delta, population) {
             return Ok(KernelOutput {
                 values: KernelValues::Scores(ranks),
                 row_count: n,

@@ -3,7 +3,10 @@
 //! Every successful batch has one native completion, never one per item.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryWriteError, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, QueryResult, QueryWriteError, WriteBatch, WriteError,
+    WriteTxnError,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
@@ -13,7 +16,7 @@ use fgdb_gql::{
     GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
     PurposeContexts, VId,
 };
 use std::convert::Infallible;
@@ -89,6 +92,303 @@ fn staged(result: QueryResult, statements: usize) {
     };
     assert!(completion.is_none(), "staging is not durability");
     assert_eq!(receipt.stats().completed_statements, statements);
+}
+
+#[test]
+fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates_commit() {
+    let ((), report) = run_async_under_lab(0x7363_6122, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=2 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(10)),
+                ],
+            );
+        }
+        seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(2), VId(2), VId(1), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        for replacements in [[2, 3], [2, 1]] {
+            let input = args(vec![
+                object(vec![("a", int(1)), ("b", int(replacements[0]))]),
+                object(vec![("a", int(2)), ("b", int(replacements[1]))]),
+            ]);
+            for tail in [
+                "MATCH (n:Entity {id:row.a}) SET n.id=row.b",
+                "MATCH (n:Entity {id:row.a}) REMOVE n:Entity",
+                "MATCH (n:Entity {id:row.a})-[:R]->(m) DETACH DELETE n",
+                "MATCH (n:Entity {id:row.a}), (anchor:Entity {id:1}) DETACH DELETE n",
+            ] {
+                let error = txn
+                    .query_write(
+                        &mut db,
+                        &cx,
+                        &format!("UNWIND $rows AS row {tail}"),
+                        &input,
+                        symbols,
+                        R,
+                        policy(20, 0),
+                        no_allocation,
+                    )
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                            statement: 0
+                        })
+                    ),
+                    "{tail}: {error:?}"
+                );
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+            }
+        }
+        for id in 1..=2 {
+            let vertex = txn.vertex(&db, VId(id)).unwrap().unwrap();
+            assert_eq!(vertex.labels, [ENTITY]);
+            assert_eq!(
+                vertex.props,
+                [
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(10))
+                ]
+            );
+        }
+        assert_eq!(txn.edges(&db).unwrap().len(), 2);
+
+        let input = args(vec![
+            object(vec![("a", int(1)), ("b", int(20))]),
+            object(vec![("a", int(2)), ("b", int(30))]),
+        ]);
+        staged(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.p=row.b",
+                &input,
+                symbols,
+                R,
+                policy(2, 0),
+                no_allocation,
+            )
+            .unwrap(),
+            2,
+        );
+        staged(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=row.b",
+                &args(vec![object(vec![("a", int(1)), ("b", int(5))])]),
+                symbols,
+                R,
+                policy(1, 0),
+                no_allocation,
+            )
+            .unwrap(),
+            1,
+        );
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(2)
+            }
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        for (id, key, value) in [(1, 5, 20), (2, 2, 30)] {
+            assert_eq!(
+                db.vertex(VId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(value))
+                ]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_together() {
+    let ((), report) = run_async_under_lab(0x7363_6123, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, p) in [(1, 10), (2, 0)] {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(p)),
+                ],
+            );
+        }
+        for (id, source, destination, p) in [(1, 1, 2, 50), (2, 2, 1, 60)] {
+            seed.add_edge(
+                EId(id),
+                VId(source),
+                VId(destination),
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(p)),
+                ],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+
+        for (tail, values) in [
+            (
+                "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.name='changed'",
+                [(1, 0), (2, 0)],
+            ),
+            (
+                "MATCH (n:Entity) WHERE abs(n.id)=row.id OR n.id=0 SET n.p=n.p+row.p",
+                [(1, 2), (1, 3)],
+            ),
+            (
+                "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET a.id=row.p",
+                [(1, 11), (2, 12)],
+            ),
+            (
+                "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET a.p=coalesce(a.p,0)+row.p",
+                [(1, 100), (2, 200)],
+            ),
+            (
+                "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET e += {id:row.p}",
+                [(11, 101), (12, 102)],
+            ),
+        ] {
+            let input = args(
+                values
+                    .into_iter()
+                    .map(|(id, p)| object(vec![("id", int(id)), ("p", int(p))]))
+                    .collect(),
+            );
+            let frozen = input.canonical_bytes();
+            staged(
+                txn.query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row {tail}"),
+                    &input,
+                    symbols,
+                    R,
+                    policy(16, 0),
+                    no_allocation,
+                )
+                .unwrap_or_else(|error| panic!("{tail}: {error:?}")),
+                2,
+            );
+            assert_eq!(input.canonical_bytes(), frozen);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        }
+
+        // The same edge key remains unsafe when it is also the selection
+        // predicate. Refusal must preserve all successful batches and prefix.
+        let digest = txn.staged_effect_digest().unwrap();
+        let input = args(vec![
+            object(vec![("id", int(101)), ("p", int(102))]),
+            object(vec![("id", int(102)), ("p", int(103))]),
+        ]);
+        for tail in [
+            "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id OR e.p=0 SET e.id=row.p",
+            "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
+            "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
+        ] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row {tail}"),
+                    &input,
+                    symbols,
+                    R,
+                    policy(16, 0),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                    statement: 0
+                })
+            ));
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        }
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(2)
+            }
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert!(db.vertex(VId(99)).unwrap().is_some());
+        for (id, key, p) in [(1, 11, 115), (2, 12, 200)] {
+            assert_eq!(
+                db.vertex(VId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(p)),
+                    (NAME, CanonicalScalar::ucs_basic_text("changed").unwrap()),
+                ]
+            );
+        }
+        assert_eq!(db.edges().unwrap().len(), 2);
+        for (id, key, p) in [(1, 101, 50), (2, 102, 60)] {
+            assert_eq!(
+                db.edge(EId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(p)),
+                ]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -341,6 +641,101 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
 }
 
 #[test]
+fn keyed_edge_unwind_admits_only_endpoint_unions_and_pair_edges() {
+    let ((), report) = run_async_under_lab(0x7363_6110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=600_u128 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+            if id > 1 {
+                seed.add_edge(EId(id), VId(id - 1), VId(id), vec![]);
+            }
+        }
+        db.write(&commit, seed).await.unwrap();
+        let mut pairs = (100..110)
+            .map(|id| object(vec![("a", int(id)), ("b", int(id + 100))]))
+            .collect::<Vec<_>>();
+        pairs.insert(1, pairs[0].clone());
+        let values = args(pairs);
+        let statement = "UNWIND $rows AS row \
+            MATCH (a:Entity {id:row.a}), (b:Entity {id:row.b}) \
+            MERGE (a)-[:R]->(b)";
+        let bounded = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100, 100, 10_000_000, 10_000_000),
+            20,
+            0,
+            20,
+        );
+        let issued = AtomicU64::new(10_000);
+        let allocate = |request: GraphWriteIdentityRequest| {
+            assert!(matches!(request.request, GraphInsertRequest::Edge { .. }));
+            Ok::<_, Infallible>(ElementId::Edge(EId(u128::from(
+                issued.fetch_add(1, Ordering::Relaxed),
+            ))))
+        };
+        for pass in 0..2 {
+            let result = db
+                .query_write(
+                    &txcx, &cx, &commit, statement, &values, symbols, R, bounded, allocate,
+                )
+                .await
+                .unwrap();
+            let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            else {
+                panic!("edge UNWIND keeps its ordinary native write receipt");
+            };
+            assert_eq!(receipt.stats().completed_statements, 11);
+            assert_eq!(
+                receipt.stats().created_edges,
+                if pass == 0 { 10 } else { 0 }
+            );
+            assert_eq!(
+                receipt.stats().selection.snapshot_records,
+                if pass == 0 { 23 } else { 33 },
+                "two indexed endpoints per row plus each existing pair edge"
+            );
+            if pass == 0 {
+                assert!(matches!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::WriteCommitted { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::ReadClosed { .. })
+                ));
+            }
+            assert_eq!(issued.load(Ordering::Relaxed), 10_010);
+        }
+        let loaded = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.eid.0 >= 10_000)
+            .map(|edge| (edge.entry.src, edge.entry.dst))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            loaded,
+            (100..110_u128).map(|id| (VId(id), VId(id + 100))).collect()
+        );
+        assert_eq!(db.edges().unwrap().len(), 609);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn malformed_scalar_matrix_and_overexpanded_sources_refuse_before_catalog_or_allocation() {
     let ((), report) = run_async_under_lab(0x7363_6103, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -532,6 +927,209 @@ fn scalar_batches_share_creation_and_effect_budgets_and_keep_issued_identities_c
             ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn large_shared_prefix_survives_nested_unwind_failure_refresh_and_savepoint_rollback() {
+    let ((), report) = run_async_under_lab(0x7363_6120, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=2 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(10)),
+                ],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        let payload = CanonicalScalar::ucs_basic_text(&"prefix payload ".repeat(64)).unwrap();
+        for id in 1000..1512 {
+            prefix.create_vertex(VId(id), vec![], vec![(NAME, payload.clone())]);
+        }
+        txn.write(&mut db, prefix).unwrap();
+        txn.savepoint(&db, "kept").unwrap();
+        txn.savepoint(&db, "same-prefix").unwrap();
+        let mut unrelated = WriteBatch::new(R);
+        unrelated.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(21)));
+        db.write(&commit, unrelated).await.unwrap();
+        let refreshed = txn.refresh_snapshot(&db, &txcx).unwrap();
+        assert_eq!(refreshed, CommitSeq(2));
+        let prefix_digest = txn.staged_effect_digest().unwrap();
+
+        let issued = AtomicU64::new(0);
+        staged(
+            txn.query_write(
+                &mut db,
+                &query,
+                UPSERT,
+                &args(vec![int(1), int(4), int(4)]),
+                symbols,
+                R,
+                policy(10, 1),
+                |_| {
+                    assert_eq!(issued.fetch_add(1, Ordering::Relaxed), 0);
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(9000)))
+                },
+            )
+            .unwrap(),
+            3,
+        );
+        assert_eq!(issued.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            txn.vertex(&db, VId(9000)).unwrap().unwrap().props,
+            vec![(ID, CanonicalScalar::Int(4)), (P, CanonicalScalar::Int(2))]
+        );
+        let completed_digest = txn.staged_effect_digest().unwrap();
+        let failure = txn
+            .query_write(
+                &mut db,
+                &query,
+                "UNWIND $rows AS x MATCH (n:Entity {id:1}) SET n.p=100/x",
+                &args(vec![int(2), int(0)]),
+                symbols,
+                R,
+                policy(2, 0),
+                no_allocation,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            QueryWriteError::Execute(GraphWriteScriptExecutionError::BatchProgram {
+                location: Some(location),
+                ..
+            }) if location.argument_set == 1
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), completed_digest);
+
+        txn.rollback_to_savepoint(&db, "same-prefix").unwrap();
+        assert_eq!(txn.basis(), refreshed);
+        assert_eq!(txn.staged_effect_digest().unwrap(), prefix_digest);
+        assert!(txn.vertex(&db, VId(9000)).unwrap().is_none());
+        assert_eq!(
+            txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+        );
+        assert_eq!(
+            txn.vertex(&db, VId(1000)).unwrap().unwrap().props,
+            vec![(NAME, payload)]
+        );
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(3)
+            }
+        );
+        assert_eq!(db.vertices().unwrap().len(), 514);
+        assert!(db.vertex(VId(9000)).unwrap().is_none());
+        assert_eq!(
+            db.vertex(VId(2)).unwrap().unwrap().props,
+            vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(21))]
+        );
+        assert_eq!(db.delta_since(refreshed).unwrap().count(), 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn failed_unwind_and_savepoint_rollback_retain_noop_preparation_conflicts() {
+    let ((), report) = run_async_under_lab(0x7363_6121, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        for change_observed_vertex in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=2 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![ENTITY],
+                    vec![
+                        (ID, CanonicalScalar::Int(id as i64)),
+                        (P, CanonicalScalar::Int(10)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            for id in 1000..1128 {
+                prefix.create_vertex(VId(id), vec![], vec![]);
+            }
+            txn.write(&mut db, prefix).unwrap();
+            txn.savepoint(&db, "kept").unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
+            // The first row observes the before-image but normalizes to a no-op.
+            // The second row refuses after the first preparation has succeeded.
+            let failure = txn
+                .query_write(
+                    &mut db,
+                    &query,
+                    "UNWIND $rows AS x MATCH (n:Entity {id:1}) SET n.p=100/x",
+                    &args(vec![int(10), int(0)]),
+                    symbols,
+                    R,
+                    policy(2, 0),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                QueryWriteError::Execute(GraphWriteScriptExecutionError::BatchProgram {
+                    location: Some(location),
+                    ..
+                }) if location.argument_set == 1
+            ));
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            txn.rollback_to_savepoint(&db, "kept").unwrap();
+            let mut winner = WriteBatch::new(R);
+            winner.set_vertex_property(
+                VId(if change_observed_vertex { 1 } else { 2 }),
+                P,
+                Some(CanonicalScalar::Int(11)),
+            );
+            db.write(&commit, winner).await.unwrap();
+            // Do not read the transaction again before finishing: that could
+            // accidentally repair an observation lost by either rollback.
+            let completion = txn.finish(&mut db, &commit).await;
+            if change_observed_vertex {
+                assert!(matches!(
+                    completion,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+                assert!(db.vertex(VId(1000)).unwrap().is_none());
+                assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            } else {
+                assert_eq!(
+                    completion.unwrap(),
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(3)
+                    }
+                );
+                assert_eq!(db.vertices().unwrap().len(), 130);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

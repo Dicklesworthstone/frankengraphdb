@@ -120,6 +120,20 @@ impl VertexAggregatePlan {
         })
     }
 
+    /// Leading infallible root predicates from the checked input. Sources may
+    /// use these to choose an admitted candidate superset, keeping all ordinary
+    /// visible-row checks. The relaxed aggregate input plan stays private: it
+    /// does not prove the ordering required by an ordinary row cursor.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.input.leading_root_predicates()
+    }
+
+    /// The first eligible Boolean prefix from this aggregate's input scan.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        self.input.leading_root_prefix()
+    }
+
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -944,6 +958,22 @@ impl NumericState {
             payload_units,
         } = self
         else {
+            // The first binary64 input installs an owned exact accumulator.
+            // Admit its box before update() can allocate or replace the integer
+            // prefix. Later inputs reuse that box and must not charge it again.
+            if matches!(input, Input::Scalar(Some(CanonicalScalar::Float(_))))
+                && matches!(self, Self::Sum(_) | Self::Average { .. })
+            {
+                // Preserve arithmetic refusal before allocation admission.
+                // update() repeats this check for callers that already own
+                // their reservation; neither path may mutate on overflow.
+                if let Self::Average { count, .. } = self {
+                    count.checked_add(1).ok_or(GqlQueryError::Source(
+                        GraphAggregateError::ArithmeticOverflow { aggregate },
+                    ))?;
+                }
+                control(VertexScanEvent::ScratchEntry)?;
+            }
             return self.update(input, aggregate);
         };
         if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) {
@@ -1027,13 +1057,16 @@ impl NumericState {
                 );
             }
             Self::Average { sum, count } => {
-                if let Input::Scalar(Some(CanonicalScalar::Float(_))) = input {
+                if let Input::Scalar(Some(CanonicalScalar::Float(value))) = input {
+                    let next_count = count.checked_add(1).ok_or_else(overflow)?;
+                    let mut exact = Self::exact_prefix(*sum);
+                    exact.add(*value);
                     *self = Self::Float {
-                        exact: Self::exact_prefix(*sum),
-                        count: *count,
+                        exact,
+                        count: next_count,
                         average: true,
                     };
-                    return self.update(input, aggregate);
+                    return Ok(());
                 }
                 let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
                     return Err(GqlQueryError::Source(

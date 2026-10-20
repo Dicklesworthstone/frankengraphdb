@@ -1,5 +1,8 @@
 //! A cold source consumes the same durable objects as reopen, with independently
 //! specified point/adjacency answers and a one-frame eviction/refault boundary.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -58,6 +61,23 @@ fn limits() -> BufferedReadLimits {
             max_extent_bytes: 16 * 1024,
         },
     }
+}
+
+// Directory construction has a different allowance from a later cursor's
+// source work. Keep its retained reservation explicit in resident-cap laws.
+fn patch_directory_overhead(patches: usize) -> (usize, usize) {
+    // Each Range holds three VIds and a patch ordinal, including trailing
+    // alignment padding. Admission reserves one full entry per patch.
+    let (entry, _) = std::alloc::Layout::new::<[VId; 3]>()
+        .extend(std::alloc::Layout::new::<usize>())
+        .unwrap();
+    let reserved_bytes = patches * entry.pad_to_align().size();
+    // Fill and augment each visit at most P entries. Heapify plus extraction
+    // invokes at most 3P/2 sifts, each with two controls per tree level;
+    // extraction also spends at most P controls on swaps.
+    let height = patches.checked_ilog2().unwrap_or(0) as usize;
+    let work = patches * (3 * height + 3);
+    (reserved_bytes, work)
 }
 
 fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
@@ -397,6 +417,129 @@ async fn routed_fixture(
 
 fn extent_visits(stats: BufferStats) -> u64 {
     stats.hits + stats.misses
+}
+
+#[test]
+fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let first = propertied_block(
+            &store,
+            &commit,
+            None,
+            &[edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, None)],
+            &[Some(100), Some(500)],
+        )
+        .await;
+        // Both interval families put this later publication at their root.
+        // Retirement restatements tie on created_at, but retain this ordinal.
+        let later = propertied_block(
+            &store,
+            &commit,
+            Some(first),
+            &[edge(50, 7, 50, 1, Some(3)), edge(90, 7, 90, 3, None)],
+            &[Some(500), Some(900)],
+        )
+        .await;
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(3),
+                    blocks: vec![
+                        BlockRef {
+                            block_id: first.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(1),
+                        },
+                        BlockRef {
+                            block_id: later.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(3),
+                        },
+                    ],
+                    vertex_patches: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&query, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let before = extent_visits(view.stats());
+        let old = view
+            .edge_at(&query, EId(50), CommitSeq(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.entry, edge(50, 7, 50, 1, Some(3)));
+        assert_eq!(
+            old.props,
+            vec![(PropertyKeyId(11), CanonicalScalar::Int(500))]
+        );
+        assert_eq!(extent_visits(view.stats()) - before, 3);
+        drop(old);
+        let before = extent_visits(view.stats());
+        assert!(
+            view.edge_at(&query, EId(50), CommitSeq(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            extent_visits(view.stats()) - before,
+            2,
+            "retired winner has no sidecar read"
+        );
+        for relation in [None, Some(REL)] {
+            for (cut, expected) in [
+                (
+                    1,
+                    vec![edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, Some(3))],
+                ),
+                (3, vec![edge(10, 7, 10, 1, None), edge(90, 7, 90, 3, None)]),
+            ] {
+                let before = extent_visits(view.stats());
+                let found = view
+                    .adjacency_at(&query, VId(7), relation, false, CommitSeq(cut), 3)
+                    .await
+                    .unwrap();
+                assert_eq!(found.as_ref(), &expected);
+                assert_eq!(extent_visits(view.stats()) - before, 2, "topology only");
+            }
+            for (cut, expected) in [(1, vec![edge(50, 7, 50, 1, Some(3))]), (3, vec![])] {
+                let before = extent_visits(view.stats());
+                let found = view
+                    .adjacency_at(&query, VId(50), relation, true, CommitSeq(cut), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(found.as_ref(), &expected);
+                assert_eq!(
+                    extent_visits(view.stats()) - before,
+                    2,
+                    "complete historical candidates"
+                );
+            }
+        }
+        assert!(matches!(
+            view.adjacency_at(&query, VId(7), None, false, CommitSeq(3), 2)
+                .await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered adjacency identities",
+                requested: 3,
+                limit: 2,
+            })
+        ));
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
 }
 
 #[test]
@@ -999,9 +1142,10 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
             .unwrap();
         let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
         let mut bounded = limits();
-        // Linear admission suffices for the entire cursor. A point-read loop
-        // over every candidate would revisit 32 patches per output and refuse.
-        bounded.max_work = count * 4;
+        // Authenticate one object and row per patch, then build the directory.
+        // The later cursor must still use exactly four source events per row.
+        let (_, directory_work) = patch_directory_overhead(count);
+        bounded.max_work = 2 * count + directory_work;
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounded)
             .await
@@ -1030,23 +1174,40 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
         drop(held);
         assert_eq!(pool.used(), 0);
 
-        bounded.max_work -= 1;
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounded)
             .await
             .unwrap();
         let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
-        for _ in 1..count {
-            assert!(scan.next(&cx).await.unwrap().is_some());
+        // The hosted-query control applies a tighter cursor allowance without
+        // lowering the already completed constructor's directory allowance.
+        let scan_limit = count * 4 - 1;
+        let mut admitted_work = 0usize;
+        let mut observe = |event| {
+            if event == BufferedScanEvent::Work {
+                let requested = admitted_work + 1;
+                if requested > scan_limit {
+                    return Err((requested, scan_limit));
+                }
+                admitted_work = requested;
+            }
+            Ok(())
+        };
+        for index in 1..count {
+            let candidate = scan
+                .next_candidate_with(&cx, &mut observe)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(candidate.vid, VId(index as u128));
+            assert!(candidate.row.is_some());
         }
         assert!(matches!(
-            scan.next(&cx).await,
-            Err(BufferedReadError::Limit {
-                resource: "buffered source work",
-                requested: 128,
-                limit: 127,
-            })
+            scan.next_candidate_with(&cx, &mut observe).await,
+            Err(BufferedScanError::Control((128, 127)))
         ));
+        assert_eq!(admitted_work, scan_limit);
+        assert_eq!(scan.work_used(), scan_limit);
         assert!(
             scan.next(&cx).await.unwrap().is_none(),
             "a work error fuses the cursor"
@@ -1443,6 +1604,170 @@ fn a_keyed_root_cannot_bypass_cross_object_identity_history() {
 }
 
 #[test]
+fn interval_point_and_endpoint_reads_preserve_publication_winners_and_future_fences() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let definitions = [
+            vec![scan_vertex(50, 1, None, 10)],
+            vec![
+                scan_vertex(20, 1, None, 20),
+                scan_vertex(50, 1, Some(3), 10),
+                scan_vertex(70, 1, None, 70),
+            ],
+            vec![
+                scan_vertex(0, 1, None, 0),
+                scan_vertex(50, 3, None, 11),
+                scan_vertex(100, 1, None, 100),
+            ],
+            vec![scan_vertex(50, 3, Some(5), 11)],
+            vec![scan_vertex(50, 5, None, 12)],
+            vec![
+                scan_vertex(1, 6, None, 1),
+                scan_vertex(50, 5, Some(6), 12),
+                scan_vertex(u128::MAX, 6, None, 99),
+            ],
+            vec![scan_vertex(30, 7, None, 30), scan_vertex(60, 7, None, 60)],
+        ];
+        let mut patches = Vec::new();
+        for rows in &definitions {
+            let patch = store
+                .put_patch(&commit, &encode_patch(rows).unwrap())
+                .await
+                .unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: rows.iter().map(|row| row.created_at).min().unwrap(),
+                last_seq: rows
+                    .iter()
+                    .map(|row| row.retired_at.unwrap_or(row.created_at).max(row.created_at))
+                    .max()
+                    .unwrap(),
+            });
+        }
+        let future_patch = patches.last().unwrap().patch_id;
+        // A deliberately dangling late edge exercises the source's existing
+        // typed endpoint failure, after the newest vertex statement retires.
+        let edge_image = edge(99, 50, 50, 1, None);
+        let block = store
+            .put(&commit, &encode_block(0, None, &[edge_image]).unwrap())
+            .await
+            .unwrap();
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(7),
+                    blocks: vec![BlockRef {
+                        block_id: block.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }],
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        for cut in 0..=7 {
+            let expected = match cut {
+                1 | 2 => Some(scan_vertex(50, 1, Some(3), 10)),
+                3 | 4 => Some(scan_vertex(50, 3, Some(5), 11)),
+                5 => Some(scan_vertex(50, 5, Some(6), 12)),
+                _ => None,
+            };
+            let found = view.vertex_at(&cx, VId(50), CommitSeq(cut)).await.unwrap();
+            assert_eq!(found.as_deref(), expected.as_ref(), "point cut {cut}");
+            drop(found);
+            assert!(
+                view.vertex_at(&cx, VId(49), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an interval hit is not a vertex: cut {cut}"
+            );
+            let extreme = view
+                .vertex_at(&cx, VId(u128::MAX), CommitSeq(cut))
+                .await
+                .unwrap();
+            assert_eq!(extreme.is_some(), cut >= 6);
+            drop(extreme);
+            if cut == 0 {
+                continue;
+            }
+            let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let candidate = scan
+                .next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+                .await;
+            if let Some(expected) = expected {
+                let endpoints = candidate.unwrap().unwrap().row.unwrap();
+                assert_eq!(endpoints.source_vertex(), &expected, "endpoint cut {cut}");
+                assert_eq!(endpoints.target_vertex(), &expected);
+                drop(endpoints);
+            } else {
+                assert!(matches!(
+                    candidate,
+                    Err(BufferedScanError::Read(BufferedReadError::DanglingEndpoint))
+                ));
+            }
+            assert!(
+                scan.next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        // Start with no resident extents, then damage a future-only patch whose
+        // conservative range includes V50 but whose rows do not contain it.
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let path = store.path(future_patch);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let found = view
+            .vertex_at(&cx, VId(50), CommitSeq(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&*found, &scan_vertex(50, 5, Some(6), 12));
+        drop(found);
+        assert!(matches!(
+            view.vertex_at(&cx, VId(50), CommitSeq(7)).await,
+            Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+        ));
+        let retained = pool.used();
+        assert!(matches!(
+            store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await,
+            Err(BufferedReadError::Store(_))
+        ));
+        assert_eq!(
+            pool.used(),
+            retained,
+            "failed full admission refunds all state"
+        );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
     const COUNT: usize = 240;
     const PAYLOAD: usize = 14_000;
@@ -1492,12 +1817,16 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
         bounded.max_root_bytes = 16 * 1024;
         bounded.max_source_bytes = source_bytes;
         bounded.max_vertex_patches = COUNT;
-        bounded.max_work = COUNT * 4;
+        let (directory_bytes, directory_work) = patch_directory_overhead(COUNT);
+        bounded.max_work = 2 * COUNT + directory_work;
         let mut view = store
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        assert_eq!(
+            pool.used(),
+            bounded.metadata_bytes().unwrap() + directory_bytes
+        );
         for index in [1, COUNT, 1] {
             let found = view
                 .vertex_at(&query, VId(index as u128), CommitSeq(1))
@@ -1587,12 +1916,19 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
         bounded.max_vertex_patches = COUNT;
         bounded.max_source_bytes = source_bytes + (COUNT - 1) * birth_bytes;
         // Each incoming patch and each refault has one object plus two rows.
-        bounded.max_work = 3 * COUNT + 3 * (COUNT - 1);
+        // Retain this exact authenticated-refault boundary independently of
+        // the directory construction that follows successful admission.
+        let admission_work = 3 * COUNT + 3 * (COUNT - 1);
+        let (directory_bytes, directory_work) = patch_directory_overhead(COUNT);
+        bounded.max_work = admission_work + directory_work;
         let mut view = store
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        assert_eq!(
+            pool.used(),
+            bounded.metadata_bytes().unwrap() + directory_bytes
+        );
         let found = view
             .vertex_at(&query, VId(1), CommitSeq(1))
             .await
@@ -1610,11 +1946,11 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
         assert_eq!(pool.used(), 0);
 
         let mut too_little = bounded;
-        too_little.max_work -= 1;
+        too_little.max_work = admission_work - 1;
         assert!(matches!(
             store.open_buffered_root(&query, id, pool.clone(), too_little).await,
             Err(BufferedReadError::Limit { resource: "buffered source work", requested, limit })
-                if requested == bounded.max_work && limit == bounded.max_work - 1
+                if requested == admission_work && limit == admission_work - 1
         ));
         assert_eq!(pool.used(), 0);
         too_little = bounded;

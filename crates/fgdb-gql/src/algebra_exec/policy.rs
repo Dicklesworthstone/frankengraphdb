@@ -3,7 +3,8 @@
 
 mod topology;
 
-use super::{GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats, GlaLimitExceeded, charge};
+use super::{GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats, GlaLimitExceeded};
+use crate::GovernedCheckpoint;
 use crate::algebra::{GlaIdentityOutput, GlaOutput, GlaPlan, VertexPredicate};
 use crate::{
     BudgetedGqlError, BudgetedGqlExecution, GqlBudgetDimension, GqlBudgetExceeded,
@@ -111,52 +112,217 @@ impl<E: core::error::Error + 'static, C: core::error::Error + 'static> core::err
     }
 }
 
-struct QueryMeter<Checkpoint> {
-    checkpoint: Checkpoint,
+/// Events one evaluator run defers.
+const EVALUATOR_RUN: u64 = 1024;
+
+/// A governed execution's charges: the host checkpoint, row and evaluator
+/// counters, and the open evaluator run. Pattern and aggregate executions
+/// share it. For a host that takes runs (`GovernedCheckpoint::RUNS`), while
+/// the evaluator's allowances cover two whole runs, events are counted and
+/// their host units, work and scratch charged together (the host's in one
+/// call). The Work and scratch fast path is all `event` holds, so it inlines
+/// into the hottest loops; everything else is `slow`. Any other host is
+/// charged per event: host, rows, then evaluator.
+pub(crate) struct Charges<K> {
+    checkpoint: K,
     policy: GqlQueryPolicy,
-    rows: GqlExecutionStats,
-    evaluator: GlaExecutionStats,
+    pub(crate) rows: GqlExecutionStats,
+    pub(crate) evaluator: GlaExecutionStats,
+    /// Events the open run may still take; `opened` is its size, so it has
+    /// taken `opened - left`, each owing its host unit and evaluator work.
+    left: u64,
+    opened: u64,
+    /// Scratch entries the open run has taken, owing their scratch charge.
+    scratch: u64,
 }
 
-impl<Checkpoint> QueryMeter<Checkpoint> {
-    fn observe<E, C>(&mut self, event: GlaExecutionEvent) -> Result<(), GqlQueryError<E, C>>
+impl<K> Charges<K> {
+    /// Charges after an admitted input of `snapshot_records`, before any event.
+    pub(crate) fn new(checkpoint: K, policy: GqlQueryPolicy, snapshot_records: u64) -> Self {
+        Self {
+            checkpoint,
+            policy,
+            rows: GqlExecutionStats {
+                snapshot_records,
+                result_rows: 0,
+            },
+            evaluator: GlaExecutionStats::default(),
+            left: 0,
+            opened: 0,
+            scratch: 0,
+        }
+    }
+
+    /// The host's own charge outside any run, as before and after execution.
+    /// No run is open there, so nothing deferred is passed.
+    fn unit<E, C>(&mut self) -> Result<(), GqlQueryError<E, C>>
     where
-        Checkpoint: FnMut() -> Result<(), C>,
+        K: GovernedCheckpoint<C>,
     {
-        (self.checkpoint)().map_err(GqlQueryError::Interrupted)?;
-        charge_result_row(&mut self.rows, self.policy.rows, event).map_err(GqlQueryError::Rows)?;
-        charge(&mut self.evaluator, self.policy.evaluator, event).map_err(GqlQueryError::Evaluator)
+        debug_assert_eq!(self.left, 0);
+        self.checkpoint.unit().map_err(GqlQueryError::Interrupted)
+    }
+
+    /// A Work event or scratch entry inside a run is only counted: the
+    /// closure's whole body, so it inlines into the hottest loops.
+    #[inline(always)]
+    pub(crate) fn event<E, C>(
+        &mut self,
+        event: GlaExecutionEvent,
+    ) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        if self.left > 0 {
+            match event {
+                GlaExecutionEvent::Work => {
+                    self.left -= 1;
+                    return Ok(());
+                }
+                GlaExecutionEvent::ScratchEntry => {
+                    self.left -= 1;
+                    self.scratch += 1;
+                    return Ok(());
+                }
+                GlaExecutionEvent::ResultRow => {}
+            }
+        }
+        self.slow(event)
+    }
+
+    /// Consecutive Work events with no intervening reader or data exception.
+    /// Consume an already open run arithmetically, but open and settle runs
+    /// through `event` itself. The host therefore sees precisely the same
+    /// calls, including a partial final run and every per-unit refusal, as
+    /// an event-by-event caller. A host that declines runs still gets every
+    /// unit separately. The wide count cannot overflow before a finite
+    /// evaluator allowance has refused.
+    pub(crate) fn work<E, C>(&mut self, mut units: u128) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        while units > 0 {
+            if self.left > 0 {
+                let take = units.min(u128::from(self.left)) as u64;
+                self.left -= take;
+                units -= u128::from(take);
+            } else {
+                self.event(GlaExecutionEvent::Work)?;
+                units -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every event the fast path does not take. A spent run settles; the
+    /// next opens while the host takes runs and the evaluator's work and
+    /// scratch allowances each cover two whole runs, so no evaluator refusal
+    /// can fall inside one. An event outside a run is charged on the spot:
+    /// host, rows, then evaluator, the per-event order.
+    #[inline(never)]
+    fn slow<E, C>(&mut self, event: GlaExecutionEvent) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        if self.left == 0 {
+            self.settle()?;
+            let limits = self.policy.evaluator;
+            let covered = |limit: u64, used: u64| limit.saturating_sub(used) >= 2 * EVALUATOR_RUN;
+            if !K::RUNS
+                || !covered(limits.max_work_units, self.evaluator.work_units)
+                || !covered(limits.max_scratch_entries, self.evaluator.scratch_entries)
+            {
+                self.checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
+                return self.judge(event);
+            }
+            self.left = EVALUATOR_RUN;
+            self.opened = EVALUATOR_RUN;
+            if event != GlaExecutionEvent::ResultRow {
+                return self.event(event);
+            }
+        }
+        // Inside a run, a result row's limit is judged now while its host
+        // unit and evaluator work wait. Per event, the host was charged for
+        // it and for every event before it first, so a host refusal among
+        // them wins.
+        self.left -= 1;
+        let next = self.rows.result_rows + 1;
+        if let Err(error) = self.policy.rows.check(GqlBudgetDimension::ResultRows, next) {
+            self.settle()?;
+            return Err(GqlQueryError::Rows(error));
+        }
+        self.rows.result_rows = next;
+        Ok(())
+    }
+
+    /// The row and evaluator charges of one event.
+    fn judge<E, C>(&mut self, event: GlaExecutionEvent) -> Result<(), GqlQueryError<E, C>> {
+        if event == GlaExecutionEvent::ResultRow {
+            let next = self.rows.result_rows + 1;
+            self.policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, next)
+                .map_err(GqlQueryError::Rows)?;
+            self.rows.result_rows = next;
+        }
+        self.evaluator
+            .charge_event(self.policy.evaluator, event)
+            .map_err(GqlQueryError::Evaluator)
+    }
+
+    /// Charge the run: its host units in one checkpoint call, in event order,
+    /// then its events' evaluator work and its scratch entries. Nothing is
+    /// left pending, so a host that refused here is never called again. A
+    /// run opens only while the evaluator's allowances cover two whole runs,
+    /// so only the host can refuse here, at its own per-unit ordinal.
+    pub(crate) fn settle<E, C>(&mut self) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        let taken = self.opened - self.left;
+        let scratch = std::mem::take(&mut self.scratch);
+        self.left = 0;
+        self.opened = 0;
+        if taken > 0 {
+            self.checkpoint
+                .units(taken)
+                .map_err(GqlQueryError::Interrupted)?;
+            self.evaluator
+                .charge_work_units(self.policy.evaluator, taken)
+                .map_err(GqlQueryError::Evaluator)?;
+        }
+        if scratch > 0 {
+            self.evaluator
+                .charge_scratch_entries(self.policy.evaluator, scratch)
+                .map_err(GqlQueryError::Evaluator)?;
+        }
+        Ok(())
     }
 }
 
 // One admission/completion contract for predicate-only and property-aware
 // executions. Neither path gets a second meter or converts a source error to
 // null. The accessors and private terminal collector are the only differences.
-fn governed<Row, E, C, Checkpoint>(
+fn governed<Row, E, C, K: GovernedCheckpoint<C>>(
     snapshot_records: u64,
     policy: GqlQueryPolicy,
-    mut checkpoint: Checkpoint,
-    execute: impl FnOnce(&mut QueryMeter<Checkpoint>) -> Result<Vec<Row>, GqlQueryError<E, C>>,
-) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>>
-where
-    Checkpoint: FnMut() -> Result<(), C>,
-{
-    checkpoint().map_err(GqlQueryError::Interrupted)?;
+    mut checkpoint: K,
+    execute: impl FnOnce(&mut Charges<K>) -> Result<Vec<Row>, GqlQueryError<E, C>>,
+) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
+    checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
     policy
         .rows
         .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
         .map_err(GqlQueryError::Rows)?;
-    let mut meter = QueryMeter {
-        checkpoint,
-        policy,
-        evaluator: GlaExecutionStats::default(),
-        rows: GqlExecutionStats {
-            snapshot_records,
-            result_rows: 0,
-        },
-    };
-    let value = execute(&mut meter)?;
-    (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
+    let mut meter = Charges::new(checkpoint, policy, snapshot_records);
+    let value = execute(&mut meter);
+    // A run's units are charged before the outcome is judged; a host refusal
+    // among them is the one per-event charging met first. A settled or
+    // refused run leaves none, so a host that has refused is not called
+    // again.
+    meter.settle()?;
+    let value = value?;
+    meter.unit()?;
     debug_assert_eq!(
         u64::try_from(value.len()).ok(),
         Some(meter.rows.result_rows)
@@ -217,19 +383,19 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             if let Some(physical) =
-                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+                topology::compile(self.operators(), &mut |event| meter.event(event))?
             {
-                return physical.execute(self, edges, &mut |event| meter.observe(event));
+                return physical.execute(self, edges, &mut |event| meter.event(event));
             }
             self.execute_with_control(
                 vertices,
                 edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
-                |event| meter.observe(event),
+                |event| meter.event(event),
             )
         })
     }
@@ -249,23 +415,23 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             if self.requires_identified_edges() || self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
             if let Some(physical) =
-                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+                topology::compile(self.operators(), &mut |event| meter.event(event))?
             {
-                return physical.execute(self, edges, &mut |event| meter.observe(event));
+                return physical.execute(self, edges, &mut |event| meter.event(event));
             }
             self.execute_with_properties_control(
                 vertices,
                 edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
-                |event| meter.observe(event),
+                |event| meter.event(event),
             )
         })
     }
@@ -283,7 +449,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         if self.projects_property_maps() {
             return governed(snapshot_records, policy, checkpoint, |_| {
@@ -326,18 +492,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
         mut edge_properties: impl FnMut(EId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             if let Some(physical) =
-                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+                topology::compile(self.operators(), &mut |event| meter.event(event))?
             {
                 return physical.execute(
                     self,
                     edges
                         .into_iter()
                         .map(|(_, source, relation, destination)| (source, relation, destination)),
-                    &mut |event| meter.observe(event),
+                    &mut |event| meter.event(event),
                 );
             }
             self.execute_with_element_maps_control(
@@ -350,7 +516,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |eid| edge_type(eid).map_err(GqlQueryError::Source),
                 |vid| vertex_properties(vid).map_err(GqlQueryError::Source),
                 |eid| edge_properties(eid).map_err(GqlQueryError::Source),
-                |event| meter.observe(event),
+                |event| meter.event(event),
             )
         })
     }
@@ -366,7 +532,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         self.execute_governed_with_element_accessors(
             snapshot_records,
@@ -394,21 +560,21 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             if self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
             if let Some(physical) =
-                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+                topology::compile(self.operators(), &mut |event| meter.event(event))?
             {
                 return physical.execute(
                     self,
                     edges
                         .into_iter()
                         .map(|(_, source, relation, destination)| (source, relation, destination)),
-                    &mut |event| meter.observe(event),
+                    &mut |event| meter.event(event),
                 );
             }
             self.execute_with_identified_properties_control(
@@ -416,7 +582,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
-                |event| meter.observe(event),
+                |event| meter.event(event),
             )
         })
     }
@@ -707,6 +873,135 @@ mod tests {
                 assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
                 assert_eq!(at.get(), stop);
             }
+        }
+    }
+
+    /// **A PATTERN'S EVALUATOR RUNS NEVER MOVE AN OUTCOME.** A two-hop
+    /// pattern over a 36-vertex graph takes thousands of events, so runs open
+    /// and close many times. A host that takes runs gets the per-event value,
+    /// statistics and host total in far fewer calls, and at every sampled
+    /// work, scratch, result-row and host limit the execution answers or
+    /// refuses exactly as per-event charging does. The host charges a run in
+    /// one call, refusing inside it at the exceeding unit as fgdb's signed
+    /// meter does, and is never called again after refusing.
+    #[test]
+    fn pattern_runs_keep_every_value_and_refusal_of_per_event_charging() {
+        struct Host<'u> {
+            used: &'u Cell<u64>,
+            calls: &'u Cell<u64>,
+            budget: u64,
+            refused: bool,
+        }
+        impl GovernedCheckpoint<u64> for Host<'_> {
+            const RUNS: bool = true;
+            fn unit(&mut self) -> Result<(), u64> {
+                self.units(1)
+            }
+            fn units(&mut self, n: u64) -> Result<(), u64> {
+                assert!(!self.refused, "called after refusing");
+                self.calls.set(self.calls.get() + 1);
+                if self.budget - self.used.get() < n {
+                    self.used.set(self.budget);
+                    self.refused = true;
+                    return Err(self.budget + 1);
+                }
+                self.used.set(self.used.get() + n);
+                Ok(())
+            }
+        }
+        let plan: GlaPlan = GlaPlan::lower(
+            &RelationBind::new()
+                .with_relation("R", RelationId(1))
+                .bind("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN c")
+                .unwrap(),
+        );
+        let edges: Vec<_> = (0..36_u128)
+            .flat_map(|a| {
+                (0..36_u128)
+                    .filter(move |b| (a * 7 + b * 3) % 3 == 0)
+                    .map(move |b| (VId(a), RelationId(1), VId(b)))
+            })
+            .collect();
+        let runs = |policy: GqlQueryPolicy, budget: u64| {
+            let (used, calls) = (Cell::new(0), Cell::new(0));
+            let result = plan.execute_governed(
+                edges.len() as u64,
+                (0..36).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                policy,
+                Host {
+                    used: &used,
+                    calls: &calls,
+                    budget,
+                    refused: false,
+                },
+            );
+            (result, used.get(), calls.get())
+        };
+        let per_event = |policy: GqlQueryPolicy, budget: u64| {
+            let used = Cell::new(0);
+            let result = plan.execute_governed(
+                edges.len() as u64,
+                (0..36).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                policy,
+                || {
+                    if used.get() == budget {
+                        return Err(budget + 1);
+                    }
+                    used.set(used.get() + 1);
+                    Ok(())
+                },
+            );
+            (result, used.get())
+        };
+        let wide = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let (expected, host) = per_event(wide, u64::MAX);
+        let expected = expected.unwrap();
+        let (bulk, used, calls) = runs(wide, u64::MAX);
+        assert_eq!(bulk.as_ref(), Ok(&expected));
+        assert_eq!(used, host, "the per-unit host total");
+        assert!(calls * 100 < used, "{calls} calls for {used} units");
+        let (work, scratch, rows) = (
+            expected.evaluator.work_units,
+            expected.evaluator.scratch_entries,
+            expected.rows.result_rows,
+        );
+        assert!(work > 4 * 1024, "{work} units must span several runs");
+        let sampled = |total: u64| (0..=total).filter(move |at| at % 13 == 0 || total - at <= 40);
+        for limit in sampled(work) {
+            let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX);
+            assert_eq!(
+                runs(policy, u64::MAX).0,
+                per_event(policy, u64::MAX).0,
+                "work limit {limit}"
+            );
+        }
+        for limit in sampled(scratch) {
+            let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit);
+            assert_eq!(
+                runs(policy, u64::MAX).0,
+                per_event(policy, u64::MAX).0,
+                "scratch limit {limit}"
+            );
+        }
+        for limit in sampled(rows) {
+            let policy = GqlQueryPolicy::new(u64::MAX, limit, u64::MAX, u64::MAX);
+            assert_eq!(
+                runs(policy, u64::MAX).0,
+                per_event(policy, u64::MAX).0,
+                "row limit {limit}"
+            );
+        }
+        for budget in sampled(host) {
+            let (result, used, _) = runs(wide, budget);
+            assert_eq!(
+                (result, used),
+                per_event(wide, budget),
+                "host budget {budget}"
+            );
         }
     }
 }

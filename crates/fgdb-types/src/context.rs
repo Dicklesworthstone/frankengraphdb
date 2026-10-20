@@ -352,8 +352,10 @@ impl SimulationCheckpointProbe {
 /// bit on every call and run the full checkpoint when it is set; deadline,
 /// poll-quota and cost-budget exhaustion, which need the clock, are evaluated
 /// once per interval. Work-unit accounting is a separate exact counter, so no
-/// refusal moves.
-const FULL_CHECKPOINT_INTERVAL: u32 = 64;
+/// refusal moves. At 64 the clock read alone was still 4.5% of a fgdbd
+/// triangle count (2026-10-14); 256 calls are about 10 us of evaluation, far
+/// inside any deadline's resolution.
+const FULL_CHECKPOINT_INTERVAL: u32 = 256;
 
 /// Per-context countdown to the next full foundation checkpoint.
 ///

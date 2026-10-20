@@ -33,11 +33,11 @@ mod graph;
 
 #[path = "resident/maintained.rs"]
 mod maintained;
-pub(crate) use maintained::Registry;
 pub use maintained::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus,
 };
+pub(crate) use maintained::{QueryIndexes, Registry};
 
 #[cfg(test)]
 #[path = "resident_tests.rs"]
@@ -298,6 +298,9 @@ impl ResidentIndex {
         search(&self.index.snapshot(), &self.definition, cx, query, policy)
     }
 
+    /// Restrict result endpoints before each lane's candidate limit without
+    /// rebuilding this generation. See [`PinnedIndex::search_filtered`] for
+    /// the predicate, source-sequence and authority contract.
     pub fn search_filtered(
         &self,
         cx: &QueryCx,
@@ -531,10 +534,12 @@ impl ResidentIndex {
         // A graph-enabled index must advance topology even for edge-only
         // commits. Pin the successor off-side, before the SAME final acceptance
         // as both search lanes. Failure/unwind leaves the old coherent triple.
-        let graph_source = if self.graph_source.is_some() {
+        let graph_source = if let Some(current) = &self.graph_source {
             work.borrow_mut().charge(1)?;
             Some(EmbeddedReadView {
                 snapshot: Arc::clone(snapshot),
+                namespace: current.namespace,
+                beacon_indexes: QueryIndexes::default(),
             })
         } else {
             None
@@ -585,6 +590,16 @@ impl PinnedIndex {
         search(&self.index, &self.definition, cx, query, policy)
     }
 
+    /// Restrict endpoints BEFORE text/vector top-k and each hybrid candidate
+    /// depth. BM25 statistics and ANN routing retain the entire frozen corpus;
+    /// an ineligible document may still route an approximate search. Filtering
+    /// a previously truncated answer is not equivalent to this operation.
+    ///
+    /// Supply a stable, bounded, side-effect-free ID predicate. Derive any
+    /// graph-dependent eligibility at [`Self::source_sequence`], not at a
+    /// writer's newer head. The predicate is NOT authorization: this index
+    /// remains privileged. Work/result limits and final cancellation checks
+    /// apply even when no endpoint is eligible; ANN remains approximate.
     pub fn search_filtered(
         &self,
         cx: &QueryCx,
@@ -639,7 +654,11 @@ impl<V: Vfs + Clone> Database<V> {
                 )?;
                 let graph_source = if graph_enabled {
                     work.borrow_mut().charge(1)?;
-                    Some(self.read_session().map_err(Error::Source)?)
+                    Some(EmbeddedReadView {
+                        snapshot: Arc::clone(&self.snapshot),
+                        namespace: self.keys.namespace,
+                        beacon_indexes: QueryIndexes::default(),
+                    })
                 } else {
                     None
                 };

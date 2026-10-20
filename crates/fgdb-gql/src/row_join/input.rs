@@ -8,6 +8,7 @@ use fgdb_delta_types::zset::incremental::presence::{
 use fgdb_delta_types::zset::incremental::{IncrementalJoin, JoinUpdate};
 use fgdb_types::CanonicalScalar;
 
+mod borrowed;
 mod predicate;
 
 #[derive(PartialEq, Eq)]
@@ -305,7 +306,7 @@ impl InputUpdate<'_> {
 
 fn append_columns<E>(
     values: &mut Vec<GraphValue>,
-    row: Option<&Row>,
+    row: Option<&GraphValueRow>,
     width: usize,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<(), ZSetError<E>> {
@@ -335,14 +336,12 @@ fn append<E>(
     limbs: LimbLimit,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<(), ZSetError<E>> {
-    charge(control, ZSetEvent::Work)?;
-    charge(control, ZSetEvent::ScratchEntry)?;
-    let mut values = Vec::with_capacity(spec.width());
-    append_columns(&mut values, left, spec.left.len(), control)?;
-    if spec.kind.includes_right() {
-        append_columns(&mut values, right, spec.right.len(), control)?;
-    }
-    let row = GraphValueRow::from_owned_values(values);
+    let row = borrowed::project(
+        spec,
+        left.map(|row| row.as_ref()),
+        right.map(|row| row.as_ref()),
+        control,
+    )?;
     charge(control, ZSetEvent::Work)?;
     let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
     charge(control, ZSetEvent::ScratchEntry)?;

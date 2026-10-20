@@ -64,7 +64,22 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
             db.write(&commit, edit).await.unwrap();
         }
         let view = db.read_session().unwrap();
-        let prepared = pattern(None);
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        builder
+            .filter("n", VertexPredicate::HasLabel(LABEL))
+            .unwrap();
+        builder
+            .filter(
+                "n",
+                VertexPredicate::IntegerProperty {
+                    key: KEY,
+                    comparison: IntegerComparison::Equal,
+                    value: 1,
+                },
+            )
+            .unwrap();
+        let prepared = builder.prepare("n", 0, None).unwrap();
         let plan = VertexScanPlan::compile(prepared.plan()).unwrap();
         for as_of in [CommitSeq(0), CommitSeq(1), CommitSeq(3), CommitSeq(7)] {
             let expected = db
@@ -78,7 +93,9 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                     cx: &cx,
                     as_of,
                     after: None,
-                },
+                    candidates: RootCandidates::Histories,
+                }
+                .with_root_equality(&plan, |_| true),
                 plan.clone(),
                 wide(),
                 || {
@@ -102,7 +119,9 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                         cx: &cx,
                         as_of,
                         after: None,
-                    },
+                        candidates: RootCandidates::Histories,
+                    }
+                    .with_root_equality(&plan, |_| true),
                     plan.clone(),
                     wide(),
                     || {
@@ -141,7 +160,9 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                         cx: &cx,
                         as_of,
                         after: None,
-                    },
+                        candidates: RootCandidates::Histories,
+                    }
+                    .with_root_equality(&plan, |_| true),
                     plan.clone(),
                     wide(),
                     || Ok::<_, usize>(()),
@@ -259,6 +280,7 @@ fn snapshot_successors_are_sorted_and_visibility_uses_the_shared_mvcc_resolver()
                 cx: &cx,
                 as_of: cut,
                 after: None,
+                candidates: RootCandidates::Histories,
             };
             let mut candidates = Vec::new();
             let mut visible = Vec::new();

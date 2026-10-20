@@ -98,6 +98,7 @@ pub(crate) struct UnresolvedGraphText<'a> {
     pub(super) leading: Vec<ReadStageTemplate>,
     pub(super) leading_types: Vec<crate::GraphSetColumnType>,
     pub(super) correlations: Vec<(usize, usize)>,
+    pub(super) row_fields: Vec<ReadValueTemplate>,
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
@@ -187,6 +188,7 @@ impl UnresolvedGraphText<'_> {
             + usize::from(!self.leading.is_empty() && !self.singleton)
             + usize::from(self.projection.is_some())
             + usize::from(!self.correlations.is_empty())
+            + 2 * usize::from(!self.row_fields.is_empty())
             + self
                 .pipeline
                 .iter()
@@ -238,6 +240,7 @@ impl UnresolvedGraphText<'_> {
                 singleton: true,
                 leading: self.leading,
                 correlations: self.correlations,
+                row_fields: self.row_fields,
             });
         }
         let selection = if self.projection.is_none() {
@@ -348,6 +351,7 @@ impl UnresolvedGraphText<'_> {
             singleton: false,
             leading: self.leading,
             correlations: self.correlations,
+            row_fields: self.row_fields,
             projection: self.projection,
             quantifier,
             pipeline: self.pipeline,

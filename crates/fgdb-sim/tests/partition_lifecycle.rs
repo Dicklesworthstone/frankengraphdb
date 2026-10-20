@@ -30,6 +30,9 @@
 //! agrees before compaction is a partition that will disagree in production, where
 //! compaction is continuous. The last law compacts, republishes, reopens and demands
 //! the same agreement.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};

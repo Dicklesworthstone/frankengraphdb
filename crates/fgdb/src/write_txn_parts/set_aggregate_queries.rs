@@ -61,7 +61,7 @@ mod set_aggregate_queries {
                 })?;
             // A CALL input runs in Prism at this same sequence.
             cx.with_restriction(|| {
-                query.execute_governed_with_procedures(
+                query.execute_governed_with_elements(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
@@ -70,7 +70,7 @@ mod set_aggregate_queries {
                         if crate::query::is_hybrid(call) {
                             return crate::query::hybrid_procedure_with_registry(
                                 &self.snapshot,
-                                Some(&self.maintained_beacon),
+                                Some(self.maintained_beacon.query_indexes()),
                                 as_of,
                                 call,
                                 arguments,
@@ -87,6 +87,7 @@ mod set_aggregate_queries {
                             |spec, options| self.execute_fnx(cx, spec, options),
                         )
                     },
+                    |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
                     || cx.checkpoint(),
                 )
             })
@@ -119,7 +120,7 @@ mod set_aggregate_queries {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
             cx.with_restriction(|| {
-                query.execute_governed_with_procedures(
+                query.execute_governed_with_elements(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
@@ -128,6 +129,7 @@ mod set_aggregate_queries {
                         if crate::query::is_hybrid(call) {
                             return crate::query::hybrid_procedure(
                                 &self.snapshot,
+                                Some(&self.beacon_indexes),
                                 as_of,
                                 call,
                                 arguments,
@@ -144,6 +146,7 @@ mod set_aggregate_queries {
                             |spec, options| self.execute_fnx(cx, spec, options),
                         )
                     },
+                    |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
                     || cx.checkpoint(),
                 )
             })
@@ -156,6 +159,8 @@ mod set_aggregate_queries {
         /// operands. Each operand uses the existing positive/negative read and
         /// scan witnesses, including rows canceled by INTERSECT/EXCEPT or pages.
         /// Those observations survive late arithmetic, budget or source errors.
+        /// Carried vertex/edge property reads retain the same canonical overlay
+        /// and point witnesses in folded and materialized aggregate inputs.
         ///
         /// This is read-only with respect to staged effects and durability:
         /// it does not finish, commit, retry or replace the caller's workspace.
@@ -171,7 +176,8 @@ mod set_aggregate_queries {
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
             cx.with_restriction(|| {
-                query.execute_governed_with_procedures(
+                let element_failure = std::cell::RefCell::new(None);
+                let result = query.execute_governed_with_elements(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed(database, cx, pattern, remaining)
@@ -179,8 +185,27 @@ mod set_aggregate_queries {
                     |call, arguments, remaining| {
                         self.execute_procedure_governed(database, cx, call, arguments, remaining)
                     },
-                    || cx.checkpoint(),
-                )
+                    |element, key| {
+                        self.element_property_with_checkpoint(
+                            database,
+                            cx,
+                            &element_failure,
+                            element,
+                            key,
+                        )
+                    },
+                    || {
+                        let stopped = element_failure.borrow_mut().take();
+                        match stopped {
+                            Some(error) => Err(error),
+                            None => cx.checkpoint(),
+                        }
+                    },
+                );
+                match element_failure.into_inner() {
+                    Some(error) => Err(GqlQueryError::Interrupted(error)),
+                    None => result,
+                }
             })
         }
     }

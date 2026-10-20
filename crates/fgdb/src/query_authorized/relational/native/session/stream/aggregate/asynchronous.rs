@@ -122,7 +122,15 @@ fn build<'q, C: FnMut() -> u64 + Send>(
     let driver: AsyncPull<'q> = match plan {
         Plan::Vertex(plan) => {
             let source = ScopedSource {
-                inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+                inner: view
+                    .vertex_scan_source(cx, at)
+                    .map_err(QueryError::Read)?
+                    .with_root_equality_predicates(plan.leading_root_predicates(), |key| {
+                        execution.borrow().permit.predicates().allows_property(key)
+                    })
+                    .with_root_prefix(plan.leading_root_prefix(), |key| {
+                        execution.borrow().permit.predicates().allows_property(key)
+                    }),
                 execution: execution.clone(),
             };
             let control = execution.clone();

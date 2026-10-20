@@ -1,5 +1,8 @@
 //! `fgdbd`: serve FrankenGraphDB databases over FGP, mint capability tokens,
 //! and generate owner-only key files.
+// Proving `Server::serve`'s connection task Send walks through the ordered
+// read futures, past the default recursion limit (a future hard error).
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 #![recursion_limit = "256"]
 

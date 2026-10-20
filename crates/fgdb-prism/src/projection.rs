@@ -200,6 +200,11 @@ struct Projection {
     outgoing: Rows,
     incoming: Option<Rows>,
     weights: Vec<f64>,
+    // The 1-based row/weight checkpoint of the first negative final CSR
+    // weight. Finite weights are guaranteed by construction. Retaining the
+    // visit ordinal preserves Dijkstra's cancellation/error precedence while
+    // avoiding another immutable weight scan on every source query.
+    first_negative_weight_visit: Option<usize>,
     edges: usize,
     input_edges: usize,
     workspace_bytes: usize,
@@ -590,10 +595,14 @@ impl SnapshotGraphView {
         );
         for edge in &work {
             poll(&mut checkpoint)?;
-            hash.update(&edge.eid.0.to_le_bytes());
-            hash.update(&edge.source.0.to_le_bytes());
-            hash.update(&edge.target.0.to_le_bytes());
-            hash.update(&edge.weight.to_bits().to_le_bytes());
+            // Feed one canonical record per call without changing the byte
+            // transcript or moving an edge's cancellation checkpoint.
+            let mut bytes = [0u8; 56];
+            bytes[..16].copy_from_slice(&edge.eid.0.to_le_bytes());
+            bytes[16..32].copy_from_slice(&edge.source.0.to_le_bytes());
+            bytes[32..48].copy_from_slice(&edge.target.0.to_le_bytes());
+            bytes[48..].copy_from_slice(&edge.weight.to_bits().to_le_bytes());
+            hash.update(&bytes);
         }
 
         sort_by_key(
@@ -654,10 +663,11 @@ impl SnapshotGraphView {
         limit("adjacency entries", arcs, limits.max_adjacency_entries)?;
         let faces = if directed { 2 } else { 1 };
         let mut bytes = add(input_bytes, mul(n, size_of::<[u8; 32]>())?)?;
-        // Degree arrays, row offsets and construction cursors for each face.
+        // Degree arrays become construction cursors after prefix sums, so
+        // only one n-element buffer and n+1 offsets are live for each face.
         bytes = add(
             bytes,
-            mul(mul(add(mul(n, 3)?, 1)?, faces)?, size_of::<usize>())?,
+            mul(mul(add(mul(n, 2)?, 1)?, faces)?, size_of::<usize>())?,
         )?;
         bytes = add(bytes, mul(mul(arcs, faces)?, size_of::<usize>())?)?;
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
@@ -669,10 +679,21 @@ impl SnapshotGraphView {
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // The final outgoing array first holds one dense target per reduced
+        // edge. Sources are already ordered, so walk their stable-ID directory
+        // once instead of binary-searching both endpoints in both CSR passes.
+        // Identity hashing and EId-ordered reduction above still use full VIds.
+        let mut out_nodes = filled(arcs, 0usize, &mut checkpoint)?;
+        let mut source = 0;
+        for (index, edge) in work.iter().enumerate() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
+            while vertices[source] < edge.source {
+                poll(&mut checkpoint)?;
+                source += 1;
+            }
+            let s = source;
             let t = ordinal(&vertices, edge.eid, edge.target)?;
+            out_nodes[index] = t;
             out_counts[s] = add(out_counts[s], 1)?;
             if directed {
                 in_counts[t] = add(in_counts[t], 1)?;
@@ -682,44 +703,73 @@ impl SnapshotGraphView {
         }
         let out_offsets = offsets(&out_counts, &mut checkpoint)?;
         let out_len = *out_offsets.last().expect("initial zero");
-        let mut out_next = clone_slice(&out_offsets[..n], &mut checkpoint)?;
-        let mut out_nodes = filled(out_len, 0usize, &mut checkpoint)?;
+        debug_assert_eq!(out_len, arcs);
+        let mut out_next = out_counts;
+        for (next, &end) in out_next.iter_mut().zip(&out_offsets[1..]) {
+            poll(&mut checkpoint)?;
+            *next = end;
+        }
         let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
         let in_offsets = if directed {
             offsets(&in_counts, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        let mut in_next = if directed {
-            clone_slice(&in_offsets[..n], &mut checkpoint)?
-        } else {
-            Vec::new()
-        };
+        let mut in_next = in_counts;
+        for (next, &end) in in_next.iter_mut().zip(in_offsets.iter().skip(1)) {
+            poll(&mut checkpoint)?;
+            *next = end;
+        }
         let mut in_nodes = if directed {
             filled(kept, 0usize, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // Scatter backwards into row ends. Each edge's forward incidence has
+        // the same relative order as the compact input, hence its final slot
+        // is at least its input index. Undirected normalization makes source
+        // <= target: a reciprocal incidence is later still (absent for loops).
+        // Thus neither write can overwrite an unread dense target in the
+        // prefix of out_nodes. Reversing both the traversal and row cursors
+        // leaves neighbors ascending on both faces, without row sorting.
+        let mut first_negative_weight_visit = None;
+        let mut record_weight = |source, slot, weight: f64| {
+            if weight < 0.0 {
+                // Each earlier row and weight contributes one checkpoint.
+                // Observe the reduced weight, never a raw parallel edge.
+                let visit = add(add(source, slot)?, 2)?;
+                first_negative_weight_visit = Some(
+                    first_negative_weight_visit.map_or(visit, |first: usize| first.min(visit)),
+                );
+            }
+            Ok::<(), ProjectionError>(())
+        };
+        for (index, edge) in work.iter().enumerate().rev() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
-            let t = ordinal(&vertices, edge.eid, edge.target)?;
+            while vertices[source] > edge.source {
+                poll(&mut checkpoint)?;
+                source -= 1;
+            }
+            let s = source;
+            let t = out_nodes[index];
+            out_next[s] -= 1;
             let slot = out_next[s];
+            debug_assert!(slot >= index);
             out_nodes[slot] = t;
             weights[slot] = edge.weight;
-            out_next[s] += 1;
+            record_weight(s, slot, edge.weight)?;
             if directed {
+                in_next[t] -= 1;
                 in_nodes[in_next[t]] = s;
-                in_next[t] += 1;
             } else if s != t {
+                out_next[t] -= 1;
                 let slot = out_next[t];
+                debug_assert!(slot >= index);
                 out_nodes[slot] = s;
                 weights[slot] = edge.weight;
-                out_next[t] += 1;
+                record_weight(t, slot, edge.weight)?;
             }
         }
-        // Sorted normalized pairs and source-order scatter produce sorted
-        // rows on BOTH faces. Binary edge lookup therefore needs no hash map.
         let mut names = reserved(n, &mut checkpoint)?;
         for &vertex in &vertices {
             poll(&mut checkpoint)?;
@@ -742,6 +792,7 @@ impl SnapshotGraphView {
             },
             incoming,
             weights,
+            first_negative_weight_visit,
             edges: kept,
             input_edges: e,
             workspace_bytes: bytes,
@@ -772,8 +823,25 @@ impl SnapshotGraphView {
     pub fn input_edge_count(&self) -> usize {
         self.0.input_edges
     }
+    pub(crate) fn first_negative_weight_visit(&self) -> Option<usize> {
+        self.0.first_negative_weight_visit
+    }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes
+    }
+    /// The heap this view keeps while it is held: its vertex, name, row and
+    /// weight vectors, by capacity. The builder's input staging is freed by
+    /// then, so this is below `charged_workspace_bytes`, the build's peak.
+    pub fn charged_resident_bytes(&self) -> usize {
+        let graph = &*self.0;
+        let rows = |rows: &Rows| {
+            (rows.offsets.capacity() + rows.neighbors.capacity()) * size_of::<usize>()
+        };
+        graph.vertices.capacity() * size_of::<VId>()
+            + graph.names.capacity() * size_of::<[u8; 32]>()
+            + rows(&graph.outgoing)
+            + graph.incoming.as_ref().map_or(0, rows)
+            + graph.weights.capacity() * size_of::<f64>()
     }
     pub fn shares_cache_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -791,6 +859,20 @@ impl SnapshotGraphView {
             self.0.outgoing.neighbors.get(start..end)?,
             self.0.weights.get(start..end)?,
         ))
+    }
+
+    /// The incoming face as one array of sources beside row offsets: target
+    /// `t`'s sources, ascending, are `sources[offsets[t]..offsets[t + 1]]`.
+    /// An undirected view's incoming face is its outgoing one.
+    pub fn incoming_face(&self) -> (&[usize], &[usize]) {
+        let rows = self.0.incoming.as_ref().unwrap_or(&self.0.outgoing);
+        (&rows.offsets, &rows.neighbors)
+    }
+
+    /// Dense row boundaries also supply exact out-degrees without retaining a
+    /// second per-vertex degree vector in an executing kernel.
+    pub(crate) fn outgoing_offsets(&self) -> &[usize] {
+        &self.0.outgoing.offsets
     }
 
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {

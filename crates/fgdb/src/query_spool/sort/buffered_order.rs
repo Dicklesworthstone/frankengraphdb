@@ -8,7 +8,7 @@ use fgdb_gql::edge_stream::{
 };
 use fgdb_gql::spill_set::{
     AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetBinaryPlan,
-    SpillSetCrossPlan, SpillSetValuesPlan,
+    SpillSetCrossPlan, SpillSetJoinPlan, SpillSetValuesPlan,
 };
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
@@ -19,6 +19,7 @@ enum Input {
     Values(SpillSetValuesPlan),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
+    RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
@@ -62,8 +63,11 @@ impl PreparedNativeRead {
     /// before downstream clauses. Exact rational averages and wide integer
     /// overflow retain the native row-domain refusal. COLLECT is unsupported.
     /// Correlated fixed-hop or copy-only EXISTS/NOT EXISTS use the async join
-    /// source, including probes without an expansion. Independent/nested probes,
-    /// OPTIONAL/variable-length paths and keyed/theta joins still refuse.
+    /// source, including probes without an expansion. Keyed/theta relational
+    /// joins finish both child plans, then use bounded-row external matching
+    /// and canonical bag ordering for inner/outer/semi/anti results. Pair work
+    /// may be quadratic. Independent/nested probes and OPTIONAL/variable-length
+    /// graph paths still refuse; relational outer joins do not unlock them.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -154,6 +158,16 @@ impl PreparedNativeRead {
 }
 
 impl PreparedBufferedOrder {
+    pub fn from_prepared_relation(
+        query: &fgdb_gql::PreparedGraphSet,
+        as_of: Option<CommitSeq>,
+    ) -> core::result::Result<Self, fgdb_gql::spill_set::SpillSetBuildError> {
+        Ok(Self::from_relation(
+            AsyncSpillSetPlan::compile(query)?,
+            as_of,
+        ))
+    }
+
     /// Reuse a fully admitted relational program as private aggregate input.
     /// Its complete stage sequence and source tail remain unchanged.
     pub(crate) fn from_relation(input: AsyncSpillSetPlan, as_of: Option<CommitSeq>) -> Self {
@@ -180,6 +194,7 @@ impl PreparedBufferedOrder {
         match &self.input {
             Input::Set(plan) => plan.aggregate_count(),
             Input::Aggregate(plan) => 1 + plan.input().aggregate_count(),
+            Input::RowJoin(plan) => plan.left().aggregate_count() + plan.right().aggregate_count(),
             _ => 0,
         }
     }
@@ -302,6 +317,9 @@ impl PreparedBufferedOrder {
                                 Input::Binary(source.clone())
                             }
                             AsyncSpillSetSourcePlan::Cross(source) => Input::Cross(source.clone()),
+                            AsyncSpillSetSourcePlan::RowJoin(source) => {
+                                Input::RowJoin(source.clone())
+                            }
                             AsyncSpillSetSourcePlan::Aggregate(source) => {
                                 Input::Aggregate(source.clone())
                             }
@@ -339,6 +357,7 @@ impl PreparedBufferedOrder {
                     super::staged::execute(
                         plan,
                         input,
+                        view,
                         cx,
                         policy,
                         scratch,
@@ -380,6 +399,28 @@ impl PreparedBufferedOrder {
             Input::Cross(plan) => {
                 let plan = plan.clone();
                 Box::pin(super::cross::execute(
+                    plan,
+                    as_of,
+                    view,
+                    cx,
+                    input_policy,
+                    scratch,
+                    destination,
+                    auxiliary,
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                    resolver,
+                ))
+            }
+            Input::RowJoin(plan) => {
+                let plan = plan.clone();
+                Box::pin(super::relational_join::execute(
                     plan,
                     as_of,
                     view,

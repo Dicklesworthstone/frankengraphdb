@@ -24,6 +24,7 @@ mod reduction;
 mod replay;
 pub use replay::{StandingReplayBatch, StandingReplayWindow};
 mod sets;
+mod triangle_counts;
 mod triangles;
 mod window;
 // Reuse the concurrently introduced row-output file as one registry sink.
@@ -291,6 +292,7 @@ pub(crate) enum StandingQuery {
     /// Recursive endpoint closure of a complete maintained row relation.
     Closure(Box<closure::State>),
     Triangles(Box<triangles::State>),
+    TriangleCounts(Box<triangle_counts::State>),
     Components(Box<components::State>),
     CoreNumbers(Box<kcore::State>),
     /// Dependencies name only earlier registry entries, so the append order
@@ -323,6 +325,7 @@ impl StandingQuery {
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
             Self::Closure(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
+            Self::TriangleCounts(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
             Self::Set(query) => (query.policy, query.frontier, query.failure),
@@ -355,6 +358,9 @@ impl StandingQuery {
             }
             Self::Closure(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Triangles(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::TriangleCounts(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
             Self::Components(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::CoreNumbers(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Set(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
@@ -641,12 +647,20 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),
+            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
+                self.prepare_standing_triangle_counts(cx, query.relation, query.output(), policy)?,
+            )),
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
-            StandingQuery::CoreNumbers(query) => StandingQuery::CoreNumbers(Box::new(
-                self.prepare_standing_core_numbers(cx, query.relation, policy)?,
-            )),
+            StandingQuery::CoreNumbers(query) => {
+                StandingQuery::CoreNumbers(Box::new(self.prepare_standing_core_numbers(
+                    cx,
+                    query.relation,
+                    policy,
+                    query.has_value_rows(),
+                )?))
+            }
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
                 cx,
                 query.inputs,
@@ -773,6 +787,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Rows { .. }
             | StandingQuery::Constant(_)
             | StandingQuery::Triangles(_)
+            | StandingQuery::TriangleCounts(_)
             | StandingQuery::Components(_)
             | StandingQuery::CoreNumbers(_)
             | StandingQuery::Set(_)
@@ -878,6 +893,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::TriangleCounts(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => {
                 query.maintain_with_sources(cx, batch, prior, &mut meter)
             }

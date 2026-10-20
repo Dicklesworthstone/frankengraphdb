@@ -1,6 +1,6 @@
 //! Public ordered-session laws over real spill pages and masked native input.
 use super::*;
-use crate::{DatabaseKeys, MemVfs, WriteBatch};
+use crate::{DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use asupersync::io::ReadBuf;
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
@@ -227,6 +227,173 @@ async fn values(cursor: &mut AuthorizedSpoolCursor<'_, File>) -> Vec<Vec<GraphVa
 fn refusal<T>(result: Result<T>, expected: AuthorizationError) {
     assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
         if matches!(*error, QueryError::Authorization(actual) if actual == expected)));
+}
+
+#[test]
+fn keyed_ordered_streams_bound_input_before_sort_and_preserve_the_eager_window() {
+    let ((), report) = run_async_under_lab(0x8600_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..228_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+            batch.create_vertex(
+                VId(id + 1000),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(3))],
+            );
+        }
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(
+                PropertyKeyId(1),
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(3.0)),
+            )],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (scratch, _) = file(&cx, &pool).await;
+        let (destination, _) = file(&cx, &pool).await;
+        let mut ordered = db
+            .authorized_ordered_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols as Resolver,
+                GqlQueryPolicy::new(3, 3, 1_000_000, 1_000_000),
+                || 100,
+                scratch,
+                destination,
+                AuthorizedSortLimits {
+                    max_input_rows: 3,
+                    ..limits()
+                },
+            )
+            .unwrap();
+        let args = GqlParameters::new().with_int64("key", 3).unwrap();
+        for text in [
+            "MATCH (n:L) WHERE n.p = $key RETURN n AS id ORDER BY id DESC",
+            "MATCH (n:L) WHERE n.p = $key RETURN n AS id ORDER BY id DESC SKIP 1 LIMIT 1",
+            "MATCH (n:L) WHERE n.p = $key RETURN n.p AS p ORDER BY p DESC",
+        ] {
+            let eager = db
+                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+                .unwrap()
+                .query(&cx, text, &args)
+                .unwrap();
+            let prepared = ordered.prepare(&cx, text, &args).unwrap();
+            let future = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+            fn is_send<T: Send>(_: &T) {}
+            is_send(&future);
+            let mut cursor = future.await.unwrap();
+            let columns = cursor.columns().to_vec();
+            let rows = values(&mut cursor)
+                .await
+                .into_iter()
+                .map(|row| row.into_iter().map(QueryValue::Value).collect())
+                .collect();
+            assert_eq!(QueryResult::Rows { columns, rows }, eager, "{text}");
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordered_equality_preserves_denied_key_quota_and_earlier_expression_errors() {
+    let ((), report) = run_async_under_lab(0x8600_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for hidden in [55, 99] {
+            let mut db =
+                Database::open_memory(&commit, DatabaseKeys::new([0x16; 32], NS, [0x26; 32]))
+                    .await
+                    .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(0)),
+                        (PropertyKeyId(2), CanonicalScalar::Int(hidden)),
+                    ],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let pool = MemoryPool::new(32_768, 0).unwrap();
+            let (scratch, _) = file(&cx, &pool).await;
+            let (destination, _) = file(&cx, &pool).await;
+            let mut ordered = db
+                .authorized_ordered_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols as Resolver,
+                    GqlQueryPolicy::new(1, 2, 1_000_000, 1_000_000),
+                    || 100,
+                    scratch,
+                    destination,
+                    limits(),
+                )
+                .unwrap();
+            let args = GqlParameters::new();
+            let denied = ordered
+                .prepare(
+                    &cx,
+                    "MATCH (n:L) WHERE n.hidden = 55 RETURN n AS id ORDER BY id DESC",
+                    &args,
+                )
+                .unwrap();
+            let error = ordered
+                .execute_ordered(&cx, &denied, &args)
+                .unwrap()
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                NativeSpoolError::Authorized(error)
+                    if matches!(*error, QueryError::Stream(GqlQueryError::Rows(error))
+                        if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                            && error.limit == 1 && error.observed == 2)
+            ));
+            let fallible = ordered
+                .prepare(
+                    &cx,
+                    "MATCH (n:L) WHERE 10 / n.p > 0 AND n.p = 7 RETURN n AS id ORDER BY id DESC",
+                    &args,
+                )
+                .unwrap();
+            let error = ordered
+                .execute_ordered(&cx, &fallible, &args)
+                .unwrap()
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                NativeSpoolError::Authorized(error)
+                    if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
+                        if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
+            ));
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -824,6 +991,240 @@ fn limit_zero_keeps_input_budget_and_pending_query_cancellation_is_nonterminal()
                     .prepare(&cx, "MATCH (n:L) RETURN n.p AS p", &params)
                     .is_ok()
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn range_and_prefix_ordered_streams_bound_sort_input_across_capacity_fallback() {
+    let ((), report) = run_async_under_lab(0x8600_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let issuer = authority();
+        for prefix in [false, true] {
+            for hidden_values in [0_u128, 70] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([0x16; 32], NS, [0x26; 32]))
+                        .await
+                        .unwrap();
+                let value = |number: i64| {
+                    if prefix {
+                        CanonicalScalar::ucs_basic_text(&format!("Ad{number}")).unwrap()
+                    } else {
+                        CanonicalScalar::Int(number)
+                    }
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                for (id, number) in [(0, 30), (3, 20), (u128::MAX, 40)] {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), value(number))],
+                    );
+                }
+                for id in 100..356_u128 {
+                    let unrelated = if prefix {
+                        CanonicalScalar::ucs_basic_text(&format!("zz{id}")).unwrap()
+                    } else {
+                        CanonicalScalar::Int(-(id as i64))
+                    };
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), unrelated)],
+                    );
+                }
+                for offset in 0..hidden_values {
+                    batch.create_vertex(
+                        VId(1000 + offset),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), value(300 + offset as i64))],
+                    );
+                    batch.create_vertex(
+                        VId(2000 + offset),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), value(500 + offset as i64))],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                if hidden_values != 0 {
+                    let mut change = WriteBatch::new(RelationId(1));
+                    for offset in 0..hidden_values {
+                        let outside = if prefix {
+                            CanonicalScalar::ucs_basic_text("outside").unwrap()
+                        } else {
+                            CanonicalScalar::Int(-1)
+                        };
+                        change.set_vertex_property(
+                            VId(2000 + offset),
+                            PropertyKeyId(1),
+                            Some(outside),
+                        );
+                    }
+                    db.write(&commit, change).await.unwrap();
+                }
+                let mut scoped = grant();
+                scoped.limits.max_nodes = 3;
+                let token = issuer.issue_at(&scoped, 100).unwrap();
+                let broad_token = issuer.issue_at(&grant(), 100).unwrap();
+                let pool = MemoryPool::new(32_768, 0).unwrap();
+                let (scratch, _) = file(&cx, &pool).await;
+                let (destination, _) = file(&cx, &pool).await;
+                let mut ordered = db
+                    .authorized_ordered_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols as Resolver,
+                        GqlQueryPolicy::new(3, 3, 1_000_000, 1_000_000),
+                        || 100,
+                        scratch,
+                        destination,
+                        AuthorizedSortLimits {
+                            max_input_rows: 3,
+                            ..limits()
+                        },
+                    )
+                    .unwrap();
+                let filter = if prefix {
+                    "n.p STARTS WITH 'Ad'"
+                } else {
+                    "n.p >= 10 AND n.p < 1000"
+                };
+                let args = GqlParameters::new();
+                for tail in [
+                    "RETURN n AS id, n.p AS p ORDER BY p DESC",
+                    "RETURN n AS id, n.p AS p ORDER BY p DESC SKIP 1 LIMIT 1",
+                    "RETURN n.p AS p ORDER BY p DESC",
+                ] {
+                    let text = format!("MATCH (n:L) WHERE {filter} {tail}");
+                    let eager = db
+                        .authorized_read_session(
+                            &cx,
+                            &issuer,
+                            &broad_token,
+                            "main",
+                            symbols,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                        .query(&cx, &text, &args)
+                        .unwrap();
+                    let prepared = ordered.prepare(&cx, &text, &args).unwrap();
+                    let future = ordered.execute_ordered(&cx, &prepared, &args).unwrap();
+                    fn is_send<T: Send>(_: &T) {}
+                    is_send(&future);
+                    let mut cursor = future.await.unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let rows = values(&mut cursor)
+                        .await
+                        .into_iter()
+                        .map(|row| row.into_iter().map(QueryValue::Value).collect())
+                        .collect();
+                    assert_eq!(
+                        QueryResult::Rows { columns, rows },
+                        eager,
+                        "prefix={prefix} hidden_values={hidden_values} {tail}"
+                    );
+                    drop(cursor);
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordered_range_and_prefix_keep_denied_key_refusals_and_earlier_arithmetic_errors() {
+    let ((), report) = run_async_under_lab(0x8600_0022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for prefix in [false, true] {
+            for matches in [false, true] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([0x16; 32], NS, [0x26; 32]))
+                        .await
+                        .unwrap();
+                let hidden = if prefix {
+                    CanonicalScalar::ucs_basic_text(if matches { "Ad" } else { "other" }).unwrap()
+                } else {
+                    CanonicalScalar::Int(if matches { 55 } else { 99 })
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                for id in 1..=2 {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![
+                            (PropertyKeyId(1), CanonicalScalar::Int(0)),
+                            (PropertyKeyId(2), hidden.clone()),
+                        ],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                let pool = MemoryPool::new(32_768, 0).unwrap();
+                let (scratch, _) = file(&cx, &pool).await;
+                let (destination, _) = file(&cx, &pool).await;
+                let mut ordered = db
+                    .authorized_ordered_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols as Resolver,
+                        GqlQueryPolicy::new(1, 2, 1_000_000, 1_000_000),
+                        || 100,
+                        scratch,
+                        destination,
+                        limits(),
+                    )
+                    .unwrap();
+                let args = GqlParameters::new();
+                let text = if prefix {
+                    "MATCH (n:L) WHERE n.hidden STARTS WITH 'Ad' RETURN n AS id ORDER BY id DESC"
+                } else {
+                    "MATCH (n:L) WHERE n.hidden > 50 AND n.hidden < 60 RETURN n AS id ORDER BY id DESC"
+                };
+                let denied = ordered.prepare(&cx, text, &args).unwrap();
+                let error = ordered
+                    .execute_ordered(&cx, &denied, &args)
+                    .unwrap()
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Stream(GqlQueryError::Rows(error))
+                            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                                && error.limit == 1 && error.observed == 2)
+                ));
+                let text = if prefix {
+                    "MATCH (n:L) WHERE 10 / n.p > 0 AND n.p STARTS WITH 'Ad' RETURN n AS id ORDER BY id DESC"
+                } else {
+                    "MATCH (n:L) WHERE 10 / n.p > 0 AND n.p > 7 RETURN n AS id ORDER BY id DESC"
+                };
+                let fallible = ordered.prepare(&cx, text, &args).unwrap();
+                let error = ordered
+                    .execute_ordered(&cx, &fallible, &args)
+                    .unwrap()
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
+                            if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
+                ));
+                assert_eq!(pool.used(), 0);
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

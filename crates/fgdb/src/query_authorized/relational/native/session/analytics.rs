@@ -3,7 +3,7 @@
 
 use super::{AuthorizedReadSession, Live};
 use crate::gql_exec::AdmissionUsage;
-use crate::query::authorized::{analytics, query_error};
+use crate::query::authorized::analytics;
 use crate::{EmbeddedReadView, QueryError, ReadError};
 use fgdb_gql::{GqlQueryPolicy, GraphSymbolResolver};
 use fgdb_prism::{
@@ -122,7 +122,10 @@ fn execute(
         policy(options, host),
         scope,
         execution,
-        |event| usage.observe(allowance, event).map_err(query_error),
+        analytics::UsageObserver {
+            usage: &mut usage,
+            policy: allowance,
+        },
     )
 }
 

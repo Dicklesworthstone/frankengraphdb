@@ -238,9 +238,14 @@ fn real_marker_boundaries_recover_once_and_preserve_completion_classes() {
                     ErrorCode::OutcomeUnknown
                 );
                 assert_eq!(db.db.status(), DatabaseStatus::Recovering { generation: 2 });
+                assert!(db.db.shared.gate.state.read().unwrap().published.is_none());
                 assert!(matches!(old.enter(), Err(Unavailable::Recovering)));
                 assert!(matches!(
                     db.db.read(&root).await,
+                    Err(Unavailable::Recovering)
+                ));
+                assert!(matches!(
+                    db.db.read_view(&root).await,
                     Err(Unavailable::Recovering)
                 ));
                 // The root worker can run, but cannot consume the handle yet.
@@ -262,6 +267,11 @@ fn real_marker_boundaries_recover_once_and_preserve_completion_classes() {
                 }
             );
             assert_eq!(old.check().is_err(), needs_recovery);
+            let (view, generation) = db.db.read_view(&root).await.unwrap();
+            assert_eq!(view.frontier(), CommitSeq(u64::from(needs_recovery)));
+            assert_eq!(view.vertex(VId(1)).unwrap().is_some(), needs_recovery);
+            generation.check().unwrap();
+            drop(view);
             let mut guard = db.db.write(&root).await.unwrap();
             assert_eq!(
                 guard.frontier().unwrap(),
@@ -394,6 +404,7 @@ fn failed_authoritative_reopen_stays_fenced_after_storage_is_repaired() {
         for _ in 0..3 {
             asupersync::runtime::yield_now().await;
             assert_eq!(db.db.status(), failed);
+            assert!(db.db.shared.gate.state.read().unwrap().published.is_none());
             assert!(matches!(db.db.read(&root).await, Err(Unavailable::Fenced)));
             assert!(matches!(db.db.write(&root).await, Err(Unavailable::Fenced)));
         }
@@ -452,6 +463,125 @@ fn dropped_outer_write_future_still_fences_and_recovers_its_marker() {
 }
 
 #[test]
+fn published_read_admission_does_not_wait_for_a_writer_or_permanently_pin_history() {
+    let ((), report) = run_async_under_lab(0x79a0_0008, |root| async move {
+        let (server, token, _) = served(&root, "published-read-overlap").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut held = db.db.write(&root).await.unwrap();
+        let mut admission = Box::pin(crate::execute::read_session(&root, db, &token));
+        let (mut first, at) = match admission
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        {
+            Poll::Ready(Ok(result)) => result,
+            Poll::Ready(Err(error)) => panic!("{}", error.message),
+            Poll::Pending => panic!("a published read waited behind an unchanged writer"),
+        };
+        drop(admission);
+        assert_eq!(at, CommitSeq(0));
+        let (rows, result_at) = first
+            .query_with_snapshot(
+                &contexts.query(),
+                "MATCH (n) RETURN 7 AS value",
+                &fgdb_gql::GqlParameters::new(),
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(result_at, at);
+        assert!(matches!(rows, fgdb::QueryResult::Rows { rows, .. } if rows.is_empty()));
+        drop(first);
+
+        // No actual reader remains: the published record must not retain the
+        // old allocation after advancement. The weak ownership in production
+        // also permits make_mut to dissociate it without copying metadata.
+        held.write(&contexts.commit(), vertex(1)).await.unwrap();
+        assert!(
+            db.db
+                .shared
+                .gate
+                .state
+                .read()
+                .unwrap()
+                .published
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .is_none()
+        );
+        let mut fallback = Box::pin(db.db.read_view(&root));
+        assert!(
+            fallback
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        drop(fallback);
+        drop(held);
+
+        let (old, generation) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(old.frontier(), CommitSeq(1));
+        assert!(old.vertex(VId(1)).unwrap().is_some());
+        let mut held = db.db.write(&root).await.unwrap();
+        held.write(&contexts.commit(), vertex(2)).await.unwrap();
+        // A real old pin keeps the published generation available throughout
+        // the successor commit. The gate does not expose the successor early.
+        let mut overlap = Box::pin(db.db.read_view(&root));
+        let (during, during_generation) = match overlap
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+        {
+            Poll::Ready(Ok(result)) => result,
+            _ => panic!("the retained published generation must be immediately pinnable"),
+        };
+        drop(overlap);
+        assert_eq!(during.frontier(), CommitSeq(1));
+        assert!(during.vertex(VId(2)).unwrap().is_none());
+        generation.check().unwrap();
+        during_generation.check().unwrap();
+
+        // Prepared admission and eager execution use the same generation,
+        // including their result sequence, without re-entering the writer.
+        let prepared = crate::execute::prepare_read(
+            &root,
+            db,
+            &token,
+            &fgdb_protocol::body::Prepare {
+                statement: "MATCH (n) RETURN $v AS value".into(),
+                parameters: vec![("v".into(), fgdb_protocol::body::WireValue::Int(9))],
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let answer = crate::execute::read_prepared(
+            &root,
+            db,
+            &token,
+            &prepared,
+            &[("v".into(), fgdb_protocol::body::WireValue::Int(11))],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            answer.outcome,
+            fgdb_protocol::body::Outcome::Rows { seq: 1 }
+        );
+        assert_eq!(
+            answer.rows,
+            vec![vec![fgdb_protocol::body::WireValue::Int(11)]]
+        );
+        drop(held);
+        let (fresh, _) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(fresh.frontier(), CommitSeq(2));
+        assert!(fresh.vertex(VId(2)).unwrap().is_some());
+        assert_eq!(old.frontier(), CommitSeq(1));
+        assert!(old.vertex(VId(2)).unwrap().is_none());
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn abort_before_worker_first_poll_fences_instead_of_leaving_a_ready_slot() {
     let ((), report) = run_async_under_lab(0x79a0_0005, |root| async move {
         let (server, _, _) = served(&root, "unpolled-worker").await;
@@ -461,6 +591,7 @@ fn abort_before_worker_first_poll_fences_instead_of_leaving_a_ready_slot() {
         db.db.worker.try_lock().unwrap().as_ref().unwrap().abort();
         db.db.stop_and_join(&root).await;
         assert!(matches!(db.db.status(), DatabaseStatus::Fenced { .. }));
+        assert!(db.db.shared.gate.state.read().unwrap().published.is_none());
         assert!(matches!(db.db.generation(), Err(Unavailable::Fenced)));
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -503,4 +634,33 @@ fn unused_server_drop_releases_worker_and_read_polls_do_not_wake_subscriptions()
         weak.upgrade().is_none(),
         "dropping a server without a listener must not retain its worker/database"
     );
+}
+
+#[test]
+fn stop_releases_published_index_ownership_and_late_writer_cannot_restore_it() {
+    let ((), report) = run_async_under_lab(0x79a0_0009, |root| async move {
+        let (server, _, _) = served(&root, "published-read-stop").await;
+        let db = &server.databases["test"];
+        let generation = db.db.generation().unwrap();
+        let mut held = db.db.write(&root).await.unwrap();
+        assert!(generation.gate.state.read().unwrap().published.is_some());
+        db.db.stop();
+        assert!(generation.gate.state.read().unwrap().published.is_none());
+        assert!(matches!(
+            db.db.read_view(&root).await,
+            Err(Unavailable::Stopping)
+        ));
+        // An already-admitted writer can finish while shutdown drains. Its
+        // healthy Drop must not recreate ownership in a stopped generation.
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        held.write(&contexts.commit(), vertex(1)).await.unwrap();
+        drop(held);
+        assert!(generation.gate.state.read().unwrap().published.is_none());
+        server.join_database_workers(&root).await;
+        drop(server);
+        // A template or queued completion may retain the generation fence
+        // beyond the server; that fence owns no snapshot or search-index pin.
+        assert!(generation.gate.state.read().unwrap().published.is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

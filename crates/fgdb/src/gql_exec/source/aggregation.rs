@@ -16,8 +16,8 @@ use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
     GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphAggregateError, GraphAggregateRow, GraphShortestWalkCursor, GraphWalkBounds,
-    PreparedGraphAggregate,
+    GraphAggregateError, GraphAggregateRow, GraphCountSource, GraphShortestWalkCursor,
+    GraphWalkBounds, PreparedGraphAggregate,
 };
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::collections::BTreeMap;
@@ -117,6 +117,36 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
     let mut usage = AdmissionUsage::default();
+    let elements = |element, key| {
+        crate::gql_exec::read_element_property(
+            element,
+            key,
+            |vid| reader.gql_vertex_at(vid, as_of),
+            |eid| reader.gql_edge_at(eid, as_of),
+        )
+    };
+    // The same MVCC visitors can admit a plain count without retaining their
+    // winning rows a second time. Shape admission excludes every input reader,
+    // filter and metadata projection; the original aggregate finalizer still
+    // owns output expressions, HAVING, ordering and pages. An independently
+    // fallible reader keeps its ordinary materialized source.
+    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_summary_source()) {
+        let (examined, matching) = count_input(snapshot, source, as_of, &mut |event| {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+        })
+        .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+        let count = aggregate
+            .prepare_count_summary(source, examined, matching)
+            .expect("the checked source counts only its admitted live occurrences");
+        let result = count.execute_governed_with_element_reads(
+            examined,
+            elements,
+            usage.remaining(policy),
+            checkpoint,
+        );
+        return usage.finish(policy, result);
+    }
     admitted
         .materialize(&mut |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -139,24 +169,63 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             |error| GqlQueryError::Source(GraphAggregateError::Source(error)),
         )
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-    let result = aggregate.execute_governed_with_element_maps(
+    let result = aggregate.execute_governed_with_element_maps_and_reads(
         admitted.snapshot_records,
         admitted.vertex_ids(),
         admitted.identified_edges(),
-        |vid, predicates| admitted.matches(vid, predicates),
+        |vid, predicates| admitted.matches(vid, predicates).map_err(GqlError::Read),
         |vid, key| Ok(admitted.property(vid, key)),
         |eid, key| Ok(admitted.edge_property(eid, key)),
         |vid| Ok(admitted.cached_labels.get(&vid).map(Vec::as_slice)),
         |eid| Ok(admitted.cached_types.get(&eid)),
         |vid| Ok(admitted.property_maps.vertices.get(&vid)),
         |eid| Ok(admitted.property_maps.edges.get(&eid)),
+        elements,
         usage.remaining(policy),
         checkpoint,
     );
-    usage
-        .finish(policy, result)
-        .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))
+    usage.finish(policy, result)
 }
+
+// Preserve scan_vertices/scan_edges' full admission transcript, including the
+// logical scratch charge for each live row, while retaining just two counts.
+// The existing edge visitor still owns its bounded-by-policy MVCC winner merge;
+// this removes the second live-edge table, not the source's history work.
+fn count_input<E>(
+    snapshot: &Snapshot,
+    source: GraphCountSource,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(super::SourceEvent) -> Result<(), E>,
+) -> Result<(u64, u64), E> {
+    let mut examined = 0;
+    let mut matching = 0;
+    match source {
+        GraphCountSource::Vertices => {
+            super::visit_vertices(&snapshot.patches, as_of, control, |_, control| {
+                control(super::SourceEvent::SnapshotRecord)?;
+                control(super::SourceEvent::ScratchEntry)?;
+                examined += 1;
+                Ok(())
+            })?;
+            matching = examined;
+        }
+        GraphCountSource::Relation(relation) => {
+            super::visit_edges(&snapshot.blocks, as_of, control, |entry, control| {
+                control(super::SourceEvent::SnapshotRecord)?;
+                control(super::SourceEvent::ScratchEntry)?;
+                examined += 1;
+                if entry.relation == relation {
+                    matching += 1;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok((examined, matching))
+}
+
+#[cfg(test)]
+mod count_tests;
 
 type SetResult<E> = Result<
     GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
@@ -219,7 +288,7 @@ impl<V: Vfs + Clone> Database<V> {
                     if crate::query::is_hybrid(call) {
                         return crate::query::hybrid_procedure_with_registry(
                             &self.snapshot,
-                            Some(&self.maintained_beacon),
+                            Some(self.maintained_beacon.query_indexes()),
                             as_of,
                             call,
                             arguments,
@@ -286,6 +355,7 @@ impl EmbeddedReadView {
                     if crate::query::is_hybrid(call) {
                         return crate::query::hybrid_procedure(
                             &self.snapshot,
+                            Some(&self.beacon_indexes),
                             as_of,
                             call,
                             arguments,

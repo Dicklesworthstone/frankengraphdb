@@ -1009,6 +1009,19 @@ impl<'a> Parser<'a> {
                                 .predicate(IntegerComparison::Equal),
                             )
                         }
+                        GqlParameterType::Scalar(CanonicalScalarKind::Decimal) => {
+                            noninteger_parameter.get_or_insert(*at);
+                            // Preserve the declared exact domain during shape
+                            // validation. This zero is never evaluated: binding
+                            // still substitutes the caller's decimal or NULL.
+                            GraphIntegerOp::Scalar(
+                                crate::GqlScalarParameter::new(CanonicalScalar::Decimal(
+                                    fgdb_types::CanonicalDecimal::default(),
+                                ))
+                                .expect("zero decimal is an admitted scalar")
+                                .predicate(IntegerComparison::Equal),
+                            )
+                        }
                         GqlParameterType::Scalar(CanonicalScalarKind::Text) => {
                             noninteger_parameter.get_or_insert(*at);
                             GraphIntegerOp::Scalar(
@@ -2140,6 +2153,230 @@ mod float_parameter_tests {
                 GraphIntegerEvaluationError::Value(error) => error.kind,
                 GraphIntegerEvaluationError::Control(()) => unreachable!(),
             })
+    }
+
+    fn decimal(coefficient: i128) -> CanonicalScalar {
+        CanonicalScalar::Decimal(
+            fgdb_types::CanonicalDecimal::from_coefficient(coefficient).unwrap(),
+        )
+    }
+
+    #[test]
+    fn declared_decimal_parameters_reach_exact_arithmetic_and_conversions() {
+        const UNIT: i128 = 1_000_000_000_000_000_000;
+        for (text, expected) in [
+            ("x + $delta", 15 * UNIT / 2),
+            ("x - $delta", 7 * UNIT / 2),
+            ("x * $delta", 11 * UNIT),
+            ("x / $delta", 11 * UNIT / 4),
+            ("x % $delta", 3 * UNIT / 2),
+            ("ABS(-$delta)", 2 * UNIT),
+            ("+$delta", 2 * UNIT),
+        ] {
+            let prepared = template(text, CanonicalScalarKind::Decimal);
+            assert_eq!(
+                evaluate(&prepared, decimal(2 * UNIT), decimal(11 * UNIT / 2)),
+                Ok(decimal(expected)),
+                "{text}"
+            );
+        }
+        let prepared = template("x * $delta", CanonicalScalarKind::Decimal);
+        // Literal coefficients pin half-even rounding on opposite sides of
+        // a tie. Reuse the SAME template with new arguments, not new syntax.
+        for (input, factor, expected) in [
+            (10 * UNIT + 1, UNIT / 2, 5 * UNIT),
+            (20 * UNIT + 3, UNIT / 2, 10 * UNIT + 2),
+            (10 * UNIT + 1, UNIT / 4, 5 * UNIT / 2),
+            (20 * UNIT + 3, UNIT / 4, 5 * UNIT + 1),
+            (-20 * UNIT - 3, UNIT / 2, -10 * UNIT - 2),
+        ] {
+            assert_eq!(
+                evaluate(&prepared, decimal(factor), decimal(input)),
+                Ok(decimal(expected))
+            );
+        }
+        let wide = decimal(9_007_199_254_740_993 * UNIT + 1);
+        assert_eq!(
+            evaluate(
+                &template("toInteger($delta)", CanonicalScalarKind::Decimal),
+                wide.clone(),
+                CanonicalScalar::Null,
+            ),
+            Ok(CanonicalScalar::Int(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            evaluate(
+                &template("toString($delta)", CanonicalScalarKind::Decimal),
+                wide,
+                CanonicalScalar::Null,
+            ),
+            Ok(CanonicalScalar::ucs_basic_text("9007199254740993.000000000000000001").unwrap())
+        );
+    }
+
+    #[test]
+    fn decimal_witnesses_preserve_parameter_holes_nulls_and_lazy_branches() {
+        const UNIT: i128 = 1_000_000_000_000_000_000;
+        let prepared = template("x / $delta", CanonicalScalarKind::Decimal);
+        assert!(
+            prepared
+                .0
+                .iter()
+                .any(|op| matches!(op, MutationIntegerTemplateOp::Parameter { index: 0, .. }))
+        );
+        let transcript = |program: &[MutationIntegerTemplateOp]| {
+            let mut bytes = Vec::new();
+            for op in program {
+                op.append_template_transcript(&mut bytes);
+            }
+            bytes
+        };
+        let before = transcript(&prepared.0);
+        assert_eq!(
+            evaluate(&prepared, decimal(2 * UNIT), decimal(7 * UNIT)),
+            Ok(decimal(7 * UNIT / 2))
+        );
+        assert_eq!(
+            evaluate(&prepared, CanonicalScalar::Null, decimal(7 * UNIT)),
+            Ok(CanonicalScalar::Null)
+        );
+        assert_eq!(transcript(&prepared.0), before);
+        // The type witness is zero even in a denominator, but neither it nor
+        // an unselected branch may execute during preparation or binding.
+        for text in [
+            "COALESCE($delta, x / x)",
+            "CASE WHEN TRUE THEN $delta ELSE x / x END",
+        ] {
+            assert_eq!(
+                evaluate(
+                    &template(text, CanonicalScalarKind::Decimal),
+                    decimal(3 * UNIT + 1),
+                    decimal(0),
+                ),
+                Ok(decimal(3 * UNIT + 1)),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            evaluate(
+                &template("NULLIF($delta, $delta)", CanonicalScalarKind::Decimal),
+                decimal(1),
+                CanonicalScalar::Null,
+            ),
+            Ok(CanonicalScalar::Null)
+        );
+    }
+
+    #[test]
+    fn decimal_parameter_failures_reach_the_native_typed_error_boundary() {
+        const UNIT: i128 = 1_000_000_000_000_000_000;
+        for (text, delta, input, expected) in [
+            (
+                "x / $delta",
+                decimal(0),
+                decimal(UNIT),
+                GraphIntegerErrorKind::DivisionByZero,
+            ),
+            (
+                "x % $delta",
+                decimal(0),
+                decimal(UNIT),
+                GraphIntegerErrorKind::DivisionByZero,
+            ),
+            (
+                "x * $delta",
+                decimal(fgdb_types::MAX_DECIMAL_COEFFICIENT),
+                decimal(2 * UNIT),
+                GraphIntegerErrorKind::Overflow,
+            ),
+            (
+                "x + $delta",
+                decimal(1),
+                decimal(fgdb_types::MAX_DECIMAL_COEFFICIENT),
+                GraphIntegerErrorKind::Overflow,
+            ),
+            (
+                "x * $delta",
+                decimal(UNIT),
+                CanonicalScalar::Int(2),
+                GraphIntegerErrorKind::IncompatibleOperands,
+            ),
+            (
+                "x * $delta",
+                decimal(UNIT),
+                float(0.5),
+                GraphIntegerErrorKind::IncompatibleOperands,
+            ),
+        ] {
+            assert_eq!(
+                evaluate(&template(text, CanonicalScalarKind::Decimal), delta, input),
+                Err(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_parameters_do_not_weaken_nonnumeric_or_integer_only_admission() {
+        for text in [
+            "UPPER($delta)",
+            "$delta AND TRUE",
+            "SUBSTRING('abc', $delta, 1)",
+            "SUBSTRING('abc', 1, $delta)",
+            "FLOOR($delta)",
+        ] {
+            let mut parser = Parser::new_with_parameter_types(
+                text,
+                &[(
+                    "delta",
+                    GqlParameterType::Scalar(CanonicalScalarKind::Decimal),
+                )],
+            )
+            .unwrap();
+            let error = parser
+                .row_expression(&[])
+                .err()
+                .expect("invalid decimal context");
+            assert_eq!(error.offset, text.find('$').unwrap(), "{text}");
+            assert!(matches!(
+                error.kind,
+                GraphMutationTextErrorKind::IntegerOperand
+            ));
+        }
+    }
+
+    #[test]
+    fn bound_decimal_arithmetic_keeps_every_evaluator_checkpoint() {
+        const UNIT: i128 = 1_000_000_000_000_000_000;
+        for text in ["x + $delta", "x * $delta", "x / $delta", "x % $delta"] {
+            let prepared = template(text, CanonicalScalarKind::Decimal);
+            let value =
+                GqlParameterValue::Scalar(GqlScalarParameter::new(decimal(2 * UNIT)).unwrap());
+            let bound = bind_integer(&prepared.0, &[value], prepared.1).unwrap();
+            let row = [GraphValue::Scalar(decimal(7 * UNIT))];
+            let mut calls = 0;
+            bound
+                .evaluate_scalar_with_control(&row, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+            assert!(calls > 0);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                let result = bound.evaluate_scalar_with_control(&row, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                });
+                assert!(
+                    matches!(
+                        result,
+                        Err(GraphIntegerEvaluationError::Control(at)) if at == stop
+                    ),
+                    "{text}: checkpoint {stop}"
+                );
+            }
+        }
     }
 
     #[test]

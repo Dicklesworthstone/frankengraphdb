@@ -126,6 +126,7 @@ pub(super) fn finish<'a>(
                     leading: Vec::new(),
                     leading_types: Vec::new(),
                     correlations: Vec::new(),
+                    row_fields: Vec::new(),
                 },
             };
             // Keep the old resolver and source definition for a single part.

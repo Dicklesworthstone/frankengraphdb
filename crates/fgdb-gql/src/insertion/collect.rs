@@ -376,22 +376,46 @@ fn allocate_id<E, A, C>(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
     property_catalog: Option<&crate::ReverseSymbolCatalog>,
-    mut source: impl FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    mut source: impl GraphSetSource<E, C>,
     mut allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
+) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
+    // The insertion engine is compiled once per error-type triple, not once
+    // per caller closure type (fgdb-2goz): each callback is a trait object.
+    execute_erased(
+        insertion,
+        policy,
+        bindings,
+        property_catalog,
+        &mut source,
+        &mut allocate,
+        &mut checkpoint,
+    )
+}
+
+/// A selection source behind a trait object.
+type ErasedSource<'a, E, C> = &'a mut dyn GraphSetSource<E, C>;
+
+fn execute_erased<E, A, C>(
+    insertion: &PreparedGraphInsert,
+    policy: GraphInsertPolicy,
+    bindings: Option<&[GraphInsertBinding]>,
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    source: ErasedSource<'_, E, C>,
+    mut allocate: &mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+    mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
     let (selected_rows, selection, evaluator) = match &insertion.input {
         Input::Pattern(pattern) => {
-            let selected = source(pattern, policy.query)
+            let selected = source
+                .pattern(pattern, policy.query)
                 .map_err(|error| error.map_source(GraphInsertError::Source))?;
             if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
                 return Err(GqlQueryError::Source(
@@ -402,7 +426,7 @@ pub(super) fn execute<E, A, C>(
         }
         Input::Relation(relation) => {
             let selected = relation
-                .execute_governed(policy.query, &mut source, &mut checkpoint)
+                .execute_with_source(policy.query, source, &mut checkpoint)
                 .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
             (selected.value, selected.rows, selected.evaluator)
         }

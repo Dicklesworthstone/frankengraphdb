@@ -288,13 +288,16 @@ impl core::fmt::Debug for GraphWalkCursor<'_> {
 /// of adjacency input order. Duplicate input occurrences remain distinct.
 /// Unlike the endpoint cursors, every returned path contains real edge IDs.
 pub(crate) struct GraphPathCursor<'a> {
-    adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+    adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
     depth: u32,
     frontier: Vec<GraphPath>,
     pending: std::vec::IntoIter<GraphPath>,
-    settled: BTreeMap<VId, u32>,
+    /// Only looked up and cleared, never iterated, so its order can never
+    /// reach a result or a charge. Seeded id hashing: SipHash over every
+    /// endpoint a layer reaches was 5% of an epinions SHORTEST.
+    settled: crate::id_hash::IdMap<VId, u32>,
     done: bool,
 }
 
@@ -303,7 +306,7 @@ impl<'a> GraphPathCursor<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         search: GraphWalkSearch,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         control(GlaExecutionEvent::Work)?;
@@ -315,7 +318,7 @@ impl<'a> GraphPathCursor<'a> {
             depth: 0,
             frontier: vec![GraphPath::new(source, Box::new([]))],
             pending: Vec::new().into_iter(),
-            settled: BTreeMap::new(),
+            settled: crate::id_hash::IdMap::default(),
             done: false,
         })
     }
@@ -372,9 +375,28 @@ impl<'a> GraphPathCursor<'a> {
             GraphWalkSearch::Acyclic | GraphWalkSearch::Simple
         );
         let unique = self.search == GraphWalkSearch::AnyShortest;
+        if shortest && self.depth >= self.bounds.minimum() {
+            // Settle the whole layer before expanding any of it, so an edge
+            // between two vertices of this layer is pruned like an edge back
+            // to an earlier one. Recording the same depth keeps every
+            // equal-depth witness of this layer eligible.
+            for path in &self.frontier {
+                control(GlaExecutionEvent::Work)?;
+                let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
+                if !self.settled.contains_key(&endpoint) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    self.settled.insert(endpoint, self.depth);
+                }
+            }
+        }
         let mut next = Vec::new();
         let mut pending = Vec::new();
-        let mut canonical = BTreeMap::<VId, GraphPath>::new();
+        // Each endpoint's best path so far, with the generation number of
+        // the step that made it best. Probed per step, and read once at the
+        // layer's end only to be sorted by generation, so a hashed map holds
+        // what the ordered one did, in the order it left (fgdb-61p1n).
+        let mut canonical = crate::id_hash::IdMap::<VId, (u64, GraphPath)>::default();
+        let mut generated = 0_u64;
         for path in core::mem::take(&mut self.frontier) {
             control(GlaExecutionEvent::Work)?;
             let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
@@ -401,10 +423,18 @@ impl<'a> GraphPathCursor<'a> {
                 && endpoint == path.start();
             if !closed
                 && self.depth < self.bounds.maximum()
-                && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
+                && let Some(neighbors) = self.adjacency.and_then(|map| map.neighbors(&endpoint))
             {
                 for &step in neighbors {
                     control(GlaExecutionEvent::Work)?;
+                    if shortest && self.settled.contains_key(&step.1) {
+                        // A settled endpoint is never reopened: this child
+                        // would be dropped at the start of the next layer,
+                        // unemitted and unexpanded. Drop it before any prefix
+                        // comparison or copy, so a layer copies one path per
+                        // newly reached vertex, not one per edge.
+                        continue;
+                    }
                     if restricted {
                         // Inspect the actual path, not endpoint settlement.
                         // Keep all valid parallel edges and distinct prefixes.
@@ -430,7 +460,7 @@ impl<'a> GraphPathCursor<'a> {
                     if unique {
                         // Compare before copying: parallel edges and tied
                         // routes cannot multiply the next layer's prefixes.
-                        let previous = canonical.get(&step.1);
+                        let previous = canonical.get(&step.1).map(|(_, path)| path);
                         if let Some(previous) = previous {
                             let candidate =
                                 path.steps().iter().copied().chain(core::iter::once(step));
@@ -453,7 +483,8 @@ impl<'a> GraphPathCursor<'a> {
                             control(GlaExecutionEvent::ScratchEntry)?;
                         }
                         let child = Self::extend_path(&path, step, control)?;
-                        canonical.insert(step.1, child);
+                        generated += 1;
+                        canonical.insert(step.1, (generated, child));
                     } else {
                         control(GlaExecutionEvent::ScratchEntry)?;
                         let child = Self::extend_path(&path, step, control)?;
@@ -466,13 +497,19 @@ impl<'a> GraphPathCursor<'a> {
                 pending.push(path);
             }
         }
-        // Endpoint coalescing chooses identities, not endpoint ordering. Move
-        // those winners into the same canonical path order used by ALL modes.
-        for (_, path) in canonical {
+        // Endpoint coalescing chooses identities, not endpoint ordering. The
+        // winners leave in the order they were generated: a sorted frontier
+        // expanded through sorted neighbor lists (identified adjacency is
+        // sorted) generates its paths in canonical order already, so the sort
+        // below only has to verify that order.
+        let mut winners = Vec::with_capacity(canonical.len());
+        for (_, winner) in canonical {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            next.push(path);
+            winners.push(winner);
         }
+        winners.sort_unstable_by_key(|(generated, _)| *generated);
+        next.extend(winners.into_iter().map(|(_, path)| path));
         Self::sort_paths(&mut next, control)?;
         self.pending = pending.into_iter();
         self.frontier = next;
@@ -504,10 +541,24 @@ impl<'a> GraphPathCursor<'a> {
 
     /// Fallible in-place heapsort keeps comparison work interruptible without
     /// allocating a second path buffer or hiding fallible control in `Ord`.
+    /// Input already in strictly ascending order is verified with one charged
+    /// comparison per adjacent pair instead: a layer generated from a sorted
+    /// frontier and sorted neighbor lists is, and sorted input is heapsort's
+    /// worst case.
     fn sort_paths<E>(
         paths: &mut [GraphPath],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
+        let mut ascending = true;
+        for pair in paths.windows(2) {
+            if !Self::compare_paths(&pair[0], &pair[1], control)?.is_lt() {
+                ascending = false;
+                break;
+            }
+        }
+        if ascending {
+            return Ok(());
+        }
         for root in (0..paths.len() / 2).rev() {
             Self::sift_paths(paths, root, control)?;
         }
@@ -993,5 +1044,204 @@ mod repetition_tests {
                 vec![VId(u128::from(MAX_GRAPH_WALK_HOPS))]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shortest_path_tests {
+    use super::*;
+
+    fn run(
+        source: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        adjacency: &BTreeMap<VId, Vec<(EId, VId)>>,
+    ) -> Vec<Vec<(EId, VId)>> {
+        let mut cursor = GraphPathCursor::new(source, bounds, search, Some(adjacency), &mut |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        let mut rows = Vec::new();
+        while let Some(path) = cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap() {
+            assert_eq!(path.start(), source);
+            rows.push(path.steps().to_vec());
+        }
+        rows
+    }
+
+    /// SHORTEST from the definition, by complete walk enumeration that never
+    /// prunes: an endpoint's admitted length is the least length in the bounds
+    /// at which any walk reaches it. ALL SHORTEST returns every walk of that
+    /// length to it; ANY SHORTEST the least of them under the canonical
+    /// (edge, vertex) order. Rows come layer by layer in canonical order.
+    #[test]
+    fn shortest_paths_match_complete_walk_enumeration() {
+        for mask in 0..512_u32 {
+            let mut adjacency = BTreeMap::<VId, Vec<(EId, VId)>>::new();
+            for source in 0..3_u128 {
+                for destination in 0..3_u128 {
+                    if mask & (1 << (3 * source + destination)) != 0 {
+                        adjacency
+                            .entry(VId(source))
+                            .or_default()
+                            .push((EId(10 * source + destination + 1), VId(destination)));
+                    }
+                }
+            }
+            // One parallel edge, with a larger identity than its twin.
+            if let Some(neighbors) = adjacency.values_mut().next() {
+                let (edge, vertex) = neighbors[0];
+                neighbors.push((EId(edge.0 + 100), vertex));
+                neighbors.sort();
+            }
+            for source in 0..4_u128 {
+                let mut layers: Vec<Vec<Vec<(EId, VId)>>> = vec![vec![Vec::new()]];
+                for depth in 1..=4 {
+                    let mut next = Vec::new();
+                    for walk in &layers[depth - 1] {
+                        let at = walk.last().map_or(VId(source), |step| step.1);
+                        for &step in adjacency.get(&at).into_iter().flatten() {
+                            let mut extended = walk.clone();
+                            extended.push(step);
+                            next.push(extended);
+                        }
+                    }
+                    layers.push(next);
+                }
+                let endpoint =
+                    |walk: &Vec<(EId, VId)>| walk.last().map_or(VId(source), |step| step.1);
+                for maximum in 0..=4_u32 {
+                    for minimum in 0..=maximum {
+                        let admitted = minimum as usize..=maximum as usize;
+                        let mut least = BTreeMap::<VId, usize>::new();
+                        for depth in admitted.clone() {
+                            for walk in &layers[depth] {
+                                least.entry(endpoint(walk)).or_insert(depth);
+                            }
+                        }
+                        let mut all = Vec::new();
+                        let mut any = Vec::new();
+                        for depth in admitted.clone() {
+                            let mut shortest: Vec<_> = layers[depth]
+                                .iter()
+                                .filter(|walk| least[&endpoint(walk)] == depth)
+                                .cloned()
+                                .collect();
+                            shortest.sort();
+                            let mut first = BTreeMap::<VId, Vec<(EId, VId)>>::new();
+                            for walk in &shortest {
+                                first.entry(endpoint(walk)).or_insert_with(|| walk.clone());
+                            }
+                            let mut unique: Vec<_> = first.into_values().collect();
+                            unique.sort();
+                            all.extend(shortest);
+                            any.extend(unique);
+                        }
+                        let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                        // The order is canonical whatever the input order:
+                        // reversed neighbor lists generate paths out of order.
+                        let reversed: BTreeMap<VId, Vec<(EId, VId)>> = adjacency
+                            .iter()
+                            .map(|(vertex, neighbors)| {
+                                (*vertex, neighbors.iter().rev().copied().collect())
+                            })
+                            .collect();
+                        for (search, expected) in [
+                            (GraphWalkSearch::AllShortest, &all),
+                            (GraphWalkSearch::AnyShortest, &any),
+                        ] {
+                            for input in [&adjacency, &reversed] {
+                                assert_eq!(
+                                    &run(VId(source), bounds, search, input),
+                                    expected,
+                                    "mask={mask}, source={source}, bounds={bounds:?}, {search:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod path_cursor_charges {
+    use super::*;
+
+    /// Totals and a digest of every event and path of ANY and ALL SHORTEST
+    /// path cursors over random multigraphs, recorded with the ordered
+    /// per-layer canonical map (fgdb-61p1n): a change to the cursor that keeps
+    /// every charge, in order, and every path leaves them.
+    const PINNED: (u64, u64, u64) = (56_560, 27_148, 9_665_325_222_785_454_547);
+
+    #[test]
+    fn shortest_path_cursor_events_keep_their_pinned_digest() {
+        let mut state = 0x5a07_e5e7_0000_0001_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut work, mut scratch, mut digest) = (0_u64, 0_u64, 0xcbf2_9ce4_8422_2325_u64);
+        let fold = |digest: &mut u64, value: u64| {
+            *digest = (*digest ^ value).wrapping_mul(0x0100_0000_01b3);
+        };
+        for _ in 0..150 {
+            let vertices = 1 + random(16);
+            let mut adjacency: BTreeMap<VId, Vec<(EId, VId)>> = BTreeMap::new();
+            for eid in 0..random(4 * vertices) {
+                let (source, target) = (random(vertices), random(vertices));
+                adjacency
+                    .entry(VId(u128::from(source)))
+                    .or_default()
+                    .push((EId(u128::from(eid)), VId(u128::from(target))));
+            }
+            for neighbors in adjacency.values_mut() {
+                neighbors.sort_unstable();
+            }
+            for search in [GraphWalkSearch::AnyShortest, GraphWalkSearch::AllShortest] {
+                for (minimum, maximum) in [(1, 3), (0, 5), (2, 4)] {
+                    let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                    let source = VId(u128::from(random(vertices)));
+                    let mut events = Vec::new();
+                    let mut control = |event| {
+                        events.push(event);
+                        Ok::<_, ()>(())
+                    };
+                    let mut cursor = GraphPathCursor::new(
+                        source,
+                        bounds,
+                        search,
+                        Some(&adjacency),
+                        &mut control,
+                    )
+                    .unwrap();
+                    let mut paths = Vec::new();
+                    while let Some(path) = cursor.next_with_control(&mut control).unwrap() {
+                        paths.push(path);
+                    }
+                    for event in events {
+                        match event {
+                            GlaExecutionEvent::Work => work += 1,
+                            GlaExecutionEvent::ScratchEntry => scratch += 1,
+                            GlaExecutionEvent::ResultRow => {}
+                        }
+                        fold(&mut digest, event as u64);
+                    }
+                    for path in paths {
+                        fold(&mut digest, path.start().0 as u64);
+                        for &(edge, vertex) in path.steps() {
+                            fold(&mut digest, edge.0 as u64);
+                            fold(&mut digest, vertex.0 as u64);
+                        }
+                        fold(&mut digest, u64::MAX);
+                    }
+                }
+            }
+        }
+        assert!(work > 10_000 && scratch > 10_000, "{work} {scratch}");
+        assert_eq!((work, scratch, digest), PINNED);
     }
 }

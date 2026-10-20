@@ -67,6 +67,21 @@ impl PreparedNativeRead {
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
     /// binary set/product circuits with projections, filters and UNWIND are admitted
     /// only where the existing standing engines support their bound operators.
+    /// Zero-argument connected/weakly-connected/strongly-connected component
+    /// CALLs reuse the component delta engines for one explicit relation and
+    /// all live vertices, with unit weights, collapsed parallel edges and
+    /// kept or dropped self-loops. YIELD aliases and downstream row stages retain
+    /// their native schema; unsupported projection recipes refuse.
+    /// Core-number CALLs use the existing exact affected-component maintainer
+    /// under the same projection profile with self-loops explicitly dropped.
+    /// Their checked integer rows and derivatives are retained only for native
+    /// registration; typed core-number views do not acquire a second row sink.
+    /// Triangle CALLs under the explicit undirected/unit/collapse/drop profile
+    /// maintain exact per-vertex counts, including live zero-count isolates.
+    /// The source retains linear vertex result/incidence state and consumes
+    /// signed triangle changes; it does not retain the typed triple table or
+    /// rescan it per tick. Bootstrap still materializes the initial triangle
+    /// derivative, and changed-triangle scratch remains governed by policy.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and

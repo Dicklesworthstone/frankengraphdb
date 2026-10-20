@@ -734,3 +734,154 @@ fn savepoint_steps_refuse_unknown_names_parameters_and_empty_names_before_runnin
     ]);
     assert!(validate_input(&again.steps).is_ok());
 }
+
+/// A statement given to the wrong step flag names the flag it needs, as a
+/// usage error, before the transaction begins (fgdb-j72ep). Text that is
+/// neither a read nor a write keeps its own grammar error.
+#[test]
+fn a_statement_under_the_wrong_step_flag_names_the_right_one() {
+    let ((), report) = run_async_under_lab(0x7478_6340, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (parts, expected, code) in [
+            (
+                ["--query", "CREATE (n:Person {p: 1})"],
+                "a write statement: pass it with --write, not --query",
+                2,
+            ),
+            (
+                ["--query", "MATCH (n:Person) SET n.p = 2 RETURN n.p AS p"],
+                "a write statement: pass it with --write, not --query",
+                2,
+            ),
+            (
+                ["--write", "MATCH (n:Person) RETURN count(*) AS c"],
+                "a read statement: pass it with --query, not --write",
+                2,
+            ),
+            (["--write", "MATCH (n:Person) RETURN"], "", 3),
+            (["--query", "CREATE"], "", 3),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            let error = run(&mut db, &contexts, &options(&parts), None, true, &mut bytes)
+                .await
+                .expect_err("a misrouted or invalid step refuses");
+            assert_eq!(error.code, code, "{parts:?}: {}", error.message);
+            assert!(
+                error.message.starts_with("transaction step 1: "),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.ends_with(expected),
+                "{parts:?}: {}",
+                error.message
+            );
+            assert!(bytes.is_empty());
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Every write-with-RETURN form `fgdb write` runs is also a transaction step
+/// (fgdb-j72ep): CREATE ... RETURN, MERGE ... ON MATCH / ON CREATE SET ...
+/// RETURN and MATCH ... SET ... RETURN in its inline-map and WHERE forms,
+/// each returning its row under its statement number and committing the same
+/// state, while --rollback returns no row and leaves the state unchanged.
+#[test]
+fn write_steps_with_return_run_in_a_transaction_and_roll_back_cleanly() {
+    let ((), report) = run_async_under_lab(0x7478_6341, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        okay(
+            run(
+                &mut db,
+                &contexts,
+                &options(&["--write", "CREATE (n:Person {p: 1})"]),
+                None,
+                true,
+                &mut bytes,
+            )
+            .await,
+        );
+        for (steps, rows, values) in [
+            (
+                vec![
+                    "--write",
+                    "CREATE (n:Person {p: 7}) RETURN n.p AS p",
+                    "--write",
+                    "MERGE (n:Person {p: 7}) ON MATCH SET n.p = 8 RETURN n.p AS p",
+                ],
+                vec![(1, 7), (2, 8)],
+                vec![1, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MATCH (n:Person {p: 1}) SET n.p = 2 RETURN n.p AS p",
+                ],
+                vec![(1, 2)],
+                vec![2, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MATCH (n:Person) WHERE n.p = 2 SET n.p = 3 RETURN n.p AS p",
+                ],
+                vec![(1, 3)],
+                vec![3, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MERGE (n:Person {p: 5}) ON CREATE SET n.p = 6 RETURN n.p AS p",
+                ],
+                vec![(1, 6)],
+                vec![3, 6, 8],
+            ),
+        ] {
+            let before = db.frontier().unwrap();
+            let mut bytes = Vec::new();
+            okay(run(&mut db, &contexts, &options(&steps), None, true, &mut bytes).await);
+            let text = output(bytes);
+            assert_eq!(
+                text.matches("\"event\":\"row\"").count(),
+                rows.len(),
+                "{text}"
+            );
+            for (statement, value) in rows {
+                let row = format!(
+                    r#""statement":{statement},"cells":[{{"type":"int","value":"{value}"}}]"#
+                );
+                assert!(text.contains(&row), "{steps:?}: {text}");
+            }
+            assert!(text.contains("\"kind\":\"committed\""), "{text}");
+            assert_eq!(db.frontier().unwrap(), CommitSeq(before.0 + 1));
+            assert_eq!(committed_values(&db), values, "{steps:?}");
+        }
+
+        let before = db.frontier().unwrap();
+        let rollback = options(&[
+            "--write",
+            "MATCH (n:Person {p: 3}) SET n.p = 4 RETURN n.p AS p",
+            "--write",
+            "MERGE (n:Person {p: 6}) ON MATCH SET n.p = 9 RETURN n.p AS p",
+            "--rollback",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &rollback, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(text.contains("\"kind\":\"rolled_back\""), "{text}");
+        assert!(!text.contains("\"event\":\"row\""), "{text}");
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(committed_values(&db), vec![3, 6, 8]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

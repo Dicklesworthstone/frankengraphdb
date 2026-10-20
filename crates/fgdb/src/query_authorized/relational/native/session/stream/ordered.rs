@@ -194,6 +194,85 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+impl EmbeddedReadView {
+    /// Bind trusted templates and external-sort files to this pinned view.
+    /// Authority, source coherence and physical limits follow
+    /// [`Database::authorized_prepared_ordered_read_session`]. The host must
+    /// retain its recovery fence while this immutable view is in use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<(
+        AuthorizedOrderedReadSession<'a, R, C, A, B>,
+        AuthorizedPreparedRead,
+    )>
+    where
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    {
+        let (session, prepared) = self
+            .authorized_prepared_read_session(
+                cx, authority, token, branch, resolver, policy, clock, selector, native,
+            )
+            .map_err(authorized)?;
+        limits.validate()?;
+        Ok((
+            AuthorizedOrderedReadSession {
+                session,
+                scratch,
+                destination,
+                limits,
+            },
+            prepared,
+        ))
+    }
+
+    /// Bind trusted external-sort files to this exact authorized generation.
+    /// The namespace and live permit checks precede physical-limit admission,
+    /// as in [`Database::authorized_ordered_read_session`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_ordered_read_session<'a, R, C, A, B>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B>>
+    where
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    {
+        let session = self
+            .authorized_read_session(cx, authority, token, branch, resolver, policy, clock)
+            .map_err(authorized)?;
+        limits.validate()?;
+        Ok(AuthorizedOrderedReadSession {
+            session,
+            scratch,
+            destination,
+            limits,
+        })
+    }
+}
+
 fn authorized(error: QueryError) -> NativeSpoolError {
     NativeSpoolError::Authorized(Box::new(error))
 }
@@ -242,40 +321,31 @@ where
         )
     }
 }
-/// A pulled set (fgdb-7xqxb): each scanned source row takes the set's own
-/// projection, through the eager per-row evaluator, before it enters the
-/// private sort. Every evaluation step is a signed checkpoint, as in the
-/// unordered set pull, and an arithmetic failure is the eager Projection
-/// error at the same source ordinal.
-struct SetInput<S, F, M> {
+/// A pulled set (fgdb-7xqxb): scan and projection share the original native
+/// work/scratch meter and signed checkpoint. Only completed projected rows
+/// spend the private sort-input allowance; final delivery has its own quota.
+/// Projection errors keep their source ordinal and fuse the input cursor,
+/// including when an outer LIMIT would discard every result.
+struct SetInput<S, F> {
     rows: VertexInput<S, F>,
     pull: GraphSetRowPull,
-    ordinal: u64,
-    meter: M,
 }
-impl<S, F, M> InputCursor for SetInput<S, F, M>
+impl<S, F> InputCursor for SetInput<S, F>
 where
     S: VertexScanSource<Error = QueryError> + Send,
     F: FnMut() -> core::result::Result<(), QueryError> + Send,
-    M: FnMut(GlaExecutionEvent) -> core::result::Result<(), QueryError> + Send,
 {
     fn pull(&mut self) -> Option<Result<SpoolRow>> {
-        let row = match self.rows.0.next()? {
-            Ok(row) => row,
-            Err(error) => return Some(Err(authorized(scan_error(error)))),
-        };
-        let ordinal = self.ordinal;
-        self.ordinal += 1;
-        let projected = self
-            .pull
-            .project(&row, ordinal, &mut self.meter, |column, error| {
+        self.rows
+            .0
+            .next_projected(&self.pull, scan_error, |ordinal, column, error| {
                 QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
                     row: usize::try_from(ordinal).unwrap_or(usize::MAX),
                     column,
                     error,
                 }))
-            });
-        Some(projected.map(SpoolRow::governed).map_err(authorized))
+            })
+            .map(|row| row.map(SpoolRow::governed).map_err(authorized))
     }
     fn state(&self) -> ScanState {
         self.rows.state()
@@ -469,7 +539,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                 let input: Box<dyn InputCursor + Send + 'q> = match plan {
                     RowPlan::Vertex(plan) => {
                         let source = ScopedSource {
-                            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+                            inner: view
+                                .vertex_scan_source(cx, at)
+                                .map_err(QueryError::Read)?
+                                .with_root_equality(&plan, |key| {
+                                    execution.borrow().permit.predicates().allows_property(key)
+                                }),
                             execution: execution.clone(),
                         };
                         let rows = VertexInput(VertexScanCursor::new(
@@ -479,18 +554,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                             move || control.borrow_mut().checkpoint(),
                         ));
                         match pull {
-                            Some(pull) => {
-                                let meter = execution.clone();
-                                Box::new(SetInput {
-                                    rows,
-                                    pull,
-                                    ordinal: 0,
-                                    meter: move |event| match event {
-                                        GlaExecutionEvent::Work => meter.borrow_mut().checkpoint(),
-                                        _ => Ok(()),
-                                    },
-                                })
-                            }
+                            Some(pull) => Box::new(SetInput { rows, pull }),
                             None => Box::new(rows),
                         }
                     }

@@ -182,6 +182,10 @@ fn every_registered_kernel_uses_the_same_scoped_projection_and_explicit_laws() {
                 "CALL fnx.clustering_coefficient() YIELD score,vertex",
                 Directedness::Undirected,
             ),
+            (
+                "CALL fnx.directed_clustering_coefficient() YIELD score,vertex",
+                Directedness::Directed,
+            ),
         ];
         for (text, direction) in calls {
             let opt = options(direction);
@@ -559,43 +563,21 @@ fn every_clock_boundary_fences_one_shot_and_prepared_output_and_releases_the_pin
     let ((), report) = run_async_under_lab(0xa11a_1006, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let db = database(&c.commit(), false).await;
-        for prepared_path in [false, true] {
-            let issuer = issuer();
-            let token = issuer.issue_at(&grant(), NOW).unwrap();
-            let seen = Cell::new(0);
-            let stop = Cell::new(u64::MAX);
-            let clock = || {
-                let next = seen.get() + 1;
-                seen.set(next);
-                if next >= stop.get() { EXPIRES } else { NOW }
-            };
-            let mut session = db
-                .authorized_read_session(
-                    &c.query(),
-                    &issuer,
-                    &token,
-                    "main",
-                    catalog,
-                    host(),
-                    clock,
-                )
-                .unwrap();
-            let prepared = session
-                .prepare_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
-                .unwrap();
-            seen.set(0);
-            if prepared_path {
-                session.execute_fnx(&c.query(), &prepared).unwrap();
-            } else {
-                session
-                    .call_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
-                    .unwrap();
-            }
-            let boundaries = seen.get();
-            assert!(boundaries > 20);
-            for boundary in 1..=boundaries {
-                stop.set(u64::MAX);
-                seen.set(0);
+        // Charged per unit (the oracle switch) a call crosses many clock
+        // boundaries; charged in runs (fgdb-62mzm) fewer. Every boundary of
+        // both fences the output.
+        for (runs, least) in [(false, 20), (true, 1)] {
+            crate::query::authorized::WORK_RUNS.with(|cell| cell.set(runs));
+            for prepared_path in [false, true] {
+                let issuer = issuer();
+                let token = issuer.issue_at(&grant(), NOW).unwrap();
+                let seen = Cell::new(0);
+                let stop = Cell::new(u64::MAX);
+                let clock = || {
+                    let next = seen.get() + 1;
+                    seen.set(next);
+                    if next >= stop.get() { EXPIRES } else { NOW }
+                };
                 let mut session = db
                     .authorized_read_session(
                         &c.query(),
@@ -611,50 +593,84 @@ fn every_clock_boundary_fences_one_shot_and_prepared_output_and_releases_the_pin
                     .prepare_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
                     .unwrap();
                 seen.set(0);
-                stop.set(boundary);
+                if prepared_path {
+                    session.execute_fnx(&c.query(), &prepared).unwrap();
+                } else {
+                    session
+                        .call_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
+                        .unwrap();
+                }
+                let boundaries = seen.get();
+                assert!(boundaries > least, "{boundaries} clock boundaries");
+                for boundary in 1..=boundaries {
+                    stop.set(u64::MAX);
+                    seen.set(0);
+                    let mut session = db
+                        .authorized_read_session(
+                            &c.query(),
+                            &issuer,
+                            &token,
+                            "main",
+                            catalog,
+                            host(),
+                            clock,
+                        )
+                        .unwrap();
+                    let prepared = session
+                        .prepare_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
+                        .unwrap();
+                    seen.set(0);
+                    stop.set(boundary);
+                    let result = if prepared_path {
+                        session.execute_fnx(&c.query(), &prepared)
+                    } else {
+                        session.call_fnx(
+                            &c.query(),
+                            CC,
+                            &params(),
+                            options(Directedness::Undirected),
+                        )
+                    };
+                    authorization(result, WardenError::Expired);
+                    assert!(session.is_closed(), "expiry at {boundary}");
+                    assert!(session.state.is_none(), "generation retained at {boundary}");
+                }
+                let retiring = self::issuer();
+                let token = retiring.issue_at(&grant(), NOW).unwrap();
+                let seen = Cell::new(0);
+                let stop = Cell::new(u64::MAX);
+                let mut session = db
+                    .authorized_read_session(
+                        &c.query(),
+                        &retiring,
+                        &token,
+                        "main",
+                        catalog,
+                        host(),
+                        || {
+                            seen.set(seen.get() + 1);
+                            if seen.get() == stop.get() {
+                                retiring.retire();
+                            }
+                            NOW
+                        },
+                    )
+                    .unwrap();
+                let prepared = session
+                    .prepare_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
+                    .unwrap();
+                seen.set(0);
+                stop.set(boundaries);
                 let result = if prepared_path {
                     session.execute_fnx(&c.query(), &prepared)
                 } else {
                     session.call_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
                 };
-                authorization(result, WardenError::Expired);
-                assert!(session.is_closed(), "expiry at {boundary}");
-                assert!(session.state.is_none(), "generation retained at {boundary}");
+                authorization(result, WardenError::AuthorityRetired);
+                assert!(session.state.is_none());
             }
-            let retiring = self::issuer();
-            let token = retiring.issue_at(&grant(), NOW).unwrap();
-            let seen = Cell::new(0);
-            let stop = Cell::new(u64::MAX);
-            let mut session = db
-                .authorized_read_session(
-                    &c.query(),
-                    &retiring,
-                    &token,
-                    "main",
-                    catalog,
-                    host(),
-                    || {
-                        seen.set(seen.get() + 1);
-                        if seen.get() == stop.get() {
-                            retiring.retire();
-                        }
-                        NOW
-                    },
-                )
-                .unwrap();
-            let prepared = session
-                .prepare_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
-                .unwrap();
-            seen.set(0);
-            stop.set(boundaries);
-            let result = if prepared_path {
-                session.execute_fnx(&c.query(), &prepared)
-            } else {
-                session.call_fnx(&c.query(), CC, &params(), options(Directedness::Undirected))
-            };
-            authorization(result, WardenError::AuthorityRetired);
-            assert!(session.state.is_none());
         }
+        crate::query::authorized::WORK_RUNS.with(|cell| cell.set(true));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

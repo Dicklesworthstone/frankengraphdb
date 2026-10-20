@@ -81,6 +81,41 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         Self::compile_with_projection(plan, None, Row::accepts_projection)
     }
 
+    /// Infallible root predicates that precede every Boolean expression and
+    /// existence probe. A source may use an exact candidate superset for one
+    /// of these predicates, but must keep the ordinary visible-row checks.
+    /// Later predicates cannot prune roots: doing so could hide an earlier
+    /// expression or probe error. Source authorization still controls which
+    /// property indexes may be consulted.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.tests
+            .iter()
+            .take_while(|test| matches!(test, Test::Predicate(_) | Test::Identity(_)))
+            .filter_map(|test| match test {
+                Test::Predicate(predicate) => Some(predicate),
+                _ => None,
+            })
+    }
+
+    /// A direct STARTS WITH conjunct in the first Boolean expression, after
+    /// only infallible root predicates. Every scalar-expression conjunct must
+    /// be a direct prefix test, so nontext values are UNKNOWN and no arithmetic
+    /// sibling can be skipped. A source must prove compatible text ordering.
+    /// Later Boolean expressions and probes are never crossed by this accessor.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        for test in self.tests.iter() {
+            match test {
+                Test::Predicate(_) | Test::Identity(_) => {}
+                Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                    return expression.starts_with_conjunct();
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.
@@ -391,6 +426,19 @@ pub trait VertexScanSource {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<Self::Error, C>>;
+
+    /// Recheck an optional root candidate restriction against an already
+    /// resolved visible row. A scoped adapter must admit the row's authority
+    /// before calling this method and may use a poll-only control so stale
+    /// historical index entries do not consume candidate allowances.
+    /// This does not replace ordinary predicates or narrow independent probes.
+    fn root_is_candidate<C>(
+        &self,
+        _row: &VertexScanRow<'_>,
+        _control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<bool, VertexScanSourceError<Self::Error, C>> {
+        Ok(true)
+    }
 
     /// A cooperative consumer asks for one source examination at a time.
     /// Sources which internally filter a directory override this to return a

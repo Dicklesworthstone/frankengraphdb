@@ -434,6 +434,7 @@ impl ExpressionCell<'_> {
                     CanonicalScalar::Null
                         | CanonicalScalar::Int(_)
                         | CanonicalScalar::Float(_)
+                        | CanonicalScalar::Decimal(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
                         | CanonicalScalar::Date(_)
@@ -1258,8 +1259,10 @@ fn charge_payload<E>(
 
 /// openCypher toString / toInteger (fgdb-j687q). NULL stays NULL. Text that
 /// is not an i64 literal converts to NULL under toInteger, as openCypher
-/// defines it. Decimal, float, timestamp, bytes and average cells are a typed
-/// failure, never a guessed rendering.
+/// defines it. Decimal conversion stays exact: toString uses the canonical
+/// fixed-scale spelling and toInteger truncates its scale-18 coefficient
+/// toward zero without a binary64 intermediate. Bytes and exact aggregate
+/// cells remain typed failures.
 /// openCypher `base ^ exponent` (TCK Precedence2, Return2 [1]): a float, NULL
 /// when either operand is. A Count, wide sum or average, or a non-number, is
 /// an error. The exponent must be integral (a fractional one is NonInteger,
@@ -1433,6 +1436,21 @@ fn convert<E>(
                         Err(_) => Ok(CanonicalScalar::Null),
                     }
                 };
+            }
+            CanonicalScalar::Decimal(value) => {
+                if to_text {
+                    // The fixed-scale decimal spelling is bounded by its
+                    // canonical profile. Reserve the temporary formatter and
+                    // then the returned text payload under the same evaluator.
+                    control(GlaExecutionEvent::ScratchEntry)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    return make_text(&value.to_string(), instruction, control);
+                }
+                let unit = 10_i128.pow(fgdb_types::STRICT_PORTABLE_DECIMAL_SCALE);
+                let integer = value.coefficient() / unit;
+                return i64::try_from(integer)
+                    .map(CanonicalScalar::Int)
+                    .map_err(|_| failure(GraphIntegerErrorKind::Overflow));
             }
             // toString of a temporal value is its ISO 8601 text with the
             // java.time spelling (fgdb-txbg9); a temporal value is not a number.
@@ -2021,5 +2039,73 @@ mod tests {
             )
             .contains("123456789")
         );
+    }
+
+    #[test]
+    fn decimal_to_string_and_integer_never_round_through_binary64() {
+        use fgdb_types::CanonicalDecimal;
+
+        let decimal = |coefficient| {
+            GraphIntegerOp::Scalar(
+                ScalarPredicate::new(
+                    CanonicalScalar::Decimal(
+                        CanonicalDecimal::from_coefficient(coefficient).unwrap(),
+                    ),
+                    IntegerComparison::Equal,
+                )
+                .unwrap(),
+            )
+        };
+        let evaluate_scalar = |ops: &[GraphIntegerOp]| {
+            GraphIntegerExpression::prepare_scalar(ops)
+                .unwrap()
+                .evaluate_scalar_with_control(&[], &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+        };
+
+        let unit = 10_i128.pow(fgdb_types::STRICT_PORTABLE_DECIMAL_SCALE);
+        let beyond_binary64 = 9_007_199_254_740_993_i128 * unit + 1;
+        assert_eq!(
+            evaluate_scalar(&[decimal(beyond_binary64), GraphIntegerOp::ToText]),
+            CanonicalScalar::ucs_basic_text("9007199254740993.000000000000000001").unwrap()
+        );
+        assert_eq!(
+            evaluate_scalar(&[decimal(beyond_binary64), GraphIntegerOp::ToInteger]),
+            CanonicalScalar::Int(9_007_199_254_740_993)
+        );
+
+        for (coefficient, expected) in [
+            (unit - 1, 0),
+            (-(unit - 1), 0),
+            (7 * unit + unit / 2, 7),
+            (-(7 * unit + unit / 2), -7),
+        ] {
+            assert_eq!(
+                evaluate_scalar(&[decimal(coefficient), GraphIntegerOp::ToInteger]),
+                CanonicalScalar::Int(expected)
+            );
+        }
+
+        let expression =
+            GraphIntegerExpression::prepare_scalar(&[decimal(-1), GraphIntegerOp::ToText]).unwrap();
+        let mut events = 0;
+        assert_eq!(
+            expression
+                .evaluate_scalar_with_control(&[], &mut |_| {
+                    events += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
+            CanonicalScalar::ucs_basic_text("-0.000000000000000001").unwrap()
+        );
+        for stop in 1..=events {
+            let mut seen = 0;
+            let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GraphIntegerEvaluationError::Control(at)) if at == stop));
+            assert_eq!(seen, stop);
+        }
     }
 }

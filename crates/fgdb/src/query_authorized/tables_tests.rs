@@ -45,3 +45,157 @@ fn sealing_equals_the_ordered_map_it_replaced() {
         "{sorted_inputs} {repeated}"
     );
 }
+
+/// A scan's remembered row answers every lookup sequence as the table does:
+/// the vertex just yielded, a missing identity, and identities the scan has
+/// passed or not reached, in any interleaving.
+#[test]
+fn a_remembered_row_answers_every_lookup_as_the_table_does() {
+    use super::Tables;
+    use crate::VertexRow;
+    use fgdb_types::{CommitSeq, VId};
+    use std::cell::Cell;
+    let rows: Vec<VertexRow> = (0..50_u128)
+        .map(|at| VertexRow {
+            vid: VId(at * 3 + 1),
+            birth_ordinal: at as u64,
+            created_at: CommitSeq(1),
+            retired_at: None,
+            labels: Vec::new(),
+            props: Vec::new(),
+        })
+        .collect();
+    let mut tables = Tables::new();
+    tables.vertices = rows.iter().map(|row| (row.vid, row)).collect();
+    let mut state = 0x7ab1_e5ca_9a11_0001;
+    for _ in 0..200 {
+        let last = Cell::new(None);
+        let mut scan = tables.scan(&last);
+        for _ in 0..40 {
+            let vid = match next(&mut state) % 3 {
+                0 => match scan.next() {
+                    Some(vid) => vid,
+                    None => break,
+                },
+                1 => last.get().map_or(VId(0), |(vid, _)| vid),
+                _ => VId(u128::from(next(&mut state) % 160)),
+            };
+            let expected = tables.vertex(vid).map(|row| row as *const VertexRow);
+            let found = tables
+                .vertex_after(&last, vid)
+                .map(|row| row as *const VertexRow);
+            assert_eq!(found, expected, "{vid:?}");
+        }
+    }
+}
+
+/// Predicates of a verified grant that sees `relations`, and everything else.
+fn predicates(
+    relations: fgdb_warden::Scope<fgdb_delta_types::RelationId>,
+) -> super::PlannerPredicates {
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_types::DatabaseSecurityNamespaceId;
+    use fgdb_warden::{Authority, Grant, QueryLimits, Rights, Scope};
+    let namespace = DatabaseSecurityNamespaceId([0x5a; 32]);
+    let authority = Authority::new(
+        AuthKey::from_seed(5151),
+        namespace,
+        "graph",
+        SchemaEpoch(1),
+        1,
+    )
+    .unwrap();
+    let grant = Grant {
+        branch: "main".into(),
+        labels: Scope::All,
+        relations,
+        properties: Scope::All,
+        rights: Rights::Read,
+        limits: QueryLimits {
+            max_nodes: 1_000_000,
+            max_work: 1_000_000_000,
+            max_rows: 1000,
+        },
+        expires_at_ms: 10_000,
+    };
+    let token = authority.issue_at(&grant, 100).unwrap();
+    authority
+        .verify_at(&token, "main", 100)
+        .unwrap()
+        .predicates()
+        .clone()
+}
+
+/// An edge of a complete bound closure, whose endpoints are admitted,
+/// admits without looking them up (fgdb-61p1n): the same events in the same
+/// order, the same records and the same edge table as `admit_edge`, for
+/// tables small and large enough to be positioned, every relation visible
+/// or one hidden.
+#[test]
+fn closure_edges_admit_exactly_as_checked_edges() {
+    use super::{Fault, POSITIONED_VERTICES, SourceEvent, Tables};
+    use crate::VertexRow;
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CommitSeq, EId, VId};
+    use fgdb_warden::Scope;
+    let mut state = 0xc105_ed9e_0000_0001;
+    let mut admitted = 0;
+    for vertices in [40_u128, POSITIONED_VERTICES as u128 + 500] {
+        let rows: Vec<VertexRow> = (0..vertices)
+            .map(|at| VertexRow {
+                vid: VId(at * 7 + 3),
+                birth_ordinal: at as u64,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: Vec::new(),
+                props: Vec::new(),
+            })
+            .collect();
+        let edges: Vec<super::Edge<'_>> = (0..3 * vertices)
+            .map(|eid| {
+                let mut endpoint = || rows[(next(&mut state) % vertices as u64) as usize].vid;
+                let (src, dst) = (endpoint(), endpoint());
+                let relation = if next(&mut state).is_multiple_of(2) {
+                    RelationId(1)
+                } else {
+                    RelationId(2)
+                };
+                ((EId(eid), src, relation, dst), &[][..])
+            })
+            .collect();
+        for scope in [Scope::All, Scope::only([RelationId(1)])] {
+            let predicates = predicates(scope);
+            let run = |closure: bool| {
+                let mut log = Vec::new();
+                let mut tables = Tables::new();
+                let mut control = |event: SourceEvent| -> Result<(), Fault> {
+                    log.push(event);
+                    Ok(())
+                };
+                for row in &rows {
+                    let admitted = tables
+                        .admit_vertex(row, &predicates, &mut || Ok::<_, Fault>(()), &mut control)
+                        .unwrap();
+                    assert!(admitted.is_some());
+                }
+                for &edge in &edges {
+                    if closure {
+                        tables
+                            .admit_closure_edge(edge, &predicates, true, &mut control)
+                            .unwrap();
+                    } else {
+                        tables.admit_edge(edge, &predicates, &mut control).unwrap();
+                    }
+                }
+                let identities: Vec<_> =
+                    tables.edges.iter().map(|&(identity, _)| identity).collect();
+                (log, tables.records, identities)
+            };
+            let checked = run(false);
+            assert_eq!(run(true), checked, "{vertices} vertices");
+            admitted += checked.2.len();
+        }
+    }
+    assert!(admitted > 10_000, "{admitted}");
+}

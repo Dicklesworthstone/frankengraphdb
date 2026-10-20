@@ -11,6 +11,9 @@
 //! `&CommitCx`, while every synchronous read accepts the shared sealed
 //! `StorageReadCx` contract and runs under the caller's role restriction — the
 //! doctrine-3 boundary a lab runtime swaps to inject filesystem faults.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
@@ -28,6 +31,9 @@ use std::path::PathBuf;
 const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 const REL: RelationId = RelationId(1);
+
+#[path = "block_store/root_append.rs"]
+mod root_append;
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-blockstore-{}-{name}", std::process::id()));
@@ -1544,89 +1550,99 @@ fn more_blocks_than_one_flush() -> (Vec<Vec<u8>>, Vec<DeltaBlockVersion>) {
 }
 
 /// **A BATCH NAMES NO OBJECT BEFORE ITS STAGED SYNCS, AND REWRITES WHAT A CRASH
-/// LEFT STAGED.** A batch writes up to `BATCH_SYNCS_IN_FLIGHT` staging inodes,
-/// syncs them together, and only then renames them to canonical names. More
-/// objects than one flush holds force a flush mid-batch; crashing that flush
-/// after its syncs but before its renames must leave every one of its objects
-/// without a canonical name, only noncanonical staging inodes. A clean retry
-/// must rewrite those leftovers, not refuse them, and leave none behind.
+/// LEFT STAGED.** A flush writes its objects under noncanonical staging names
+/// (one inode per object below `PACK_MIN_OBJECTS`, one pack inode at or above
+/// it), syncs them and proves their durable bytes, and only then renames them
+/// to canonical names. Crashing a flush after its syncs but before its
+/// renames must leave every one of its objects without a canonical name and
+/// unreadable, only noncanonical staging inodes. A clean retry must rewrite
+/// those leftovers, not refuse them, and leave none behind. Both publication
+/// units are exercised: a loose batch, then a packed one.
 #[test]
 fn a_batch_names_no_object_before_its_staged_syncs_and_rewrites_leftover_staging() {
-    use fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT;
+    use fgdb_strata::store::{PACK_DIR, PACK_MIN_OBJECTS};
     let dir = scratch_dir("batch-flush-window");
     under_lab(0x9_111, move |cx| async move {
         let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
             .await
             .expect("store");
         let staging_names = || {
-            std::fs::read_dir(dir.join(BLOCK_DIR))
+            let loose = std::fs::read_dir(dir.join(BLOCK_DIR))
                 .expect("blocks directory")
                 .map(|entry| entry.expect("entry").file_name())
                 .filter(|name| {
                     name.to_string_lossy()
                         .starts_with(".block-publication.staging.")
                 })
-                .count()
+                .count();
+            let packed = std::fs::read_dir(dir.join(BLOCK_DIR).join(PACK_DIR))
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.expect("entry").file_name())
+                        .filter(|name| name.to_string_lossy() == ".pack-staging")
+                        .count()
+                })
+                .unwrap_or(0);
+            (loose, packed)
         };
         let (blocks, ids) = more_blocks_than_one_flush();
-
-        let mut receipts = PublishReceipts::new();
-        let mut batch = store
-            .publication_batch(
-                &cx,
-                &mut receipts,
-                Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
-            )
-            .expect("batch");
-        let mut crashed_at = None;
-        for (at, bytes) in blocks.iter().enumerate() {
-            if let Err(error) = batch.put_verified(&cx, bytes, None).await {
-                crashed_at = Some((at, error));
-                break;
+        let loose = PACK_MIN_OBJECTS - 1;
+        assert!(blocks.len() - loose >= PACK_MIN_OBJECTS);
+        for (blocks, ids, staged) in [
+            (&blocks[..loose], &ids[..loose], (loose, 0)),
+            (&blocks[loose..], &ids[loose..], (0, 1)),
+        ] {
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store
+                .publication_batch(
+                    &cx,
+                    &mut receipts,
+                    Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
+                )
+                .expect("batch");
+            for bytes in blocks {
+                batch.put_verified(&cx, bytes, None).await.expect("staged");
             }
-        }
-        let Some((at, error)) = crashed_at else {
-            panic!("more objects than one flush holds never flushed mid-batch");
-        };
-        assert_eq!(
-            at, BATCH_SYNCS_IN_FLIGHT,
-            "the full flush runs at the next put"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("complete staging inode before canonical publication"),
-            "wrong crash instant: {error}"
-        );
-        drop(batch);
-        for id in &ids {
+            let error = batch.finish(&cx).await.expect_err("the crash instant");
             assert!(
-                !store.path(id.0).exists(),
-                "a staged object was named before its flush renamed it"
+                error
+                    .to_string()
+                    .contains("complete staging inode before canonical publication"),
+                "wrong crash instant: {error}"
             );
-            assert!(!receipts.holds(*id));
-        }
-        assert_eq!(staging_names(), BATCH_SYNCS_IN_FLIGHT);
+            for id in ids {
+                assert!(
+                    !store.path(id.0).exists(),
+                    "a staged object was named before its flush renamed it"
+                );
+                assert!(
+                    store.get_bytes(&cx, *id).await.is_err(),
+                    "a staged object was readable before its flush named it"
+                );
+                assert!(!receipts.holds(*id));
+            }
+            assert_eq!(staging_names(), staged);
 
-        let mut batch = store
-            .publication_batch(&cx, &mut receipts, None)
-            .expect("retry");
-        for bytes in &blocks {
-            batch
-                .put_verified(&cx, bytes, None)
-                .await
-                .expect("restaged");
+            let mut batch = store
+                .publication_batch(&cx, &mut receipts, None)
+                .expect("retry");
+            for bytes in blocks {
+                batch
+                    .put_verified(&cx, bytes, None)
+                    .await
+                    .expect("restaged");
+            }
+            batch.finish(&cx).await.expect("durable batch");
+            for (id, bytes) in ids.iter().zip(blocks) {
+                assert!(receipts.holds(*id));
+                assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
+            }
+            assert_eq!(
+                staging_names(),
+                (0, 0),
+                "a flush renames every staging inode away"
+            );
         }
-        batch.finish(&cx).await.expect("durable batch");
-        for (id, bytes) in ids.iter().zip(&blocks) {
-            assert!(receipts.holds(*id));
-            assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
-        }
-        assert_eq!(
-            staging_names(),
-            0,
-            "a flush renames every staging inode away"
-        );
     });
 }
 
@@ -1794,13 +1810,17 @@ fn a_receipted_property_patch_is_not_reread_by_a_later_block() {
         let mut batch = store
             .publication_batch(&cx, &mut fresh, None)
             .expect("batch");
+        // Objects are staged in memory and checked against their canonical
+        // files when the batch publishes them, so the refusal is the batch's.
+        let published = match batch
+            .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
+            .await
+        {
+            Ok(_) => batch.finish(&cx).await,
+            Err(error) => Err(error),
+        };
         assert!(
-            matches!(
-                batch
-                    .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
-                    .await,
-                Err(StoreError::DamagedExisting { .. })
-            ),
+            matches!(published, Err(StoreError::DamagedExisting { .. })),
             "a session without the receipt re-reads the file and sees the damage"
         );
     });
@@ -2728,6 +2748,111 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
     });
 }
 
+/// **A ROOT PUBLICATION PACKS A BULK COMMIT'S NEW SEGMENTS AND KEEPS ITS ROOT
+/// AND MANIFEST LOOSE.** A root naming seven new segments publishes them as
+/// loose files, as a small transaction's objects are. The next root, eight
+/// segments longer, publishes those eight as one pack beside the loose seven,
+/// while its root and the manifest naming it stay loose files, which slot
+/// recovery and the damage tooling address by path. A fresh handle resolves
+/// the manifest and reopens every block through both kinds of segment.
+#[test]
+fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
+    use fgdb_strata::manifest::ManifestRecord;
+    use fgdb_strata::store::{PACK_DIR, ROOT_SEGMENT_PACK_MIN};
+    let dir = scratch_dir("root-segment-pack");
+    under_lab(0xd9, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let (loose, packed) = (ROOT_SEGMENT_PACK_MIN - 1, ROOT_SEGMENT_PACK_MIN);
+        let grown = batch_of_blocks(&cx, &store, (loose + packed) * SEGMENT_REFS + 1).await;
+        let mut small = grown.clone();
+        small.blocks.truncate(loose * SEGMENT_REFS + 1);
+        let segments: Vec<ObjectId> =
+            encode_root_v5(&grown, &K_OID, NAMESPACE, &mut SegmentCache::default())
+                .expect("encodes")
+                .new_segments
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+        assert_eq!(segments.len(), loose + packed);
+        let packs = || {
+            std::fs::read_dir(dir.join(BLOCK_DIR).join(PACK_DIR))
+                .expect("the blocks were packed")
+                .map(|entry| entry.expect("entry").file_name())
+                .filter(|name| !name.to_string_lossy().starts_with('.'))
+                .count()
+        };
+        let block_packs = packs();
+
+        let mut receipts = PublishReceipts::new();
+        let mut manifest = None;
+        for (root, new, packs_after) in [
+            (&small, &segments[..loose], block_packs),
+            (&grown, &segments[loose..], block_packs + 1),
+        ] {
+            let verified = store
+                .verify_root(&cx, root, &mut receipts)
+                .await
+                .expect("verifies");
+            let root_id = verified.id();
+            let records = [ManifestRecord {
+                graph: root.graph,
+                branch: root.branch,
+                partition: root.partition,
+                root: root_id,
+                published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+            }];
+            let (manifest_id, _) = store
+                .publish_root_and_manifest(&cx, verified, &records, &mut receipts)
+                .await
+                .expect("publishes");
+            assert_eq!(packs(), packs_after, "{} new segments", new.len());
+            for segment in new {
+                assert_eq!(
+                    store.path(*segment).is_file(),
+                    new.len() < ROOT_SEGMENT_PACK_MIN,
+                    "a segment is loose exactly when its root names fewer than the minimum new"
+                );
+            }
+            assert!(store.path(root_id.0).is_file(), "the root is loose");
+            assert!(store.path(manifest_id.0).is_file(), "the manifest is loose");
+            manifest = Some((manifest_id, root_id));
+        }
+        for segment in &segments[..loose] {
+            assert!(
+                store.path(*segment).is_file(),
+                "an earlier root's segments stay put"
+            );
+        }
+
+        let (manifest_id, root_id) = manifest.expect("published");
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        let resolved = reopened
+            .resolve_manifest(&cx, manifest_id)
+            .await
+            .expect("resolves through packed segments");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0.root, root_id);
+        assert_eq!(resolved[0].1, grown);
+        let (_, blocks, _, _) = reopened
+            .reopen(&cx, root_id)
+            .await
+            .expect("reopens the whole partition");
+        assert_eq!(blocks.len(), grown.blocks.len());
+        for (k, entries) in blocks.iter().enumerate() {
+            let k = k as u128;
+            assert_eq!(
+                entries,
+                &vec![entry(1_000 + k, 500_000 + k, 1)],
+                "block {k}"
+            );
+        }
+    });
+}
+
 /// **RECEIPTS SEEDED FROM A REOPEN ARE THE RECEIPTS ITS PUBLISHER HELD**
 /// (fgdb-ibbuq). A 767-block root is two full segments plus a 255-reference
 /// tail, and the next root adds one block, which fills a third segment. Three
@@ -2868,14 +2993,17 @@ fn a_damaged_or_substituted_segment_refuses_the_root() {
 /// to the flat one would refuse a lawful root.
 #[test]
 fn a_bounded_root_read_charges_every_segment_it_names() {
+    // Both lists at a format's ceiling: V4 at the flat one, V5 at its own.
+    const V4_REFS: usize = 2 * fgdb_strata::root::MAX_FLAT_ROOT_BLOCKS as usize;
+    const V5_REFS: usize = 2 * fgdb_strata::root::MAX_ROOT_BLOCKS as usize;
     const LARGEST_V4_READ: usize =
-        MAX_ENCODED_ROOT_V4_BYTES + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+        MAX_ENCODED_ROOT_V4_BYTES + V4_REFS / SEGMENT_REFS * SEGMENT_BYTES;
     // A V5 read at the ceilings: the root, every full index segment of both
     // lists, and every segment.
     const LARGEST_V5_READ: usize = MAX_ENCODED_ROOT_V5_BYTES
-        + (2 << 20) / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
+        + V5_REFS / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
             * fgdb_strata::root_segment::INDEX_BYTES
-        + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+        + V5_REFS / SEGMENT_REFS * SEGMENT_BYTES;
     const _: () = assert!(LARGEST_V4_READ > MAX_ENCODED_ROOT_BYTES);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V4_READ);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V5_READ);

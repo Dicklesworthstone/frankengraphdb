@@ -792,3 +792,278 @@ fn every_public_refresh_checkpoint_preserves_typed_interruption_and_retry() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn cold_view(db: &Database<crate::MemVfs>) -> crate::EmbeddedReadView {
+    // This test-only source deliberately omits maintained query pins, so
+    // comparisons retain the independently built source after registration.
+    crate::EmbeddedReadView {
+        snapshot: std::sync::Arc::clone(&db.snapshot),
+        namespace: db.keys.namespace,
+        beacon_indexes: super::QueryIndexes::default(),
+    }
+}
+
+#[test]
+fn maintained_automatic_reads_match_fresh_exact_corpus_after_commits_and_compaction() {
+    let ((), report) = run_async_under_lab(0xbeac_1310, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        for (id, words, x, y) in [
+            (1, "graph graph storage", 0, 1),
+            (2, "storage", 2, 0),
+            (3, "graph", 3, 4),
+        ] {
+            db.write(&commit, document(id, words, x, y)).await.unwrap();
+        }
+        let definition = options();
+        db.register_beacon_index(&query, &definition, ReadPolicy::default())
+            .unwrap();
+        let searches = [
+            text_query(),
+            vector_query(),
+            Search::Hybrid(ExactHybridQuery {
+                vector: &[0.0, 0.0],
+                text: "graph storage",
+                k: 2,
+                vector_candidates: 2,
+                text_candidates: 2,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            }),
+        ];
+        let compare = |db: &Database<crate::MemVfs>| {
+            let view = cold_view(db);
+            let mut reused = definition.clone();
+            // No source scratch or document staging is permitted. The source
+            // oracle must instead use the original independent build policy.
+            reused.policy.max_source_scratch = 0;
+            reused.policy.max_staging_rows = 0;
+            for search in searches {
+                let expected = view.beacon_search(&query, &definition, search).unwrap();
+                assert!(!expected.is_empty());
+                assert_eq!(db.beacon_search(&query, &reused, search).unwrap(), expected);
+                assert_eq!(
+                    db.beacon_search_filtered(&query, &reused, search, |id| id != VId(1))
+                        .unwrap(),
+                    view.beacon_search_filtered(&query, &definition, search, |id| id != VId(1))
+                        .unwrap()
+                );
+            }
+        };
+        compare(&db);
+
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_vertex_property(VId(1), PropertyKeyId(1), Some(text("storage storage")));
+        changes.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(7)));
+        changes.set_vertex_label(VId(2), LabelId(1), false);
+        changes.delete_vertex(VId(3));
+        changes.create_vertex(
+            VId(4),
+            vec![LabelId(1)],
+            vec![
+                (PropertyKeyId(1), text("graph storage")),
+                (PropertyKeyId(2), CanonicalScalar::Int(0)),
+                (PropertyKeyId(3), CanonicalScalar::Int(2)),
+            ],
+        );
+        db.write(&commit, changes).await.unwrap();
+        compare(&db);
+
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_vertex_label(VId(2), LabelId(1), true);
+        changes.set_vertex_property(VId(1), PropertyKeyId(3), None);
+        db.write(&commit, changes).await.unwrap();
+        compare(&db);
+        db.compact(&commit).await.unwrap();
+        compare(&db);
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn maintained_automatic_reads_keep_fresh_limits_and_every_typed_checkpoint() {
+    use fgdb_beacon::read::ReadError as SearchError;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xbeac_1311, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, document(1, "graph storage", 0, 1))
+            .await
+            .unwrap();
+        let definition = options();
+        let expected = db.beacon_search(&query, &definition, text_query()).unwrap();
+        let mut delivery = definition.clone();
+        delivery.policy.max_source_scratch = 0;
+        delivery.policy.max_staging_rows = 0;
+        assert!(db.beacon_search(&query, &delivery, text_query()).is_err());
+        db.register_beacon_index(&query, &definition, ReadPolicy::default())
+            .unwrap();
+        assert_eq!(
+            db.beacon_search(&query, &delivery, text_query()).unwrap(),
+            expected
+        );
+
+        let mut exhausted = delivery.clone();
+        exhausted.policy.max_work_units = 0;
+        assert!(matches!(
+            db.beacon_search_filtered(&query, &exhausted, text_query(), |_| false),
+            Err(SearchError::Index(BeaconError::WorkBudgetExceeded))
+        ));
+        exhausted = delivery.clone();
+        exhausted.policy.max_result_rows = 0;
+        assert!(matches!(
+            db.beacon_search(&query, &exhausted, text_query()),
+            Err(SearchError::Index(BeaconError::ResourceLimit {
+                resource: "result rows",
+                limit: 0,
+            }))
+        ));
+
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let measured = query.with_checkpoint_probe(Arc::clone(&probe));
+        assert_eq!(
+            db.beacon_search(&measured, &delivery, text_query())
+                .unwrap(),
+            expected
+        );
+        let calls = probe.calls();
+        assert!(calls > 2);
+        for stop in 1..=calls {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = query.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                matches!(
+                    db.beacon_search(&interrupted, &delivery, text_query()),
+                    Err(SearchError::Interrupted(_))
+                ),
+                "checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop, "first interruption is retained");
+            assert_eq!(
+                db.beacon_search(&interrupted, &delivery, text_query())
+                    .unwrap(),
+                expected,
+                "the refused query cannot poison its shared generation"
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_ticks() {
+    let ((), report) = run_async_under_lab(0xbeac_1312, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let first = db.write(&commit, document(1, "graph", 1, 2)).await.unwrap();
+        let definition = options();
+        let handle = db
+            .register_beacon_index(&query, &definition, ReadPolicy::default())
+            .unwrap();
+        let hybrid = Search::Hybrid(ExactHybridQuery {
+            vector: &[0.0, 0.0],
+            text: "graph storage",
+            k: 1,
+            vector_candidates: 1,
+            text_candidates: 1,
+            vector_mode: VectorSearch::Exact,
+            text_mode: TextMatch::Any,
+            profile: ExactRrfProfile::default(),
+        });
+        let mut mismatches = Vec::new();
+        let mut changed = definition.clone();
+        changed.vertex_label = None;
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.projection.text = Some(PropertyKeyId(99));
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.projection.vector.reverse();
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.projection.encoding = fgdb_beacon::read::VectorEncoding::CoordinatesRoundedF32;
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.index.vector.as_mut().unwrap().metric = DistanceMetric::NegativeDotProduct;
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.index.vector.as_mut().unwrap().seed ^= 1;
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.index.text.as_mut().unwrap().k1 = 2.0;
+        mismatches.push(changed);
+        let mut changed = definition.clone();
+        changed.index.max_documents -= 1;
+        mismatches.push(changed);
+        let view = cold_view(&db);
+        for mut changed in mismatches {
+            let expected = view.beacon_search(&query, &changed, hybrid).unwrap();
+            assert_eq!(
+                db.beacon_search(&query, &changed, hybrid).unwrap(),
+                expected
+            );
+            changed.policy.max_staging_rows = 0;
+            assert!(db.beacon_search(&query, &changed, hybrid).is_err());
+        }
+
+        let mut no_build = definition.clone();
+        no_build.policy.max_staging_rows = 0;
+        let ann = Search::Vector {
+            query: &[0.0, 0.0],
+            k: 1,
+            mode: VectorSearch::Approximate { ef_search: 8 },
+        };
+        assert!(db.beacon_search(&query, &no_build, ann).is_err());
+        db.write(&commit, document(2, "storage", 0, 1))
+            .await
+            .unwrap();
+        let mut historical = definition.clone();
+        historical.as_of = Some(first);
+        assert_eq!(
+            db.beacon_search(&query, &historical, hybrid).unwrap(),
+            view.beacon_search(&query, &historical, hybrid).unwrap()
+        );
+        historical.policy.max_staging_rows = 0;
+        assert!(db.beacon_search(&query, &historical, hybrid).is_err());
+
+        db.unregister_beacon_index(&query, &handle).unwrap();
+        let handle = db
+            .register_beacon_index(
+                &query,
+                &definition,
+                ReadPolicy {
+                    max_work_units: 0,
+                    ..ReadPolicy::default()
+                },
+            )
+            .unwrap();
+        db.write(&commit, document(3, "graph graph storage", 0, 0))
+            .await
+            .unwrap();
+        assert!(
+            db.beacon_index_status(&query, &handle)
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        assert!(db.beacon_search(&query, &no_build, hybrid).is_err());
+        assert_eq!(
+            db.beacon_search(&query, &definition, hybrid).unwrap(),
+            cold_view(&db)
+                .beacon_search(&query, &definition, hybrid)
+                .unwrap()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

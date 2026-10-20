@@ -142,10 +142,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// result. Each active probe has its own definition-bounded frame charge;
     /// histories, decoding and predicates share the outer cumulative policy.
     ///
-    /// One bounded source record per active hop is retained. Routed incidence
+    /// One bounded source record per active hop is retained. Authenticated block
     /// directories, decode workspaces, traversal and copied results all use this
-    /// view's MemoryPool. The first nested lookup builds resident block routing;
-    /// it can refuse on memory/work limits. Consecutive incidence successors
+    /// view's MemoryPool. Nested lookups seek shared descriptor metadata without
+    /// reading graph payloads to build routing. Broad incoming ranges can still
+    /// select many blocks and refuse on memory/work limits. Consecutive successors
     /// retain one charged merge heap and bounded decoded block, instead of
     /// reseeding for every candidate. Root advances release that continuation;
     /// different incidences or positions replace it before reseeding. Deep

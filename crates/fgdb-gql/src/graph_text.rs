@@ -10,6 +10,7 @@ mod boolean;
 pub(crate) mod literal;
 mod ordering;
 mod parameters;
+mod row_fields;
 mod scoped;
 pub use crate::algebra::GraphPathFunction;
 use crate::algebra::{
@@ -668,6 +669,9 @@ struct Parser<'a> {
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
+    /// Computed imported join keys, evaluated once per leading row before
+    /// its graph product. Their private columns never enter public schemas.
+    read_row_fields: Vec<crate::set_text::ReadValueTemplate>,
     /// Enabled only while a multipart graph part can lower its WHERE to ON.
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
@@ -774,6 +778,7 @@ impl<'a> Parser<'a> {
             parameter_types: BTreeMap::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
+            read_row_fields: Vec::new(),
             read_comparisons: None,
             boundary_reads: None,
             elements: Vec::new(),
@@ -1203,15 +1208,12 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.punct(b':', ":")?;
-            let row = match self.current.kind {
-                TokenKind::Word(binding) if !edge => self
-                    .read_row_bindings
-                    .iter()
-                    .position(|candidate| candidate.text == binding),
-                _ => None,
+            let row = if edge {
+                None
+            } else {
+                self.imported_row_field()?
             };
             if let Some(row) = row {
-                self.advance()?;
                 self.read_correlations.push((variable, Some(key), row));
             } else {
                 let at = self.current.at;

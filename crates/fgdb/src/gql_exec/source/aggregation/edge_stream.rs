@@ -1,5 +1,5 @@
 //! Pull identified edge matches from one pinned, admitted MVCC generation.
-//! Successor/predecessor walks use the existing persistent history indexes;
+//! Root identities stream through the existing flat base and persistent overlay;
 //! opening does not collect candidate IDs, visible edges, or projected rows.
 
 mod aggregate;
@@ -7,7 +7,7 @@ mod asynchronous_join;
 mod expansion;
 pub(super) use expansion::next_from_view;
 
-use crate::gql_exec::source::{SourceEvent, edge_properties_at};
+use crate::gql_exec::source::{HistoryRef, IdentityScanCursor, SourceEvent, edge_properties_at};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
@@ -29,7 +29,7 @@ pub struct SnapshotEdgeSource<'q> {
     view: EmbeddedReadView,
     cx: &'q QueryCx,
     as_of: CommitSeq,
-    after: Option<EId>,
+    scan: IdentityScanCursor,
 }
 impl EdgeScanSource for SnapshotEdgeSource<'_> {
     type Error = ReadError;
@@ -43,23 +43,17 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
     ) -> Result<Option<EId>, EdgeScanSourceError<ReadError, C>> {
         let cx = self.cx;
         cx.with_restriction(|| {
-            let mut node = self.view.snapshot.adjacency_index().histories.0.as_deref();
-            let mut successor = None;
-            // Strict successor, not eid+1: zero and u128::MAX are ordinary IDs.
-            // Each visited node is metered; no unmetered rank lookup or ID bag.
-            while let Some(current) = node {
-                control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-                if self.after.is_none_or(|after| current.key > after) {
-                    successor = Some(current.key);
-                    node = current.left.0.as_deref();
-                } else {
-                    node = current.right.0.as_deref();
-                }
-            }
-            if let Some(eid) = successor {
-                self.after = Some(eid);
-            }
-            Ok(successor)
+            // Sequential ordinals and an owned overlay spine avoid descending
+            // the identity index again for each root. No eid+1 sentinel, and a
+            // control refusal commits no cursor movement.
+            self.scan
+                .next(self.view.snapshot.adjacency_index(), &mut |event| {
+                    control(match event {
+                        SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                        SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                    })
+                })
+                .map_err(EdgeScanSourceError::Control)
         })
     }
 
@@ -86,7 +80,11 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
-        edge_from_view(&self.view, self.cx, self.as_of, eid, control)
+        self.cx.with_restriction(|| {
+            let snapshot = &self.view.snapshot;
+            let history = self.scan.history(snapshot.adjacency_index(), eid);
+            edge_from_snapshot(snapshot, self.as_of, eid, history, control)
+        })
     }
 
     fn vertex<'a, C>(
@@ -98,7 +96,7 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
             let snapshot = &self.view.snapshot;
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
                     control(match event {
                         // SnapshotRecords counts candidate EDGE histories once,
@@ -128,54 +126,49 @@ pub(super) fn edge_from_view<'a, C>(
     eid: EId,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
-    cx.with_restriction(|| {
-        let snapshot = &view.snapshot;
-        let mut node = snapshot.adjacency_index().histories.0.as_deref();
-        let mut history = None;
-        while let Some(current) = node {
-            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            match eid.cmp(&current.key) {
-                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
-                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                core::cmp::Ordering::Equal => {
-                    history = Some(&current.value);
-                    break;
-                }
-            }
+    cx.with_restriction(|| edge_from_snapshot(&view.snapshot, as_of, eid, None, control))
+}
+
+fn edge_from_snapshot<'a, C>(
+    snapshot: &'a crate::Snapshot,
+    as_of: CommitSeq,
+    eid: EId,
+    history: Option<HistoryRef<'_>>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
+    let history = match history {
+        Some(history) => history,
+        None => {
+            let Some(history) = snapshot
+                .adjacency_index()
+                .history_charged(eid, &mut || control(GlaExecutionEvent::Work))
+                .map_err(EdgeScanSourceError::Control)?
+            else {
+                return Ok(None);
+            };
+            history
         }
-        let Some(history) = history else {
-            return Ok(None);
-        };
-        let mut node = history.0.as_deref();
-        let mut winner = None;
-        while let Some(current) = node {
-            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            // History keys are (created_at, block, row). Pick the last
-            // coordinate at or before the cut, INCLUDING a retirement
-            // restatement. Falling back to an older live row resurrects
-            // deletes and can mix topology with another version's costs.
-            if current.key.0 <= as_of {
-                winner = Some(current.key);
-                node = current.right.0.as_deref();
-            } else {
-                node = current.left.0.as_deref();
-            }
-        }
-        let Some((_, block, row)) = winner else {
-            return Ok(None);
-        };
-        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        let entry = &snapshot.blocks[block][row];
-        if !entry.visible_at(as_of) {
-            return Ok(None);
-        }
-        Ok(Some(EdgeScanRow {
-            source: entry.src,
-            target: entry.dst,
-            relation: entry.relation,
-            properties: edge_properties_at(&snapshot.block_props, block, row),
-        }))
-    })
+    };
+    // History keys are (created_at, block, row). Pick the last coordinate at
+    // or before the cut, INCLUDING a retirement restatement. A cached history
+    // never substitutes an older live row or properties from another version.
+    let Some((block, row)) = history
+        .latest_charged(as_of, &mut || control(GlaExecutionEvent::Work))
+        .map_err(EdgeScanSourceError::Control)?
+    else {
+        return Ok(None);
+    };
+    control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+    let entry = &snapshot.blocks[block][row];
+    if !entry.visible_at(as_of) {
+        return Ok(None);
+    }
+    Ok(Some(EdgeScanRow {
+        source: entry.src,
+        target: entry.dst,
+        relation: entry.relation,
+        properties: edge_properties_at(&snapshot.block_props, block, row),
+    }))
 }
 impl core::fmt::Debug for SnapshotEdgeSource<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -208,7 +201,7 @@ fn open<'q>(
             view,
             cx,
             as_of,
-            after: None,
+            scan: IdentityScanCursor::default(),
         },
         plan,
         policy,
@@ -282,7 +275,7 @@ impl EmbeddedReadView {
             view: self.clone(),
             cx,
             as_of,
-            after: None,
+            scan: IdentityScanCursor::default(),
         })
     }
 

@@ -13,7 +13,7 @@ type Cancel = Box<asupersync::error::Error>;
 #[path = "query_aggregate_stream.rs"]
 mod aggregate_stream;
 #[path = "query_authorized.rs"]
-mod authorized;
+pub(crate) mod authorized;
 #[path = "query_beacon.rs"]
 mod beacon;
 #[path = "query_diff.rs"]
@@ -33,12 +33,12 @@ pub use authorized::{
     AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
     AuthorizedSpoolCursor,
 };
-pub(crate) use beacon::BeaconRegistry;
 pub(crate) use beacon::procedure::{
     EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
     privileged_with_registry as hybrid_procedure_with_registry, refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
+pub(crate) use beacon::{BeaconQueryIndexes, BeaconRegistry};
 pub use beacon::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,
@@ -49,7 +49,7 @@ use explain::{explain_prefix, explain_result};
 pub use prism::ProcedureError;
 pub(crate) use prism::{
     bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
-    push_staged as push_prism_staged,
+    push_staged as push_prism_staged, source_control as prism_source_control,
 };
 pub use view::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,

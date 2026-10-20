@@ -143,18 +143,21 @@ pub struct EliasFano {
 
 /// Allocation-free forward cursor over one scalar Elias-Fano sequence.
 ///
-/// This crate-internal seam is deliberately below durable framing. It scans
+/// This physical-access seam is deliberately below durable framing. It scans
 /// each unary-high word at most once and reads each low field once, so consuming
 /// the cursor is linear in the encoded words plus yielded values. Callers can
 /// use [`Self::fill`] to cap the amount of work and caller-owned storage used by
-/// one step.
-pub(crate) struct EliasFanoSequentialCursor<'a> {
+/// one step. Sparse gaps use the rank directory with logarithmic probes in the
+/// gap length, so a single value never linearly walks a long run of zero words.
+pub struct EliasFanoSequentialCursor<'a> {
     encoded: &'a EliasFano,
     logical_index: usize,
     high_word_index: usize,
     remaining_high_word: u64,
     #[cfg(test)]
     high_words_examined: usize,
+    #[cfg(test)]
+    high_gap_probes: usize,
 }
 
 impl EliasFano {
@@ -321,9 +324,9 @@ impl EliasFano {
 
     /// Creates an allocation-free cursor at the first represented value.
     ///
-    /// This is a crate-internal physical-access seam, not a durable iterator
+    /// This is a physical-access seam, not a durable iterator
     /// format or rank/select capability claim.
-    pub(crate) fn sequential_cursor(&self) -> EliasFanoSequentialCursor<'_> {
+    pub fn sequential_cursor(&self) -> EliasFanoSequentialCursor<'_> {
         EliasFanoSequentialCursor {
             encoded: self,
             logical_index: 0,
@@ -331,6 +334,47 @@ impl EliasFano {
             remaining_high_word: self.high_words.first().copied().unwrap_or(0),
             #[cfg(test)]
             high_words_examined: usize::from(!self.high_words.is_empty()),
+            #[cfg(test)]
+            high_gap_probes: 0,
+        }
+    }
+
+    /// Creates an allocation-free forward cursor at a logical position.
+    ///
+    /// A nonzero start uses one positional directory lookup, then scans each
+    /// remaining unary-high word at most once. Seeking never decodes the
+    /// preceding values. A position at or beyond the end returns an exhausted
+    /// cursor; duplicates remain distinct positions.
+    pub fn sequential_cursor_from(&self, index: usize) -> EliasFanoSequentialCursor<'_> {
+        if index == 0 {
+            return self.sequential_cursor();
+        }
+        if index >= self.len {
+            return EliasFanoSequentialCursor {
+                encoded: self,
+                logical_index: self.len,
+                high_word_index: self.high_words.len(),
+                remaining_high_word: 0,
+                #[cfg(test)]
+                high_words_examined: 0,
+                #[cfg(test)]
+                high_gap_probes: 0,
+            };
+        }
+        let position = self
+            .select_high_position(index)
+            .expect("validated Elias-Fano position");
+        let high_word_index = position / u64::BITS as usize;
+        EliasFanoSequentialCursor {
+            encoded: self,
+            logical_index: index,
+            high_word_index,
+            remaining_high_word: self.high_words[high_word_index]
+                & (u64::MAX << (position % u64::BITS as usize)),
+            #[cfg(test)]
+            high_words_examined: 1,
+            #[cfg(test)]
+            high_gap_probes: 0,
         }
     }
 
@@ -478,10 +522,57 @@ impl EliasFano {
 }
 
 impl EliasFanoSequentialCursor<'_> {
+    /// Gallop over a zero-word gap, then locate its end in the bounded interval.
+    /// Searching only the gap keeps total traversal linear in the encoded size;
+    /// a global directory search at every word boundary would not have that law.
+    fn skip_empty_high_words(&mut self) -> Option<()> {
+        let target_rank = u32::try_from(self.logical_index).ok()?.checked_add(1)?;
+        let last = self.encoded.high_word_ranks.len().checked_sub(1)?;
+        let origin = self.high_word_index;
+        let mut left = origin.checked_add(1)?;
+        let mut stride = 1_usize;
+        let mut right;
+        loop {
+            right = origin.saturating_add(stride).min(last);
+            #[cfg(test)]
+            {
+                self.high_gap_probes += 1;
+            }
+            if self.encoded.high_word_ranks[right] >= target_rank {
+                break;
+            }
+            if right == last {
+                return None;
+            }
+            left = right + 1;
+            stride = stride.saturating_mul(2);
+        }
+        while left < right {
+            let middle = left + (right - left) / 2;
+            #[cfg(test)]
+            {
+                self.high_gap_probes += 1;
+            }
+            if self.encoded.high_word_ranks[middle] < target_rank {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        self.high_word_index = left;
+        self.remaining_high_word = *self.encoded.high_words.get(left)?;
+        #[cfg(test)]
+        {
+            self.high_words_examined += 1;
+        }
+        Some(())
+    }
+
     /// Fills at most `output.len()` values and returns the initialized prefix.
     ///
-    /// No allocation or random-access directory search is performed.
-    pub(crate) fn fill(&mut self, output: &mut [u64]) -> usize {
+    /// No allocation or repeated positional search per value is performed.
+    /// Sparse high-word gaps use bounded directory probes.
+    pub fn fill(&mut self, output: &mut [u64]) -> usize {
         let mut written = 0_usize;
         while written < output.len() {
             let Some(value) = self.next() else {
@@ -514,6 +605,9 @@ impl Iterator for EliasFanoSequentialCursor<'_> {
             {
                 self.high_words_examined += 1;
             }
+            if self.remaining_high_word == 0 {
+                self.skip_empty_high_words()?;
+            }
         }
 
         let within_word = self.remaining_high_word.trailing_zeros() as usize;
@@ -537,6 +631,7 @@ impl Iterator for EliasFanoSequentialCursor<'_> {
 }
 
 impl ExactSizeIterator for EliasFanoSequentialCursor<'_> {}
+impl core::iter::FusedIterator for EliasFanoSequentialCursor<'_> {}
 
 fn words_for_bits(bits: usize) -> Option<usize> {
     let complete = bits / 64;
@@ -752,6 +847,70 @@ mod tests {
             let encoded =
                 EliasFano::try_new(&values, EntryLimit::new(values.len())).expect("valid fixture");
             assert_eq!(encoded.sequential_cursor().collect::<Vec<_>>(), values);
+        }
+    }
+
+    #[test]
+    fn sequential_seek_matches_every_suffix_across_words_and_duplicate_runs() {
+        let fixtures = [
+            Vec::new(),
+            vec![0; 129],
+            vec![u64::MAX; 129],
+            (0..513).map(|i| (i / 3) * 1_000_003).collect(),
+            (0..257).map(|i| if i < 2 { 0 } else { u64::MAX }).collect(),
+            (0..193).map(|i| u64::MAX - 192 + i).collect(),
+        ];
+        for values in fixtures {
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            for start in (0..=values.len() + 1).chain([usize::MAX]) {
+                let mut cursor = encoded.sequential_cursor_from(start);
+                let expected = &values[start.min(values.len())..];
+                assert_eq!(cursor.len(), expected.len());
+                let mut actual = Vec::new();
+                let mut scratch = [0; 17];
+                assert_eq!(cursor.fill(&mut []), 0);
+                loop {
+                    let written = cursor.fill(&mut scratch);
+                    if written == 0 {
+                        break;
+                    }
+                    actual.extend_from_slice(&scratch[..written]);
+                    assert_eq!(cursor.len(), expected.len() - actual.len());
+                }
+                assert_eq!(actual, expected, "start={start}");
+                assert_eq!(cursor.next(), None);
+                assert_eq!(cursor.next(), None);
+                if start < values.len() {
+                    let first_word = if start == 0 {
+                        0
+                    } else {
+                        encoded.select_high_position(start).unwrap() / 64
+                    };
+                    assert!(
+                        cursor.high_words_examined() <= encoded.high_words.len() - first_word,
+                        "a seek must not rescan the preceding high words"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_sparse_gaps_use_logarithmic_directory_work() {
+        for zeros in [0_usize, 17] {
+            let mut values = vec![0; zeros];
+            values.resize(65_537, u64::MAX);
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            let mut cursor = encoded.sequential_cursor();
+            let prefix = cursor.by_ref().take(zeros + 1).collect::<Vec<_>>();
+            assert_eq!(prefix, values[..zeros + 1]);
+            assert!(cursor.high_words_examined <= 3);
+            assert!(cursor.high_gap_probes > 0);
+            assert!(
+                cursor.high_gap_probes <= 2 * encoded.high_words.len().ilog2() as usize + 3,
+                "one sparse incidence must not scan every intervening word"
+            );
+            assert_eq!(cursor.collect::<Vec<_>>(), values[zeros + 1..]);
         }
     }
 

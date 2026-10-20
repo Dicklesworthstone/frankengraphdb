@@ -4,8 +4,8 @@
 //! admitted set share it; scoped capabilities never reuse or populate; and a
 //! commit never serves the previous generation's records.
 
-use super::super::SCANS;
-use super::{ADMITTED, AdmissionKey};
+use super::super::{SCANS, WORK_RUNS};
+use super::{ADMITTED, AdmissionKey, INLINE_IDENTITIES, POSITIONED_EDGES};
 use crate::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
@@ -18,17 +18,21 @@ use fgdb_types::{
 use fgdb_warden::{Authority, CapabilityToken, Grant, QueryLimits, Restriction, Scope};
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x61; 32]);
 const BRANCH: &str = "main";
 const P: PropertyKeyId = PropertyKeyId(1);
 const W: PropertyKeyId = PropertyKeyId(2);
 /// Whole-graph statements that read edges: one admitted set serves them all.
-const EDGE_READS: [&str; 4] = [
+const EDGE_READS: [&str; 5] = [
     "MATCH (a:L)-[:R]->(b:L) RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b) RETURN a.p AS p, count(*) AS d ORDER BY d DESC, p ASC LIMIT 3",
     "MATCH (a:L)-[:R]->(b:L)-[:R]->(c:L) RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b:M) RETURN b.p AS p ORDER BY p",
+    // Each edge's own property beside its endpoints: a refill that pairs a
+    // record's properties with another record's identity answers differently.
+    "MATCH (a)-[r:R]->(b) RETURN a.p AS p, b.p AS q, r.w AS w ORDER BY p, q, w",
 ];
 /// A vertex-only plan admits no edge: its own admitted set.
 const VERTEX_READ: &str = "MATCH (n:L) RETURN count(*) AS n";
@@ -191,12 +195,31 @@ fn footprint(
     (format!("{result:?}"), probe.calls(), reads.get())
 }
 
+/// The refill forms a core can take: inline identities or not, positioned
+/// edges or not.
+const FORMS: [(bool, bool); 4] = [(true, true), (false, true), (true, false), (false, false)];
+
+fn with_forms(law: impl Fn(bool, bool)) {
+    for (inline, positioned) in FORMS {
+        INLINE_IDENTITIES.store(inline, Ordering::Relaxed);
+        POSITIONED_EDGES.store(positioned, Ordering::Relaxed);
+        law(inline, positioned);
+    }
+    INLINE_IDENTITIES.store(true, Ordering::Relaxed);
+    POSITIONED_EDGES.store(true, Ordering::Relaxed);
+}
+
 /// A hit spends what the scan spent: equal rows, query-context checkpoints
-/// and clock reads, and every checkpoint ordinal interrupts the hit there.
+/// and clock reads, and every checkpoint ordinal interrupts the hit there,
+/// whichever form its core takes.
 #[test]
 fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
     let _serial = serial();
-    let ((), report) = run_async_under_lab(0x61b1_0001, |root| async move {
+    with_forms(a_reused_full_scan_spends_exactly_what_its_scan_spent_with);
+}
+
+fn a_reused_full_scan_spends_exactly_what_its_scan_spent_with(inline: bool, positioned: bool) {
+    let ((), report) = run_async_under_lab(0x61b1_0001, move |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let token = issuer().issue_at(&open(), 100).unwrap();
@@ -209,6 +232,18 @@ fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
             let warm = footprint(&db, &cx, &token, text);
             assert_eq!(scans(), before + 1, "{text}: the second statement reuses");
             assert_eq!(warm, cold, "{text}");
+            if text != VERTEX_READ {
+                let at = db.frontier().unwrap();
+                let core = ADMITTED
+                    .lookup(&db.snapshot, AdmissionKey { at, edges: true })
+                    .unwrap();
+                assert_eq!(core.identities.is_some(), inline, "{text}: refill form");
+                assert_eq!(
+                    core.positioned.is_some(),
+                    positioned,
+                    "{text}: positioned form"
+                );
+            }
             // Interrupted at any ordinal, the hit stops where a scan on a
             // database with nothing to reuse stops, with the same refusal.
             let interrupted = |db: &Database<MemVfs>, stop| {
@@ -244,7 +279,11 @@ fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
 #[test]
 fn statements_with_one_admitted_set_share_it() {
     let _serial = serial();
-    let ((), report) = run_async_under_lab(0x61b1_0002, |root| async move {
+    with_forms(statements_with_one_admitted_set_share_it_with);
+}
+
+fn statements_with_one_admitted_set_share_it_with(inline: bool, positioned: bool) {
+    let ((), report) = run_async_under_lab(0x61b1_0002, move |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let token = issuer().issue_at(&open(), 100).unwrap();
@@ -277,6 +316,40 @@ fn statements_with_one_admitted_set_share_it() {
         assert_eq!((edges.vertices.len(), vertices.vertices.len()), (8, 8));
         assert_eq!((edges.edges.len(), vertices.edges.len()), (9, 0));
         assert_eq!((edges.records, vertices.records), (17, 8));
+        assert_eq!(
+            edges.identities.as_ref().map(Vec::len),
+            inline.then_some(9),
+            "edge identities inline only while they fit"
+        );
+        // Positioned edges name each admitted edge's endpoints in the sealed
+        // vertex table, in identity order, beside its relation.
+        assert_eq!(
+            edges.positioned.as_ref().map(|form| form.edges.len()),
+            positioned.then_some(9),
+            "edges positioned only while they fit"
+        );
+        if let (Some(form), Some(identities)) = (&edges.positioned, &edges.identities) {
+            let mut sealed: Vec<VId> = edges.vertices.iter().map(|&(vid, ..)| vid).collect();
+            sealed.sort_unstable();
+            sealed.dedup();
+            for (edge, &(_, source, relation, destination)) in form.edges.iter().zip(identities) {
+                assert_eq!(sealed[edge.source as usize], source);
+                assert_eq!(sealed[edge.destination as usize], destination);
+                assert_eq!(form.relations[edge.relation as usize], relation);
+            }
+        }
+        assert!(
+            vertices.positioned.is_none(),
+            "a vertex-only core has no edges"
+        );
+        // The reused statements above resolved vertices through the core's
+        // position index, so their equality with the fresh scans covers it.
+        for core in [&edges, &vertices] {
+            assert!(
+                core.positions.get().is_some_and(Option::is_some),
+                "a reused core indexes its sealed vertex table"
+            );
+        }
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -328,6 +401,60 @@ fn signed_refusal_points_of_a_hit_match_a_fresh_scan() {
                 let admitted = footprint(&cold, &cx, &attenuated(low), text);
                 assert_eq!(scans(), before + 1, "{text}: the cold statement scanned");
                 assert_eq!(footprint(&warm, &cx, &attenuated(low), text), admitted);
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Signed work charged in runs (fgdb-62mzm) admits and refuses native reads
+/// exactly where charging every unit alone does: for MaxWork, MaxNodes and
+/// MaxRows, the same smallest admitting limit, the same refusal one below it
+/// and the same admitted rows, with no more query-context polls.
+#[test]
+fn work_runs_admit_and_refuse_native_reads_at_the_per_unit_thresholds() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x61b1_0009, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        let limits: [fn(u64) -> Restriction; 3] = [
+            Restriction::MaxWork,
+            Restriction::MaxNodes,
+            Restriction::MaxRows,
+        ];
+        for text in EDGE_READS.into_iter().chain([VERTEX_READ]) {
+            for limit in limits {
+                let threshold = |runs: bool| {
+                    WORK_RUNS.with(|cell| cell.set(runs));
+                    let attenuated = |value| token.attenuate(limit(value)).unwrap();
+                    let (mut low, mut high) = (0, 10_000_000);
+                    while low < high {
+                        let middle = low + (high - low) / 2;
+                        if read(&db, &cx, &attenuated(middle), text, || 100).is_ok() {
+                            high = middle;
+                        } else {
+                            low = middle + 1;
+                        }
+                    }
+                    let refused =
+                        (low > 0).then(|| footprint(&db, &cx, &attenuated(low - 1), text));
+                    let admitted = footprint(&db, &cx, &attenuated(low), text);
+                    WORK_RUNS.with(|cell| cell.set(true));
+                    (low, refused, admitted)
+                };
+                let (unit_low, unit_refused, unit_admitted) = threshold(false);
+                let (run_low, run_refused, run_admitted) = threshold(true);
+                assert_eq!(run_low, unit_low, "{text}: admitting limit");
+                assert_eq!(
+                    run_refused.map(|footprint| footprint.0),
+                    unit_refused.map(|footprint| footprint.0),
+                    "{text}: refusal"
+                );
+                assert_eq!(run_admitted.0, unit_admitted.0, "{text}: rows");
+                assert!(run_admitted.1 <= unit_admitted.1, "{text}: polls");
             }
         }
         assert_eq!(c.outstanding_obligations(), 0);
@@ -455,4 +582,82 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A repeated filterless count neither merges history nor refills the vertex
+/// table. A refill initializes the core's shared vertex-position cache, even
+/// when its small-table result is None, so an untouched OnceLock distinguishes
+/// the summary path from merely reusing admission before traversing rows.
+#[test]
+fn filterless_counts_replay_without_refilling_source_tables() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x61b1_0007, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        for text in [
+            "MATCH (n) RETURN count(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN count(*) AS n",
+        ] {
+            let db = database(&c.commit()).await;
+            let cold = read(&db, &cx, &token, text, || 100).unwrap();
+            let before = scans();
+            let core = ADMITTED
+                .lookup(
+                    &db.snapshot,
+                    AdmissionKey {
+                        at: db.frontier().unwrap(),
+                        edges: text.contains("[:R]"),
+                    },
+                )
+                .unwrap();
+            assert!(core.positions.get().is_none());
+            assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), cold);
+            assert_eq!(scans(), before);
+            assert!(core.positions.get().is_none(), "{text}: table was refilled");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Many relationship types cannot grow an unbounded summary table. Its fixed
+/// capacity is accounted in the existing core, and exceeding it chooses the
+/// ordinary edge visitor while retaining the exact vertex cardinality.
+#[test]
+fn relation_count_summaries_are_bounded_and_accounted() {
+    use super::{COUNT_SUMMARY_RELATIONS, Recording};
+    use fgdb_gql::GraphCountSource;
+    let _serial = serial();
+    for relations in [1, COUNT_SUMMARY_RELATIONS, COUNT_SUMMARY_RELATIONS + 1] {
+        let mut recording = Recording::default();
+        recording.vertex(VId(1), 0, 0, 0);
+        for relation in 0..relations {
+            recording.edge(
+                (
+                    EId(relation as u128),
+                    VId(1),
+                    RelationId(relation as u64),
+                    VId(1),
+                ),
+                0,
+                relation,
+                [0, 0],
+            );
+        }
+        let mut core = recording.finish(relations as u64 + 1).unwrap();
+        assert_eq!(core.count_source(GraphCountSource::Vertices), Some((1, 1)));
+        let expected = (relations <= COUNT_SUMMARY_RELATIONS).then_some((relations as u64, 1));
+        assert_eq!(
+            core.count_source(GraphCountSource::Relation(RelationId(0))),
+            expected
+        );
+        let before = core.bytes();
+        let counts = core.positioned.as_mut().unwrap().counts.take();
+        let bytes = counts
+            .as_ref()
+            .map_or(0, |counts| counts.capacity() * std::mem::size_of::<u64>());
+        assert_eq!(before - core.bytes(), bytes);
+        assert!(bytes <= COUNT_SUMMARY_RELATIONS * std::mem::size_of::<u64>());
+    }
 }

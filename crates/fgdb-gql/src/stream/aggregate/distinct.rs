@@ -82,12 +82,12 @@ impl DistinctState {
         for _ in 0..units {
             control(VertexScanEvent::ScratchEntry)?;
         }
-        if let NumericState::Collect(values) = &mut self.accumulator {
-            collection::push(values, input, control)?;
-        } else {
-            // Keep the existing numeric path's event sequence unchanged.
-            self.accumulator.update(input, aggregate)?;
-        }
+        // The membership slot does not pay for a numeric promotion's owned
+        // exact accumulator. Use the same governed contribution as ALL:
+        // integer updates keep their event sequence, while the first float
+        // must admit its box before either arithmetic or membership changes.
+        self.accumulator
+            .update_governed(input, aggregate, control)?;
         match input {
             Input::Vertex(vid) => {
                 self.vertices.insert(vid);

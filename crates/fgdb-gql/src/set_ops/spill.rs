@@ -1,6 +1,7 @@
-//! Physical admission for external relations. Do not fuse across a stage:
+//! Physical admission for external relations. Preserve evaluation barriers:
 //! every child's complete evaluation and selected row order precede its
 //! parent's operation, including when a later stage requests LIMIT zero.
+//! Only the native selected-product seam may fuse transparent copies/filter.
 
 pub use super::aggregate::SpillSetAggregateRowError;
 pub use super::merge::SpillSetMergeStep;
@@ -19,6 +20,32 @@ use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
+use fgdb_delta_types::{ElementId, PropertyKeyId};
+use fgdb_types::CanonicalScalar;
+
+mod relational_join;
+mod selected_cross;
+pub use relational_join::SpillSetJoinPlan;
+
+/// The executing host's pinned, awaitable element-property reader.
+///
+/// The returned property retains its source reservation until the evaluator
+/// has admitted and copied its scalar. Reads must use the same snapshot and
+/// authority as the input rows. Only reached operands call this reader, so
+/// CASE/coalesce, comprehensions and reduce preserve their original effects.
+/// `Some(Ok(None))` is an absent property; outer `None` means this host cannot
+/// read element properties and preserves the typed expression refusal.
+/// Original source errors pass through without conversion to NULL.
+pub trait AsyncSpillElementSource: Send {
+    type Error: Send;
+    type Property: std::borrow::Borrow<CanonicalScalar> + Send;
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send;
+}
 
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +89,7 @@ pub enum AsyncSpillSetSourcePlan {
     Join(AsyncEdgeJoinPlan),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
+    RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
 }
 impl AsyncSpillSetSourcePlan {
@@ -70,30 +98,32 @@ impl AsyncSpillSetSourcePlan {
             Self::Values(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
-            Self::Binary(_) | Self::Cross(_) => ScanKind::Set,
+            Self::Binary(_) | Self::Cross(_) | Self::RowJoin(_) => ScanKind::Set,
             Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
     }
 }
 
-/// A compiler-owned Cartesian product of two complete native relations.
+/// A compiler-owned Cartesian or selected product of complete native relations.
 ///
 /// Complete the left child, then the right child exactly once, including when
 /// either is empty or an enclosing page is zero. Each child retains its own
-/// order, DISTINCT, grouping and page. Emit every right occurrence for each
+/// order, DISTINCT, grouping and page. Visit every right occurrence for each
 /// left occurrence in that order; neither child nor this product is implicitly
-/// canonicalized. The enclosing Identity stage alone owns this node's explicit
-/// ORDER BY/SKIP/LIMIT. Native correlated predicates remain later row filters.
+/// canonicalized. A compiler-proved native selection tests borrowed pairs and
+/// copies only TRUE occurrences. Other correlations remain later row filters.
+/// The enclosing Identity stage owns this node's ORDER BY/SKIP/LIMIT.
 ///
-/// Output names and domains concatenate the original children unchanged.
-/// There is no comparison, type unification, numeric coercion or null padding.
-/// The complete product must succeed before any enclosing stage consumes it.
+/// Plain output concatenates the original children; a selected product may
+/// carry the native seam's column-only projection. No coercion or null padding
+/// is introduced. Complete the selected product before a parent consumes it.
 #[derive(Clone)]
 pub struct SpillSetCrossPlan {
     left: Box<AsyncSpillSetPlan>,
     right: Box<AsyncSpillSetPlan>,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
+    selection: Option<selected_cross::Selection>,
 }
 
 impl core::fmt::Debug for SpillSetCrossPlan {
@@ -118,8 +148,9 @@ impl SpillSetCrossPlan {
         &self.types
     }
 
-    /// Admit one pair against the original child schemas, then copy it with
-    /// the SAME kernel as native materialized and folded Cartesian execution.
+    /// Admit one pair against the original child schemas, then copy its output
+    /// with the native value-copy kernels. This is not a witness test: physical
+    /// hosts use select_pair_with_control before retaining selected products.
     /// InputSchema's operand is local to this pair: zero is left, one is right.
     /// NULL remains valid in each nullable domain, without narrowing Any.
     ///
@@ -134,24 +165,8 @@ impl SpillSetCrossPlan {
         right: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphValueRow, SpillSetRowError<E>> {
-        let mut event = |event| control(event).map_err(SpillSetRowError::Control);
-        for (operand, input, row) in [(0, self.left(), left), (1, self.right(), right)] {
-            event(GlaExecutionEvent::Work)?;
-            if row.len() != input.column_types().len() {
-                return Err(SpillSetRowError::Native(
-                    GraphSetExecutionError::InputSchema { operand },
-                ));
-            }
-            for (kind, value) in input.column_types().iter().zip(row.values()) {
-                event(GlaExecutionEvent::Work)?;
-                if !kind.accepts(value) {
-                    return Err(SpillSetRowError::Native(
-                        GraphSetExecutionError::InputSchema { operand },
-                    ));
-                }
-            }
-        }
-        super::execute::copy_cross_pair(left, right, &mut event)
+        self.validate_pair_with_control(left, right, control)?;
+        self.copy_output_with_control(left, right, control)
     }
 }
 
@@ -335,7 +350,7 @@ impl SpillSetValuesPlan {
     /// its identity tuple. These events belong to the SAME cumulative allowance
     /// used by every following stage; no final ResultRow is charged here.
     ///
-    /// The host retains the returned cursor's reservation through the yielded
+    /// The host retains the returned cursor's reservation, used by the yielded
     /// row's last use, including awaited encoding/appends. The consuming cursor
     /// emits exactly one unit row and then exhausts. Its first stage still owns
     /// the Values node's page; a later LIMIT zero never skips this source.
@@ -405,6 +420,13 @@ impl AsyncSpillSetPlan {
                     stages,
                 });
             }
+            CompiledSource::RowJoin(join) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::RowJoin(join),
+                    graph: None,
+                    stages,
+                });
+            }
             CompiledSource::Aggregate(aggregate) => {
                 return Ok(Self {
                     source: AsyncSpillSetSourcePlan::Aggregate(aggregate),
@@ -460,6 +482,7 @@ impl AsyncSpillSetPlan {
         match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
             AsyncSpillSetSourcePlan::Cross(cross) => cross.columns(),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join.columns(),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
             _ => self
                 .graph
@@ -492,6 +515,23 @@ impl AsyncSpillSetPlan {
                 .stage_count()
                 .saturating_add(cross.right().stage_count())
                 .saturating_add(2),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join
+                .left()
+                .stage_count()
+                .saturating_add(join.right().stage_count())
+                // Keyed joins sort both children, then write one output run.
+                // Residual right-absence sweeps only reread these same runs.
+                // General unkeyed joins emit and copy.
+                .saturating_add(
+                    if join.supports_merge_presence()
+                        || join.supports_merge_pairs()
+                        || join.supports_merge_filtered()
+                    {
+                        3
+                    } else {
+                        2
+                    },
+                ),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
                 aggregate.input().stage_count().saturating_add(3)
             }
@@ -515,6 +555,10 @@ impl AsyncSpillSetPlan {
                 .left()
                 .aggregate_count()
                 .saturating_add(cross.right().aggregate_count()),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join
+                .left()
+                .aggregate_count()
+                .saturating_add(join.right().aggregate_count()),
             _ => 0,
         }
     }
@@ -544,9 +588,15 @@ impl core::fmt::Debug for AsyncSpillSetPlan {
 #[derive(Clone)]
 enum Operation {
     Identity,
-    Project(Vec<GraphSetProjection>),
+    Project {
+        projection: Vec<GraphSetProjection>,
+        reads_elements: bool,
+    },
     Filter(RowPredicate),
-    Unwind(GraphSetValue),
+    Unwind {
+        value: GraphSetValue,
+        reads_elements: bool,
+    },
 }
 
 /// A checked per-input operation and its complete finish contract.
@@ -614,27 +664,14 @@ impl SpillSetStage {
         row_index: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<SpillSetRows, SpillSetRowError<E>> {
+        self.admit_input(&row, control)?;
         let mut event = |event| control(event).map_err(SpillSetRowError::Control);
-        event(GlaExecutionEvent::Work)?;
-        if row.len() != self.input.len() {
-            return Err(SpillSetRowError::Native(
-                GraphSetExecutionError::InputSchema { operand: 0 },
-            ));
-        }
-        for (kind, value) in self.input.iter().zip(row.values()) {
-            event(GlaExecutionEvent::Work)?;
-            if !kind.accepts(value) {
-                return Err(SpillSetRowError::Native(
-                    GraphSetExecutionError::InputSchema { operand: 0 },
-                ));
-            }
-        }
         let state = match &self.operation {
             Operation::Identity => StageRows::One(Some(row)),
             Operation::Filter(predicate) => {
                 StageRows::One(predicate.evaluate(&row, &mut event)?.then_some(row))
             }
-            Operation::Project(projection) => StageRows::One(Some(
+            Operation::Project { projection, .. } => StageRows::One(Some(
                 GraphSetProjection::evaluate_numbered_row_with_control(
                     &row,
                     row_index as u64,
@@ -650,7 +687,7 @@ impl SpillSetStage {
                     },
                 )?,
             )),
-            Operation::Unwind(value) => {
+            Operation::Unwind { value, .. } => {
                 StageRows::Unwind(projection::UnwindRows::new(row, value, &mut event).map_err(
                     |error| match error {
                         projection::ProjectionFailure::Control(error) => error,
@@ -666,6 +703,118 @@ impl SpillSetStage {
             }
         };
         Ok(SpillSetRows { state })
+    }
+
+    /// Evaluate one input with the same schema, native events and error order
+    /// as start(), awaiting only reached element-property operands. No source
+    /// is prefetched or replayed. Dropping the future releases its private
+    /// evaluation state; it never publishes a prefix.
+    ///
+    /// Preparation caches whether an expression can read an element. Stages
+    /// without that effect retain the synchronous evaluator without recursive
+    /// frame allocations or a per-row expression-tree scan.
+    ///
+    /// reserve_frame must grant the requested exact future byte size BEFORE
+    /// its Box allocation and retain that grant through the future's last use
+    /// or cancellation. These physical reservations are separate from native
+    /// logical work. As with start(), ScratchEntry reservations must retain
+    /// all evaluated values through the returned rows' awaited uses.
+    pub async fn start_with_async_elements<E, S, M, G>(
+        &self,
+        row: GraphValueRow,
+        row_index: usize,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+        source: &mut S,
+        reserve_frame: &M,
+    ) -> Result<SpillSetRows, SpillSetRowError<E>>
+    where
+        E: Send,
+        S: AsyncSpillElementSource<Error = E>,
+        M: Fn(usize) -> Result<G, E> + Sync,
+        G: Send,
+    {
+        let reads_elements = match &self.operation {
+            Operation::Identity | Operation::Filter(_) => false,
+            Operation::Project { reads_elements, .. }
+            | Operation::Unwind { reads_elements, .. } => *reads_elements,
+        };
+        if !reads_elements {
+            return self.start(row, row_index, control);
+        }
+        self.admit_input(&row, control)?;
+        let expression_error = |error| match error {
+            projection::ProjectionFailure::Control(error) => SpillSetRowError::Control(error),
+            projection::ProjectionFailure::Arithmetic { column, error } => {
+                SpillSetRowError::Native(GraphSetExecutionError::Projection {
+                    row: row_index,
+                    column,
+                    error,
+                })
+            }
+        };
+        let state = match &self.operation {
+            Operation::Identity => StageRows::One(Some(row)),
+            Operation::Filter(predicate) => StageRows::One(
+                predicate
+                    .evaluate(&row, &mut |event| {
+                        control(event).map_err(SpillSetRowError::Control)
+                    })?
+                    .then_some(row),
+            ),
+            Operation::Project { projection, .. } => StageRows::One(Some(
+                projection::evaluate_async(
+                    &row,
+                    projection,
+                    Some(row_index as u64),
+                    control,
+                    source,
+                    reserve_frame,
+                )
+                .await
+                .map_err(expression_error)?,
+            )),
+            Operation::Unwind { value, .. } => {
+                control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+                let list = projection::evaluate_value_async(
+                    value,
+                    &row,
+                    row.len(),
+                    None,
+                    control,
+                    source,
+                    reserve_frame,
+                )
+                .await
+                .map_err(expression_error)?;
+                StageRows::Unwind(
+                    projection::UnwindRows::from_evaluated(row, list, control)
+                        .map_err(expression_error)?,
+                )
+            }
+        };
+        Ok(SpillSetRows { state })
+    }
+
+    fn admit_input<E>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetRowError<E>> {
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        if row.len() != self.input.len() {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ));
+        }
+        for (kind, value) in self.input.iter().zip(row.values()) {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            if !kind.accepts(value) {
+                return Err(SpillSetRowError::Native(
+                    GraphSetExecutionError::InputSchema { operand: 0 },
+                ));
+            }
+        }
+        Ok(())
     }
 }
 impl core::fmt::Debug for SpillSetStage {
@@ -784,6 +933,9 @@ fn compile_stages<'a>(
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
 ) -> Result<CompiledSource<'a>, SpillSetBuildError> {
+    if let Some(cross) = selected_cross::compile(query, depth, stages)? {
+        return Ok(CompiledSource::Cross(cross));
+    }
     let (pattern, input, operation, canonical, distinct) = match &query.node {
         SetNode::Values => (
             CompiledSource::Values,
@@ -821,7 +973,12 @@ fn compile_stages<'a>(
         } => (
             compile_stages(input, depth + 1, stages)?,
             input.types.clone(),
-            Operation::Project(projection.clone()),
+            Operation::Project {
+                projection: projection.clone(),
+                reads_elements: projection
+                    .iter()
+                    .any(|output| output.value().may_read_element_properties()),
+            },
             (!*preserve_order && !input.preserves_row_order())
                 || *quantifier == GraphSetQuantifier::Distinct,
             *quantifier == GraphSetQuantifier::Distinct,
@@ -829,7 +986,10 @@ fn compile_stages<'a>(
         SetNode::Unwind { input, value } => (
             compile_stages(input, depth + 1, stages)?,
             input.types.clone(),
-            Operation::Unwind(value.clone()),
+            Operation::Unwind {
+                value: value.clone(),
+                reads_elements: value.may_read_element_properties(),
+            },
             false,
             false,
         ),
@@ -862,6 +1022,7 @@ fn compile_stages<'a>(
                     right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
                     columns: query.columns.clone(),
                     types: query.types.clone(),
+                    selection: None,
                 }),
                 query.types.clone(),
                 Operation::Identity,
@@ -886,7 +1047,20 @@ fn compile_stages<'a>(
                 false,
             )
         }
-        SetNode::ProcedureCall(_) | SetNode::Join { .. } | SetNode::Owned => {
+        SetNode::Join { left, right, spec } => (
+            CompiledSource::RowJoin(SpillSetJoinPlan {
+                left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
+                right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                spec: spec.clone(),
+                columns: query.columns.clone(),
+                types: query.types.clone(),
+            }),
+            query.types.clone(),
+            Operation::Identity,
+            true,
+            false,
+        ),
+        SetNode::ProcedureCall(_) | SetNode::Owned => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };
@@ -913,6 +1087,7 @@ enum CompiledSource<'a> {
     Pattern(&'a PreparedGraphPattern<GraphValueRow>),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
+    RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
 }
 
@@ -977,9 +1152,12 @@ mod tests {
             input: vec![GraphSetColumnType::Vertex],
             columns: vec!["owner".into(), "item".into()],
             types: vec![GraphSetColumnType::Vertex; 2],
-            operation: Operation::Unwind(GraphSetValue::Value(GraphValue::Vertices(
-                vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
-            ))),
+            operation: Operation::Unwind {
+                value: GraphSetValue::Value(GraphValue::Vertices(
+                    vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
+                )),
+                reads_elements: false,
+            },
             order: None,
             distinct: false,
             offset: 0,

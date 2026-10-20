@@ -228,7 +228,10 @@ mod tests {
         let query = prepare("MERGE (n:Item) RETURN DISTINCT n AS node");
         let low = GraphValue::Vertex(VId(7));
         let high = GraphValue::Vertex(VId((1_u128 << 112) + 7));
-        let result = output(&query, vec![vec![high.clone()], vec![low.clone()]]);
+        // A RETURN without ORDER BY is a bag: both full-width identities come
+        // back whole and distinct, in whatever order the batch delivers.
+        let mut result = output(&query, vec![vec![high.clone()], vec![low.clone()]]);
+        result.sort();
         assert_eq!(result, vec![vec![low], vec![high]]);
     }
 

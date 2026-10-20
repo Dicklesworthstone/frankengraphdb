@@ -455,15 +455,44 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
     Ok(GraphValueRow::from_owned_values(values))
 }
 
-pub(super) fn execute<E, C>(
+/// A selection source behind a trait object: called at most once.
+type ErasedSource<'a, E, C> = Box<
+    dyn FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+        + 'a,
+>;
+
+pub(super) fn execute<'a, E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
     bindings: Option<&[GraphMutationBinding]>,
     source: impl FnOnce(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a,
     mut checkpoint: impl FnMut() -> Result<(), C>,
+) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
+    // The mutation engine is compiled once per error-type pair, not once per
+    // caller closure type (fgdb-2goz): its source is boxed (one allocation
+    // per statement) and its checkpoint is a trait object.
+    execute_erased(
+        mutation,
+        policy,
+        bindings,
+        Box::new(source),
+        &mut checkpoint,
+    )
+}
+
+fn execute_erased<E, C>(
+    mutation: &PreparedGraphMutation,
+    policy: GraphMutationPolicy,
+    bindings: Option<&[GraphMutationBinding]>,
+    source: ErasedSource<'_, E, C>,
+    mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
     let selected = mutation.select_governed(policy.query, source, &mut checkpoint)?;

@@ -58,6 +58,22 @@ impl std::error::Error for BeaconError {}
 /// characters, postings, or visited bookkeeping entries, not wall-clock time.
 pub trait WorkControl {
     fn charge(&mut self, units: usize) -> Result<(), BeaconError>;
+
+    /// Admit logical scratch entries BEFORE a kernel retains them. Expansion
+    /// emits two entries per new visit (distance and queue), then one per new
+    /// ranking-heap slot and output row. Graph fusion emits its validation,
+    /// rank, evidence, heap and result entries separately. Replacing a heap
+    /// occupant reuses its slot; dropping entries does not refund admissions.
+    ///
+    /// The default is work-only: existing callers retain their independent
+    /// count limits, not a new shared-memory promise. A shared-scratch host
+    /// must override this hook and forward it through any control wrappers.
+    /// Its implementation owns cancellation, work charges and the cumulative
+    /// allowance. Source/index construction is accounted by the host, not by
+    /// this hook. Entries are not allocator bytes or a process RSS bound.
+    fn reserve_scratch(&mut self, _entries: usize) -> Result<(), BeaconError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

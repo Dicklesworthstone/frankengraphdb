@@ -40,7 +40,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
     BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
 };
-use image::{Image, Row};
+use image::{Image, Row, RowScan, RowScanStep};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,13 +406,7 @@ impl SealedPartition {
             (Some(row), Some(destination)) => row.lower_bound(&self.image, destination),
             _ => 0,
         };
-        Ok(SealedCursor {
-            image: &self.image,
-            row,
-            position,
-            as_of,
-            finished: false,
-        })
+        Ok(SealedCursor::new(&self.image, row, position, as_of))
     }
 
     pub fn row<'a>(
@@ -442,11 +436,12 @@ pub enum SealedScanStep<T> {
     End,
 }
 
-/// Shared fuel for a cooperative scan slice. Outgoing incidence decodes and
+/// Shared fuel for a cooperative scan slice. Outgoing raw incidences and
 /// incoming locator probes (including chunk transitions/invisible history)
 /// spend one unit each BEFORE advancing. Several cursors can share the same
-/// allowance; no layer silently resets it. Operators may also spend units for
-/// their vertex/edge work. This is not CPU instructions or a wall-clock bound:
+/// allowance, including when visibility spans avoid a physical decode; no layer
+/// silently resets it. Operators may also spend units for their vertex/edge
+/// work. This is not CPU instructions or a wall-clock bound:
 /// an individual compressed lookup, allocation, and its checkpoint are atomic.
 #[derive(Debug)]
 pub struct SealedScanBudget {
@@ -476,13 +471,21 @@ impl SealedScanBudget {
 /// A failed cursor stays failed/finished and cannot resume after skipping rows.
 pub struct SealedCursor<'a> {
     image: &'a Image,
-    row: Option<&'a Row>,
-    position: usize,
+    scan: Option<RowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
 }
 
 impl<'a> SealedCursor<'a> {
+    fn new(image: &'a Image, row: Option<&'a Row>, position: usize, as_of: CommitSeq) -> Self {
+        Self {
+            image,
+            scan: row.map(|row| RowScan::new(image, row, position)),
+            as_of,
+            finished: false,
+        }
+    }
+
     pub fn next(&mut self, cx: &QueryCx) -> Result<Option<SealedEdge<'a>>, SealedError> {
         self.next_inner(&mut || cx.checkpoint().map_err(SealedError::Interrupted))
     }
@@ -560,24 +563,37 @@ impl<'a> SealedCursor<'a> {
             self.finished = true;
             return Err(error);
         }
-        let Some(row) = self.row else {
+        let Some(scan) = &mut self.scan else {
             self.finished = true;
             return Ok(SealedScanStep::End);
         };
-        while self.position < row.len() {
+        while scan.position < scan.len() {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
-            if self.position.is_multiple_of(64)
+            if scan.position.is_multiple_of(64)
                 && let Err(error) = checkpoint()
             {
                 self.finished = true;
                 return Err(error);
             }
-            let (entry, locator) = row
-                .incidence(self.image, self.position)
-                .expect("sealed admission validated every incidence");
-            self.position += 1;
+            let (entry, locator) = match scan
+                .next_or_hidden_span(self.as_of)
+                .expect("sealed admission validated every incidence")
+            {
+                RowScanStep::Incidence(entry, locator) => (entry, locator),
+                RowScanStep::Hidden(count) => {
+                    // One raw incidence was paid above, before its checkpoint.
+                    // Pay the rest before advancing, stopping at the next
+                    // checkpoint, fuel exhaustion or visibility transition.
+                    let count = count
+                        .min(64 - scan.position % 64)
+                        .min(budget.remaining.saturating_add(1));
+                    budget.remaining -= count - 1;
+                    scan.skip_hidden(count);
+                    continue;
+                }
+            };
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]

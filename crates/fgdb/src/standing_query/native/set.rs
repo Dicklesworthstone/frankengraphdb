@@ -9,7 +9,103 @@ use fgdb_gql::PreparedGraphSetAggregate;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_window::RowWindowSpec;
-use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
+use fgdb_gql::{
+    GraphSetColumnType, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
+    GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+};
+use fgdb_prism::{
+    FnxAlgorithm, FnxOutput, FnxWeightSpec, FoundationAlgorithm, ParallelEdgePolicy, SelfLoopPolicy,
+};
+
+pub(super) enum AnalyticSource {
+    Components(components::ComponentRelation),
+    CoreNumbers(RelationId),
+    TriangleCounts(RelationId, triangle_counts::Output),
+}
+
+/// The compiler and subscription footprint share one source-free admission.
+/// Only the complete, explicit topology contract has an existing derivative;
+/// future duplicates or self-loops cannot silently defeat a Reject policy.
+pub(super) fn analytic_procedure(
+    query: &PreparedGraphSet,
+) -> Result<Option<(AnalyticSource, RowProjectionSpec)>, StandingQueryError> {
+    let Some(call) = query.incremental_procedure() else {
+        return Ok(None);
+    };
+    let bound = crate::query::bind_procedure(call, &[]).map_err(|error| {
+        prepare_error(QueryError::Set(
+            error.map_source(GraphSetExecutionError::Source),
+        ))
+    })?;
+    // Read the immutable input recipe only; no source is pinned or executed
+    // at this placeholder cut. The analytic owner admits the live snapshot.
+    let options = bound.options_at(CommitSeq(0));
+    let Some(relation) = options.selection.relation else {
+        return Err(StandingQueryError::Unsupported);
+    };
+    if options.selection.vertex_label.is_some()
+        || options.selection.weight != FnxWeightSpec::Unit
+        || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
+        || options.projection.self_loops == SelfLoopPolicy::Reject
+    {
+        return Err(StandingQueryError::Unsupported);
+    }
+    // The shared binder already enforced the registered graph-kind law.
+    // Reversal and retaining self-loops preserve weak and strong membership;
+    // neither changes reachability between distinct vertices.
+    let (source, value_type, value_field) = match bound.algorithm() {
+        FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
+            AnalyticSource::Components(components::ComponentRelation::Weak(relation)),
+            GraphSetColumnType::Vertex,
+            FnxOutput::Component,
+        ),
+        FnxAlgorithm::StronglyConnectedComponents => (
+            AnalyticSource::Components(components::ComponentRelation::Strong(relation)),
+            GraphSetColumnType::Vertex,
+            FnxOutput::Component,
+        ),
+        FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
+            if options.projection.self_loops == SelfLoopPolicy::Drop =>
+        {
+            (
+                AnalyticSource::CoreNumbers(relation),
+                GraphSetColumnType::Scalar,
+                FnxOutput::Core,
+            )
+        }
+        FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
+            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Triangles),
+            GraphSetColumnType::Scalar,
+            FnxOutput::Triangles,
+        ),
+        FnxAlgorithm::ClusteringCoefficient => (
+            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Clustering),
+            GraphSetColumnType::Scalar,
+            FnxOutput::Score,
+        ),
+        _ => return Err(StandingQueryError::Unsupported),
+    };
+    let mut projection = Vec::with_capacity(bound.outputs().len());
+    for (column, name) in bound.outputs().iter().zip(query.columns()) {
+        let input = match column.field {
+            FnxOutput::Vertex => 0,
+            field if field == value_field => 1,
+            _ => return Err(StandingQueryError::Unsupported),
+        };
+        projection.push(GraphSetProjection::new(
+            name.clone(),
+            GraphSetValue::Column(input),
+        ));
+    }
+    let output = RowProjectionSpec::new(
+        vec![GraphSetColumnType::Vertex, value_type],
+        projection,
+        GraphSetQuantifier::All,
+    )
+    .and_then(|spec| spec.widen_output_types(query.column_types().to_vec()))
+    .map_err(StandingQueryError::ProjectionSchema)?;
+    Ok(Some((source, output)))
+}
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -135,6 +231,35 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 .database
                 .prepare_registered_rows(cx, pattern.clone(), policy)?;
             self.append(query)
+        } else if let Some((source, spec)) = analytic_procedure(query)? {
+            let state = match source {
+                AnalyticSource::Components(relation) => StandingQuery::Components(Box::new(
+                    self.database
+                        .prepare_standing_components(cx, relation, policy)?,
+                )),
+                AnalyticSource::CoreNumbers(relation) => StandingQuery::CoreNumbers(Box::new(
+                    self.database
+                        .prepare_standing_core_numbers(cx, relation, policy, true)?,
+                )),
+                AnalyticSource::TriangleCounts(relation, output) => {
+                    StandingQuery::TriangleCounts(Box::new(
+                        self.database
+                            .prepare_standing_triangle_counts(cx, relation, output, policy)?,
+                    ))
+                }
+            };
+            let input = self.append(state);
+            checkpoint()?;
+            // Keep aliases, column selection/order and Any procedure domains
+            // in an ordinary maintained projection.
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            self.append(StandingQuery::Projection(Box::new(state)))
         } else if let Some(definition) = query.incremental_group() {
             // Keep the entire selected child relation. The existing exact
             // reducer and checked row sink publish one atomic derivative;
@@ -471,6 +596,14 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Projection(query) => mark(query.input, inherited)?,
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
+            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
+            StandingQuery::TriangleCounts(_) => {}
+            StandingQuery::Components(query)
+                if matches!(
+                    query.relation,
+                    components::ComponentRelation::Weak(_)
+                        | components::ComponentRelation::Strong(_)
+                ) => {}
             _ => return Err(StandingQueryError::Unsupported),
         }
     }
@@ -488,6 +621,37 @@ fn rebuild_checked<V: Vfs + Clone>(
                 staged
                     .database
                     .prepare_standing_constant(cx, query.definition.clone(), policy)?,
+            )),
+            StandingQuery::Components(query)
+                if matches!(
+                    query.relation,
+                    components::ComponentRelation::Weak(_)
+                        | components::ComponentRelation::Strong(_)
+                ) =>
+            {
+                StandingQuery::Components(Box::new(staged.database.prepare_standing_components(
+                    cx,
+                    query.relation,
+                    policy,
+                )?))
+            }
+            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
+                StandingQuery::CoreNumbers(Box::new(
+                    staged.database.prepare_standing_core_numbers(
+                        cx,
+                        query.relation,
+                        policy,
+                        true,
+                    )?,
+                ))
+            }
+            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
+                staged.database.prepare_standing_triangle_counts(
+                    cx,
+                    query.relation,
+                    query.output(),
+                    policy,
+                )?,
             )),
             StandingQuery::Rows { output, .. } => {
                 staged
@@ -683,3 +847,15 @@ mod join_tests;
 
 #[cfg(test)]
 mod selected_join_tests;
+
+#[cfg(test)]
+mod component_tests;
+
+#[cfg(test)]
+mod core_tests;
+
+#[cfg(test)]
+mod triangle_tests;
+
+#[cfg(test)]
+mod clustering_tests;

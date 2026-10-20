@@ -31,6 +31,7 @@ use crate::edge_props::{
     EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES,
     admitted_row_bytes, encode_property_patch, property_patch_id,
 };
+use crate::id_map::{IdMap, IdSet};
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{
     VertexPatchError, VertexPatchRows, VertexRow, encode_patch, span_of_rows, vertex_patch_id,
@@ -292,14 +293,14 @@ pub struct BlockWriter {
     /// AND properties, because a tombstone must RESTATE the properties so a
     /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
     /// the vertex live map remembers rows for the same reason.
-    live: BTreeMap<EId, LiveEdge>,
+    live: IdMap<EId, LiveEdge>,
     /// Every EId admitted while replaying this partition-local writer.
     ///
     /// The graph-wide allocator is enforced before partition routing; this is a
     /// defense-in-depth check over the history visible to this fold. Shared
     /// copy-on-write so the engine allocator can probe it without a copy
     /// ([`BlockWriter::spent_edges`]).
-    spent: Arc<BTreeSet<EId>>,
+    spent: Arc<IdSet<EId>>,
     sealed: Vec<SealedBlock>,
     /// The newest sealed block per descriptor family — the predecessor each
     /// family's NEXT block links (V6, fgdb-4391). Rebuilt deterministically by
@@ -318,10 +319,10 @@ pub struct BlockWriter {
     /// `DeleteVertex` names only the VId, while the tombstone that retires a
     /// SEALED row must restate the exact birth — ordinal, labels, properties —
     /// and only the creation carried those.
-    live_vertices: BTreeMap<VId, VertexRow>,
+    live_vertices: IdMap<VId, VertexRow>,
     /// Every VId admitted while replaying this partition-local writer, shared
     /// copy-on-write like `spent`.
-    spent_vertices: Arc<BTreeSet<VId>>,
+    spent_vertices: Arc<IdSet<VId>>,
     sealed_patches: Vec<SealedPatch>,
     /// Live identities whose same-seq creation has already been sealed in
     /// this run. A later same-seq delete cannot fold those away — the
@@ -411,46 +412,46 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Self {
-        let mut live = BTreeMap::new();
-        for (entry, props) in live_edges {
-            live.insert(
-                entry.eid,
-                LiveEdge {
-                    src: entry.src,
-                    relation: entry.relation,
-                    dst: entry.dst,
-                    created_at: entry.created_at,
-                    props,
-                },
-            );
-        }
-        let mut spent = BTreeSet::new();
-        for block in blocks {
-            for entry in block {
-                spent.insert(entry.eid);
-            }
-        }
-        let mut live_vertices = BTreeMap::new();
-        for row in crate::vertex::merge_all_vertices(patches, frontier) {
-            live_vertices.insert(row.vid, row);
-        }
-        let mut spent_vertices = BTreeSet::new();
-        for rows in patches {
-            for row in rows {
-                spent_vertices.insert(row.vid);
-            }
-        }
+        // Collecting an identity map keeps the last pair of a repeated key,
+        // as inserting in order does.
+        let live: IdMap<EId, LiveEdge> = live_edges
+            .into_iter()
+            .map(|(entry, props)| {
+                (
+                    entry.eid,
+                    LiveEdge {
+                        src: entry.src,
+                        relation: entry.relation,
+                        dst: entry.dst,
+                        created_at: entry.created_at,
+                        props,
+                    },
+                )
+            })
+            .collect();
+        let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let live_vertices: IdMap<VId, VertexRow> =
+            crate::vertex::merge_all_vertices(patches, frontier)
+                .into_iter()
+                .map(|row| (row.vid, row))
+                .collect();
+        let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).
-        let mut chain_heads = BTreeMap::new();
-        for (sealed_block, entries) in sealed.iter().zip(blocks) {
-            if let Some(first) = entries.first() {
-                chain_heads.insert(
-                    (first.src, first.relation),
-                    DeltaBlockVersion(sealed_block.block_id),
-                );
-            }
-        }
+        let chain_heads = last_wins(
+            sealed
+                .iter()
+                .zip(blocks)
+                .filter_map(|(sealed_block, entries)| {
+                    entries.first().map(|first| {
+                        (
+                            (first.src, first.relation),
+                            DeltaBlockVersion(sealed_block.block_id),
+                        )
+                    })
+                })
+                .collect(),
+        );
         Self {
             graph,
             branch,
@@ -476,12 +477,12 @@ impl BlockWriter {
             branch,
             partition,
             pending: BTreeMap::new(),
-            live: BTreeMap::new(),
+            live: IdMap::new(),
             spent: Arc::default(),
             sealed: Vec::new(),
             chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
-            live_vertices: BTreeMap::new(),
+            live_vertices: IdMap::new(),
             spent_vertices: Arc::default(),
             sealed_patches: Vec::new(),
             sealed_live_edges: BTreeSet::new(),
@@ -547,12 +548,12 @@ impl BlockWriter {
     /// reader. A caller that may outlive that admission keeps an
     /// `Arc::downgrade` instead: the fold then mutates in place, and the weak
     /// handle stops upgrading.
-    pub fn spent_edges(&self) -> Arc<BTreeSet<EId>> {
+    pub fn spent_edges(&self) -> Arc<IdSet<EId>> {
         Arc::clone(&self.spent)
     }
 
     /// The vertex counterpart of [`BlockWriter::spent_edges`].
-    pub fn spent_vertices(&self) -> Arc<BTreeSet<VId>> {
+    pub fn spent_vertices(&self) -> Arc<IdSet<VId>> {
         Arc::clone(&self.spent_vertices)
     }
 
@@ -588,11 +589,15 @@ impl BlockWriter {
     /// the exact set a vertex deletion's cascade before-image must equal
     /// (both directions, the reference semantics).
     pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
-        self.live
+        // The identity map holds no order: sort the incident identities.
+        let mut incident: Vec<EId> = self
+            .live
             .iter()
             .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
             .map(|(eid, _)| *eid)
-            .collect()
+            .collect();
+        incident.sort_unstable();
+        incident
     }
 
     /// How many vertex rows are pending — the vertex half of the seal signal.
@@ -1323,9 +1328,9 @@ impl BlockWriter {
                         props: successor_row.clone(),
                     },
                 );
-                self.live
-                    .entry(eid)
-                    .and_modify(|live| live.props = successor_row);
+                if let Some(live) = self.live.get_mut(&eid) {
+                    live.props = successor_row;
+                }
                 return Ok(());
             }
             // The same-commit creation already sealed (format ceiling).
@@ -1595,6 +1600,51 @@ impl BlockWriter {
         };
         validate_root(&root).map_err(WriteError::Root)?;
         Ok(root)
+    }
+}
+
+/// The map that inserting `pairs` in order builds, a later pair replacing an
+/// earlier one with an equal key, built in one bulk pass. A writable open
+/// assembles its writer's maps from millions of pairs; one insert each, in the
+/// random key order a keyed EId permutation gives, was most of that assembly
+/// on a packed web-google (fgdb-e8gr4).
+fn last_wins<K: Ord, V>(mut pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
+    // Stable: pairs with equal keys keep their order, so the last one wins.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut unique: Vec<(K, V)> = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        match unique.last_mut() {
+            Some(last) if last.0 == pair.0 => *last = pair,
+            _ => unique.push(pair),
+        }
+    }
+    unique.into_iter().collect()
+}
+
+#[cfg(test)]
+mod last_wins_tests {
+    use super::last_wins;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn last_wins_builds_the_map_that_inserting_in_order_builds() {
+        let mut state = 0x001a_570f_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for trial in 0..2_000 {
+            let len = next(64) as usize;
+            let keys = 1 + next(40);
+            let pairs: Vec<(u64, u64)> = (0..len).map(|at| (next(keys), at as u64)).collect();
+            let mut inserted = BTreeMap::new();
+            for &(key, value) in &pairs {
+                inserted.insert(key, value);
+            }
+            assert_eq!(last_wins(pairs), inserted, "trial {trial}");
+        }
     }
 }
 

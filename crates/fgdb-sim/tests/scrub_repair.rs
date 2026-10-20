@@ -556,6 +556,10 @@ mod publication_metadata {
         kind: Kind,
         path: PathBuf,
         bytes: Vec<u8>,
+        /// Whether `path` holds the object. A bulk commit's objects live in
+        /// a commit pack instead (fgdb-79kyi); damage is planted only on
+        /// loose objects, by path.
+        loose: bool,
     }
 
     async fn remember(
@@ -566,8 +570,44 @@ mod publication_metadata {
         kind: Kind,
     ) {
         let path = store.path(id);
-        let bytes = vfs.read(&path).await.unwrap();
-        objects.insert(id, Object { kind, path, bytes });
+        let (loose, bytes) = on_disk(vfs, store, id).await;
+        objects.insert(
+            id,
+            Object {
+                kind,
+                path,
+                bytes,
+                loose,
+            },
+        );
+    }
+
+    /// The stored bytes of `id` as the on-disk format holds them, read
+    /// without the store's own lookup: its loose file, else its entry in a
+    /// commit pack (`FGPK`, version 1, count, then `{id, offset u64, len
+    /// u32}` entries). Returns whether the object is loose.
+    async fn on_disk(vfs: &MemVfs, store: &BlockStore<MemVfs>, id: ObjectId) -> (bool, Vec<u8>) {
+        let path = store.path(id);
+        if let Ok(bytes) = vfs.read(&path).await {
+            return (true, bytes);
+        }
+        let packs = path.parent().unwrap().join(fgdb_strata::store::PACK_DIR);
+        let mut entries = vfs.read_dir(&packs).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let pack = vfs.read(&entry.path()).await.unwrap();
+            if pack.len() < 12 || pack[..4] != *b"FGPK" {
+                continue;
+            }
+            let count = u32::from_le_bytes(pack[8..12].try_into().unwrap()) as usize;
+            for row in pack[12..12 + count * 44].chunks(44) {
+                if row[..32] == id.0 {
+                    let offset = u64::from_le_bytes(row[32..40].try_into().unwrap()) as usize;
+                    let len = u32::from_le_bytes(row[40..44].try_into().unwrap()) as usize;
+                    return (false, pack[offset..offset + len].to_vec());
+                }
+            }
+        }
+        panic!("object {id:?} is neither loose nor packed");
     }
 
     // The oracle walks the authenticated on-disk format BEFORE any mutation.
@@ -616,7 +656,7 @@ mod publication_metadata {
                 remember(&mut objects, vfs, store, segment_id, Kind::Segment).await;
             }
             for reference in root.blocks {
-                let bytes = vfs.read(&store.path(reference.block_id)).await.unwrap();
+                let (_, bytes) = on_disk(vfs, store, reference.block_id).await;
                 if let Some((id, _)) = fgdb_strata::decode_block_with_properties(&bytes).unwrap().1
                 {
                     remember(&mut objects, vfs, store, id, Kind::EdgeProperties).await;
@@ -750,6 +790,15 @@ mod publication_metadata {
                     (*id, object.clone())
                 })
                 .collect();
+            // Damage is planted by path, so every damaged object must be the
+            // file at that path; a packed one would leave the damage unread.
+            assert!(selected.iter().all(|(_, object)| object.loose));
+            assert!(
+                objects
+                    .values()
+                    .any(|object| object.kind == Kind::EdgeBlock && !object.loose),
+                "this commit's blocks are packed, so the inventory crossed a pack"
+            );
             for (id, object) in &selected {
                 for damage in [
                     Damage::Flip,

@@ -1,6 +1,9 @@
 //! Composition tests for the real Tier-D admission, sealed I/R image, resident
 //! budget, asynchronous extent loader, and query-private UnixVfs scratch path.
 //! These tests do not promote a derived image into durable manifest authority.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};

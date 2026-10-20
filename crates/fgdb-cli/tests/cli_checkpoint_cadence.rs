@@ -2,6 +2,9 @@
 //! The real CLI commits every chunk. Native reopened state is checked by caller
 //! keys, while already durable marker identities must survive every resume.
 //! No checkpoint decoder, graph evaluator or commit implementation is mocked.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use asupersync::Budget;
 use fgdb::{BulkLoadCheckpoint, Database, DatabaseKeys};

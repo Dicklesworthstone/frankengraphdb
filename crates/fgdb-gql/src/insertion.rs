@@ -14,7 +14,7 @@ use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphIntegerError, GraphMutationValue, GraphSetColumnType, GraphSetExecutionError,
-    GraphSetProjection, GraphSetValue, PreparedGraphSet,
+    GraphSetProjection, GraphSetSource, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -510,6 +510,40 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    /// A native vertex-only selection followed solely by edge creations in
+    /// one relation. Appending such edges cannot change this selection or its
+    /// frozen property inputs. A host may reuse that fact only while no other
+    /// mutations intervene and must still admit every edge and issued identity.
+    ///
+    /// Relational inputs, procedures and returning-query stages are not part
+    /// of this proof. Native projected values name pattern-bound vertices;
+    /// they cannot hide a read through a supplied edge identity.
+    #[must_use]
+    pub fn independent_edge_append_relation(&self) -> Option<RelationId> {
+        use crate::algebra::ValueProjection;
+
+        let Input::Pattern(selection) = &self.input else {
+            return None;
+        };
+        if !self.vertices.is_empty()
+            || self.edges.is_empty()
+            || self.edges.iter().any(|edge| edge.relation != self.relation)
+            || selection.plan().reads_edges()
+            || !selection.value_columns().iter().all(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Property { .. }
+                        | ValueProjection::Labels { .. }
+                        | ValueProjection::Properties { .. }
+                )
+            })
+        {
+            return None;
+        }
+        Some(self.relation)
+    }
+
     pub(crate) fn return_property_keys(
         &self,
         binding: crate::GraphInsertBinding,
@@ -566,6 +600,19 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
+        self.execute_governed_with_source(policy, source, allocate, checkpoint)
+    }
+
+    /// The same atomic collector with an explicit graph source owner. The host
+    /// may supply checked factors of one admitted pattern; ordinary closures
+    /// continue to use [`Self::execute_governed`] with identical semantics.
+    pub fn execute_governed_with_source<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
         collect::execute(self, policy, None, None, source, allocate, checkpoint)
             .map(|(batch, _)| batch)
     }
@@ -575,10 +622,7 @@ impl PreparedGraphInsert {
         policy: GraphInsertPolicy,
         bindings: &[crate::insertion_query::GraphInsertBinding],
         property_catalog: Option<&crate::ReverseSymbolCatalog>,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl GraphSetSource<E, C>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> ReturningInsert<E, A, C> {

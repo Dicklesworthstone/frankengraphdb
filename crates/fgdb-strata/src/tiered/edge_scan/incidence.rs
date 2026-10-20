@@ -1,11 +1,9 @@
-//! Independent cold incidence positions over one admitted partition. Routing
-//! retains only endpoint/relation/block coordinates, never edge IDs or fields.
+//! Independent cold incidence positions over one admitted partition. Shared
+//! authenticated descriptor routing excludes unrelated payloads before reads.
 //! The existing EId merge selects history winners and property locators.
 
 use super::*;
 use fgdb_types::VId;
-use std::collections::BTreeSet;
-use std::ops::Bound::{Excluded, Included, Unbounded};
 
 mod stream;
 pub use stream::BufferedEdgeIncidenceScan;
@@ -28,81 +26,6 @@ impl BufferedEdgeDirection {
     }
 }
 
-// None is an explicit all-relation directory, not an authorization wildcard.
-// A typed and an untyped request both seek ONE ordered block set. Outgoing and
-// incoming sets merge by block ordinal; a self-loop's block is visited once.
-type Route = (VId, bool, Option<RelationId>, usize);
-struct Routes {
-    entries: BTreeSet<Route>,
-    // Conservative B-tree node/occupancy charge, not an allocator/RSS measure.
-    // The set drops before its charge; every insertion is admitted in advance.
-    charge: MemoryCharge,
-}
-
-impl Routes {
-    fn lookup_work<C>(
-        &self,
-        cx: &QueryCx,
-        work: &mut EdgeScanWork,
-        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
-    ) -> Result<(), BufferedScanError<C>> {
-        // Fixed-width keys: cover tree descent, within-node comparisons and
-        // insertion/rebalancing conservatively before a library B-tree call.
-        for _ in 0..32 * (self.entries.len().saturating_add(1).ilog2() as usize + 1) {
-            work.step(cx, observe)?;
-        }
-        Ok(())
-    }
-
-    fn insert<C>(
-        &mut self,
-        route: Route,
-        cx: &QueryCx,
-        work: &mut EdgeScanWork,
-        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
-    ) -> Result<(), BufferedScanError<C>> {
-        self.lookup_work(cx, work, observe)?;
-        if !self.entries.contains(&route) {
-            self.charge
-                .grow(cx, 512)
-                .map_err(BufferedReadError::Memory)?;
-            self.lookup_work(cx, work, observe)?;
-            self.entries.insert(route);
-        }
-        Ok(())
-    }
-
-    fn next_block<C>(
-        &self,
-        request: Incidence,
-        after: Option<usize>,
-        cx: &QueryCx,
-        work: &mut EdgeScanWork,
-        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
-    ) -> Result<Option<usize>, BufferedScanError<C>> {
-        let mut found = None;
-        for incoming in [false, true] {
-            if (incoming && request.direction == BufferedEdgeDirection::Outgoing)
-                || (!incoming && request.direction == BufferedEdgeDirection::Incoming)
-            {
-                continue;
-            }
-            self.lookup_work(cx, work, observe)?;
-            let prefix = (request.endpoint, incoming, request.relation);
-            let lower = after.map_or(Included((prefix.0, prefix.1, prefix.2, 0)), |block| {
-                Excluded((prefix.0, prefix.1, prefix.2, block))
-            });
-            if let Some(&(endpoint, face, relation, block)) =
-                self.entries.range((lower, Unbounded)).next()
-                && (endpoint, face, relation) == prefix
-            {
-                found = Some(found.map_or(block, |old: usize| old.min(block)));
-            }
-        }
-        Ok(found)
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Incidence {
     endpoint: VId,
@@ -119,7 +42,6 @@ impl Incidence {
 
 struct Driver<'source, V: Vfs> {
     root: BufferedEdgeScan<'source, V>,
-    routes: Option<Routes>,
 }
 
 // At most one retained successor stream. `next` is the EXACT request that may
@@ -133,20 +55,22 @@ struct Continuation {
 }
 
 /// One root stream plus independently positioned indexed incidence requests.
-/// The first incidence request builds a derived endpoint-to-block directory by
-/// one governed pass over the admitted blocks. Later requests fault only routed
-/// blocks; they do not rebuild the directory or scan unrelated block payloads.
+/// Every incidence request seeks the partition's authenticated descriptor
+/// directory. It does not scan graph payloads to construct query-local routing.
+/// Outgoing keys are exact; incoming ranges can admit unrelated rows within a
+/// selected block, which the ordinary incidence predicate then rejects.
 /// All histories in a routed block remain authoritative until native resolution.
 ///
-/// Routing is query-local RESIDENT METADATA, bounded by the partition pool and
-/// cumulative source work. It can grow with distinct endpoint/block pairs and
-/// refuse when it does not fit. This is not a persistent adjacency index or an
-/// optimal I/O bound: each successor can refault its routed bounded blocks.
+/// Routing is shared resident descriptor metadata, bounded and charged during
+/// authenticated partition admission, with no per-edge routing entries. Query
+/// seeks and payload reads share one cumulative source allowance. This is not
+/// a durable index or an optimal I/O bound: broad incoming ranges can select
+/// many blocks, and each successor can refault its routed bounded blocks.
 /// No full edge directory, neighborhood payload bag or result table is kept.
 ///
 /// Root exhaustion does not disable nested reads: the final root edge may still
 /// have children. Close/error/drop of a POLLED pending call drops the complete
-/// driver, including routing and root heads, and makes all later calls inert.
+/// driver and root heads, and makes all later calls inert.
 /// Returned edge/endpoints own their charges independently. This is owner-level
 /// storage access, not a Warden grant or cross-process retention lease.
 pub struct BufferedEdgeJoinScan<'source, V: Vfs> {
@@ -164,10 +88,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             as_of: self.as_of,
             work: self.work.used,
             continuation: None,
-            driver: Some(Driver {
-                root: self,
-                routes: None,
-            }),
+            driver: Some(Driver { root: self }),
         }
     }
 }
@@ -285,7 +206,7 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
     /// Even repeated EOF checks observe the cumulative work/cancellation limit.
     ///
     /// At most one additional routed heap and bounded decoded block remain
-    /// charged between calls, beside the independent root and routing metadata.
+    /// charged between calls, beside the independent root.
     /// A deep join may still reseed after switching incidences; this is not a
     /// per-depth cache, persistent index or optimal I/O guarantee. Errors never
     /// retry through the independent path. All state is taken before awaiting,
@@ -374,44 +295,6 @@ impl<V: Vfs> Driver<'_, V> {
         Ok(result)
     }
 
-    async fn build_routes<C: Send>(
-        &mut self,
-        cx: &QueryCx,
-        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<(), BufferedScanError<C>> {
-        if self.routes.is_some() {
-            return Ok(());
-        }
-        self.root.work.step(cx, observe)?;
-        let mut routes = Routes {
-            entries: BTreeSet::new(),
-            charge: self.root.partition.reserve_scan_bytes(cx, 1024)?,
-        };
-        for block in 0..self.root.blocks {
-            let image = self
-                .root
-                .partition
-                .edge_scan_block(cx, block, &mut self.root.work, observe)
-                .await?;
-            for row in &image.0 {
-                for (endpoint, incoming) in [(row.src, false), (row.dst, true)] {
-                    for relation in [None, Some(row.relation)] {
-                        routes.insert(
-                            (endpoint, incoming, relation, block),
-                            cx,
-                            &mut self.root.work,
-                            observe,
-                        )?;
-                    }
-                }
-            }
-        }
-        self.root.work.step(cx, observe)?;
-        // A failed or cancelled build never publishes a partial directory.
-        self.routes = Some(routes);
-        Ok(())
-    }
-
     async fn incident<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -441,7 +324,12 @@ impl<V: Vfs> Driver<'_, V> {
         retained: bool,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<State, BufferedScanError<C>> {
-        self.build_routes(cx, observe).await?;
+        self.root.work.step(cx, observe)?;
+        let mut blocks = self.root.partition.edge_scan_incidence_blocks(
+            request.endpoint,
+            request.relation,
+            request.direction,
+        );
         // Only routed blocks receive heads; grow their capacity under a charge
         // before heap insertion. Root heads and their position stay unchanged.
         let mut state = State {
@@ -449,19 +337,22 @@ impl<V: Vfs> Driver<'_, V> {
             active: None,
             initialized: true,
             incidence: retained.then_some(request),
-            _head_charge: self.root.partition.reserve_scan_bytes(cx, 1024)?,
+            _head_charge: Some(
+                self.root
+                    .partition
+                    .reserve_scan_bytes(cx, 1024 + size_of_val(&blocks))?,
+            ),
         };
-        let mut after_block = None;
         loop {
-            let block = self
-                .routes
-                .as_ref()
-                .expect("complete routing directory")
-                .next_block(request, after_block, cx, &mut self.root.work, observe)?;
+            let block = self.root.partition.edge_scan_next_incidence_block(
+                &mut blocks,
+                cx,
+                &mut self.root.work,
+                observe,
+            )?;
             let Some(block) = block else {
                 break;
             };
-            after_block = Some(block);
             self.root.load(&mut state, cx, block, observe).await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let mut ordinal = 0;
@@ -492,20 +383,21 @@ impl<V: Vfs> Driver<'_, V> {
                 }
             }
             if let Some(head) = head {
-                state
+                let charge = state
                     ._head_charge
-                    .grow(cx, 512)
-                    .map_err(BufferedReadError::Memory)?;
+                    .as_mut()
+                    .expect("incidence heap reservation precedes every head");
+                charge.grow(cx, 512).map_err(BufferedReadError::Memory)?;
                 state.heads.try_reserve(1).map_err(|_| {
                     BufferedReadError::Memory(MemoryError::AllocationFailed {
-                        requested: state._head_charge.bytes(),
+                        requested: charge.bytes(),
                     })
                 })?;
                 if state
                     .heads
                     .capacity()
                     .checked_mul(size_of::<Reverse<Head>>())
-                    .is_none_or(|bytes| bytes > state._head_charge.bytes())
+                    .is_none_or(|bytes| bytes > charge.bytes())
                 {
                     return Err(BufferedReadError::SizeOverflow.into());
                 }

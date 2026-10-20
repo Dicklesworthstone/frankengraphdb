@@ -30,6 +30,13 @@
 //! follows the class. A missing database and a token that may not select it
 //! share one 404, as they share one FGP refusal. The health route reveals
 //! nothing about databases.
+//!
+//! `GET /studio/` serves the embedded, local-first browser workspace. The
+//! static shell has no database authority; it uses the same authenticated
+//! schema/read routes below. See `docs/STUDIO.md` for the loopback launch.
+
+#[path = "studio/mod.rs"]
+mod studio;
 
 use crate::Server;
 use crate::commits::CommitWatcher;
@@ -575,6 +582,9 @@ pub(crate) async fn respond<'s>(
         return refusal_response(ErrorCode::Draining, "the server is draining");
     }
     let path = request.uri.split('?').next().unwrap_or("");
+    if let Some(response) = studio::respond(path, &request.method) {
+        return response;
+    }
     if path == "/v1/health" {
         return if request.method == Method::Get {
             json_response(200, r#"{"v":1,"status":"ok"}"#.to_owned())

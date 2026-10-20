@@ -10,7 +10,8 @@
 //! allowance. Row stages use ordinary native expression and predicate evaluators.
 
 pub use crate::set_ops::spill::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetAggregateRowError,
-    SpillSetBinaryPlan, SpillSetBuildError, SpillSetCrossPlan, SpillSetMergeStep, SpillSetRowError,
-    SpillSetRows, SpillSetStage, SpillSetValuesPlan,
+    AsyncSpillElementSource, AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan,
+    SpillSetAggregateRowError, SpillSetBinaryPlan, SpillSetBuildError, SpillSetCrossPlan,
+    SpillSetJoinPlan, SpillSetMergeStep, SpillSetRowError, SpillSetRows, SpillSetStage,
+    SpillSetValuesPlan,
 };

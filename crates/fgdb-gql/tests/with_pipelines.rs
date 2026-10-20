@@ -74,6 +74,154 @@ fn ints(rows: &[GraphValueRow], column: usize) -> Vec<Option<i64>> {
         })
         .collect()
 }
+
+#[test]
+fn imported_nested_map_correlations_share_read_equality_and_preserve_occurrences() {
+    let prefix = "UNWIND [{key:{p:2},ordinal:8},{key:{p:1},ordinal:9},\
+                         {key:{p:2},ordinal:10},{key:null},{key:{}},\
+                         {key:{p:'2'}}] AS row ";
+    let output = "RETURN row.ordinal AS ordinal,n.p AS value";
+    let map_text = format!("{prefix} MATCH (n {{p:row.key.p}}) {output}");
+    let where_text = format!("{prefix} MATCH (n) WHERE row.key.p=n.p {output}");
+    let map_template = PreparedGraphSetText::prepare(&map_text, symbols).unwrap();
+    let where_template = PreparedGraphSetText::prepare(&where_text, symbols).unwrap();
+    assert_eq!(
+        map_template.canonical_template_bytes(),
+        where_template.canonical_template_bytes()
+    );
+    let query = map_template.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(query.columns(), &["ordinal", "value"]);
+    let result = run(
+        &query,
+        &[
+            CanonicalScalar::Int(1),
+            CanonicalScalar::Int(2),
+            CanonicalScalar::Int(2),
+        ],
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        ints(&result.value, 0),
+        vec![Some(8), Some(8), Some(9), Some(10), Some(10)]
+    );
+    assert_eq!(
+        ints(&result.value, 1),
+        vec![Some(2), Some(2), Some(1), Some(2), Some(2)]
+    );
+    let collision =
+        prepare("UNWIND [{p:2}] AS __fg_match_key_1 MATCH (n {p:__fg_match_key_1.p}) RETURN *");
+    assert_eq!(collision.columns(), &["__fg_match_key_1", "n"]);
+    assert_eq!(
+        run(&collision, &[CanonicalScalar::Int(2)], wide(), &mut || Ok(
+            ()
+        ))
+        .unwrap()
+        .value
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn imported_map_field_errors_and_cancellation_do_not_become_empty_answers() {
+    let invalid =
+        prepare("UNWIND [{key:{p:1}},{key:2}] AS row MATCH (n {p:row.key.p}) RETURN n LIMIT 0");
+    assert!(run(&invalid, &[CanonicalScalar::Int(1)], wide(), &mut || Ok(())).is_err());
+    let query = prepare("UNWIND [{p:1},{p:1}] AS row MATCH (n {p:row.p}) RETURN n");
+    assert!(matches!(
+        run(&query, &[CanonicalScalar::Int(1)], wide(), &mut || Err(41)),
+        Err(GqlQueryError::Interrupted(41))
+    ));
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphSetText::prepare(
+            "UNWIND [{p:1}] AS row WITH row MATCH (n {p:row.p}) RETURN n",
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "continuations cannot lose an unowned computed join key"
+    );
+    // The existing continuation owner remains available after an explicit
+    // projection, including its original ordering and scope boundary.
+    let projected = prepare(
+        "UNWIND [{p:2},{p:1}] AS row WITH row.p AS wanted MATCH (n {p:wanted}) RETURN wanted",
+    );
+    assert_eq!(
+        ints(
+            &run(
+                &projected,
+                &[CanonicalScalar::Int(1), CanonicalScalar::Int(2)],
+                wide(),
+                &mut || Ok(())
+            )
+            .unwrap()
+            .value,
+            0
+        ),
+        vec![Some(1), Some(2)]
+    );
+    let fields = (0..32)
+        .map(|key| format!("p{key}:row.p{key}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let text = format!("UNWIND [{{p0:1}}] AS row MATCH (n {{{fields}}}) RETURN n");
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphSetText::prepare(&text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn imported_map_keys_keep_the_selective_cross_execution_path() {
+    let rows = (0..512)
+        .map(|key| {
+            fgdb_gql::algebra::GraphValue::map(vec![(
+                "key".into(),
+                fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(key)),
+            )])
+            .unwrap()
+        })
+        .collect();
+    let arguments = GqlParameters::new().with_list("rows", rows).unwrap();
+    let query = PreparedGraphSetText::prepare(
+        "UNWIND $rows AS row MATCH (n {p:row.key}) RETURN row.key AS input,n.p AS matched",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments)
+    .unwrap();
+    let source = (0..1024).map(CanonicalScalar::Int).collect::<Vec<_>>();
+    let result = run(&query, &source, wide(), &mut || Ok(())).unwrap();
+    assert_eq!(
+        ints(&result.value, 0),
+        (0..512).map(Some).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ints(&result.value, 1),
+        (0..512).map(Some).collect::<Vec<_>>()
+    );
+    // The existing ordered-probe execution copies selected pairs only. A
+    // materialized 512 x 1024 product would exceed this by a wide margin.
+    assert!(
+        result.evaluator.work_units < 1_000_000,
+        "{:?}",
+        result.evaluator
+    );
+}
 // The native WITH/RETURN pipeline reads its inputs as scalar columns and
 // prepares the expressions as scalars. Since 31408b2c a dynamic column under
 // arithmetic stays a scalar load (it may hold a Float), so the typed mirror

@@ -15,6 +15,8 @@ pub use buffered::PreparedBufferedOrder;
 mod binary;
 #[path = "cross.rs"]
 mod cross;
+#[path = "relational_join.rs"]
+mod relational_join;
 #[path = "staged.rs"]
 mod staged;
 
@@ -318,12 +320,16 @@ where
         Some(&mut work),
     )
     .await?;
+    // The bound terminal operator owns its comparison law. A synthesized
+    // canonical key vector can equal an explicit ASC NULLS FIRST vector;
+    // never infer language ordering from that vector or from observed rows.
     let (sorted, used) = input
-        .sort_continuing(
+        .sort_query_continuing(
             cx,
             destination,
             scratch,
             tail.order(),
+            tail.has_explicit_order(),
             run_rows,
             max_runs,
             page_bytes,

@@ -1210,6 +1210,28 @@ pub fn canonicalize(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalErro
     Ok(())
 }
 
+/// [`canonicalize`] for entries their owner drops on error, as
+/// `LogicalDeltaTemplate::build` does: each row is moved through its
+/// encoding instead of cloned, the same steps in the same order, so the
+/// result and the first error are the same. Cloning every row (labels,
+/// property vectors, text) to keep a borrowed `Err` non-destructive was a
+/// tenth of a bulk load's preparation (fgdb-load-beats-memgraph-xf2n8).
+pub(crate) fn canonicalize_owned(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalError> {
+    for entry in entries.iter_mut() {
+        let mut encoded: Vec<(Vec<u8>, DeltaRow)> = std::mem::take(&mut entry.rows)
+            .into_iter()
+            .map(|mut row| {
+                row.canonicalize_embedded_collections();
+                row.canonical_bytes().map(|bytes| (bytes, row))
+            })
+            .collect::<Result<_, _>>()?;
+        encoded.sort_by(|left, right| left.0.cmp(&right.0));
+        entry.rows = encoded.into_iter().map(|(_, row)| row).collect();
+    }
+    entries.sort_by_key(|entry| entry.coordinate());
+    Ok(())
+}
+
 impl crate::LogicalDeltaBatch {
     /// The batch's canonical bytes — the transcript its `batch_digest` is taken
     /// over, and therefore what makes that digest an idempotency key two

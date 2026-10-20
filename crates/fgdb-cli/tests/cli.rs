@@ -3,6 +3,9 @@
 //! against the real durable engine. Temporary artifacts are retained for
 //! diagnosis; no fixture deletes files. Key files are created owner-only
 //! (0600), as the CLI requires on Unix.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
@@ -443,6 +446,98 @@ fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
 }
 
 #[test]
+fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
+    let fixture = Fixture::new("spill-carried-properties");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let catalog = [
+        "--relation",
+        "KNOWS=1",
+        "--property",
+        "name=2",
+        "--property",
+        "score=3",
+        "--property",
+        "missing=4",
+    ];
+    let command = |operation: &str, options: &[&str], text: &str| {
+        let mut args = catalog.to_vec();
+        args.extend_from_slice(options);
+        args.push(text);
+        fixture.robot(operation, &args)
+    };
+    let basis = succeeded(
+        &command(
+            "write",
+            &[],
+            "CREATE (a:Person {id:1,name:'A',score:20}),(b:Person {id:2,name:'B',score:0}),(c:Person {id:3,name:'C'}),(a)-[:KNOWS {score:7}]->(b),(a)-[:KNOWS {score:9}]->(c)",
+        ),
+        "written",
+    );
+    let latest = succeeded(
+        &command(
+            "write",
+            &[],
+            "MATCH (n:Person) WHERE n.id=1 SET n.name='changed',n.score=30",
+        ),
+        "written",
+    );
+    let directory = fixture.dir.join("spill");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    let queries = [
+        ("MATCH (n:Person) WITH n AS kept RETURN kept.id AS id,kept.name AS name,kept.missing AS absent ORDER BY id".to_owned(), latest),
+        ("MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH {node:b,edge:r} AS record RETURN record.node.id AS id,record.edge.score AS score ORDER BY id".to_owned(), latest),
+        ("MATCH (n:Person) WITH [n] AS nodes RETURN [x IN nodes WHERE x.id>=2 | coalesce(x.score,5)] AS values,reduce(total=0,x IN nodes | total+coalesce(x.score,5)) AS total ORDER BY total,values".to_owned(), latest),
+        ("MATCH (n:Person) WITH n AS kept RETURN CASE WHEN kept.id=2 THEN 99 ELSE 10/coalesce(kept.score,5) END AS value ORDER BY value".to_owned(), latest),
+        (format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} WITH n AS kept RETURN kept.id AS id,kept.name AS name,kept.score AS score ORDER BY id"), basis),
+    ];
+    for phase in ["before compaction", "after compaction"] {
+        if phase == "after compaction" {
+            succeeded(&fixture.robot("compact", &[]), "compacted");
+        }
+        for (text, seq) in &queries {
+            let expected = command("query", &[], text);
+            assert_eq!(succeeded(&expected, "rows"), *seq, "{phase}: {text}");
+            for buffered in [false, true] {
+                let mut options = vec!["--spill-dir", spill, "--spill-memory-bytes", "2097152"];
+                if buffered {
+                    options.extend_from_slice(&["--buffered", "--buffer-memory-bytes", "8388608"]);
+                }
+                let actual = command("query", &options, text);
+                assert_eq!(succeeded(&actual, "rows"), *seq, "{phase}: {text}");
+                assert_eq!(
+                    rows(&actual),
+                    rows(&expected),
+                    "{phase}, buffered={buffered}: {text}"
+                );
+                assert!(terminal(&actual).contains("\"stream\":true"));
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            }
+        }
+    }
+    // LIMIT cannot hide a bad property expression in a later materialized
+    // row, and no columns, rows, result handle or scratch file may escape.
+    for limit in ["0", "1"] {
+        let text = format!(
+            "MATCH (n:Person) WITH n AS kept RETURN 10/kept.score AS value ORDER BY value LIMIT {limit}"
+        );
+        for buffered in [false, true] {
+            let mut options = vec!["--spill-dir", spill];
+            if buffered {
+                options.push("--buffered");
+            }
+            let failed = command("query", &options, &text);
+            refused(&failed, 3, "query");
+            let stdout = String::from_utf8(failed.stdout).unwrap();
+            for event in ["columns", "row", "result"] {
+                assert!(!stdout.contains(&format!("\"event\":\"{event}\"")));
+            }
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
 fn invalid_key_files_are_refused_without_creating_a_database() {
     let line = "ab".repeat(32);
     let cases: [(&str, Vec<u8>); 7] = [
@@ -665,8 +760,8 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
     assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
 
-    // A repeated or malformed limit is a usage error; write is governed too,
-    // while compact takes no execution limits.
+    // A repeated or malformed limit is a usage error. Compact takes no
+    // execution limits.
     let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
     refused(&fixture.robot("query", &twice), 2, "usage");
     refused(
@@ -674,8 +769,15 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
         2,
         "usage",
     );
+    // A write is governed by the same limits (fgdb-ewc7i), and refused
+    // before anything commits.
     let write = ["--max-work-units", "1", "INSERT (:Person {id: 9})"];
-    refused(&fixture.robot("write", &write), 3, "query");
+    let starved = fixture.robot("write", &write);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    let count = fixture.robot("query", &["MATCH (n:Person {id: 9}) RETURN count(*) AS c"]);
+    succeeded(&count, "rows");
+    assert!(String::from_utf8_lossy(&count.stdout).contains(r#""value":"0""#));
     refused(
         &fixture.robot("compact", &["--max-work-units", "1"]),
         2,

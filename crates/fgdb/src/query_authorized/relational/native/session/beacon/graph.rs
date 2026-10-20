@@ -3,12 +3,14 @@
 use super::{
     AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver, Meter,
     Options, QueryCx, QueryError, RefCell, Scan, Search, SharedWork, WorkControl, admit_query,
-    charge, definition, finish, policy, settle,
+    allows, charge, definition, finish, policy, settle, validate_eligibility,
 };
 use crate::query::beacon::graph as native;
 use fgdb_beacon::expansion::ExpansionSpec;
-use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery};
+use fgdb_beacon::read::{Projection, VectorEncoding};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexConfig};
 use fgdb_delta_types::RelationId;
+use fgdb_types::VId;
 use std::cell::Cell;
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -29,6 +31,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// exactly once. Graph structure/seed/visited limits are additionally capped
     /// by the host/request scratch ceiling, not independently widenable.
     ///
+    /// Graph-only requests need no configured text/vector lane or property
+    /// projection. They keep the same selected vertex directory and whole-edge
+    /// admission profile, including isolates at zero hops. Unused index options
+    /// cannot force a dummy index build or an unrelated property validation.
+    ///
     /// This builds per execution; it is not prepared-index graph reuse, disk
     /// spill, a durable lease or timing-isolation proof. Candidate-limited fusion
     /// and ANN retain their existing answer scope. Expiry/retirement close the
@@ -39,6 +46,38 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         options: &Options,
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
+    ) -> Result<Vec<GraphHybridHit>, Error> {
+        self.beacon_search_graph_with_eligibility(cx, options, query, expansion, None)
+    }
+
+    /// Restrict result endpoints before graph, text and vector candidate limits,
+    /// while keeping the complete capability-visible corpus and graph transit.
+    /// Eligibility does not grant authority, change BM25 statistics, or reveal
+    /// candidates through a callback. Hidden/unknown IDs are ordinary nonmatches.
+    ///
+    /// Supply at most 100,000 strictly ascending, unique IDs, at this same
+    /// historical cut. Empty selects none; the unfiltered method is unrestricted.
+    /// Validation shares the live work allowance and retains no selector copy.
+    /// Reject-all still admits the source, validates requested lanes, traverses
+    /// the bounded graph and passes final delivery checks. No prefix escapes.
+    pub fn beacon_search_graph_filtered(
+        &mut self,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: &[VId],
+    ) -> Result<Vec<GraphHybridHit>, Error> {
+        self.beacon_search_graph_with_eligibility(cx, options, query, expansion, Some(eligible))
+    }
+
+    fn beacon_search_graph_with_eligibility(
+        &mut self,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: Option<&[VId]>,
     ) -> Result<Vec<GraphHybridHit>, Error> {
         finish(self.run(cx, |view, _, scope, _, host, execution| {
             // source_query() deliberately has k=0; admission must check the
@@ -52,8 +91,32 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             ));
             let result = (|| {
                 work.borrow_mut().charge(1)?;
-                let config = options.config_for_graph(query)?;
-                let options = definition(options, config, host, &mut SharedWork(&work))?;
+                let options = if query.is_graph_only() {
+                    options.validate_graph_only(query)?;
+                    // Only source selection and its bounds apply to topology.
+                    // Do not clone vector keys or validate dormant index lanes.
+                    // Native evaluation uses None, not an empty/dummy index.
+                    Options {
+                        as_of: options.as_of,
+                        vertex_label: options.vertex_label,
+                        projection: Projection {
+                            text: None,
+                            vector: Vec::new(),
+                            encoding: VectorEncoding::Coordinates,
+                        },
+                        index: IndexConfig {
+                            text: None,
+                            vector: None,
+                            max_documents: options.index.max_documents,
+                            ..IndexConfig::default()
+                        },
+                        policy: policy(options.policy, host),
+                    }
+                } else {
+                    let config = options.config_for_graph(query)?;
+                    definition(options, config, host, &mut SharedWork(&work))?
+                };
+                validate_eligibility(eligible, &mut SharedWork(&work))?;
                 let mut expansion = expansion;
                 if query.graph_enabled() {
                     let cap = options.policy.max_source_scratch;
@@ -94,7 +157,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         .poll()
                         .map_err(|error| work.borrow_mut().refuse(error))
                 };
-                native::evaluate_with_edge_admission(
+                native::evaluate_filtered(
                     &view.snapshot,
                     at,
                     &options,
@@ -117,6 +180,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     |key| scope.allows_property(key),
                     |relation| scope.allows_relation(relation),
                     record,
+                    |id| allows(eligible, id),
                 )
             })();
             let result = settle(work, result)?;
@@ -129,3 +193,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
 #[cfg(test)]
 #[path = "graph_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "graph_filter_tests.rs"]
+mod filter_tests;

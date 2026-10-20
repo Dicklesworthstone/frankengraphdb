@@ -8,8 +8,13 @@
 //! argument is the host's typed refusal. Yield columns are the Any domain, as
 //! UNWIND columns are: their values are checked where they are used.
 
-use crate::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
-use crate::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetValue};
+use crate::algebra::{
+    GraphValue, GraphValueRow, PreparedGraphPattern, PreparedGraphPatternFactors,
+};
+use crate::{
+    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GraphSetValue,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::CanonicalScalar;
 
@@ -199,6 +204,28 @@ impl PreparedProcedureCall {
     }
 }
 
+/// Both complete factors from one original graph admission. `result_rows`
+/// counts the sum of retained factor rows, not their Cartesian product and
+/// not external result rows. `snapshot_records` counts the original admission
+/// once; evaluator statistics include all admission and both evaluations.
+/// Each factor's first column contains unique, non-null vertex identities.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GraphPatternFactorExecution {
+    pub value: [Vec<GraphValueRow>; 2],
+    pub rows: GqlExecutionStats,
+    pub evaluator: GlaExecutionStats,
+}
+
+impl core::fmt::Debug for GraphPatternFactorExecution {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphPatternFactorExecution")
+            .field("value", &"[REDACTED]")
+            .field("rows", &self.rows)
+            .field("evaluator", &self.evaluator)
+            .finish()
+    }
+}
+
 /// The trusted row sources one set execution may read: graph patterns and,
 /// when the host supplies them, procedure calls. Every existing closure over
 /// patterns is a source with no procedures.
@@ -208,6 +235,41 @@ pub trait GraphSetSource<E, C> {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>;
+
+    /// Definition-only capability: this host handles every checked two-factor
+    /// request. Inspect no source data, allocate nothing and record no read.
+    /// Its admitted graph domain contains each vertex identity exactly once.
+    /// `true` promises `pattern_factors` returns Some; violating that promise
+    /// is a source-contract error, never a second ordinary source execution.
+    fn supports_pattern_factors(&self) -> bool {
+        false
+    }
+
+    /// An optional physical product owner for one original graph pattern.
+    /// The default `None` is an unsupported capability and MUST perform no
+    /// source work or observation. Sources advertising no factor capability
+    /// execute the unchanged logical leaf without constructing a request.
+    /// A returned result, including an error, never falls back or reopens it.
+    ///
+    /// Admit `request.original()` once at the same pinned and authorized cut as
+    /// `pattern`, retaining its complete source and witness domain. Required
+    /// labels and stored properties must already be total table lookups after
+    /// admission; factor evaluation must not introduce lazy source reads. Evaluate
+    /// BOTH factors against those admitted tables before returning, even if a
+    /// factor or the consumer's leading rows are empty. This boundary precedes
+    /// all imported-key filtering. Each factor has its declared columns in
+    /// their original local order, starting with a unique non-null vertex
+    /// identity from the original source's unique vertex domain. The consumer
+    /// rejects repeated or null factor identities before key matching. The
+    /// private-row allowance is independent of final result limits; all actual
+    /// work and scratch remain cumulative.
+    fn pattern_factors(
+        &mut self,
+        _request: &PreparedGraphPatternFactors<'_>,
+        _policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        None
+    }
 
     /// `None` means this host executes no procedures. Rows must carry exactly
     /// `call.outputs()` columns, in that order.
@@ -237,6 +299,94 @@ pub trait GraphSetSource<E, C> {
         _key: PropertyKeyId,
     ) -> Option<Result<Option<CanonicalScalar>, E>> {
         None
+    }
+}
+
+/// Borrow a host through a consuming row phase, then reuse that same host for
+/// the aggregate's output expressions. Iterator entrypoints can attach their
+/// optional element reader without turning an unsupported read into NULL.
+pub(crate) struct BorrowedSource<'s, 'r, E, C> {
+    pub(crate) source: &'s mut dyn GraphSetSource<E, C>,
+    pub(crate) elements: Option<&'s mut super::projection::ElementRead<'r, E>>,
+}
+
+impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+
+    fn supports_pattern_factors(&self) -> bool {
+        self.source.supports_pattern_factors()
+    }
+
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        self.source.pattern_factors(request, policy)
+    }
+
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+        match &mut self.elements {
+            Some(read) => read(element, key),
+            None => self.source.element_property(element, key),
+        }
+    }
+}
+
+/// A caller's pattern callback, erased at a governed set boundary so the
+/// set engine is compiled once per error pair, not once per caller closure
+/// (fgdb-2goz).
+pub(crate) type DynPatterns<'a, E, C> = dyn FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a;
+
+/// A caller's procedure callback, erased at the same boundary.
+pub(crate) type DynProcedures<'a, E, C> = dyn FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a;
+
+/// Borrow one caller-specific pattern callback behind one stable source type.
+/// This is an execution-code-size boundary only: it forwards the exact policy,
+/// rows, errors and control domain without buffering or fallback.
+pub(crate) struct PatternSource<'a, E, C> {
+    pub(crate) patterns: &'a mut DynPatterns<'a, E, C>,
+}
+
+impl<E, C> GraphSetSource<E, C> for PatternSource<'_, E, C> {
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        (self.patterns)(pattern, policy)
     }
 }
 
@@ -308,6 +458,16 @@ where
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
         self.source.pattern(pattern, policy)
+    }
+    fn supports_pattern_factors(&self) -> bool {
+        self.source.supports_pattern_factors()
+    }
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        self.source.pattern_factors(request, policy)
     }
     fn procedure(
         &mut self,

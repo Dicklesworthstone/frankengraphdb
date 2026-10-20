@@ -113,7 +113,7 @@ impl WriteTxn {
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         Ok(())
     }
 
@@ -189,7 +189,7 @@ impl WriteTxn {
             // assigns births on every call, so a new group may move them.
             database
                 .prepare_ordered_writes(self.staged.clone())
-                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_ref()))
+                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_deref()))
         } else {
             database.prepare_atomic_writes(self.staged.clone())
         };
@@ -202,7 +202,7 @@ impl WriteTxn {
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         Ok(())
     }
 

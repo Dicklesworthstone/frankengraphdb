@@ -31,7 +31,7 @@ mod cache;
 #[path = "query_prism/projection.rs"]
 mod projection;
 pub(crate) use cache::{
-    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
+    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, Request as ProjectionRequest,
 };
 pub(crate) use projection::{bind_procedure, procedure_options};
 
@@ -123,20 +123,7 @@ fn bind_kernel<C>(
 ) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     let mut supplied = Vec::with_capacity(arguments.len());
     for (index, value) in arguments.iter().enumerate() {
-        let argument = match value {
-            GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
-            GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
-            GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
-            GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
-            GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
-            _ => {
-                return Err(refuse(ProcedureError::Bind(FnxCallError {
-                    site: FnxCallSite::Argument(index),
-                    kind: FnxBindErrorKind::InvalidArgument("no Prism argument domain"),
-                })));
-            }
-        };
-        supplied.push(argument);
+        supplied.push(kernel_argument(value, index)?);
     }
     let yields: Vec<(&str, &str)> = call
         .outputs()
@@ -145,6 +132,52 @@ fn bind_kernel<C>(
         .collect();
     let spec = FnxCallSpec::from_arguments(call.namespace(), call.name(), &supplied, &yields)
         .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    check_kernel_outputs(call, spec)
+}
+
+/// Named kernel arguments use the same typed registry as standalone calls.
+/// The caller maps their local argument ordinals back around projection fields.
+fn bind_named_kernel<C>(
+    call: &PreparedProcedureCall,
+    arguments: &[(&str, &GraphValue)],
+) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
+    let mut supplied = Vec::with_capacity(arguments.len());
+    for (index, &(name, value)) in arguments.iter().enumerate() {
+        supplied.push((name, kernel_argument(value, index)?));
+    }
+    let yields: Vec<(&str, &str)> = call
+        .outputs()
+        .iter()
+        .map(|name| (name.as_str(), name.as_str()))
+        .collect();
+    let spec = FnxCallSpec::from_named_arguments(call.namespace(), call.name(), &supplied, &yields)
+        .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    check_kernel_outputs(call, spec)
+}
+
+fn kernel_argument<C>(
+    value: &GraphValue,
+    index: usize,
+) -> Result<FnxArgument, GqlQueryError<GqlError, C>> {
+    Ok(match value {
+        GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
+        GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
+        GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
+        GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
+        GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
+        _ => {
+            return Err(refuse(ProcedureError::Bind(FnxCallError {
+                site: FnxCallSite::Argument(index),
+                kind: FnxBindErrorKind::InvalidArgument("no Prism argument domain"),
+            })));
+        }
+    })
+}
+
+fn check_kernel_outputs<C>(
+    call: &PreparedProcedureCall,
+    spec: FnxCallSpec,
+) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     // The statement matches these outputs as vertices (fgdb-luq0b). Vertex
     // and component cells are vertex identities; anything else refuses here
     // rather than matching nothing and dropping every row.
@@ -166,7 +199,15 @@ fn bind_kernel<C>(
 }
 
 /// The canonical whole-graph projection at the read's sequence, admitted
-/// within what the read has left. Explicit projections retain these ceilings.
+/// within what the read has left: the statement's snapshot-record budget
+/// bounds the source's work units and its scratch budget the source's scratch
+/// entries, in place of a standalone call's fixed defaults. Under those
+/// defaults a pokec PageRank refused at 10M scratch entries whatever budget
+/// its statement carried (fgdb-avyqt). The staged vertices and weighted edges
+/// become the projection builder's input, whose capacities it charges again
+/// against its workspace, so they are staged up to that workspace: the 1 GiB
+/// staging default refused pokec's 1.6 GB under a 4 GiB workspace. Explicit
+/// projections retain these ceilings.
 fn kernel_options(
     spec: &FnxCallSpec,
     as_of: CommitSeq,
@@ -174,8 +215,10 @@ fn kernel_options(
 ) -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph_for(spec, Some(as_of));
     if let Some(records) = remaining.rows.max_snapshot_records() {
-        options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);
+        options.source_limits.max_work_units = records;
     }
+    options.source_limits.max_scratch_entries = remaining.evaluator.max_scratch_entries;
+    options.source_limits.max_staging_bytes = options.projection_limits.max_workspace_bytes;
     options.execution_limits.max_estimated_work = options
         .execution_limits
         .max_estimated_work
@@ -790,14 +833,14 @@ fn finish_sealed_read(
     Ok(FnxReadResult::bind_selection(result, options.selection))
 }
 
-fn source_control(
+pub(crate) fn source_control<S>(
     cx: &QueryCx,
     limits: FnxSourceLimits,
-) -> impl FnMut(SourceEvent) -> Result<(), Error> + '_ {
+) -> impl FnMut(SourceEvent) -> Result<(), FnxReadError<S, Cancel>> + '_ {
     let mut work = 0u64;
     let mut scratch = 0u64;
     move |event| {
-        cx.checkpoint().map_err(Error::Cancelled)?;
+        cx.checkpoint().map_err(FnxReadError::Cancelled)?;
         let (counter, limit, resource) = match event {
             SourceEvent::Work | SourceEvent::SnapshotRecord => {
                 (&mut work, limits.max_work_units, "work units")
@@ -806,16 +849,16 @@ fn source_control(
                 (&mut scratch, limits.max_scratch_entries, "scratch entries")
             }
         };
-        *counter = counter.checked_add(1).ok_or(Error::SizeOverflow)?;
+        *counter = counter.checked_add(1).ok_or(FnxReadError::SizeOverflow)?;
         source_admit(resource, u128::from(*counter), u128::from(limit))
     }
 }
 
-pub(super) fn source_admit<C>(
+pub(super) fn source_admit<S, C>(
     resource: &'static str,
     requested: u128,
     limit: u128,
-) -> Result<(), FnxReadError<ReadError, C>> {
+) -> Result<(), FnxReadError<S, C>> {
     if requested > limit {
         Err(FnxReadError::SourceLimit {
             resource,
@@ -830,14 +873,14 @@ pub(super) fn source_admit<C>(
 /// Geometric growth with count admission BEFORE allocation; never reserve the
 /// caller's entire maximum for a tiny projection. Charge the conservative
 /// old+new backing-store peak while a growth might relocate the allocation.
-pub(crate) fn push_staged<T, C>(
+pub(crate) fn push_staged<T, S, C>(
     output: &mut Vec<T>,
     value: T,
     resource: &'static str,
     maximum: usize,
     staged_bytes: &mut usize,
     byte_limit: usize,
-) -> Result<(), FnxReadError<ReadError, C>> {
+) -> Result<(), FnxReadError<S, C>> {
     let next = output
         .len()
         .checked_add(1)

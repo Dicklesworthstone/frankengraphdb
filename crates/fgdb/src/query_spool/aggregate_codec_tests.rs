@@ -52,7 +52,10 @@ fn structural_admission_counts_large_text_as_bytes_and_checks_recursive_framing(
         };
         let (encoded, charge) = account::encode(&pool, &mut work, &row, 16_384).unwrap();
         assert_eq!(encoded, wire);
-        assert!(pool.used() > encoded.len());
+        // The encoder releases its completed workspace and keeps the output's
+        // capacity admitted (c6b17db3), so the charge is the output, not more.
+        assert_eq!(pool.used(), encoded.capacity());
+        assert!(pool.used() >= encoded.len());
         drop(encoded);
         drop(charge);
         assert_eq!(pool.used(), 0);

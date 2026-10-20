@@ -161,6 +161,34 @@ fn paused_native_edge_streams_and_temporal_reads_do_not_switch_generations() {
         changed.set_edge_property(EId(2), P, Some(CanonicalScalar::Int(99)));
         changed.delete_edge(EId(0));
         db.write(&commit, changed).await.unwrap();
+        {
+            // Read overlapping base/overlay identities before compaction can
+            // flatten them; neither paused old cursor advances here.
+            let args = GqlParameters::new();
+            let fresh = PreparedNativeRead::prepare(
+                "MATCH (a)-[r:R]->(b) RETURN r, a, b, r.p AS cost",
+                &args,
+                symbols,
+            )
+            .unwrap();
+            let (_, cursor) = fresh.stream(&db, &cx, &args, policy()).unwrap();
+            let expected: Vec<_> = [
+                (EId(2), WIDE, VId(0), 99),
+                (EId(3), WIDE, WIDE, 8),
+                (EId(u128::MAX), VId(0), VId(u128::MAX), -1),
+            ]
+            .into_iter()
+            .map(|(eid, source, target, cost)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Edge(eid),
+                    GraphValue::Vertex(source),
+                    GraphValue::Vertex(target),
+                    GraphValue::Scalar(CanonicalScalar::Int(cost)),
+                ])
+            })
+            .collect();
+            assert_eq!(cursor.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        }
         let mut cascade = WriteBatch::new(R);
         cascade.delete_vertex(WIDE);
         db.write(&commit, cascade).await.unwrap();
@@ -388,6 +416,219 @@ fn native_edge_limit_and_close_never_drive_an_unrequested_candidate_suffix() {
         assert_eq!(cursor.state(), ScanState::Closed);
         assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), before);
         assert_eq!(before.0.snapshot_records, 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn root_edge_scan_work_is_linear_and_every_public_allowance_preserves_prefixes() {
+    use fgdb_gql::GlaLimitDimension;
+    use fgdb_gql::edge_stream::EdgeScanState;
+
+    let ((), report) = run_async_under_lab(0x6e65_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let args = GqlParameters::new();
+        let matching =
+            PreparedGraphText::prepare("MATCH (a)-[r:R]->(b) RETURN r, a, b, r.p AS cost", symbols)
+                .unwrap()
+                .bind_parameters(&args)
+                .unwrap();
+        let mismatched = PreparedGraphText::prepare(
+            "MATCH (a)-[r:Absent]->(b) RETURN r, a, b, r.p AS cost",
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "Absent") => Some(GraphSymbol::Relation(RelationId(2))),
+                _ => symbols(kind, name),
+            },
+        )
+        .unwrap()
+        .bind_parameters(&args)
+        .unwrap();
+
+        for initial_count in [24_usize, 192] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let initial_ids: Vec<_> = (0..initial_count - 1)
+                .map(|id| EId(2 * id as u128))
+                .chain([EId(u128::MAX)])
+                .collect();
+            let mut batch = WriteBatch::new(R);
+            batch.create_vertex(VId(0), vec![], vec![]);
+            batch.create_vertex(WIDE, vec![], vec![]);
+            for &eid in &initial_ids {
+                batch.add_edge(eid, VId(0), WIDE, vec![(P, CanonicalScalar::Int(1))]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            drop(db);
+            let mut db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            let before = db.read_session().unwrap();
+            // Recovery discards the writer's initial overlay. A normal public
+            // read now builds the flat base before the next write extends it.
+            let mut warm = before
+                .stream_graph_edges_governed(&cx, &mismatched, policy())
+                .unwrap();
+            assert!(warm.next().is_none());
+            assert_eq!(warm.row_stats().snapshot_records, initial_count as u64);
+            assert_eq!(warm.evaluator_stats().scratch_entries, 0);
+
+            let added_count = initial_count / 3;
+            let mut extended_ids = initial_ids.clone();
+            let mut added = WriteBatch::new(R);
+            for id in 0..added_count {
+                let eid = EId(2 * id as u128 + 1);
+                extended_ids.push(eid);
+                added.add_edge(eid, VId(0), WIDE, vec![(P, CanonicalScalar::Int(2))]);
+            }
+            db.write(&commit, added).await.unwrap();
+            extended_ids.sort_unstable();
+            let after = db.read_session().unwrap();
+
+            for (view, identities, overlay_count) in [
+                (before, initial_ids, 0_usize),
+                (after, extended_ids, added_count),
+            ] {
+                let n = identities.len() as u64;
+                // An AVL tree with k nodes has height <= 2*floor(log2(k))+2.
+                // The source reserves one spine entry per level, once.
+                let spine_bound = if overlay_count == 0 {
+                    0
+                } else {
+                    2 * u64::from(usize::BITS - overlay_count.leading_zeros())
+                };
+                // A mismatched relation reads no endpoints or output fields.
+                // Each single-version identity spends four Work events:
+                // candidate admission, history winner, visible row, relation.
+                // Enumeration spends n+1 plus at most k overlay-node visits.
+                // The operator's first advance adds one. ScratchEntry also
+                // spends Work, so the complete public bound is 5n+k+h+2.
+                let scan_work_bound = 5 * n + overlay_count as u64 + spine_bound + 2;
+                for (emits_rows, pattern) in [(false, &mismatched), (true, &matching)] {
+                    let expected: Vec<_> = if emits_rows {
+                        identities
+                            .iter()
+                            .map(|&eid| {
+                                let value = if eid != EId(u128::MAX) && eid.0 % 2 == 1 {
+                                    2
+                                } else {
+                                    1
+                                };
+                                GraphValueRow::from_owned_values(vec![
+                                    GraphValue::Edge(eid),
+                                    GraphValue::Vertex(VId(0)),
+                                    GraphValue::Vertex(WIDE),
+                                    GraphValue::Scalar(CanonicalScalar::Int(value)),
+                                ])
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let allowance = if emits_rows {
+                        policy()
+                    } else {
+                        GqlQueryPolicy::new(n, 0, scan_work_bound, spine_bound)
+                    };
+                    let mut full = view
+                        .stream_graph_edges_governed(&cx, pattern, allowance)
+                        .unwrap();
+                    assert_eq!(full.snapshot_seq(), view.frontier());
+                    assert_eq!(full.row_stats().snapshot_records, 0);
+                    assert_eq!(full.evaluator_stats().work_units, 0);
+                    assert_eq!(full.evaluator_stats().scratch_entries, 0);
+                    assert_eq!(
+                        full.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                        expected
+                    );
+                    let rows = full.row_stats();
+                    let events = full.evaluator_stats();
+                    assert_eq!(rows.snapshot_records, n);
+                    assert_eq!(rows.result_rows, expected.len() as u64);
+                    if !emits_rows {
+                        assert!(events.work_units <= scan_work_bound);
+                        assert!(events.scratch_entries <= spine_bound);
+                        assert_eq!(events.scratch_entries == 0, overlay_count == 0);
+                    }
+                    let exact = GqlQueryPolicy::new(
+                        rows.snapshot_records,
+                        rows.result_rows,
+                        events.work_units,
+                        events.scratch_entries,
+                    );
+                    for dimension in [
+                        GlaLimitDimension::WorkUnits,
+                        GlaLimitDimension::ScratchEntries,
+                    ] {
+                        let total = match dimension {
+                            GlaLimitDimension::WorkUnits => events.work_units,
+                            GlaLimitDimension::ScratchEntries => events.scratch_entries,
+                        };
+                        for limit in 0..total {
+                            let mut allowance = exact;
+                            match dimension {
+                                GlaLimitDimension::WorkUnits => {
+                                    allowance.evaluator.max_work_units = limit;
+                                }
+                                GlaLimitDimension::ScratchEntries => {
+                                    allowance.evaluator.max_scratch_entries = limit;
+                                }
+                            }
+                            let mut refused = view
+                                .stream_graph_edges_governed(&cx, pattern, allowance)
+                                .unwrap();
+                            let mut prefix = Vec::new();
+                            loop {
+                                match refused.next() {
+                                    Some(Ok(row)) => prefix.push(row),
+                                    Some(Err(GqlQueryError::Evaluator(error))) => {
+                                        assert_eq!(error.dimension, dimension);
+                                        assert_eq!(error.limit, limit);
+                                        assert_eq!(error.observed, u128::from(limit) + 1);
+                                        break;
+                                    }
+                                    other => {
+                                        panic!("{n} identities, {dimension:?}={limit}: {other:?}")
+                                    }
+                                }
+                            }
+                            assert_eq!(prefix, expected[..prefix.len()]);
+                            assert_eq!(refused.row_stats().result_rows, prefix.len() as u64);
+                            assert_eq!(refused.state(), EdgeScanState::Failed);
+                            let stopped = (refused.row_stats(), refused.evaluator_stats());
+                            let admitted = match dimension {
+                                GlaLimitDimension::WorkUnits => stopped.1.work_units,
+                                GlaLimitDimension::ScratchEntries => stopped.1.scratch_entries,
+                            };
+                            assert_eq!(admitted, limit);
+                            assert!(refused.next().is_none());
+                            assert!(refused.next().is_none());
+                            assert_eq!((refused.row_stats(), refused.evaluator_stats()), stopped);
+                            refused.close();
+                            assert!(refused.next().is_none());
+                            assert_eq!((refused.row_stats(), refused.evaluator_stats()), stopped);
+                        }
+                    }
+                    // Public cursors fuse on failure. A fresh cursor on the
+                    // same pinned view must accept the exact observed budget.
+                    let mut retry = view
+                        .stream_graph_edges_governed(&cx, pattern, exact)
+                        .unwrap();
+                    assert_eq!(
+                        retry.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                        expected
+                    );
+                    assert_eq!(retry.row_stats(), rows);
+                    assert_eq!(retry.evaluator_stats(), events);
+                    assert_eq!(retry.state(), EdgeScanState::Exhausted);
+                    assert!(retry.next().is_none());
+                }
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

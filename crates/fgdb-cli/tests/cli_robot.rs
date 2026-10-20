@@ -1,5 +1,8 @@
 //! Black-box CLI contracts: every database operation starts a fresh process.
 //! The dependency-free JSON reader checks the frozen schema, not substrings.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -1044,14 +1047,29 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
     );
     let historic = db.command("query", &["--param", &format!("old=uint:{inserted}"), "MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ $old WHERE p.name='Ada' RETURN p.born AS born"]);
     historic.success();
+    // The result names the snapshot that answered, the bound AS OF cut, not
+    // the frontier (fgdb-vuyw5), as --stream already did.
     assert_eq!(
         historic.stdout,
         format!(
             "{{\"v\":1,\"event\":\"invocation\"}}\n\
          {{\"v\":1,\"event\":\"columns\",\"columns\":[\"born\"]}}\n\
          {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"int\",\"value\":\"1815\"}}]}}\n\
-         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{updated},\"count\":1}}\n"
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{inserted},\"count\":1}}\n"
         )
+    );
+    // A current read still names the frontier.
+    let current = db.command(
+        "query",
+        &["MATCH (p:Person) WHERE p.name='Ada' RETURN p.born AS born"],
+    );
+    current.success();
+    assert!(
+        current.stdout.ends_with(&format!(
+            "\"kind\":\"rows\",\"seq\":{updated},\"count\":1}}\n"
+        )),
+        "{}",
+        current.stdout
     );
 
     let edge_query =
@@ -1082,6 +1100,43 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
         r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1816"}]]"#,
     );
     assert_eq!(reopened.sequence("rows"), deleted);
+}
+
+#[test]
+fn certify_to_never_silently_replaces_an_existing_certificate() {
+    // fgdb-vuyw5: a certificate is an audit artifact.
+    let db = TestDb::new("certificate-no-clobber");
+    db.create();
+    let first = db.write(&["INSERT (:Person {name:'Ada',born:1815})"]);
+    let certificate = PathBuf::from(&db.key).with_file_name("kept.certificate");
+    let path = certificate.to_str().unwrap();
+    let query = "MATCH (p:Person) RETURN p.born AS born";
+    let created = db.command("query", &["--certify-to", path, query]);
+    created.success();
+    assert_eq!(created.sequence("rows"), first);
+    let original = std::fs::read(&certificate).unwrap();
+
+    let second = db.write(&["MATCH (p:Person) SET p.born=1816"]);
+    let refused = db.command("query", &["--certify-to", path, query]);
+    assert_eq!(refused.code, 2, "{}{}", refused.stdout, refused.stderr);
+    assert!(
+        refused.stdout.contains("already exists"),
+        "{}",
+        refused.stdout
+    );
+    assert!(
+        !refused.stdout.contains("\"event\":\"row\""),
+        "refused before any row"
+    );
+    assert_eq!(std::fs::read(&certificate).unwrap(), original);
+
+    let replaced = db.command("query", &["--certify-to", path, "--overwrite", query]);
+    replaced.success();
+    assert_eq!(replaced.sequence("rows"), second);
+    assert_ne!(std::fs::read(&certificate).unwrap(), original);
+
+    let stray = db.command("query", &["--overwrite", query]);
+    assert_eq!(stray.code, 2, "{}{}", stray.stdout, stray.stderr);
 }
 
 #[test]
@@ -1512,21 +1567,25 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
         r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":-18000,"zone":null}}}}"#,
     );
     let timestamp_rows = format!(r#"{{"v":1,"event":"row","cells":[{expected_cell}]}}"#);
+    // Each result names the snapshot that answered (fgdb-vuyw5).
     let queries = [
         (
             "frontier",
             "MATCH (p:Person) RETURN p.born AS value".to_owned(),
             true,
+            advanced,
         ),
         (
             "AS OF baseline",
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {seeded} RETURN p.born AS value"),
             true,
+            seeded,
         ),
         (
             "AS OF refused zoned input",
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {before} RETURN p.born AS value"),
             false,
+            before,
         ),
     ];
     for phase in ["after close", "after reopen", "after open_rebuilding"] {
@@ -1562,7 +1621,7 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
             });
         }
         // Record every actual subprocess result even if an earlier phase fails.
-        for (name, query, has_row) in &queries {
+        for (name, query, has_row, seq) in &queries {
             let output = db.command("query", &[query]);
             let rows = if *has_row {
                 format!("{timestamp_rows}\n")
@@ -1573,7 +1632,7 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
             let expected_stdout = format!(
                 "{{\"v\":1,\"event\":\"invocation\"}}\n\
                  {{\"v\":1,\"event\":\"columns\",\"columns\":[\"value\"]}}\n\
-                 {rows}{{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{advanced},\"count\":{count}}}\n"
+                 {rows}{{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{seq},\"count\":{count}}}\n"
             );
             steps.push((
                 format!("CLI {phase}: {name}"),
@@ -1963,14 +2022,17 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
     let expected_cell = format!(
         r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":0,"zone":{{"identifier":"{ZONE}","tzdb_oid":"{oid_hex}"}}}}}}"#,
     );
+    // Each result names the snapshot that answered (fgdb-vuyw5).
     let queries = [
         (
             "MATCH (p:Person) RETURN p.born AS value".to_owned(),
             format!(r#"[[{{"type":"null"}}],[{expected_cell}]]"#),
+            advanced,
         ),
         (
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {written} RETURN p.born AS value"),
             format!("[[{expected_cell}]]"),
+            written,
         ),
     ];
     let runtime = RuntimeBuilder::new().build().unwrap();
@@ -1995,13 +2057,13 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
             };
             assert!(opened.is_ok(), "embedded {phase}: {:?}", opened.err());
         }
-        for (query, expected) in &queries {
+        for (query, expected, seq) in &queries {
             let output = db.command(
                 "query",
                 &["--tzdb-file", artifact_path.to_str().unwrap(), query],
             );
             assert_rows(&output, expected);
-            assert_eq!(output.sequence("rows"), advanced, "CLI {phase}: {query}");
+            assert_eq!(output.sequence("rows"), *seq, "CLI {phase}: {query}");
         }
         // The same pinned artifact must survive decoding at every native
         // relational stage, not only the database read and final rendering.
@@ -2410,6 +2472,707 @@ fn prism_analytics_run_through_query_with_an_explicit_projection() {
         "history keeps two components"
     );
     assert_eq!(components(&[]), 1, "the frontier sees one");
+}
+
+/// Compare complete public deliveries from separate fresh processes. The
+/// decoded call is the incumbent for the same committed source and projection.
+fn sealed_analytics_matches_decoded(db: &TestDb, args: &[&str]) -> Outcome {
+    let decoded = db.command("query", args);
+    decoded.success();
+    let mut sealed_args = vec!["--sealed"];
+    sealed_args.extend_from_slice(args);
+    let sealed = db.command("query", &sealed_args);
+    sealed.success();
+    assert_eq!(sealed.events, decoded.events, "{args:?}");
+    sealed
+}
+
+fn buffered_analytics_matches_decoded(db: &TestDb, args: &[&str]) -> Outcome {
+    let decoded = db.command("query", args);
+    decoded.success();
+    let mut buffered_args = vec!["--buffered", "--buffer-memory-bytes", "8388608"];
+    buffered_args.extend_from_slice(args);
+    let buffered = db.command("query", &buffered_args);
+    buffered.success();
+    assert_eq!(buffered.events, decoded.events, "{args:?}");
+    buffered
+}
+
+#[test]
+fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
+    let db = TestDb::new("prism-buffered");
+    db.create();
+    // Invalid weights outside either induced selection must never be observed.
+    // E remains an isolate even though an excluded relation touches it.
+    let basis = db.write(&[
+        "--relation",
+        "OTHER=2",
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (d:Person {name:'D'}),(e:Person {name:'E'}),(x {name:'X'}),\
+         (a)-[:KNOWS {born:2}]->(b),(b)-[:KNOWS {born:3}]->(c),\
+         (c)-[:KNOWS {born:4}]->(a),(a)-[:KNOWS {born:7}]->(d),\
+         (e)-[:OTHER {born:'not a weight'}]->(a),(a)-[:KNOWS {born:'not a weight'}]->(x)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let dijkstra =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
+        ),
+        (
+            "directed",
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score AS rank",
+        ),
+        ("directed", "CALL fnx.cdlp(2) YIELD vertex,component"),
+        (
+            "reversed",
+            "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        ),
+        ("directed", dijkstra),
+        (
+            "directed",
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        ),
+        (
+            "reversed",
+            "CALL fnx.strongly_connected_components() YIELD component AS group_id,vertex",
+        ),
+        (
+            "undirected",
+            "CALL fnx.connected_components() YIELD vertex,component",
+        ),
+        ("undirected", "CALL fnx.triangles() YIELD vertex,triangles"),
+        (
+            "undirected",
+            "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
+        ),
+        (
+            "undirected",
+            "CALL fnx.eigenvector_centrality() YIELD score AS rank,node AS id",
+        ),
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--direction", direction, call]);
+        let output = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        if call == dijkstra {
+            let distances: BTreeMap<_, f64> = output
+                .events
+                .iter()
+                .filter(|event| event.get("event").string() == "row")
+                .map(|event| {
+                    let cells = event.get("cells").array();
+                    (
+                        cells[0].get("value").string().to_owned(),
+                        cells[1].get("value").string().parse().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                distances,
+                BTreeMap::from([
+                    (id["A"].clone(), 0.0),
+                    (id["B"].clone(), 2.0),
+                    (id["C"].clone(), 5.0),
+                    (id["D"].clone(), 7.0),
+                ])
+            );
+        }
+        if call.contains("connected_components") {
+            assert_eq!(output.terminal().get("count").unsigned(), 5);
+        }
+    }
+
+    // Rebind the same named CDLP call, comparing complete deliveries from
+    // fresh decoded/buffered processes and a separate scalar label oracle.
+    // Directed incoming and outgoing neighbors are A:{B,C,D}, B:{A,C},
+    // C:{A,B}, D:{A}; E retains its identity. The excluded edges cannot vote.
+    let community_call = "CALL fnx.cdlp(max_iter => $rounds) YIELD vertex,component AS community";
+    let ids = ["A", "B", "C", "D", "E"].map(|name| id[name].parse::<u128>().unwrap());
+    let neighbors: [&[usize]; 5] = [&[1, 2, 3], &[0, 2], &[0, 1], &[0], &[]];
+    for rounds in [0, 1, 2, 5] {
+        let parameter = format!("rounds=int:{rounds}");
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--param", &parameter, community_call]);
+        let output = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        assert_eq!(output.terminal().get("count").unsigned(), 5);
+        let mut expected = ids;
+        for _ in 0..rounds {
+            let previous = expected;
+            expected = std::array::from_fn(|vertex| {
+                let mut votes = BTreeMap::<u128, usize>::new();
+                for &neighbor in neighbors[vertex] {
+                    *votes.entry(previous[neighbor]).or_default() += 1;
+                }
+                let highest = votes.values().copied().max().unwrap_or(0);
+                votes
+                    .into_iter()
+                    .find_map(|(label, count)| (count == highest).then_some(label))
+                    .unwrap_or(previous[vertex])
+            });
+        }
+        let labels: BTreeMap<u128, u128> = output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| {
+                let cells = event.get("cells").array();
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].get("type").string(), "vertex");
+                assert_eq!(cells[1].get("type").string(), "vertex");
+                (
+                    cells[0].get("value").string().parse().unwrap(),
+                    cells[1].get("value").string().parse().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ids.into_iter().zip(expected).collect::<BTreeMap<_, _>>(),
+            "CDLP round {rounds}"
+        );
+    }
+    let current =
+        db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
+    db.command("compact", &[]).success();
+    let old_cut = basis.to_string();
+    let mut old_args = projection.to_vec();
+    old_args.extend_from_slice(&["--as-of", &old_cut, dijkstra]);
+    let old = buffered_analytics_matches_decoded(&db, &old_args);
+    assert_eq!(old.sequence("rows"), basis);
+    let mut current_args = projection.to_vec();
+    current_args.push(dijkstra);
+    let latest = buffered_analytics_matches_decoded(&db, &current_args);
+    assert_eq!(latest.sequence("rows"), current);
+    let distance_to_b = |output: &Outcome| {
+        output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .find_map(|event| {
+                let cells = event.get("cells").array();
+                (cells[0].get("value").string() == id["B"])
+                    .then(|| cells[1].get("value").string().parse::<f64>().unwrap())
+            })
+            .unwrap()
+    };
+    assert_eq!(distance_to_b(&old), 2.0);
+    assert_eq!(distance_to_b(&latest), 9.0);
+}
+
+#[test]
+fn buffered_prism_cli_preflights_incompatible_or_unbound_inputs_before_open() {
+    let missing = TestDb::new("prism-buffered-preflight");
+    let call = "CALL fnx.pagerank() YIELD vertex,score";
+    for args in [
+        vec!["--buffered", "--sealed", call],
+        vec!["--buffered", "--spill-dir", ".", call],
+        vec!["--buffered", "--max-snapshot-records", "100000", call],
+        vec!["--buffered", "--max-result-rows", "100000", call],
+        vec!["--buffered", "--max-scratch-entries", "10000000", call],
+        vec!["--buffered", "--graph-staging-bytes", "-1", call],
+        vec![
+            "--buffered",
+            "--graph-workspace-bytes",
+            "1",
+            "--graph-workspace-bytes",
+            "2",
+            call,
+        ],
+        vec!["--graph-staging-bytes", "0", "MATCH (n) RETURN n"],
+    ] {
+        missing.command("query", &args).failure(2, "usage");
+        assert!(!std::path::Path::new(&missing.db).exists());
+    }
+    for call in [
+        "CALL fnx.not_registered() YIELD vertex",
+        "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        "CALL fnx.pagerank(true) YIELD vertex,score",
+        "CALL fnx.cdlp() YIELD vertex,component",
+        "CALL fnx.cdlp(-1) YIELD vertex,component",
+    ] {
+        missing
+            .command("query", &["--buffered", call])
+            .failure(3, "query");
+        assert!(!std::path::Path::new(&missing.db).exists());
+    }
+}
+
+#[test]
+fn buffered_prism_cli_enforces_physical_and_selected_graph_limits_before_columns() {
+    let db = TestDb::new("prism-buffered-limits");
+    db.create();
+    db.write(&["INSERT (a:Person),(b:Person),(a)-[:KNOWS]->(b)"]);
+    let call = "CALL fnx.pagerank() YIELD vertex,score";
+    for flag in [
+        "--buffer-memory-bytes",
+        "--buffer-source-bytes",
+        "--max-work-units",
+    ] {
+        db.command("query", &["--buffered", flag, "0", call])
+            .failure(4, "open");
+    }
+    for flag in ["--graph-staging-bytes", "--graph-workspace-bytes"] {
+        db.command("query", &["--buffered", flag, "0", call])
+            .failure(3, "query");
+        // The graph limits are explicit Prism limits on the resident route too.
+        db.command("query", &[flag, "0", call]).failure(3, "query");
+    }
+    db.command("query", &["--buffered", "--as-of", "999", call])
+        .failure(3, "query");
+    buffered_analytics_matches_decoded(&db, &[call]);
+    for named in [
+        "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+        "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+        "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+        "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component",
+    ] {
+        let args = ["--graph-relation", "KNOWS", "--param", "steps=int:2", named];
+        let decoded = db.command("query", &args);
+        decoded.success();
+        let mut admitted = vec!["--buffered", "--max-work-units", "10000000"];
+        admitted.extend_from_slice(&args);
+        let buffered = db.command("query", &admitted);
+        buffered.success();
+        assert_eq!(buffered.events, decoded.events);
+        for flag in [
+            "--max-work-units",
+            "--max-snapshot-records",
+            "--max-result-rows",
+            "--max-scratch-entries",
+        ] {
+            let mut refused = vec!["--buffered", flag, "0"];
+            refused.extend_from_slice(&args);
+            let (code, class) = if flag == "--max-work-units" {
+                (4, "open")
+            } else {
+                (2, "usage")
+            };
+            db.command("query", &refused).failure(code, class);
+        }
+    }
+}
+
+#[test]
+fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
+    let db = TestDb::new("prism-sealed");
+    db.create();
+    // A weighted cycle, a leaf and an isolate. The OTHER edge and unlabeled
+    // endpoint must remain outside the selected induced graph.
+    let basis = db.write(&[
+        "--relation",
+        "OTHER=2",
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (d:Person {name:'D'}),(e:Person {name:'E'}),(x {name:'X'}),\
+         (a)-[:KNOWS {born:2}]->(b),(b)-[:KNOWS {born:3}]->(c),\
+         (c)-[:KNOWS {born:4}]->(a),(a)-[:KNOWS {born:7}]->(d),\
+         (e)-[:OTHER {born:1}]->(a),(a)-[:KNOWS {born:1}]->(x)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let dijkstra =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
+        ),
+        (
+            "directed",
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score AS rank",
+        ),
+        (
+            "directed",
+            "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        ),
+        ("directed", dijkstra),
+        (
+            "directed",
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        ),
+        (
+            "directed",
+            "CALL fnx.strongly_connected_components() YIELD component AS group_id,vertex",
+        ),
+        (
+            "undirected",
+            "CALL fnx.connected_components() YIELD vertex,component",
+        ),
+        ("undirected", "CALL fnx.triangles() YIELD vertex,triangles"),
+        (
+            "undirected",
+            "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
+        ),
+        (
+            "undirected",
+            "CALL fnx.eigenvector_centrality() YIELD score AS rank,node AS id",
+        ),
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--direction", direction, call]);
+        let output = sealed_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        if call == dijkstra {
+            let distances: BTreeMap<String, f64> = output
+                .events
+                .iter()
+                .filter(|event| event.get("event").string() == "row")
+                .map(|event| {
+                    let cells = event.get("cells").array();
+                    assert_eq!(cells[1].get("type").string(), "float");
+                    (
+                        cells[0].get("value").string().to_owned(),
+                        cells[1].get("value").string().parse().unwrap(),
+                    )
+                })
+                .collect();
+            // Independent weighted shortest-path oracle, including both
+            // reachable-only output and exclusion of the unlabeled endpoint.
+            assert_eq!(
+                distances,
+                BTreeMap::from([
+                    (id["A"].clone(), 0.0),
+                    (id["B"].clone(), 2.0),
+                    (id["C"].clone(), 5.0),
+                    (id["D"].clone(), 7.0),
+                ])
+            );
+        }
+    }
+
+    // Rebind the same named call across processes. The independent transition
+    // matrix is A -> {B,D}, B -> C, C -> A, with D and E dangling. The selected
+    // population excludes X and the OTHER edge; weights are explicitly ignored.
+    let fixed = "CALL fnx.pagerank(iterations => $steps, weighted => $weighted) \
+                 YIELD vertex,score AS rank";
+    for steps in [1, 2, 5] {
+        let parameter = format!("steps=int:{steps}");
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&[
+            "--param",
+            &parameter,
+            "--param",
+            "weighted=bool:false",
+            fixed,
+        ]);
+        let output = sealed_analytics_matches_decoded(&db, &args);
+        let buffered = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(buffered.events, output.events);
+        assert_eq!(output.sequence("rows"), basis);
+        assert_eq!(output.terminal().get("count").unsigned(), 5);
+        let scores: BTreeMap<String, f64> = output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| {
+                let cells = event.get("cells").array();
+                assert_eq!(cells[0].get("type").string(), "vertex");
+                assert_eq!(cells[1].get("type").string(), "float");
+                (
+                    cells[0].get("value").string().to_owned(),
+                    cells[1].get("value").string().parse().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(scores.len(), 5);
+        let mut expected = [0.2_f64; 5];
+        for _ in 0..steps {
+            let initial = (1.0 - 0.85) / 5.0 + 0.85 * (expected[3] + expected[4]) / 5.0;
+            expected = [
+                initial + 0.85 * expected[2],
+                initial + 0.85 * expected[0] / 2.0,
+                initial + 0.85 * expected[1],
+                initial + 0.85 * expected[0] / 2.0,
+                initial,
+            ];
+        }
+        for (name, expected) in ["A", "B", "C", "D", "E"].into_iter().zip(expected) {
+            let actual = scores[&id[name]];
+            assert!(
+                (actual - expected).abs() < 1e-14,
+                "iterations={steps}, vertex={name}: {actual} != {expected}"
+            );
+        }
+    }
+    // A native cap without Prism flags keeps the native query host. Routing
+    // this call through default Prism limits would incorrectly return rows.
+    db.command(
+        "query",
+        &[
+            "--max-result-rows",
+            "0",
+            "--param",
+            "steps=int:2",
+            "--param",
+            "weighted=bool:false",
+            fixed,
+        ],
+    )
+    .failure(3, "query");
+
+    let current =
+        db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
+    let old_cut = basis.to_string();
+    let mut old = projection.to_vec();
+    old.extend_from_slice(&["--as-of", &old_cut, dijkstra]);
+    let historical = sealed_analytics_matches_decoded(&db, &old);
+    assert_eq!(historical.sequence("rows"), basis);
+    let mut now = projection.to_vec();
+    now.push(dijkstra);
+    let latest = sealed_analytics_matches_decoded(&db, &now);
+    assert_eq!(latest.sequence("rows"), current);
+    let distance_to_b = |output: &Outcome| {
+        output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .find_map(|event| {
+                let cells = event.get("cells").array();
+                (cells[0].get("value").string() == id["B"])
+                    .then(|| cells[1].get("value").string().parse::<f64>().unwrap())
+            })
+            .unwrap()
+    };
+    assert_eq!(distance_to_b(&historical), 2.0);
+    assert_eq!(distance_to_b(&latest), 9.0);
+    let unchanged = db.command("query", &["MATCH (p:Person) RETURN COUNT(*) AS count"]);
+    assert_eq!(unchanged.sequence("rows"), current);
+    assert_rows(&unchanged, r#"[[{"type":"count","value":"5"}]]"#);
+}
+
+#[test]
+fn sealed_prism_cli_preflights_before_writable_open() {
+    // Valid keys, but deliberately no database. A usage or graph-law refusal
+    // must win over the missing database, and must not create it.
+    let db = TestDb::new("prism-sealed-preflight");
+    let call = "CALL fnx.pagerank() YIELD vertex";
+    let cases: &[(&[&str], i32, &str)] = &[
+        (&["--sealed", call], 2, "usage"),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--max-work-units",
+                "0",
+                "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--graph-relation",
+                "KNOWS",
+                "--max-result-rows",
+                "0",
+                "--param",
+                "steps=int:2",
+                "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.degree_centrality() YIELD vertex,score",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.connected_components() YIELD vertex,component",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.no_such_procedure() YIELD vertex",
+            ],
+            3,
+            "query",
+        ),
+        (&["--sealed", "--sealed", call], 2, "usage"),
+        (&["--sealed-result-bytes", "1", call], 2, "usage"),
+        (
+            &["--sealed", "--sealed-result-bytes", "-1", call],
+            2,
+            "usage",
+        ),
+        (
+            &["--sealed", "--sealed-result-bytes", "1.5", call],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--sealed-result-bytes",
+                "184467440737095516160",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--sealed-image-bytes",
+                "1",
+                "--sealed-image-bytes",
+                "2",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+        (&["--sealed", "--stream", call], 2, "usage"),
+        (&["--sealed", "--buffered", call], 2, "usage"),
+        (&["--sealed", "--spill-dir", "unused", call], 2, "usage"),
+        (&["--sealed", "--certify-to", "unused", call], 2, "usage"),
+        (&["--sealed", "MATCH (p:Person) RETURN p"], 2, "usage"),
+        (
+            &["--sealed", "CALL fnx.pagerank() YIELD vertex RETURN vertex"],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--max-work-units",
+                "0",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+    ];
+    assert!(!std::path::Path::new(&db.db).exists());
+    for (args, code, class) in cases {
+        db.command("query", args).failure(*code, class);
+        assert!(!std::path::Path::new(&db.db).exists(), "{args:?}");
+    }
+    db.command("create", &["--sealed"]).failure(2, "usage");
+    assert!(!std::path::Path::new(&db.db).exists());
+}
+
+#[test]
+fn sealed_prism_cli_preserves_reductions_and_enforces_every_image_and_kernel_limit() {
+    let db = TestDb::new("prism-sealed-limits");
+    db.create();
+    db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS {born:7}]->(b),(a)-[:KNOWS {born:2}]->(b),\
+         (b)-[:KNOWS {born:3}]->(c),(c)-[:KNOWS {born:true}]->(c)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let call =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    let mut admitted = projection.to_vec();
+    admitted.extend_from_slice(&["--parallel-edges", "min", "--self-loops", "drop", call]);
+    let minimum = sealed_analytics_matches_decoded(&db, &admitted);
+
+    // The same graph is valid under explicit collapse even with a retained
+    // nonnumeric loop: collapse declares unit weights before observing values.
+    let mut collapse = projection.to_vec();
+    collapse.extend_from_slice(&["--parallel-edges", "collapse", call]);
+    let collapsed = sealed_analytics_matches_decoded(&db, &collapse);
+    assert_ne!(minimum.events, collapsed.events);
+
+    for laws in [
+        ["--parallel-edges", "reject", "--self-loops", "drop"],
+        ["--parallel-edges", "min", "--self-loops", "keep"],
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&laws);
+        args.push(call);
+        db.command("query", &args).failure(3, "query");
+        args.insert(0, "--sealed");
+        db.command("query", &args).failure(3, "query");
+    }
+
+    // Each zero is a real limit. The valid decoded control above would
+    // succeed if the compressed route ignored an admission or retried it.
+    for flag in [
+        "--sealed-kernel-bytes",
+        "--sealed-result-bytes",
+        "--sealed-image-bytes",
+        "--sealed-property-bytes",
+        "--sealed-max-rows",
+        "--sealed-max-incidences",
+    ] {
+        let mut args = vec!["--sealed", flag, "0"];
+        args.extend_from_slice(&admitted);
+        db.command("query", &args).failure(3, "query");
+    }
 }
 
 #[test]
@@ -3871,6 +4634,92 @@ fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
         ],
     )
     .failure(3, "query");
+}
+
+/// Repeated vertex-only selections and edge creation share one transaction.
+/// Exercise both public batching transports across fresh-process reopens:
+/// duplicate endpoint matches retain multiplicity, empty matches allocate no
+/// edge, and an error in a later record discards the whole accepted prefix.
+#[test]
+fn independent_edge_batches_preserve_occurrences_and_late_error_atomicity() {
+    for transport in ["json", "csv"] {
+        let db = TestDb::new(&format!("independent-edge-batch-{transport}"));
+        db.create();
+        let basis = db.write(&[
+            "CREATE (:Person {team:1}),(:Person {team:1}),(:Person {team:2}),(:Person {team:3})",
+        ]);
+        let statement = "MATCH (a:Person {team:$s}), (b:Person {team:$d}) CREATE (a)-[:KNOWS {born:12/$q}]->(b)";
+        let input_dir = scratch(&format!("independent-edge-input-{transport}"));
+        std::fs::create_dir(&input_dir).unwrap();
+        let execute = |name: &str, rows: &str, csv: &str| {
+            if transport == "json" {
+                db.command("write", &["--rows", rows, statement])
+            } else {
+                let input = input_dir.join(name);
+                std::fs::write(&input, csv).unwrap();
+                db.command(
+                    "import-csv",
+                    &[
+                        "--label",
+                        "Person=1",
+                        "--relation",
+                        "KNOWS=1",
+                        "--property",
+                        "team=3",
+                        "--property",
+                        "born=2",
+                        "--input",
+                        input.to_str().unwrap(),
+                        statement,
+                    ],
+                )
+            }
+        };
+        let written = execute(
+            "accepted.csv",
+            r#"json:[{"s":1,"d":2,"q":1},{"s":3,"d":2,"q":2},{"s":9,"d":2,"q":0},{"s":2,"d":3,"q":4},{"s":1,"d":2,"q":6}]"#,
+            "s,d,q\n1,2,1\n3,2,2\n9,2,0\n2,3,4\n1,2,6\n",
+        );
+        let kind = if transport == "json" {
+            "written"
+        } else {
+            "imported_csv"
+        };
+        let accepted = written.sequence(kind);
+        assert_eq!(accepted, basis + 1, "{transport}");
+        assert_eq!(written.terminal().get("statements").unsigned(), 5);
+        if transport == "csv" {
+            assert_eq!(written.terminal().get("records").unsigned(), 5);
+        }
+        let query = "MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a.team AS src,b.team AS dst,e.born AS value ORDER BY value,src,dst";
+        let expected = r#"[
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"2"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"2"}],
+            [{"type":"int","value":"2"},{"type":"int","value":"3"},{"type":"int","value":"3"}],
+            [{"type":"int","value":"3"},{"type":"int","value":"2"},{"type":"int","value":"6"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"12"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"12"}]
+        ]"#;
+        let read = db.command("query", &[query]);
+        assert_rows(&read, expected);
+        assert_eq!(read.sequence("rows"), accepted);
+
+        let failed = execute(
+            "refused.csv",
+            r#"json:[{"s":1,"d":3,"q":3},{"s":3,"d":2,"q":0}]"#,
+            "s,d,q\n1,3,3\n3,2,0\n",
+        );
+        failed.failure(3, "query");
+        assert!(
+            failed
+                .events
+                .iter()
+                .all(|event| !matches!(event.get("event").string(), "columns" | "row" | "result"))
+        );
+        let after_failure = db.command("query", &[query]);
+        assert_rows(&after_failure, expected);
+        assert_eq!(after_failure.sequence("rows"), accepted, "{transport}");
+    }
 }
 
 #[test]

@@ -78,8 +78,11 @@ impl PreparedGraphSet {
                 // sequence requirements belong to the separately compiled
                 // child; an outer window cannot erase that child admission.
                 SetNode::Aggregate(_) => (false, false),
-                // Neither a procedure nor a write-owned head has a derivative.
-                SetNode::ProcedureCall(_) | SetNode::Owned => (true, true),
+                // The executor admits and canonically sorts procedure rows
+                // exactly like pattern rows. A page can preserve that order;
+                // the host must still admit the complete CALL derivative.
+                SetNode::ProcedureCall(_) => (false, false),
+                SetNode::Owned => (true, true),
                 // Hidden-key output preserves a sequence no longer expressible
                 // by its visible cells. An inherited canonical window would
                 // select different occurrences; the ranked proof refuses it.
@@ -156,6 +159,22 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
+            _ => None,
+        }
+    }
+
+    /// Borrow a procedure leaf with no runtime arguments, preserving its
+    /// catalog-bound graph projection and complete YIELD metadata. Hosts must
+    /// still validate the procedure, graph laws and derivative independently.
+    /// Nonempty argument programs, including named envelopes, are not erased;
+    /// they remain unsupported by this zero-argument accessor. An outer order
+    /// or page must be peeled by its own owner, including LIMIT zero.
+    pub fn incremental_procedure(&self) -> Option<&PreparedProcedureCall> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::ProcedureCall(call) if call.arguments.is_empty() => Some(call),
             _ => None,
         }
     }

@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 4;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 12;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -26,6 +26,7 @@ pub type FnxParameters = BTreeMap<String, FnxArgument>;
 pub enum FnxParameterType {
     FiniteFloat,
     PositiveInteger,
+    NonNegativeInteger,
     Boolean,
     Vertex,
     OptionalNonNegativeInteger,
@@ -35,7 +36,11 @@ pub enum FnxParameterType {
 pub struct FnxParameterSpec {
     pub name: &'static str,
     pub value_type: FnxParameterType,
-    /// None means REQUIRED, not a fabricated source vertex or an implicit NULL.
+    /// Whether this parameter occupies a slot in the positional signature.
+    /// Named-only controls do not change existing positional calls.
+    pub positional: bool,
+    /// A positional parameter without a default is required. A named-only
+    /// control without a default is absent unless explicitly supplied.
     pub default: Option<FnxArgument>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,33 +105,45 @@ const PAGERANK_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
         name: "alpha",
         value_type: FnxParameterType::FiniteFloat,
+        positional: true,
         default: Some(FnxArgument::Float(0.85)),
     },
     FnxParameterSpec {
         name: "max_iter",
         value_type: FnxParameterType::PositiveInteger,
+        positional: true,
         default: Some(FnxArgument::Integer(100)),
     },
     FnxParameterSpec {
         name: "tol",
         value_type: FnxParameterType::FiniteFloat,
+        positional: true,
         default: Some(FnxArgument::Float(1e-6)),
     },
     FnxParameterSpec {
         name: "weighted",
         value_type: FnxParameterType::Boolean,
+        positional: true,
         default: Some(FnxArgument::Boolean(true)),
+    },
+    FnxParameterSpec {
+        name: "iterations",
+        value_type: FnxParameterType::PositiveInteger,
+        positional: false,
+        default: None,
     },
 ];
 const BFS_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
         name: "source",
         value_type: FnxParameterType::Vertex,
+        positional: true,
         default: None,
     },
     FnxParameterSpec {
         name: "cutoff",
         value_type: FnxParameterType::OptionalNonNegativeInteger,
+        positional: true,
         default: Some(FnxArgument::Null),
     },
 ];
@@ -134,19 +151,28 @@ const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
         name: "source",
         value_type: FnxParameterType::Vertex,
+        positional: true,
         default: None,
     },
     FnxParameterSpec {
         name: "cutoff",
         value_type: FnxParameterType::OptionalNonNegativeFloat,
+        positional: true,
         default: Some(FnxArgument::Null),
     },
     FnxParameterSpec {
         name: "strict",
         value_type: FnxParameterType::Boolean,
+        positional: true,
         default: Some(FnxArgument::Boolean(false)),
     },
 ];
+const CDLP_PARAMETERS: &[FnxParameterSpec] = &[FnxParameterSpec {
+    name: "max_iter",
+    value_type: FnxParameterType::NonNegativeInteger,
+    positional: true,
+    default: None,
+}];
 const SIGNATURES: &[FnxSignature] = &[
     FnxSignature {
         name: "fnx.pagerank",
@@ -157,7 +183,7 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_kind: FnxGraphKind::Any,
         numeric_profile: FNX_NUMERIC_PROFILE,
         rng_policy: "none",
-        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained",
+        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained; convergence by default, named iterations selects exact updates and conflicts with max_iter/tol",
         complexity: "O(k * (|V| + |E|))",
         execution_kernel: "fgdb-prism/pagerank-row-cursor-v1",
     },
@@ -237,7 +263,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; exact per-vertex counts; isolates retained",
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
-        execution_kernel: "fgdb-prism/triangles-degree-mark-v1",
+        execution_kernel: "fgdb-prism/triangles-degree-forward-csr-v1",
     },
     FnxSignature {
         name: "fnx.clustering_coefficient",
@@ -250,54 +276,81 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; 2*t/(d*(d-1)); degree below two yields zero",
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
-        execution_kernel: "fgdb-prism/clustering-degree-mark-v1",
+        execution_kernel: "fgdb-prism/clustering-degree-forward-csr-v1",
     },
     foundation(
         "fnx.degree_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; degree / (|V| - 1); a single vertex scores 1",
         "O(|V| + |E|)",
-        "fnx-algorithms/degree_centrality",
+        "fgdb-prism/degree-centrality-csr-v1",
     ),
     foundation(
         "fnx.closeness_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Wasserman-Faust reachable-set closeness per connected component",
         "O(|V| * (|V| + |E|))",
-        "fnx-algorithms/closeness_centrality",
+        "fgdb-prism/closeness-csr-batched-policy-v2",
     ),
     foundation(
         "fnx.harmonic_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; sum of reciprocal hop distances to every other reachable vertex",
         "O(|V| * (|V| + |E|))",
-        "fnx-algorithms/harmonic_centrality",
+        "fgdb-prism/harmonic-csr-batched-policy-v2",
     ),
     foundation(
         "fnx.betweenness_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Brandes shortest-path betweenness, normalized by (|V|-1)(|V|-2)/2",
         "O(|V| * |E|)",
-        "fnx-algorithms/betweenness_centrality",
+        "fgdb-prism/brandes-csr-source-order-v2",
     ),
     foundation(
         "fnx.eigenvector_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; power iteration, at most 100 steps to tolerance 1e-6; non-convergence refuses",
         "O(100 * (|V| + |E|))",
-        "fnx-algorithms/eigenvector_centrality_with_params",
+        "fgdb-prism/eigenvector-csr-gather-v1",
     ),
     foundation(
         "fnx.core_number",
         FnxOutput::Core,
         "explicit undirected simple projection; unweighted; self-loops refused; k-core number of each vertex, an exact count",
         "O(|V| + |E|)",
-        "fnx-algorithms/core_number",
+        "fgdb-prism/core-number-bucket-csr-v1",
     ),
+    FnxSignature {
+        name: "fnx.cdlp",
+        graph_input_arity: 1,
+        parameters: CDLP_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Component],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit simple projection; self-loops refused; weights ignored; synchronous Graphalytics label propagation for max_iter updates; initial labels are VIds, ties choose the smallest VId, isolates retain their labels; directed in+out incidences count reciprocal neighbors twice",
+        complexity: "O(|V| + |E| + k * (|V| + |E|)) time; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/cdlp-synchronous-csr-v1",
+    },
+    FnxSignature {
+        name: "fnx.directed_clustering_coefficient",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Directed,
+        numeric_profile: "fgdb-directed-clustering-exact-count-f64-ratio-v1",
+        rng_policy: "none",
+        graph_laws: "explicit directed simple projection; unweighted; self-loops ignored; neighbors are the union of predecessors and successors; directed arcs among distinct neighbors / (d*(d-1)); degree below two yields zero",
+        complexity: "O(|V| + |E| + sum_v deg_weak(v) * deg_out(v))",
+        execution_kernel: "fgdb-prism/directed-clustering-neighbor-union-v1",
+    },
 ];
 
-/// A foundation row: one undirected, unweighted, parameter-free graph input
-/// over a decoded copy of the admitted projection, results in VId order.
+/// A catalog row: one undirected, unweighted, parameter-free graph input
+/// over the admitted decoded projection, with results in VId order. Its
+/// execution identity names the native CSR kernel and its numeric profile.
 const fn foundation(
     name: &'static str,
     value: FnxOutput,
@@ -403,12 +456,22 @@ fn registered(namespace: &str, name: &str) -> Option<&'static FnxSignature> {
     })
 }
 
+/// The requested answer: convergence under the registered tolerance, or an
+/// exact number of updates. Fixed iterations do not claim convergence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PageRankStoppingRule {
+    Convergence = 0,
+    ExactIterations = 1,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageRankOptions {
     alpha: f64,
     max_iter: usize,
     tol: f64,
     weighted: bool,
+    stopping_rule: PageRankStoppingRule,
 }
 impl PageRankOptions {
     pub fn new(
@@ -435,7 +498,27 @@ impl PageRankOptions {
             max_iter,
             tol,
             weighted,
+            stopping_rule: PageRankStoppingRule::Convergence,
         })
+    }
+    /// Request exactly `iterations` PageRank updates, including dangling-mass
+    /// redistribution. Positive counts are required; execution still admits
+    /// the count against the caller's iteration/work limits. No convergence
+    /// refusal is produced after the requested final update.
+    pub fn fixed_iterations(
+        alpha: f64,
+        iterations: usize,
+        weighted: bool,
+    ) -> Result<Self, FnxBindError> {
+        if iterations == 0 {
+            return Err(FnxBindError {
+                at: 0,
+                kind: FnxBindErrorKind::InvalidArgument("iterations must be positive"),
+            });
+        }
+        let mut options = Self::new(alpha, iterations, 1e-6, weighted)?;
+        options.stopping_rule = PageRankStoppingRule::ExactIterations;
+        Ok(options)
     }
     pub const fn alpha(self) -> f64 {
         self.alpha
@@ -443,11 +526,33 @@ impl PageRankOptions {
     pub const fn max_iter(self) -> usize {
         self.max_iter
     }
+    /// The convergence tolerance; unused under `ExactIterations`.
     pub const fn tolerance(self) -> f64 {
         self.tol
     }
     pub const fn weighted(self) -> bool {
         self.weighted
+    }
+    pub const fn stopping_rule(self) -> PageRankStoppingRule {
+        self.stopping_rule
+    }
+    pub const fn iterations(self) -> Option<usize> {
+        match self.stopping_rule {
+            PageRankStoppingRule::Convergence => None,
+            PageRankStoppingRule::ExactIterations => Some(self.max_iter),
+        }
+    }
+    pub(crate) fn iteration_complete(self, completed: usize, delta: f64, population: f64) -> bool {
+        match self.stopping_rule {
+            PageRankStoppingRule::Convergence => delta < population * self.tol,
+            PageRankStoppingRule::ExactIterations => completed == self.max_iter,
+        }
+    }
+    pub(crate) const fn witness_algorithm(self) -> &'static str {
+        match self.stopping_rule {
+            PageRankStoppingRule::Convergence => "pagerank_power_iteration",
+            PageRankStoppingRule::ExactIterations => "pagerank_fixed_iterations",
+        }
     }
 }
 impl Default for PageRankOptions {
@@ -457,6 +562,7 @@ impl Default for PageRankOptions {
             max_iter: 100,
             tol: 1e-6,
             weighted: true,
+            stopping_rule: PageRankStoppingRule::Convergence,
         }
     }
 }
@@ -474,8 +580,14 @@ pub enum FnxAlgorithm {
     SingleSourceDijkstraPathLength(DijkstraOptions),
     Triangles,
     ClusteringCoefficient,
-    /// A procedure the pinned franken_networkx catalog itself executes.
+    /// A pinned catalog procedure whose signature identifies its executor.
     Foundation(FoundationAlgorithm),
+    /// Graphalytics synchronous label propagation, including zero updates.
+    Cdlp {
+        max_iter: usize,
+    },
+    /// Directed arcs among the union of each vertex's in/out neighbors.
+    DirectedClusteringCoefficient,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -489,13 +601,15 @@ impl FnxAlgorithm {
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
             Self::Foundation(algorithm) => 8 + algorithm as usize,
+            Self::Cdlp { .. } => 14,
+            Self::DirectedClusteringCoefficient => 15,
         }]
     }
 }
 
-/// The fnx-algorithms entry points Prism runs as-is over a decoded copy of the
-/// admitted projection (the labelled DECODED_CACHE boundary). The ordinal is
-/// the signature row after the eight in-house kernels.
+/// Catalog algorithms over the admitted in-core DECODED_CACHE. Each signature
+/// identifies the native CSR kernel and its pinned numeric profile. The ordinal
+/// selects the row after the first eight kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FoundationAlgorithm {
@@ -542,6 +656,21 @@ impl FnxCallSpec {
     pub fn clustering_coefficient() -> Self {
         Self::new(FnxAlgorithm::ClusteringCoefficient)
     }
+    /// Synchronous Graphalytics community detection over the admitted simple
+    /// projection. Each of exactly `max_iter` rounds reads the previous round;
+    /// reciprocal directed neighbors vote twice and ties choose the smallest
+    /// stable VId. Zero returns initial VId labels, including every isolate.
+    /// The `component` output is the community label, not a WCC identifier.
+    ///
+    /// Text calls use `CALL fnx.cdlp(max_iter => 5) YIELD vertex,component`.
+    /// The count is required; this kernel does not use a convergence stop.
+    pub fn cdlp(max_iter: usize) -> Self {
+        Self::new(FnxAlgorithm::Cdlp { max_iter })
+    }
+    /// Directed neighbor-union coefficient; requires a directed projection.
+    pub fn directed_clustering_coefficient() -> Self {
+        Self::new(FnxAlgorithm::DirectedClusteringCoefficient)
+    }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
     }
@@ -574,9 +703,12 @@ impl FnxCallSpec {
         self.digest
     }
 
-    /// Parse `CALL fnx.<name>(args) [YIELD field [AS alias], ... | YIELD *]`
-    /// and bind it through [`Self::from_arguments`], the one typed resolution
-    /// every CALL surface shares.
+    /// Parse `CALL fnx.<name>(args) [YIELD field [AS alias], ... | YIELD *]`.
+    /// Arguments are either all positional or all `name => value`, resolved
+    /// through [`Self::from_arguments`] or [`Self::from_named_arguments`].
+    /// For example, `CALL fnx.pagerank(iterations => 2, weighted => false)`
+    /// requests two updates without changing the convergence defaults of
+    /// `CALL fnx.pagerank()`.
     pub fn bind(text: &str, parameters: &FnxParameters) -> Result<Self, FnxBindError> {
         Self::bind_text(text, Some(parameters))
     }
@@ -604,7 +736,11 @@ impl FnxCallSpec {
                 kind: FnxBindErrorKind::TextTooLong,
             });
         }
-        let mut parser = Parser { text, pos: 0 };
+        let mut parser = Parser {
+            text,
+            pos: 0,
+            unterminated_comment: None,
+        };
         parser.expect_keyword("CALL")?;
         let namespace = parser.word()?;
         parser.expect(b'.', ".")?;
@@ -614,14 +750,30 @@ impl FnxCallSpec {
             .ok_or_else(|| parser.error(FnxBindErrorKind::UnknownProcedure))?;
         parser.expect(b'(', "(")?;
         let mut arguments = Vec::with_capacity(signature.parameters.len());
+        let mut names = Vec::new();
         let mut positions = Vec::with_capacity(signature.parameters.len());
+        let positional_count = signature.parameters.iter().filter(|p| p.positional).count();
         if !parser.take(b')') {
             loop {
-                if arguments.len() == signature.parameters.len() {
-                    return Err(parser.error(FnxBindErrorKind::TooManyArguments));
-                }
                 parser.space();
                 positions.push(parser.pos);
+                let name = parser.argument_name()?;
+                if !arguments.is_empty() && name.is_some() != !names.is_empty() {
+                    return Err(parser.error(FnxBindErrorKind::InvalidArgument(
+                        "positional and named arguments cannot be mixed",
+                    )));
+                }
+                let limit = if name.is_some() {
+                    signature.parameters.len()
+                } else {
+                    positional_count
+                };
+                if arguments.len() == limit {
+                    return Err(parser.error(FnxBindErrorKind::TooManyArguments));
+                }
+                if let Some(name) = name {
+                    names.push(name);
+                }
                 arguments.push(parser.argument(parameters)?);
                 if parser.take(b')') {
                     break;
@@ -650,10 +802,19 @@ impl FnxCallSpec {
         }
         parser.take(b';');
         parser.space();
+        if let Some(error) = parser.trivia_error() {
+            return Err(error);
+        }
         if parser.pos != text.len() {
             return Err(parser.error(FnxBindErrorKind::TrailingInput));
         }
-        Self::from_arguments(namespace, procedure, &arguments, &yields).map_err(|error| {
+        let binding = if names.is_empty() {
+            Self::from_arguments(namespace, procedure, &arguments, &yields)
+        } else {
+            let named: Vec<_> = names.into_iter().zip(arguments).collect();
+            Self::from_named_arguments(namespace, procedure, &named, &yields)
+        };
+        binding.map_err(|error| {
             let at = match error.site {
                 FnxCallSite::Call => 0,
                 FnxCallSite::Procedure => procedure_at,
@@ -689,14 +850,20 @@ impl FnxCallSpec {
         let error = |site, kind| FnxCallError { site, kind };
         let signature = registered(namespace, name)
             .ok_or_else(|| error(FnxCallSite::Procedure, FnxBindErrorKind::UnknownProcedure))?;
-        if supplied.len() > signature.parameters.len() {
+        let positional_count = signature.parameters.iter().filter(|p| p.positional).count();
+        if supplied.len() > positional_count {
             return Err(error(
-                FnxCallSite::Argument(signature.parameters.len()),
+                FnxCallSite::Argument(positional_count),
                 FnxBindErrorKind::TooManyArguments,
             ));
         }
         let mut arguments = [FnxArgument::Null; 4];
-        for (index, parameter) in signature.parameters.iter().enumerate() {
+        for (index, parameter) in signature
+            .parameters
+            .iter()
+            .filter(|p| p.positional)
+            .enumerate()
+        {
             arguments[index] = match supplied.get(index) {
                 Some(&argument) => argument,
                 None => parameter.default.ok_or_else(|| {
@@ -785,6 +952,7 @@ impl FnxCallSpec {
             "fnx.strongly_connected_components" => FnxAlgorithm::StronglyConnectedComponents,
             "fnx.triangles" => FnxAlgorithm::Triangles,
             "fnx.clustering_coefficient" => FnxAlgorithm::ClusteringCoefficient,
+            "fnx.directed_clustering_coefficient" => FnxAlgorithm::DirectedClusteringCoefficient,
             "fnx.degree_centrality" => {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
             }
@@ -801,6 +969,14 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
+            "fnx.cdlp" => {
+                let max_iter = match arguments[0] {
+                    FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(0, "nonnegative integer max_iter required"))?;
+                FnxAlgorithm::Cdlp { max_iter }
+            }
             _ => {
                 return Err(error(
                     FnxCallSite::Procedure,
@@ -839,6 +1015,139 @@ impl FnxCallSpec {
         Ok(Self::compiled(algorithm, outputs))
     }
 
+    /// Bind registered `name => value` arguments in any order. Missing
+    /// positional parameters use their declared defaults; a required source
+    /// still refuses. Error argument indices refer to `supplied`, not the
+    /// registry's parameter order.
+    ///
+    /// PageRank's named-only `iterations` requests an exact positive number
+    /// of updates. It conflicts with explicitly supplied `max_iter` or `tol`,
+    /// including their normal default values; omitting all three keeps the
+    /// existing convergence rule. NULL is not an iteration count. Names may
+    /// not repeat, and this API never interprets a name as a positional slot.
+    pub fn from_named_arguments(
+        namespace: &str,
+        name: &str,
+        supplied: &[(&str, FnxArgument)],
+        yields: &[(&str, &str)],
+    ) -> Result<Self, FnxCallError> {
+        let error = |site, kind| FnxCallError { site, kind };
+        let invalid = |index, message| {
+            error(
+                FnxCallSite::Argument(index),
+                FnxBindErrorKind::InvalidArgument(message),
+            )
+        };
+        let registration = registered(namespace, name)
+            .ok_or_else(|| error(FnxCallSite::Procedure, FnxBindErrorKind::UnknownProcedure))?;
+        let mut named = vec![None; registration.parameters.len()];
+        for (index, &(name, value)) in supplied.iter().enumerate() {
+            let slot = registration
+                .parameters
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or_else(|| invalid(index, "unknown named argument"))?;
+            if named[slot].replace((index, value)).is_some() {
+                return Err(invalid(index, "duplicate named argument"));
+            }
+        }
+        let iterations =
+            registration
+                .parameters
+                .iter()
+                .zip(&named)
+                .find_map(|(parameter, value)| {
+                    (parameter.name == "iterations").then_some(*value).flatten()
+                });
+        let exact = if let Some((index, value)) = iterations {
+            for (supplied_index, &(parameter, _)) in supplied.iter().enumerate() {
+                if matches!(parameter, "max_iter" | "tol") {
+                    return Err(invalid(
+                        supplied_index,
+                        "iterations conflicts with max_iter and tol",
+                    ));
+                }
+            }
+            Some(
+                match value {
+                    FnxArgument::Integer(count) if count > 0 => usize::try_from(count).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(index, "positive integer iterations required"))?,
+            )
+        } else {
+            None
+        };
+        let mut positional = Vec::new();
+        let mut supplied_indices = Vec::new();
+        for (parameter, value) in registration.parameters.iter().zip(named) {
+            if !parameter.positional {
+                continue;
+            }
+            let (index, value) = match value {
+                Some((index, value)) => (Some(index), value),
+                None => (
+                    None,
+                    parameter.default.ok_or_else(|| {
+                        error(
+                            FnxCallSite::Arguments,
+                            FnxBindErrorKind::MissingArgument(parameter.name),
+                        )
+                    })?,
+                ),
+            };
+            positional.push(value);
+            supplied_indices.push(index);
+        }
+        // The positional API retains its existing whole-call domain errors.
+        // Named calls can identify these independent scalar errors precisely.
+        if registration.name == "fnx.pagerank" {
+            for (index, &(parameter, value)) in supplied.iter().enumerate() {
+                match (parameter, float_argument(value)) {
+                    ("alpha", Some(alpha)) if !(0.0..1.0).contains(&alpha) => {
+                        return Err(invalid(index, "alpha must be finite and in [0,1)"));
+                    }
+                    ("tol", Some(tol)) if tol <= 0.0 => {
+                        return Err(invalid(index, "tol must be finite and positive"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let call =
+            Self::from_arguments(namespace, name, &positional, yields).map_err(|mut failure| {
+                if let FnxCallSite::Argument(index) = failure.site {
+                    failure.site = supplied_indices
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .map_or(FnxCallSite::Arguments, FnxCallSite::Argument);
+                }
+                failure
+            })?;
+        match exact {
+            None => Ok(call),
+            Some(iterations) => {
+                let Some(options) = call.options() else {
+                    return Err(error(
+                        FnxCallSite::Procedure,
+                        FnxBindErrorKind::UnknownProcedure,
+                    ));
+                };
+                let options = PageRankOptions::fixed_iterations(
+                    options.alpha(),
+                    iterations,
+                    options.weighted(),
+                )
+                .map_err(|failure| error(FnxCallSite::Call, failure.kind))?;
+                Ok(Self::compiled(
+                    FnxAlgorithm::PageRank(options),
+                    call.outputs,
+                ))
+            }
+        }
+    }
+
     fn compiled(algorithm: FnxAlgorithm, outputs: Vec<FnxOutputColumn>) -> Self {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:bound-call:v3");
@@ -848,9 +1157,12 @@ impl FnxCallSpec {
         hash.update(name.as_bytes());
         match algorithm {
             FnxAlgorithm::PageRank(options) => {
+                hash.update(&[options.stopping_rule as u8]);
                 hash.update(&options.alpha.to_bits().to_le_bytes());
                 hash.update(&(options.max_iter as u128).to_le_bytes());
-                hash.update(&options.tol.to_bits().to_le_bytes());
+                if options.stopping_rule == PageRankStoppingRule::Convergence {
+                    hash.update(&options.tol.to_bits().to_le_bytes());
+                }
                 hash.update(&[u8::from(options.weighted)]);
             }
             FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
@@ -877,6 +1189,9 @@ impl FnxCallSpec {
                     }
                 }
                 hash.update(&[options.comparison() as u8]);
+            }
+            FnxAlgorithm::Cdlp { max_iter } => {
+                hash.update(&(max_iter as u128).to_le_bytes());
             }
             _ => {}
         }
@@ -919,23 +1234,66 @@ fn float_argument(argument: FnxArgument) -> Option<f64> {
 struct Parser<'a> {
     text: &'a str,
     pos: usize,
+    unterminated_comment: Option<usize>,
 }
 impl<'a> Parser<'a> {
     fn error(&self, kind: FnxBindErrorKind) -> FnxBindError {
         FnxBindError { at: self.pos, kind }
     }
+    fn trivia_error(&self) -> Option<FnxBindError> {
+        self.unterminated_comment.map(|at| FnxBindError {
+            at,
+            kind: FnxBindErrorKind::Expected("closing */"),
+        })
+    }
+    /// Standalone CALL text follows native GQL trivia: ASCII whitespace,
+    /// // line comments and /* block comments */. Markers inside tokens are
+    /// never consumed because token parsers invoke this only at boundaries.
     fn space(&mut self) {
-        while self
-            .text
-            .as_bytes()
-            .get(self.pos)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
-            self.pos += 1;
+        loop {
+            while self
+                .text
+                .as_bytes()
+                .get(self.pos)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.pos += 1;
+            }
+            let bytes = self.text.as_bytes();
+            if bytes.get(self.pos) == Some(&b'/') && bytes.get(self.pos + 1) == Some(&b'/') {
+                self.pos += 2;
+                while bytes.get(self.pos).is_some_and(|byte| *byte != b'\n') {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            if bytes.get(self.pos) == Some(&b'/') && bytes.get(self.pos + 1) == Some(&b'*') {
+                let start = self.pos;
+                self.pos += 2;
+                let mut closed = false;
+                while self.pos + 1 < bytes.len() {
+                    if bytes[self.pos] == b'*' && bytes[self.pos + 1] == b'/' {
+                        self.pos += 2;
+                        closed = true;
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                if !closed {
+                    self.unterminated_comment = Some(start);
+                    self.pos = bytes.len();
+                    return;
+                }
+                continue;
+            }
+            return;
         }
     }
     fn take(&mut self, byte: u8) -> bool {
         self.space();
+        if self.unterminated_comment.is_some() {
+            return false;
+        }
         if self.text.as_bytes().get(self.pos) == Some(&byte) {
             self.pos += 1;
             true
@@ -946,12 +1304,17 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, byte: u8, name: &'static str) -> Result<(), FnxBindError> {
         if self.take(byte) {
             Ok(())
+        } else if let Some(error) = self.trivia_error() {
+            Err(error)
         } else {
             Err(self.error(FnxBindErrorKind::Expected(name)))
         }
     }
     fn word(&mut self) -> Result<&'a str, FnxBindError> {
         self.space();
+        if let Some(error) = self.trivia_error() {
+            return Err(error);
+        }
         let start = self.pos;
         let Some(&first) = self.text.as_bytes().get(self.pos) else {
             return Err(self.error(FnxBindErrorKind::Expected("identifier")));
@@ -989,6 +1352,30 @@ impl<'a> Parser<'a> {
             Err(self.error(FnxBindErrorKind::Expected(expected)))
         }
     }
+    fn argument_name(&mut self) -> Result<Option<&'a str>, FnxBindError> {
+        self.space();
+        let before = self.pos;
+        if !self
+            .text
+            .as_bytes()
+            .get(before)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            return Ok(None);
+        }
+        let name = self.word()?;
+        self.space();
+        if let Some(error) = self.trivia_error() {
+            return Err(error);
+        }
+        if self.text.as_bytes().get(self.pos..self.pos + 2) == Some(b"=>") {
+            self.pos += 2;
+            Ok(Some(name))
+        } else {
+            self.pos = before;
+            Ok(None)
+        }
+    }
     fn argument(
         &mut self,
         parameters: Option<&FnxParameters>,
@@ -1013,17 +1400,62 @@ impl<'a> Parser<'a> {
             return Ok(FnxArgument::Null);
         }
         self.space();
+        if let Some(error) = self.trivia_error() {
+            return Err(error);
+        }
+        // Native numeric spelling: optional sign, at least one leading digit,
+        // an optional fractional part with at least one digit, and an optional
+        // exponent with at least one digit. Thus .5 and 1. refuse while 1e5
+        // and 1.5e-3 bind exactly as native GQL does.
         let start = self.pos;
-        while self.text.as_bytes().get(self.pos).is_some_and(|byte| {
-            byte.is_ascii_digit() || matches!(*byte, b'+' | b'-' | b'.' | b'e' | b'E')
-        }) {
+        let bytes = self.text.as_bytes();
+        if bytes
+            .get(self.pos)
+            .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+        {
             self.pos += 1;
         }
-        if self.pos == start {
+        let integer_start = self.pos;
+        while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+            self.pos += 1;
+        }
+        if self.pos == integer_start {
+            self.pos = start;
             return Err(self.error(FnxBindErrorKind::Expected("typed argument")));
         }
+        let mut float = false;
+        if bytes.get(self.pos) == Some(&b'.')
+            && bytes.get(self.pos + 1).is_some_and(u8::is_ascii_digit)
+        {
+            float = true;
+            self.pos += 1;
+            while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                self.pos += 1;
+            }
+        }
+        if bytes
+            .get(self.pos)
+            .is_some_and(|byte| matches!(*byte, b'e' | b'E'))
+        {
+            let exponent = self.pos;
+            let mut at = exponent + 1;
+            if bytes
+                .get(at)
+                .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+            {
+                at += 1;
+            }
+            let digits = at;
+            while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+                at += 1;
+            }
+            if at > digits {
+                float = true;
+                self.pos = at;
+            }
+        }
         let token = &self.text[start..self.pos];
-        if token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        if float {
             token
                 .parse::<f64>()
                 .map(FnxArgument::Float)
@@ -1034,6 +1466,8 @@ impl<'a> Parser<'a> {
             // Large exact positive literals belong only to the VId domain;
             // they cannot silently become approximate f64 numeric arguments.
             token
+                .strip_prefix('+')
+                .unwrap_or(token)
                 .parse::<u128>()
                 .map(|value| FnxArgument::Vertex(VId(value)))
                 .map_err(|_| self.error(FnxBindErrorKind::InvalidArgument("integer overflow")))

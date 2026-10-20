@@ -16,10 +16,11 @@ enum OutputValue<'a> {
 /// Group columns keep their exact aggregate domains. Only local element and
 /// accumulator cells are owned; entering a list scope never copies the group
 /// or narrows its count, wide integer sum or exact average into a graph scalar.
-struct ExpressionInput<F> {
+struct ExpressionInput<'s, 'r, F, E> {
     columns: F,
     width: usize,
     locals: Vec<GraphAggregateValue>,
+    read: &'s mut crate::set_ops::ElementRead<'r, E>,
 }
 
 fn result_cell(value: &GraphAggregateValue) -> Cell<'_> {
@@ -143,7 +144,12 @@ fn element_truth<E, C>(cell: Cell<'_>, column: usize) -> Result<Option<bool>, Qu
 
 fn expression<'g, E, C>(
     value: &'g GraphSetValue,
-    input: &mut ExpressionInput<impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>>,
+    input: &mut ExpressionInput<
+        '_,
+        '_,
+        impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>,
+        E,
+    >,
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
 ) -> Result<OutputValue<'g>, QueryError<E, C>> {
@@ -598,11 +604,44 @@ fn expression<'g, E, C>(
                 })?;
             OutputValue::Owned(GraphAggregateValue::Value(value))
         }
-        GraphSetValue::MapGet { map, key, .. } => {
+        GraphSetValue::MapGet { map, key, property } => {
             let map = expression(map, input, column, control)?;
             match map.cell() {
                 cell if cell.is_null() => {
                     OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+                }
+                Cell::Value(element @ (ValueRef::Vertex(_) | ValueRef::Edge(_))) => {
+                    let element = match element {
+                        ValueRef::Vertex(vertex) => ElementId::Vertex(vertex),
+                        ValueRef::Edge(edge) => ElementId::Edge(edge),
+                        _ => unreachable!("element arm"),
+                    };
+                    let value = match property {
+                        crate::GraphElementKey::Unbound => None,
+                        crate::GraphElementKey::Missing => Some(Ok(None)),
+                        crate::GraphElementKey::Property(key) => {
+                            control(GlaExecutionEvent::Work)?;
+                            (input.read)(element, *key)
+                        }
+                    }
+                    .ok_or_else(|| failure(column, GraphIntegerErrorKind::IncompatibleOperands))?
+                    .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    match value {
+                        Some(value) => {
+                            for _ in 0..ValueRef::Scalar(&value).payload_units() {
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                            }
+                            // The pinned reader transfers this scalar's ownership;
+                            // keeping it does not clone a whole element or group.
+                            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                                value,
+                            )))
+                        }
+                        None => OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                            CanonicalScalar::Null,
+                        ))),
+                    }
                 }
                 Cell::Value(ValueRef::Map { keys, values }) => {
                     match keys.binary_search_by(|probe| probe.as_bytes().cmp(key.as_bytes())) {
@@ -997,6 +1036,7 @@ impl PreparedGraphAggregate {
         &'g self,
         groups: &'g BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>>,
         projection: &'g [crate::GraphSetProjection],
+        read: &mut crate::set_ops::ElementRead<'_, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<Vec<GraphAggregateRow>, QueryError<E, C>> {
         let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> =
@@ -1017,6 +1057,7 @@ impl PreparedGraphAggregate {
                 columns: |at| input_cell(group, at),
                 width: group.key.len() + group.state.len(),
                 locals: Vec::new(),
+                read,
             };
             for (column, value) in projection.iter().enumerate() {
                 control(GlaExecutionEvent::ScratchEntry)?;

@@ -250,6 +250,7 @@ impl PreparedGraphAggregate {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -259,21 +260,26 @@ impl PreparedGraphAggregate {
         // once; compound execution cannot enter this iterator-only interface.
         let checkpoint = RefCell::new(&mut checkpoint);
         let mut admitted = Some((vertices, edges));
+        let mut source = |pattern: &PreparedGraphPattern<GraphValueRow>,
+                          remaining: GqlQueryPolicy| {
+            let (vertices, edges) = admitted
+                .take()
+                .expect("preparation admitted exactly one immutable graph leaf");
+            pattern.plan().execute_governed_with_properties(
+                snapshot_records,
+                vertices,
+                edges,
+                &mut test_vertex,
+                &mut property,
+                remaining,
+                || (*checkpoint.borrow_mut())(),
+            )
+        };
         self.execute_relational_with_source(
             policy,
-            |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
-                let (vertices, edges) = admitted
-                    .take()
-                    .expect("preparation admitted exactly one immutable graph leaf");
-                pattern.plan().execute_governed_with_properties(
-                    snapshot_records,
-                    vertices,
-                    edges,
-                    &mut test_vertex,
-                    &mut property,
-                    remaining,
-                    || (*checkpoint.borrow_mut())(),
-                )
+            crate::set_ops::BorrowedSource {
+                source: &mut source,
+                elements: Some(elements),
             },
             || (*checkpoint.borrow_mut())(),
         )
@@ -317,12 +323,12 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = relation
+        let input = relation
             .execute_with_source(source_policy, &mut source, &mut checkpoint)
             .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
-        let mut evaluator = source.evaluator;
+        let mut evaluator = input.evaluator;
         let mut rows = GqlExecutionStats {
-            snapshot_records: source.rows.snapshot_records,
+            snapshot_records: input.rows.snapshot_records,
             result_rows: 0,
         };
         let mut control = |event| {
@@ -348,7 +354,11 @@ impl PreparedGraphAggregate {
         // Borrow the completed input through final result copying. Empty input
         // still makes one keyless zero/null group; LIMIT 0 never skips input
         // failures or aggregation. No row payload clone is needed at this seam.
-        let value = self.summarize_projected_rows(&source.value, &mut control)?;
+        let value = self.summarize_projected_rows_with_elements(
+            &input.value,
+            &mut |element, key| source.element_property(element, key),
+            &mut control,
+        )?;
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution {
             value,

@@ -9,6 +9,8 @@
 //! format changes or permission to reclaim objects follow from this reader.
 
 mod admission;
+mod block_directory;
+mod patch_directory;
 mod scan_access;
 
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
@@ -22,7 +24,6 @@ use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
-use asupersync::io::AsyncReadExt;
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
@@ -65,7 +66,8 @@ pub struct BufferedReadLimits {
     pub max_source_bytes: usize,
     pub max_blocks: usize,
     pub max_vertex_patches: usize,
-    /// Object visits plus decoded row visits, separately per open/read call.
+    /// Object/decoded-row visits and interval-directory construction/inspection,
+    /// separately per open/read call.
     /// Scans also count head initialization/consumption and share this one
     /// cumulative ceiling across every pull, including edge endpoint reads.
     pub max_work: usize,
@@ -361,6 +363,8 @@ pub struct BufferedPartition<V: Vfs> {
     root: PartitionRoot,
     blocks: Vec<BlockDescriptor>,
     patches: Vec<PatchDescriptor>,
+    patch_directory: patch_directory::PatchDirectory,
+    block_directory: block_directory::BlockDirectory,
     buffer: ExtentBuffer,
     limits: BufferedReadLimits,
     _metadata: MemoryCharge,
@@ -568,6 +572,20 @@ impl<V: Vfs + Clone> BlockStore<V> {
         drop(vertex_history);
         drop(walk);
         drop(history_charges);
+        let patch_directory =
+            patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, limits.max_work)
+            })?;
+        // The complete root walk has authenticated descriptor topology and
+        // immutable EId endpoints before these fences can exclude payloads.
+        let block_directory =
+            block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, limits.max_work)
+            })?;
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
@@ -576,6 +594,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
             root,
             blocks,
             patches,
+            patch_directory,
+            block_directory,
             buffer,
             limits,
             _metadata: metadata,
@@ -655,33 +675,18 @@ impl<V: Vfs> BufferedPartition<V> {
         match self.buffer.prepare(cx, key, admission)? {
             PreparedExtent::Resident(handle) => Ok(handle),
             PreparedExtent::Load(mut pending) => {
-                let mut file = cx
-                    .with_restriction_async(
-                        self.store.vfs.open_read(&self.store.path(key.object())),
-                    )
-                    .await
-                    .map_err(StoreError::Io)?;
-                cx.with_restriction_async(async {
-                    file.read_exact(pending.as_mut()).await?;
-                    let mut extra = [0u8; 1];
-                    if file.read(&mut extra).await? != 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "admitted object length changed",
-                        ));
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(StoreError::Io)?;
+                self.store
+                    .read_object_exact(cx, key.object(), pending.as_mut())
+                    .await?;
                 Ok(self.buffer.complete(cx, pending)?)
             }
         }
     }
 
-    /// Resolve one vertex through authenticated identity ranges. Every patch
-    /// that can restate its history remains in publication order; unrelated
-    /// patch payloads do not enter the cache or the decode workspace.
+    /// Resolve one vertex through an admitted interval directory. Every patch
+    /// that can restate its history remains a candidate; publication ordinal
+    /// breaks equal-version ties independently of directory traversal order.
+    /// Unrelated patch payloads do not enter the cache or decode workspace.
     pub async fn vertex_at(
         &mut self,
         cx: &QueryCx,
@@ -690,11 +695,13 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedReadError> {
         self.begin(cx, as_of)?;
         let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-        let mut result: Option<VertexRow> = None;
+        let mut result: Option<(VertexRow, usize)> = None;
         let mut work = 0;
-        for at in 0..self.patches.len() {
+        let mut candidates = self.patch_directory.candidates(vid);
+        while let Some(at) = self.patch_directory.next(&mut candidates, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq.0 > as_of.0 || !descriptor.may_contain(vid) {
                 continue;
@@ -717,24 +724,24 @@ impl<V: Vfs> BufferedPartition<V> {
             for row in &rows {
                 if row.vid == vid
                     && row.created_at.0 <= as_of.0
-                    && result
-                        .as_ref()
-                        .is_none_or(|old| old.created_at.0 <= row.created_at.0)
+                    && result.as_ref().is_none_or(|(old, old_at)| {
+                        (old.created_at, *old_at) <= (row.created_at, at)
+                    })
                 {
-                    result = Some(row.clone());
+                    result = Some((row.clone(), at));
                 }
             }
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(result
-            .filter(|row| row.visible_at(as_of))
-            .map(|value| BufferedValue {
+            .filter(|(row, _)| row.visible_at(as_of))
+            .map(|(value, _)| BufferedValue {
                 value,
                 _charge: result_charge,
             }))
     }
 
-    /// Resolve topology across all possibly matching block histories, then
+    /// Seek admitted EId intervals across all possibly matching histories, then
     /// fault only the winning edge's property patch. EId bounds are independent
     /// of adjacency order; an absent or propertyless winner reads no sidecar.
     pub async fn edge_at(
@@ -747,9 +754,11 @@ impl<V: Vfs> BufferedPartition<V> {
         let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
         let mut result: Option<(AdjacencyEntry, usize, u8)> = None;
         let mut work = 0;
-        for at in 0..self.blocks.len() {
+        let mut candidates = self.block_directory.edge_candidates(eid);
+        while let Some(at) = self.block_directory.next_edge(&mut candidates, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor
@@ -764,9 +773,9 @@ impl<V: Vfs> BufferedPartition<V> {
             for (index, entry) in entries.iter().enumerate() {
                 if entry.eid == eid
                     && entry.created_at.0 <= as_of.0
-                    && result
-                        .as_ref()
-                        .is_none_or(|(old, _, _)| old.created_at.0 <= entry.created_at.0)
+                    && result.as_ref().is_none_or(|(old, old_at, _)| {
+                        (old.created_at, *old_at) <= (entry.created_at, at)
+                    })
                 {
                     let locator = locators.as_ref().map_or(0, |locators| locators[index]);
                     result = Some((*entry, at, locator));
@@ -796,7 +805,7 @@ impl<V: Vfs> BufferedPartition<V> {
     /// Bounded winning adjacency, in the canonical (src, relation, dst, eid)
     /// order. The cap bounds candidate identities, including later-retired
     /// ones: exceeding it refuses the whole read, never returns a prefix.
-    /// Authenticated source/relation/destination summaries select possible
+    /// The admitted source/relation/destination directory seeks possible
     /// blocks. Only topology is read; unrelated blocks and property sidecars
     /// are not needed to resolve this answer. Descriptor visits remain metered.
     pub async fn adjacency_at(
@@ -814,11 +823,18 @@ impl<V: Vfs> BufferedPartition<V> {
             .and_then(|n| n.checked_add(1024))
             .ok_or(BufferedReadError::SizeOverflow)?;
         let result_charge = self.buffer.reserve_scratch(cx, bytes)?;
-        let mut candidates = BTreeMap::<EId, AdjacencyEntry>::new();
+        let mut candidates = BTreeMap::<EId, (AdjacencyEntry, usize)>::new();
         let mut work = 0;
-        for at in 0..self.blocks.len() {
+        let direction = if incoming {
+            crate::tiered::edge_scan::BufferedEdgeDirection::Incoming
+        } else {
+            crate::tiered::edge_scan::BufferedEdgeDirection::Outgoing
+        };
+        let mut blocks = self.block_directory.candidates(vertex, relation, direction);
+        while let Some(at) = self.block_directory.next(&mut blocks, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
             let descriptor = self.blocks[at];
             if self.root.blocks[at].first_seq.0 > as_of.0
                 || descriptor.summary.is_none_or(|summary| {
@@ -847,14 +863,15 @@ impl<V: Vfs> BufferedPartition<V> {
                 }
                 if candidates
                     .get(&entry.eid)
-                    .is_none_or(|old| old.created_at.0 <= entry.created_at.0)
+                    .is_none_or(|(old, old_at)| (old.created_at, *old_at) <= (entry.created_at, at))
                 {
-                    candidates.insert(entry.eid, entry);
+                    candidates.insert(entry.eid, (entry, at));
                 }
             }
         }
         let mut value: Vec<_> = candidates
             .into_values()
+            .map(|(row, _)| row)
             .filter(|row| row.visible_at(as_of))
             .collect();
         value.sort_unstable_by_key(|row| (row.src, row.relation, row.dst, row.eid));
@@ -1156,7 +1173,10 @@ mod tests {
                 max_source_bytes: 4096,
                 max_blocks: 1,
                 max_vertex_patches: 0,
-                max_work: 3,
+                // Three existing payload-admission events plus one descriptor
+                // insertion and two interval augmentations. Read limits below
+                // are still independently fixed at each original boundary.
+                max_work: 6,
                 buffer: BufferLimits {
                     max_frames: 1,
                     max_ghost_entries: 1,
@@ -1202,6 +1222,9 @@ mod tests {
                 })
             ));
             assert_eq!(view.stats().misses, 1, "property payload was never pinned");
+            // Exact-source routing admits a binary-seek comparison and the
+            // matching descriptor before its one topology row.
+            view.limits.max_work = 3;
             let found = view
                 .adjacency_at(&query, VId(1), None, false, CommitSeq(1), 1)
                 .await
@@ -1228,6 +1251,147 @@ mod tests {
                 .unwrap();
             assert_eq!(found.as_ref(), &vec![entry]);
             drop(found);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn indexed_point_and_adjacency_reads_fit_a_sublinear_metadata_allowance() {
+        const COUNT: usize = 256;
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-cold-indexed-work-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, report) = run_async_under_lab(0xb0_14, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let store = BlockStore::open(
+                &commit,
+                &dir,
+                [0x19; 32],
+                DatabaseSecurityNamespaceId([0x20; 32]),
+            )
+            .await
+            .unwrap();
+            let entries: Vec<_> = (0..COUNT)
+                .map(|at| AdjacencyEntry {
+                    src: VId(at as u128 * 4),
+                    relation: RelationId(1),
+                    dst: VId(at as u128 * 4 + 1),
+                    eid: EId(at as u128 * 4),
+                    created_at: CommitSeq(if at + 1 == COUNT { 2 } else { 1 }),
+                    retired_at: None,
+                })
+                .collect();
+            let mut blocks = Vec::new();
+            for entry in &entries {
+                let block = store
+                    .put(&commit, &crate::encode_block(0, None, &[*entry]).unwrap())
+                    .await
+                    .unwrap();
+                blocks.push(crate::root::BlockRef {
+                    block_id: block.0,
+                    first_seq: entry.created_at,
+                    last_seq: entry.created_at,
+                });
+            }
+            let id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        published_at: CommitSeq(2),
+                        blocks,
+                        vertex_patches: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let limits = BufferedReadLimits {
+                max_root_bytes: 64 * 1024,
+                max_source_bytes: COUNT * 4096,
+                max_blocks: COUNT,
+                max_vertex_patches: 0,
+                // Full object/row admission, three controlled heap sorts,
+                // descriptor insertion and two interval augmentations.
+                max_work: COUNT * (9 * COUNT.ilog2() as usize + 16),
+                buffer: BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 1,
+                    max_extent_bytes: 4096,
+                },
+            };
+            let mut view = store
+                .open_buffered_root(&query, id, pool.clone(), limits)
+                .await
+                .unwrap();
+            // At most two tree nodes per level plus one decoded row are
+            // needed here; full linear descriptor scans exceed this budget.
+            view.limits.max_work = 64;
+            let visits = |stats: BufferStats| stats.hits + stats.misses;
+            for entry in [entries[0], entries[COUNT / 2], entries[COUNT - 2]] {
+                let before = visits(view.stats());
+                let found = view
+                    .edge_at(&query, entry.eid, CommitSeq(1))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(found.entry, entry);
+                assert!(found.props.is_empty());
+                assert_eq!(visits(view.stats()) - before, 1);
+                drop(found);
+                for relation in [None, Some(RelationId(1))] {
+                    for incoming in [false, true] {
+                        let endpoint = if incoming { entry.dst } else { entry.src };
+                        let before = visits(view.stats());
+                        let found = view
+                            .adjacency_at(&query, endpoint, relation, incoming, CommitSeq(1), 1)
+                            .await
+                            .unwrap();
+                        assert_eq!(found.as_ref(), &vec![entry]);
+                        assert_eq!(visits(view.stats()) - before, 1);
+                    }
+                }
+            }
+            let before = visits(view.stats());
+            for eid in [EId(1), EId(u128::MAX), entries[COUNT - 1].eid] {
+                assert!(
+                    view.edge_at(&query, eid, CommitSeq(1))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            for (endpoint, relation, incoming) in [
+                (VId(1), None, false),
+                (VId(0), None, true),
+                (VId(0), Some(RelationId(2)), false),
+                (VId(1), Some(RelationId(2)), true),
+            ] {
+                let found = view
+                    .adjacency_at(&query, endpoint, relation, incoming, CommitSeq(1), 1)
+                    .await
+                    .unwrap();
+                assert!(found.is_empty());
+            }
+            assert_eq!(
+                visits(view.stats()),
+                before,
+                "absent and future candidates do no I/O"
+            );
+            let future = view
+                .edge_at(&query, entries[COUNT - 1].eid, CommitSeq(2))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(future.entry, entries[COUNT - 1]);
+            assert_eq!(visits(view.stats()) - before, 1);
+            drop(future);
             drop(view);
             assert_eq!(pool.used(), 0);
         });

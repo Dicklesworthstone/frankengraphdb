@@ -41,6 +41,11 @@ impl PreparedDependencies {
             .chain(self.adjacency.iter().copied().map(ElementId::Vertex))
     }
 
+    pub(super) fn extend(&mut self, other: Self) {
+        self.elements.extend(other.elements);
+        self.adjacency.extend(other.adjacency);
+    }
+
     pub(super) fn capture(writer: &BlockWriter, batch: &WriteBatch) -> Self {
         let mut result = Self::default();
         for pending in &batch.rows {
@@ -108,6 +113,91 @@ impl PreparedDependencies {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Prepare only the next edge-creation chunk of a program whose vertex
+    /// selections cannot observe any earlier chunk. The program owner keeps
+    /// both successful and refused preparation dependencies separately.
+    pub(super) fn prepare_independent_edge_chunk(
+        &mut self,
+        batch: WriteBatch,
+        earlier_edges: &fgdb_gql::id_hash::IdSet<crate::EId>,
+    ) -> Result<crate::LogicalDeltaTemplate, WriteError> {
+        self.ensure_writable()?;
+        if batch.is_empty() {
+            return Err(WriteError::EmptyBatch);
+        }
+        debug_assert!(
+            batch
+                .rows
+                .iter()
+                .all(|row| matches!(row, PendingRow::Edge { ensure: false, .. }))
+        );
+        // This complete input pass must still precede every identity/liveness
+        // check, including a collision with an earlier program chunk.
+        self.admit_write_values(&batch)?;
+        self.build_create_template_with_edge_prefix(batch, Some(earlier_edges))
+    }
+
+    /// One ordinary canonical authority for already-admitted independent
+    /// chunks. No row is re-derived from storage, and no earlier prefix is
+    /// cloned or sorted while another program statement is being evaluated.
+    pub(super) fn compose_independent_edge_chunks(
+        &self,
+        relation: crate::RelationId,
+        chunks: &[crate::LogicalDeltaTemplate],
+        dependencies: PreparedDependencies,
+    ) -> Result<PreparedWrite, crate::WriteTxnError> {
+        let mut rows = Vec::new();
+        let mut offset = 0_u64;
+        for chunk in chunks {
+            let [coordinate] = chunk.coordinate_entries() else {
+                return Err(crate::WriteTxnError::UnsupportedAtomicMutation);
+            };
+            if coordinate.graph != crate::GRAPH
+                || coordinate.branch != crate::BRANCH
+                || coordinate.relation != relation
+                || coordinate.schema_epoch != crate::SchemaEpoch(0)
+                || coordinate.schema_transition.is_some()
+            {
+                return Err(crate::WriteTxnError::UnsupportedAtomicMutation);
+            }
+            for row in &coordinate.rows {
+                let mut row = row.clone();
+                let crate::DeltaRow::CreateEdge { birth_ordinal, .. } = &mut row else {
+                    return Err(crate::WriteTxnError::UnsupportedAtomicMutation);
+                };
+                *birth_ordinal = birth_ordinal
+                    .checked_add(offset)
+                    .ok_or(crate::WriteTxnError::AtomicOrdinalOverflow)?;
+                rows.push(row);
+            }
+            offset = offset
+                .checked_add(
+                    u64::try_from(coordinate.rows.len())
+                        .map_err(|_| crate::WriteTxnError::AtomicOrdinalOverflow)?,
+                )
+                .ok_or(crate::WriteTxnError::AtomicOrdinalOverflow)?;
+        }
+        let template = crate::LogicalDeltaTemplate::build(
+            crate::intent_semantics_oid(),
+            [0_u8; 32],
+            vec![crate::CoordinateEntry {
+                graph: crate::GRAPH,
+                branch: crate::BRANCH,
+                relation,
+                schema_epoch: crate::SchemaEpoch(0),
+                schema_transition: None,
+                rows,
+            }],
+        )
+        .map_err(WriteError::Canonical)?;
+        Ok(PreparedWrite {
+            template,
+            basis: self.snapshot.frontier,
+            handle_owner: Arc::clone(&self.handle_owner),
+            dependencies,
+        })
+    }
+
     pub(super) fn prepare_write_checked(
         &mut self,
         batch: WriteBatch,

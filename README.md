@@ -90,7 +90,7 @@ CALL hybrid.search(
 EXPLAIN (CERTIFICATE) MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*);
 ```
 
-> **Target state.** Checked 2026-09-28, and again 2026-10-05, by running each statement through the `fgdb` CLI on a fresh database: 6 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)`, `CALL hybrid.search` (named arguments; the corpus is the projection the arguments name, built per call at the read's snapshot, and `$ada` is a list of seed vertices) and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), and naming a graph in `CALL` (fgdb-luq0b).
+> **Target state.** Checked 2026-09-28, 2026-10-05 and 2026-10-17 by running each statement through the `fgdb` CLI on a fresh database: 6 of these 11 statements run as written: the `INSERT`, the `SHORTEST` quantified-path match, `FOR SYSTEM_TIME AS OF SEQ` (given a sequence number the database has retained), `EXPLAIN (CERTIFICATE)`, `CALL hybrid.search` (named arguments; the corpus is the projection the arguments name, built per call at the read's snapshot, and `$ada` is a list of seed vertices) and `SUBSCRIBE TO` (served by `fgdbd` and streamed by `fgdb remote subscribe`, or registered in process with `Database::subscribe_native`; a read with no `RETURN` subscribes to its bound variables). `CALL fnx.pagerank() YIELD node, score ...` also runs without the `GRAPH social` argument. Not yet: `CREATE GRAPH` (there is no graph catalog), the three branch statements (there is no branch catalog, fork, merge or branch write; `AT BRANCH` works on reads only, against a pinned snapshot the host resolves through `Database::query_with_branch_resolver`), and naming a graph in `CALL` (fgdb-luq0b). **Isolation today** (checked 2026-10-19 in `crates/fgdb/src/write_txn_parts/finish.rs`): a write transaction (`Database::begin` -> `WriteTxn`) commits under first-committer-wins backward validation. Every element, point lookup and scan it read is checked against every delta committed since its basis snapshot, and any overlap aborts it; reads run against one pinned generation. The plan's SSI engine (rw-antidependency tracking, FG-INV-05) is not live, so "serializable by default" names the 1.0 contract, not the delivered mechanism, which aborts more transactions than SSI would.
 
 ---
 
@@ -232,6 +232,7 @@ fgdb create --db mydb.fgdbdir --key-file fgdb.keys
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
 
 # Stream native rows one at a time, or save a portable result certificate
+# (--certify-to refuses an existing file unless --overwrite is also given)
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --stream "<gql>"
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --certify-to result.cert "<gql>"
 
@@ -307,6 +308,7 @@ fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --label Doc=1 --property
 # Bulk CSV import, NDJSON delta load with checkpoints, compaction
 fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
+# (--input also takes a JSON array of the same row objects; a leading '[' selects it)
 fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
 # Inputs past the default 1,000,000 rows or 64 MiB of keys name their own bounds
@@ -356,6 +358,19 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property 
   --param 'q=json:[0.1,0.8,0.1]' \
   "CALL hybrid.search(vector => \$q, vector_property => 'emb', metric => 'cosine', k => 5)
      YIELD node, score RETURN node.title, score ORDER BY score DESC"
+# ...or the same packed property through the search command
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property emb=3 \
+  --vector 0.1,0.8,0.1 --vector-encoding packed --vector-property emb --metric cosine --k 5
+# (--vector-encoding coordinates-rounded explicitly rounds stored integer, float and
+#  decimal coordinates to f32; the default encoding refuses any decimal and any value
+#  f32 cannot hold exactly)
+
+# Graph-only neighborhood: seeds and an explicit hop bound are a complete request
+# (docs/cli_graph_only_search.md); inside GQL, hybrid.search's
+# graph_access => 'demand' reads only the probed histories, with no index build
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --expand-from 101,205 --max-hops 2 --k 20
+# (hybrid.search rows are in canonical vertex order unless the query orders them:
+#  ORDER BY score DESC returns them in rank order)
 
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
@@ -374,6 +389,10 @@ fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fg
 fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 
+# One prepared read, many argument sets: a JSON array of typed objects, or CSV with --csv-types
+fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
+  --rows-file names.json query 'MATCH (p:Person {name: $name}) RETURN p.name'
+
 # Live changefeed: a baseline, then one exact delta per commit
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
   subscribe "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
@@ -382,7 +401,8 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
 curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) RETURN p.name"}' \
   http://127.0.0.1:7474/v1/databases/social/query
 
-# ...or from any official Neo4j driver, read-only (add --bolt-listen 127.0.0.1:7688)
+# ...or from any official Neo4j driver: reads, plus bounded no-RETURN autocommit writes
+# (add --bolt-listen 127.0.0.1:7688)
 python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
@@ -434,7 +454,7 @@ Native `CREATE`/`INSERT`, matched mutations and vertex `MERGE` also support aggr
 
 FGP also supports reusable native read templates through `Client::prepare_read`, `execute_prepared`/`execute_prepared_streaming`, and `release_prepared`. Preparation binds syntax and operand types without executing or pinning a snapshot; each execution supplies its parameters again and opens a fresh authorized read. Handles belong to one connection, are invalidated by authority refresh or database recovery, and cannot be used to execute writes. Each connection retains at most 64 templates and 4 MiB of original query text. Both schema and row callbacks return `Result<(), ClientError>`; a callback error cancels and drains its result before the client can execute another request.
 
-Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported profiles refuse without retry; aggregate ordered execution remains outside the external row-sort profile.
+Remote queries select their execution path with `--read-mode buffered|source|ordered`. The default `buffered` mode collects the ordinary eager answer. `source` uses the authorized native row or aggregate cursor with transport credit driving source demand. Its row profile is identity-leading: a vertex scan's rows begin with the scanned vertex and a fixed-edge scan's with the captured edge, so `MATCH (p:Person) RETURN p.name` refuses in `source` mode (re-measured 2026-10-17) while `buffered` answers it; [Native source streams](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) gives the exact profile. `ordered` uses the server's private external sorter for property-only vertex and fixed-edge/join projections, hidden sort keys, DISTINCT and SKIP/LIMIT. Both native modes flush the schema and each row without collecting the complete result in the CLI. Unsupported profiles refuse without retry; aggregate ordered execution remains outside the external row-sort profile.
 
 Enable external ordered reads by adding `--query-scratch-dir /existing/private/scratch` to the database's `fgdbd serve` options, after its `--database` argument. This is an operator path; clients cannot choose files or physical limits. Defaults bound the database's shared tracked spill buffers to 64 MiB and concurrent ordered sessions to four, with two private files of at most 512 MiB each per session and at most 100,000 input rows. The complete sort-work ceiling is reserved from the same signed allowance that pays for source work and final delivery. The server announces the stream before sorting, handles controls while setup or sort I/O is pending, and streams only the completed final rows under credit. On Unix, scratch files are exclusive and unlinked before query data is written. The source graph remains resident. [Ordered stream details and limits](docs/FABRIC_PROTOCOL.md#typed-operation-bodies) describe the supported profile and ownership boundaries.
 
@@ -583,7 +603,7 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 
 ## Quick start
 
-> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` step, and `fgdbd`'s TOML config and Bolt protocol, await W10 composition (`fgdbd serve` itself runs today with flags, serving FGP and the HTTP/JSON adapter; `fgdb remote subscribe` streams a changefeed from it). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
+> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`scrub`/`search`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch` step and `fgdbd`'s TOML config await W10 composition (`fgdbd serve` itself runs today with flags, serving FGP, the HTTP/JSON adapter and, with `--bolt-listen`, the Bolt-compat subset; `fgdb remote subscribe` streams a changefeed from it). The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
 
 ```bash
 # 1. Create a database directory and bulk-load a graph
@@ -647,6 +667,8 @@ require_capability = true          # macaroon-gated; caveats compile to planner 
 role   = "leader"                  # leader | follower
 peers  = ["10.0.0.2:7688", "10.0.0.3:7688"]
 ```
+
+> **Target state.** Nothing reads this file today (checked 2026-10-19): `fgdbd serve` and the `fgdb` CLI take flags (`fgdbd --help`, [The `fgdb` CLI](#the-fgdb-cli)). There is no isolation knob: every write transaction uses the one model described under the Quick example. Replication is not served: `crates/fgdb-repl` holds the replica catch-up state machine, and no `fgdbd` path uses it yet.
 
 ## Performance
 

@@ -2,6 +2,8 @@
 //! Uses the component input/bootstrap and the component-owned k-core kernel;
 //! no second graph representation, delta decoder or publication authority.
 
+mod rows;
+
 use super::*;
 use fgdb_delta_types::zset::committed::CommittedEdgeInput;
 use fgdb_delta_types::zset::components::kcore::{CoreError, IncrementalCoreNumbers};
@@ -13,6 +15,7 @@ pub(crate) struct State {
     input: CommittedEdgeInput,
     cores: IncrementalCoreNumbers<VId>,
     rows: ZSet<(VId, u64)>,
+    relational: Option<rows::State>,
     pub(super) relation: RelationId,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
@@ -28,6 +31,22 @@ fn core_error(error: CoreError<StandingQueryFailure>) -> StandingQueryFailure {
     }
 }
 impl State {
+    pub(super) fn has_value_rows(&self) -> bool {
+        self.relational.is_some()
+    }
+
+    pub(super) fn columns(&self) -> Option<&[String]> {
+        self.relational.as_ref().map(rows::State::columns)
+    }
+
+    pub(super) fn value_rows(&self) -> Option<&ZSet<GraphValueRow>> {
+        self.relational.as_ref().map(rows::State::rows)
+    }
+
+    pub(super) fn value_delta(&self) -> Option<&ZSet<GraphValueRow>> {
+        self.relational.as_ref().and_then(rows::State::delta)
+    }
+
     pub(super) fn maintain(
         &mut self,
         cx: &CommitCx,
@@ -57,6 +76,11 @@ impl State {
             .rows
             .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
+        let native = self
+            .relational
+            .as_mut()
+            .map(|rows| rows.prepare(pending.delta(), pending.vertex_count(), meter))
+            .transpose()?;
         for (row, _) in pending.delta().iter() {
             meter.charge(ZSetEvent::Work)?;
             if sink
@@ -70,6 +94,9 @@ impl State {
         // No recoverable operation separates the accepted publications.
         let _ = pending.commit();
         sink.commit();
+        if let Some(native) = native {
+            native.commit();
+        }
         let _ = input.commit();
         Ok(())
     }
@@ -77,6 +104,7 @@ impl State {
     fn from_snapshot(
         snapshot: &crate::Snapshot,
         relation: RelationId,
+        native_rows: bool,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
         let components::TopologyInput {
@@ -93,10 +121,16 @@ impl State {
             .map_err(|_| StandingQueryFailure::Arithmetic)?;
         (meter.checkpoint)()?;
         let rows = pending.commit();
+        let relational = if native_rows {
+            Some(rows::State::from_numbers(&rows, meter)?)
+        } else {
+            None
+        };
         Ok(Self {
             input,
             cores,
             rows,
+            relational,
             relation,
             policy: meter.policy,
             frontier: snapshot.frontier,
@@ -128,7 +162,7 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let state = self.prepare_standing_core_numbers(cx, relation, policy)?;
+        let state = self.prepare_standing_core_numbers(cx, relation, policy, false)?;
         Ok(self.store_standing_query(StandingQuery::CoreNumbers(Box::new(state))))
     }
 
@@ -137,6 +171,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         relation: RelationId,
         policy: GqlQueryPolicy,
+        native_rows: bool,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
@@ -150,7 +185,7 @@ impl<V: Vfs + Clone> Database<V> {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            State::from_snapshot(&self.snapshot, relation, &mut meter)
+            State::from_snapshot(&self.snapshot, relation, native_rows, &mut meter)
                 .map_err(StandingQueryError::Maintenance)
         })
     }

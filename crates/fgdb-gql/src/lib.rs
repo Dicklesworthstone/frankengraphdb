@@ -27,6 +27,9 @@ mod evidence_limits;
 mod evidence_page;
 pub mod free_join;
 mod graph_text;
+pub mod id_hash;
+pub mod id_sort;
+mod identified;
 pub mod insertion;
 pub mod insertion_query;
 mod insertion_query_text;
@@ -97,14 +100,16 @@ pub use write_script::{
 pub use aggregation::{
     BoundAggregate, GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn,
     GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
-    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
-    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
-    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
+    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphCountSource,
+    GraphExactAverage, GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    GraphNullPlacement, MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge,
+    PositionedGraph, PreparedGraphAggregate, PreparedGraphCount,
 };
-pub use algebra::GraphMatchMode;
+pub use algebra::{GraphMatchMode, PreparedGraphPatternFactors};
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy,
 };
 pub use deletion::{
     GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
@@ -154,6 +159,7 @@ pub use graph_text::{
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
     starts_fnx_graph_projection,
 };
+pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
     PreparedGraphInsertQuery,
@@ -208,14 +214,14 @@ pub use prepared::{
 };
 pub use set_ops::row_filter;
 pub use set_ops::{
-    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetBuildError, GraphSetColumnType,
-    GraphSetExecutionError, GraphSetFilterError, GraphSetOperand, GraphSetOperation,
-    GraphSetPredicateOp, GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier,
-    GraphSetRowPull, GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
-    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
-    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
-    WithProcedures,
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphPatternFactorExecution,
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
+    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
+    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementReads, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

@@ -92,6 +92,11 @@ fn prepared(text: &str) -> PreparedGraphEdgeUpsertQuery {
         .unwrap()
 }
 
+/// A hidden payload far larger than the visible "private" one, yet one edge
+/// row under the 16 KiB per-object ceiling (eb4bf6ec): 1000 repetitions made a
+/// 16,933-byte row the store refuses, so every law here failed at setup.
+const HIDDEN_PAYLOAD_REPEATS: usize = 900;
+
 async fn fixture(commit: &CommitCx, existing: bool, hidden: bool) -> Database<MemVfs> {
     let mut db = Database::open_memory(commit, keys()).await.unwrap();
     let mut seed = WriteBatch::new(S);
@@ -121,7 +126,10 @@ async fn fixture(commit: &CommitCx, existing: bool, hidden: bool) -> Database<Me
                     (
                         SECRET,
                         CanonicalScalar::Text(if hidden {
-                            CanonicalText::new_ucs_basic(&"private payload".repeat(1000)).unwrap()
+                            CanonicalText::new_ucs_basic(
+                                &"private payload".repeat(HIDDEN_PAYLOAD_REPEATS),
+                            )
+                            .unwrap()
                         } else {
                             CanonicalText::new_ucs_basic("private").unwrap()
                         }),
@@ -235,7 +243,8 @@ fn duplicate_inputs_keep_parallel_full_identities_final_values_and_hidden_fields
             assert_eq!(
                 record.props[1].1,
                 CanonicalScalar::Text(
-                    CanonicalText::new_ucs_basic(&"private payload".repeat(1000)).unwrap()
+                    CanonicalText::new_ucs_basic(&"private payload".repeat(HIDDEN_PAYLOAD_REPEATS))
+                        .unwrap()
                 )
             );
         }

@@ -144,13 +144,17 @@ fn eager_plain_collect_agrees_with_native_visitation_not_sorted_projection() {
             definition
                 .execute_with_source_governed(
                     policy(),
-                    |pattern, remaining| {
+                    |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
                         pattern_at(snapshot, at, pattern, scope, execution, remaining)
                     },
                     || execution.borrow_mut().checkpoint(),
                 )
                 .map(|result| result.value)
-                .map_err(aggregate_error)
+                .map_err(|error| {
+                    aggregate_gql_error(
+                        error.map_source(|source| source.map_source(GqlError::Read)),
+                    )
+                })
         },
     )
     .unwrap();

@@ -91,6 +91,15 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             source_width: pattern_width(pattern),
         });
     }
+    if set::analytic_procedure(query)?.is_some() {
+        // One topology/analytics owner plus its exact YIELD projection.
+        // The source binding has the two endpoint identity columns; outer
+        // projection, grouping and rank owners are counted by their branches.
+        return Ok(Footprint {
+            nodes: 2,
+            source_width: 2,
+        });
+    }
     if let Some(definition) = query.incremental_group() {
         // The exact reducer and checked row sink share ONE registry node and
         // its meter. Count the complete child, not only its first graph leaf.

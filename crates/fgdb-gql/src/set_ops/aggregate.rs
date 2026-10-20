@@ -232,6 +232,49 @@ impl PreparedGraphSetAggregate {
         self.summary
             .execute_relational_with_source(policy, source, checkpoint)
     }
+
+    /// Execute CALL and row-expression inputs with the host's element reader.
+    /// The reader must use the SAME admitted cut and authority as every source;
+    /// a returned vertex or edge identity is not itself permission to read it.
+    /// Missing properties are NULL, but reader failures remain typed failures,
+    /// including beneath an empty final page. A host without an element reader
+    /// should keep using `execute_governed_with_procedures`, which refuses such
+    /// reads instead of fabricating absent properties.
+    ///
+    /// Both folded and materialized input profiles retain their existing
+    /// selection and share the native group engine. Source visits, expression
+    /// work, payload copies and grouping spend one cumulative allowance; only
+    /// final group rows spend the output-row budget. No eager fallback or new
+    /// aggregate/value semantics are introduced by supplying this reader.
+    pub fn execute_governed_with_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let source = WithElementReads {
+            source: WithProcedures {
+                patterns,
+                procedures,
+            },
+            elements,
+        };
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
 }
 
 impl PreparedGraphSet {

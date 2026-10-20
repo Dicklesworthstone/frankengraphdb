@@ -89,6 +89,89 @@ fn ids() -> QueryResult {
 }
 
 #[test]
+fn weak_read_views_preserve_namespace_scope_and_exact_pinned_generation() {
+    let ((), report) = run_async_under_lab(0x5ec0_5010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = database(&c.commit()).await;
+        let unpinned = db.pinned_read_view().unwrap().downgrade();
+        assert!(unpinned.upgrade().is_some());
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(70)));
+        db.write(&c.commit(), change).await.unwrap();
+        assert!(
+            unpinned.upgrade().is_none(),
+            "a weak view must not force the old snapshot to survive a write"
+        );
+
+        let view = db.pinned_read_view().unwrap();
+        let at = view.frontier();
+        let retained = view.downgrade();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let foreign = Authority::new(
+            AuthKey::from_seed(0x5ec0_5010),
+            DatabaseSecurityNamespaceId([0x53; 32]),
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let foreign_token = foreign.issue_at(&grant(), 100).unwrap();
+        assert!(matches!(
+            view.authorized_read_session(
+                &cx,
+                &foreign,
+                &foreign_token,
+                "main",
+                symbols,
+                policy(),
+                || panic!("namespace refusal must precede clock and catalog callbacks")
+            ),
+            Err(QueryError::Authorization(Error::WrongAuthority))
+        ));
+        let mut session = view
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(700)));
+        db.write(&c.commit(), change).await.unwrap();
+        assert_eq!(retained.upgrade().unwrap().frontier(), at);
+        drop(view);
+        drop(db);
+        let params = GqlParameters::new();
+        let (rows, selected) = session
+            .query_with_snapshot(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &params)
+            .unwrap();
+        assert_eq!(selected, at);
+        assert_eq!(
+            rows,
+            result(
+                &["id", "p"],
+                vec![vec![vertex(1), value(70)], vec![vertex(3), value(19)]],
+            )
+        );
+        assert_eq!(
+            session
+                .query(&cx, "MATCH (n:H) RETURN n AS id", &params)
+                .unwrap(),
+            result(&["id"], vec![])
+        );
+        issuer.retire();
+        assert!(matches!(
+            session.query(&cx, "MATCH (n) RETURN n AS id", &params),
+            Err(QueryError::Authorization(Error::AuthorityRetired))
+        ));
+        assert!(session.is_closed());
+        assert!(
+            retained.upgrade().is_none(),
+            "terminal authority refusal releases the last pin"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn session_and_prepared_reads_keep_one_generation_after_writes_and_writer_drop() {
     let ((), report) = run_async_under_lab(0x5ec0_5001, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

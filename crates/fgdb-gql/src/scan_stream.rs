@@ -32,6 +32,7 @@ pub struct ScanSortTail {
     evaluation_width: usize,
     visible_width: usize,
     order: Vec<crate::algebra::GraphValueOrder>,
+    explicit_order: bool,
     distinct: bool,
     offset: u64,
     count: Option<u64>,
@@ -50,6 +51,15 @@ impl ScanSortTail {
     pub fn order(&self) -> &[crate::algebra::GraphValueOrder] {
         &self.order
     }
+    /// Whether these keys came from explicit language ORDER BY. Otherwise
+    /// they encode implicit canonical whole-row order. Equal key vectors do
+    /// not imply equal comparison laws: ASC NULLS FIRST over every column may
+    /// still require numeric equivalence and language collection ordering.
+    /// Consumers must preserve this compiler-owned distinction through sorting
+    /// and defer the canonical tie-break until ALL explicit keys have tied.
+    pub fn has_explicit_order(&self) -> bool {
+        self.explicit_order
+    }
     pub fn distinct(&self) -> bool {
         self.distinct
     }
@@ -62,25 +72,41 @@ impl ScanSortTail {
 
     /// The tail of a relation whose complete projected rows the caller sorts
     /// (a pulled set, fgdb-7xqxb): `width` visible cells, the relation's own
-    /// ORDER BY keys over them and its page, with no hidden cell and no
-    /// DISTINCT. None when the width is out of range or a key names no cell.
+    /// ORDER BY keys, quantifier and page, with no hidden cells. An implicit
+    /// order is canonical whole-row order (NULL first), not explicit ASC's
+    /// default NULLS LAST. The consumer must drain and project the complete
+    /// input before applying DISTINCT and then the page, even for LIMIT 0.
+    /// None for an invalid width, repeated key or out-of-range column.
     pub(crate) fn for_relation(
         width: usize,
-        order: Vec<crate::algebra::GraphValueOrder>,
+        mut order: Vec<crate::algebra::GraphValueOrder>,
+        quantifier: crate::GraphSetQuantifier,
         offset: u64,
         count: Option<u64>,
     ) -> Option<Self> {
         if width == 0
             || width > crate::algebra::MAX_PATTERN_VERTICES
-            || order.iter().any(|key| key.column >= width)
+            || order.len() > width
+            || order.iter().enumerate().any(|(at, key)| {
+                key.column >= width || order[..at].iter().any(|prior| prior.column == key.column)
+            })
         {
             return None;
+        }
+        let explicit_order = !order.is_empty();
+        if !explicit_order {
+            order = (0..width)
+                .map(|column| {
+                    crate::algebra::GraphValueOrder::ascending(column).with_nulls_first(true)
+                })
+                .collect();
         }
         Some(Self {
             evaluation_width: width,
             visible_width: width,
             order,
-            distinct: false,
+            explicit_order,
+            distinct: quantifier == crate::GraphSetQuantifier::Distinct,
             offset,
             count,
         })
@@ -119,12 +145,15 @@ impl ScanSortTail {
             // logical metadata here too, before any source or LIMIT is driven.
             return Err(projection);
         }
-        let order = match &ops[at] {
+        let (order, explicit_order) = match &ops[at] {
             // Implicit whole-row order is canonical GraphValue order, whose
             // Null scalar is least. Explicit ASC's default NULLS LAST differs.
-            GlaOperator::OrderByValues => (0..columns.len())
-                .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
-                .collect(),
+            GlaOperator::OrderByValues => (
+                (0..columns.len())
+                    .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
+                    .collect(),
+                false,
+            ),
             GlaOperator::OrderByValueColumns { columns: keys } => {
                 if keys.is_empty() || keys.len() > MAX_PATTERN_VERTICES {
                     return Err(at);
@@ -136,7 +165,7 @@ impl ScanSortTail {
                         return Err(at);
                     }
                 }
-                keys.to_vec()
+                (keys.to_vec(), true)
             }
             _ => return Err(at),
         };
@@ -144,6 +173,7 @@ impl ScanSortTail {
             evaluation_width,
             visible_width,
             order,
+            explicit_order,
             distinct,
             offset: *offset,
             count: *count,
@@ -374,6 +404,7 @@ mod sort_tail_tests {
                 assert_eq!(tail.offset(), 7);
                 assert_eq!(tail.count(), count);
                 assert!(!tail.distinct());
+                assert!(tail.has_explicit_order());
                 assert_eq!(
                     tail.order(),
                     &[
@@ -428,5 +459,90 @@ mod sort_tail_tests {
         let (_, tail) = VertexScanPlan::compile_sort_input(hidden.plan()).unwrap();
         assert_eq!(tail.evaluation_width(), 2);
         assert_eq!(tail.visible_width(), 1);
+        assert!(!tail.has_explicit_order());
+    }
+
+    #[test]
+    fn equal_scan_key_vectors_retain_different_comparison_laws() {
+        for edge in [false, true] {
+            for distinct in [false, true] {
+                let logical = plan(edge, distinct, None, Some(0));
+                let mut operators = logical.operators().to_vec();
+                let at = operators.len() - 2;
+                operators[at] = GlaOperator::OrderByValues;
+                let implicit = GlaPlan::<GraphValueRow>::from_operators(operators.clone());
+                let canonical = ScanSortTail::compile(&implicit).unwrap();
+                operators[at] = GlaOperator::OrderByValueColumns {
+                    columns: canonical.order().to_vec().into(),
+                };
+                let explicit = GlaPlan::<GraphValueRow>::from_operators(operators);
+                let language = ScanSortTail::compile(&explicit).unwrap();
+                assert_eq!(canonical.order(), language.order());
+                assert!(!canonical.has_explicit_order());
+                assert!(language.has_explicit_order());
+                assert_ne!(canonical, language);
+                for tail in [&canonical, &language] {
+                    assert_eq!(tail.evaluation_width(), 3);
+                    assert_eq!(tail.visible_width(), 3);
+                    assert_eq!(tail.distinct(), distinct);
+                    assert_eq!(tail.offset(), 7);
+                    assert_eq!(tail.count(), Some(0));
+                    assert_eq!((*tail).clone(), *tail);
+                }
+                if edge {
+                    assert_eq!(
+                        EdgeScanPlan::compile_sort_input(&implicit).unwrap().1,
+                        canonical
+                    );
+                    assert_eq!(
+                        EdgeScanPlan::compile_sort_input(&explicit).unwrap().1,
+                        language
+                    );
+                } else {
+                    assert_eq!(
+                        VertexScanPlan::compile_sort_input(&implicit).unwrap().1,
+                        canonical
+                    );
+                    assert_eq!(
+                        VertexScanPlan::compile_sort_input(&explicit).unwrap().1,
+                        language
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relation_tail_remembers_explicitness_before_default_keys_are_synthesized() {
+        use crate::GraphSetQuantifier;
+        for width in [1, 2, crate::algebra::MAX_PATTERN_VERTICES] {
+            for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+                let implicit = ScanSortTail::for_relation(width, vec![], quantifier, 2, Some(0))
+                    .unwrap();
+                let explicit = ScanSortTail::for_relation(
+                    width,
+                    implicit.order().to_vec(),
+                    quantifier,
+                    2,
+                    Some(0),
+                )
+                .unwrap();
+                assert_eq!(implicit.order(), explicit.order());
+                assert!(!implicit.has_explicit_order());
+                assert!(explicit.has_explicit_order());
+                assert_ne!(implicit, explicit);
+                assert_eq!(implicit.distinct(), explicit.distinct());
+                assert_eq!(implicit.count(), explicit.count());
+            }
+        }
+        for keys in [
+            vec![GraphValueOrder::ascending(2)],
+            vec![GraphValueOrder::ascending(0), GraphValueOrder::descending(0)],
+        ] {
+            assert!(
+                ScanSortTail::for_relation(2, keys, GraphSetQuantifier::All, 0, Some(0)).is_none()
+            );
+        }
+        assert!(ScanSortTail::for_relation(0, vec![], GraphSetQuantifier::All, 0, None).is_none());
     }
 }

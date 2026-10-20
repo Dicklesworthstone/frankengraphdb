@@ -710,6 +710,30 @@ impl AdmissionUsage {
         Ok(())
     }
 
+    /// `n` Work events in one step: the same admitted total, and the same
+    /// refusal, as `n` calls of [`Self::observe`]. Every unit up to the
+    /// limit is admitted and the first past it refuses, observing limit + 1.
+    pub(crate) fn observe_work<E, C>(
+        &mut self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        n: u64,
+    ) -> Result<(), fgdb_gql::GqlQueryError<E, C>> {
+        let limit = policy.evaluator.max_work_units;
+        let observed = u128::from(self.work_units) + u128::from(n);
+        if n > 0 && observed > u128::from(limit) {
+            self.work_units = self.work_units.max(limit);
+            return Err(fgdb_gql::GqlQueryError::Evaluator(
+                fgdb_gql::GlaLimitExceeded {
+                    dimension: fgdb_gql::GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed: u128::from(self.work_units) + 1,
+                },
+            ));
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
     pub(crate) fn observe<E, C>(
         &mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -757,6 +781,39 @@ impl AdmissionUsage {
         *self = next;
         Ok(())
     }
+    /// Whether `records` more snapshot records, `work` more work units and
+    /// `scratch` more scratch entries all fit `policy`: charged in any order,
+    /// no event among them could refuse.
+    pub(crate) fn absorbs(
+        &self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        records: u64,
+        work: u64,
+        scratch: u64,
+    ) -> bool {
+        let fits = |used: u64, more: u64, limit: u64| {
+            used.checked_add(more).is_some_and(|total| total <= limit)
+        };
+        self.records.checked_add(records).is_some_and(|total| {
+            policy
+                .rows
+                .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, total)
+                .is_ok()
+        }) && fits(self.work_units, work, policy.evaluator.max_work_units)
+            && fits(
+                self.scratch_entries,
+                scratch,
+                policy.evaluator.max_scratch_entries,
+            )
+    }
+
+    /// Charge counts [`Self::absorbs`] admitted.
+    pub(crate) fn absorb(&mut self, records: u64, work: u64, scratch: u64) {
+        self.records += records;
+        self.work_units += work;
+        self.scratch_entries += scratch;
+    }
+
     /// Snapshot records admitted so far, for a source that reports its own
     /// execution stats (an authorized procedure call).
     pub(crate) fn snapshot_records(&self) -> u64 {
@@ -800,6 +857,55 @@ impl AdmissionUsage {
     }
 }
 
+/// Evaluate the physical factors of one already admitted original source.
+/// Source records are reported once. Admission, both evaluators and retained
+/// rows share one work/scratch allowance, even when either factor is empty.
+/// The caller retains the original admission and witnesses until both succeed.
+pub(crate) fn execute_pattern_factors<E, C>(
+    request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+    snapshot_records: u64,
+    policy: fgdb_gql::GqlQueryPolicy,
+    mut usage: AdmissionUsage,
+    mut evaluate: impl FnMut(
+        &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<E, C>,
+    >,
+) -> Result<fgdb_gql::GraphPatternFactorExecution, fgdb_gql::GqlQueryError<E, C>> {
+    let mut value = [Vec::new(), Vec::new()];
+    let mut result_rows = 0_u64;
+    for (factor, rows) in request.factors().iter().zip(&mut value) {
+        let result = evaluate(factor, usage.remaining(policy));
+        let execution = usage.finish(policy, result)?;
+        debug_assert_eq!(execution.rows.snapshot_records, snapshot_records);
+        debug_assert_eq!(execution.rows.result_rows, execution.value.len() as u64);
+        // Both vectors coexist in this address space; their row count fits u64.
+        result_rows = result_rows
+            .checked_add(execution.value.len() as u64)
+            .expect("retained factor rows fit u64");
+        usage.work_units = execution.evaluator.work_units;
+        usage.scratch_entries = execution.evaluator.scratch_entries;
+        *rows = execution.value;
+    }
+    policy
+        .rows
+        .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
+        .map_err(fgdb_gql::GqlQueryError::Rows)?;
+    Ok(fgdb_gql::GraphPatternFactorExecution {
+        value,
+        rows: fgdb_gql::GqlExecutionStats {
+            snapshot_records,
+            result_rows,
+        },
+        evaluator: fgdb_gql::GlaExecutionStats {
+            work_units: usage.work_units,
+            scratch_entries: usage.scratch_entries,
+        },
+    })
+}
+
 #[cfg(test)]
 mod admission_meter_tests {
     use super::*;
@@ -807,6 +913,36 @@ mod admission_meter_tests {
         GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError,
         GqlQueryExecution, GqlQueryPolicy,
     };
+
+    /// **N WORK UNITS IN ONE STEP ARE N WORK EVENTS.** From every starting
+    /// count around the limit, `observe_work(n)` leaves the usage and returns
+    /// the result that `n` single Work events would: everything up to the
+    /// limit is admitted, and the refusal observes limit + 1.
+    #[test]
+    fn work_in_one_step_admits_and_refuses_as_single_events() {
+        type Outcome = (AdmissionUsage, Result<(), GqlQueryError<(), ()>>);
+        for limit in [0, 1, 5, 64, 130] {
+            let policy = GqlQueryPolicy::new(1_000, 1_000, limit, 1_000);
+            for start in 0..=limit {
+                for n in [0, 1, 2, 3, 63, 64, 65, 129, 200] {
+                    let mut base = AdmissionUsage::default();
+                    base.charge_work::<(), ()>(policy, start).unwrap();
+                    let single: Outcome = {
+                        let mut usage = base;
+                        let result = (0..n)
+                            .try_for_each(|_| usage.observe::<(), ()>(policy, SourceEvent::Work));
+                        (usage, result)
+                    };
+                    let batched: Outcome = {
+                        let mut usage = base;
+                        let result = usage.observe_work::<(), ()>(policy, n);
+                        (usage, result)
+                    };
+                    assert_eq!(batched, single, "limit {limit} start {start} n {n}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn row_only_admission_ignores_work_and_does_not_charge_a_refused_record() {

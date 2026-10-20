@@ -259,6 +259,29 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> ScopedSource
             .allows_vertex(row.labels))
     }
 
+    // Resolve the historical winner once, admit its scope, and recheck the
+    // selected equality before charging a root. Historical index membership is
+    // only a candidate superset; stale or private rows spend no allowance.
+    fn visible_root<C>(&self, vid: VId) -> Result<bool, VertexScanSourceError<QueryError, C>> {
+        let execution = self.execution.clone();
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
+            return Ok(false);
+        };
+        let admitted = self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_vertex(row.labels);
+        if !admitted {
+            return Ok(false);
+        }
+        self.inner
+            .root_is_candidate(&row, &mut poll)
+            .map_err(scoped_error)
+    }
+
     // This is private source admission, not a caller-visible raw record route.
     // Historical winner selection precedes scope on EVERY lookup. No per-probe
     // table, cache, permit or rescan from the first candidate is introduced.
@@ -377,7 +400,7 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
             let Some(vid) = self.inner.next_vertex(&mut poll).map_err(scoped_error)? else {
                 return Ok(None);
             };
-            if self.visible(vid)? {
+            if self.visible_root(vid)? {
                 // An admitted root costs its node before any row can use it.
                 self.execution
                     .borrow_mut()
@@ -400,7 +423,7 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
             .next_vertex_step(&mut poll)
             .map_err(scoped_error)?
         {
-            SourceStep::Item(vid) if self.visible(vid)? => {
+            SourceStep::Item(vid) if self.visible_root(vid)? => {
                 // The cooperative step admits a root exactly as next_vertex
                 // does, so its node is charged before any row can use it.
                 self.execution
@@ -916,7 +939,12 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
-    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view
+        .vertex_scan_source(cx, at)
+        .map_err(QueryError::Read)?
+        .with_root_equality(&plan, |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        });
     let source = ScopedSource {
         inner,
         execution: execution.clone(),
@@ -926,30 +954,22 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let mut ordinal = 0_u64;
     Ok(move || {
-        let mut row = cursor.next().transpose().map_err(scan_error)?;
-        // A pulled set row takes its projection before delivery, charging
-        // each evaluation step to the signed allowance as the eager set does.
-        if let (Some(pull), Some(source)) = (&pull, &row) {
-            let projected = pull.project(
-                source,
-                ordinal,
-                &mut |event| match event {
-                    GlaExecutionEvent::Work => execution.borrow_mut().checkpoint(),
-                    _ => Ok(()),
-                },
-                |column, error| {
-                    QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
-                        row: usize::try_from(ordinal).unwrap_or(usize::MAX),
-                        column,
-                        error,
-                    }))
-                },
-            )?;
-            ordinal += 1;
-            row = Some(projected);
+        // The projection runs inside the same native meter as its source.
+        // Every work/scratch event also reaches the existing signed checkpoint;
+        // no private source row counts as delivered before projection succeeds.
+        let row = if let Some(pull) = &pull {
+            cursor.next_projected(pull, scan_error, |ordinal, column, error| {
+                QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                    column,
+                    error,
+                }))
+            })
+        } else {
+            cursor.next().map(|row| row.map_err(scan_error))
         }
+        .transpose()?;
         // A row remains private until live signed delivery admission succeeds.
         // The extra terminal check also covers a natural EOF or LIMIT 0.
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
@@ -1096,3 +1116,282 @@ mod probe_tests;
 #[cfg(test)]
 #[path = "stream/edge_property_tests.rs"]
 mod edge_property_tests;
+
+#[cfg(test)]
+mod projected_budget_tests {
+    use super::*;
+    use crate::{Database, DatabaseKeys, MemVfs, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind, GraphSymbol, GraphSymbolKind};
+    use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts};
+    use fgdb_warden::{Authority, Grant, QueryLimits, Rights, Scope};
+
+    const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x8b; 32]);
+    const LABEL: LabelId = LabelId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const R: RelationId = RelationId(1);
+
+    async fn database(cx: &CommitCx) -> Database<MemVfs> {
+        let mut db = Database::open_memory(cx, DatabaseKeys::new([0x8a; 32], NS, [0x8c; 32]))
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, label, value) in [(1, LABEL, 2), (2, LabelId(2), 0), (3, LABEL, 0)] {
+            batch.create_vertex(VId(id), vec![label], vec![(P, CanonicalScalar::Int(value))]);
+        }
+        db.write(cx, batch).await.unwrap();
+        db
+    }
+
+    fn authority() -> Authority {
+        Authority::new(AuthKey::from_seed(0x8b00), NS, "graph", SchemaEpoch(1), 1).unwrap()
+    }
+
+    fn grant() -> Grant {
+        Grant {
+            branch: "main".into(),
+            labels: Scope::only([LABEL]),
+            relations: Scope::only([R]),
+            properties: Scope::only([P]),
+            rights: Rights::Read,
+            limits: QueryLimits {
+                max_nodes: 1000,
+                max_work: 100_000_000,
+                max_rows: 1000,
+            },
+            expires_at_ms: 10_000,
+        }
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn denied<Driver>(
+        mut cursor: AuthorizedRowCursor<'_, GraphValueRow, Driver>,
+        dimension: GlaLimitDimension,
+    ) where
+        Driver: FnMut() -> DriverStep,
+    {
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Stream(GqlQueryError::Evaluator(error))))
+                if error.dimension == dimension
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert_eq!(cursor.size_hint(), (0, Some(0)));
+        assert!(cursor.next().is_none());
+        cursor.close();
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+    }
+
+    #[test]
+    fn authorized_local_and_send_projections_cannot_bypass_native_limits() {
+        let ((), report) = run_async_under_lab(0x8b00_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let args = GqlParameters::new()
+                .with_scalar(
+                    "value",
+                    CanonicalScalar::ucs_basic_text(&"x".repeat(32_768)).unwrap(),
+                )
+                .unwrap();
+            for (text, policy, dimension) in [
+                (
+                    "MATCH (n) RETURN n AS id, $value AS value",
+                    GqlQueryPolicy::new(1000, 1000, u64::MAX, 128),
+                    GlaLimitDimension::ScratchEntries,
+                ),
+                (
+                    "MATCH (n) RETURN n AS id, toUpper($value) AS value",
+                    GqlQueryPolicy::new(1000, 1000, 256, u64::MAX),
+                    GlaLimitDimension::WorkUnits,
+                ),
+            ] {
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                    .unwrap();
+                // The entire native source fits this policy. Only the actual
+                // projection can exhaust it; signed allowances are generous.
+                let empty = GqlParameters::new();
+                let scan = session
+                    .prepare(&cx, "MATCH (n) RETURN n AS id", &empty)
+                    .unwrap();
+                let rows = session
+                    .stream(&cx, &scan, &empty)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].values(), &[GraphValue::Vertex(VId(1))]);
+                assert_eq!(rows[1].values(), &[GraphValue::Vertex(VId(3))]);
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                // Both open lazily. The first credited pull must refuse with
+                // the native evaluator error, not a successful unmetered row.
+                denied(session.stream(&cx, &prepared, &args).unwrap(), dimension);
+                denied(
+                    session.stream_send(&cx, &prepared, &args).unwrap(),
+                    dimension,
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    fn late_error<Driver>(mut cursor: AuthorizedRowCursor<'_, GraphValueRow, Driver>)
+    where
+        Driver: FnMut() -> DriverStep,
+    {
+        let first = cursor.next().unwrap().unwrap();
+        assert_eq!(
+            first.values(),
+            &[
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(5))
+            ]
+        );
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Set(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { row: 1, column: 1, error }
+            )))) if error.kind == GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn authorized_projection_errors_keep_the_visible_row_ordinal_and_native_cause() {
+        let ((), report) = run_async_under_lab(0x8b00_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let policy = GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000);
+            let mut session = db
+                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(&cx, "MATCH (n) RETURN n AS id, 10 / n.p AS value", &args)
+                .unwrap();
+            // Hidden VId(2) has the same bad divisor but is not a source row.
+            // The failure remains row one of the visible execution in both
+            // driver variants; an earlier successful row remains delivered.
+            late_error(session.stream(&cx, &prepared, &args).unwrap());
+            late_error(session.stream_send(&cx, &prepared, &args).unwrap());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn authorized_equality_streams_hide_private_candidates_and_recheck_historical_membership() {
+        let ((), report) = run_async_under_lab(0x8b00_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let issuer = authority();
+            let empty = GqlParameters::new();
+            let policy = GqlQueryPolicy::new(2, 2, 100_000, 100_000);
+            let mut allowance = grant();
+            allowance.limits.max_nodes = 2;
+            allowance.limits.max_rows = 2;
+            let token = issuer.issue_at(&allowance, 100).unwrap();
+            let mut answers = Vec::new();
+            for private_history in [false, true] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([0x8a; 32], NS, [0x8c; 32]))
+                        .await
+                        .unwrap();
+                let mut batch = WriteBatch::new(R);
+                batch.create_vertex(VId(1), vec![LABEL], vec![(P, CanonicalScalar::Int(7))]);
+                batch.create_vertex(
+                    VId(2),
+                    vec![LABEL],
+                    vec![(P, CanonicalScalar::Int(if private_history { 7 } else { 9 }))],
+                );
+                batch.create_vertex(VId(3), vec![LABEL], vec![(P, CanonicalScalar::Int(7))]);
+                for id in 10..=138 {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LABEL],
+                        vec![(P, CanonicalScalar::Int(id as i64 + 100))],
+                    );
+                    if private_history {
+                        batch.create_vertex(
+                            VId(1000 + id),
+                            vec![LabelId(2)],
+                            vec![(P, CanonicalScalar::Int(7))],
+                        );
+                    }
+                }
+                db.write(&commit, batch).await.unwrap();
+                let mut edits = WriteBatch::new(R);
+                edits.set_vertex_property(
+                    VId(1),
+                    P,
+                    Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0))),
+                );
+                edits.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(9)));
+                db.write(&commit, edits).await.unwrap();
+
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                    .unwrap();
+                let prepared = session
+                    .prepare(&cx, "MATCH (n {p: 7.0}) RETURN n AS id, n.p AS p", &empty)
+                    .unwrap();
+                let rows = session
+                    .stream(&cx, &prepared, &empty)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].values()[0], GraphValue::Vertex(VId(1)));
+                assert_eq!(rows[1].values()[0], GraphValue::Vertex(VId(3)));
+                assert_eq!(
+                    session
+                        .stream_send(&cx, &prepared, &empty)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                    rows
+                );
+                answers.push(rows);
+                drop(session);
+
+                // A denied property cannot steer candidate seeks. Its masked
+                // predicate is still evaluated on the ordinary visible domain,
+                // whose third row exceeds this native record allowance.
+                let mut masked = grant();
+                masked.properties = Scope::only(std::iter::empty::<PropertyKeyId>());
+                let masked = issuer.issue_at(&masked, 100).unwrap();
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &masked, "main", symbols, policy, || 100)
+                    .unwrap();
+                let prepared = session
+                    .prepare(&cx, "MATCH (n {p: 7.0}) RETURN n AS id", &empty)
+                    .unwrap();
+                assert!(
+                    session
+                        .stream(&cx, &prepared, &empty)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .is_err()
+                );
+            }
+            assert_eq!(answers[0], answers[1]);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

@@ -923,15 +923,28 @@ fn late_joined_expression_failures_precede_limit_zero_and_empty_global_count_sur
             drop(view);
             assert_eq!(source_pool.used(), 0);
         }
-        for text in [
-            "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN COUNT(*) AS rows LIMIT 0",
-            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COLLECT(s.p) AS values LIMIT 0",
+        // A correlated fixed-hop probe is a buffered join input now (3faae262,
+        // 0e7c7e7c; fgdb-4wrnd); a variable-length step and a collection over
+        // the join are still refused at preparation.
+        for (text, buffered) in [
+            (
+                "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
+                false,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN COUNT(*) AS rows LIMIT 0",
+                true,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COLLECT(s.p) AS values LIMIT 0",
+                false,
+            ),
         ] {
             let params = GqlParameters::new();
             let native = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
-            assert!(
-                native.prepare_buffered_aggregate(&params).is_err(),
+            assert_eq!(
+                native.prepare_buffered_aggregate(&params).is_ok(),
+                buffered,
                 "{text}"
             );
         }

@@ -22,10 +22,15 @@ mod buffered;
 #[cfg(test)]
 #[path = "aggregate_codec_tests.rs"]
 mod codec_tests;
+#[path = "aggregate_collection.rs"]
+mod collection;
 #[path = "aggregate_output.rs"]
 mod output;
+#[path = "aggregate_partition.rs"]
+mod partitioning;
 pub use buffered::PreparedBufferedAggregate;
 pub(super) use buffered::spool_group_stage;
+use partitioning::split_partition;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
 
@@ -66,7 +71,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::BufferedExecute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG (including DISTINCT arguments) or MIN/MAX, without collection"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG, MIN/MAX, or COLLECT over a complete relational input"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -615,8 +620,11 @@ impl PreparedNativeRead {
     /// Three distinct append-only files should share one memory pool. At most
     /// group_capacity owned group states and max_partitions metadata entries
     /// are admitted, with conservative pool charges before decoded retention.
-    /// A partition that exceeds group/memory capacity is repartitioned. A single
-    /// group that cannot fit, hash-depth exhaustion, disk/run/work limits and
+    /// A partition that exceeds group/memory capacity is repartitioned at its
+    /// first varying hash bit; uniform prefixes create no empty scratch runs.
+    /// The existing partition limit still counts every run actually created.
+    /// With distinct key hashes, at most 2*g-1 partition runs separate g groups.
+    /// A single group that cannot fit, hash-depth exhaustion, disk/run/work limits and
     /// cancellation refuse without publishing a result. Completed-group clauses
     /// require one bounded sort per unique DISTINCT argument column per accepted
     /// partition, then up to three completed-group sort passes: canonical group
@@ -879,7 +887,21 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
         }
         if let Some(at) = existing {
             let largest = groups.values[at].largest.max(resident);
-            if largest > groups.values[at].largest {
+            if largest > groups.values[at].largest && definition.has_collections() {
+                // Widen only the fixed/exemplar portion. Replacing this guard
+                // would refund the still-live collection's accumulated credit.
+                let delta = group_charge_bytes(definition, largest)?
+                    .checked_sub(group_charge_bytes(definition, groups.values[at].largest)?)
+                    .ok_or(SpillError::SizeOverflow)?;
+                match groups.values[at]._charge.grow(work.cx, delta) {
+                    Ok(()) => {}
+                    Err(MemoryError::ResourceExhausted { .. }) if groups.values.len() > 1 => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(SpillError::Memory(error).into()),
+                }
+                groups.values[at].largest = largest;
+            } else if largest > groups.values[at].largest {
                 // The replacement charge overlaps the predecessor until the
                 // stronger reservation exists. There is no uncharged interval.
                 let charge = match pool.reserve(work.cx, group_charge_bytes(definition, largest)?) {
@@ -892,28 +914,44 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
                 groups.values[at]._charge = charge;
                 groups.values[at].largest = largest;
             }
-            definition
-                .update(&mut groups.values[at].state, &row, &mut |event| {
-                    input.charge(event)
-                })
-                .map_err(execute_error)?;
+            let group = &mut groups.values[at];
+            if let Err(error) = collection::update(
+                definition,
+                &mut group.state,
+                &row,
+                input,
+                &mut group._charge,
+                work.cx,
+            ) {
+                if collection::capacity_refusal(&error) && groups.values.len() > 1 {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
         } else {
             if groups.values.len() == capacity {
                 return Ok(None);
             }
-            let charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?) {
+            let mut charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?)
+            {
                 Ok(charge) => charge,
                 Err(MemoryError::ResourceExhausted { .. }) if !groups.values.is_empty() => {
                     return Ok(None);
                 }
                 Err(error) => return Err(SpillError::Memory(error).into()),
             };
-            let mut state = definition
-                .new_state(&mut |event| input.charge(event))
-                .map_err(execute_error)?;
-            definition
-                .update(&mut state, &row, &mut |event| input.charge(event))
-                .map_err(execute_error)?;
+            let state: Result<SpillAggregateState> = (|| {
+                let mut state = collection::new_state(definition, input, &mut charge, work.cx)?;
+                collection::update(definition, &mut state, &row, input, &mut charge, work.cx)?;
+                Ok(state)
+            })();
+            let state = match state {
+                Ok(state) => state,
+                Err(error) if collection::capacity_refusal(&error) && !groups.values.is_empty() => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
             groups.values.push(Group {
                 exemplar: row,
                 state,
@@ -1050,97 +1088,6 @@ where
     Ok(())
 }
 
-fn key_hash(
-    row: &GraphValueRow,
-    definition: &SpillAggregateDefinition,
-    pool: &MemoryPool,
-    work: &mut Work<'_>,
-) -> Result<[u8; 32]> {
-    if row.len() != definition.input_width() {
-        return invalid();
-    }
-    let mut hash = fgdb_crypto::Hasher::new();
-    hash.update(b"fgdb.native-aggregate.partition.v1");
-    // The selected values' combined canonical bytes are no larger than the
-    // complete row. Reserve one codec workspace before allocating any key.
-    let (len, nodes) = account::encoded_shape(row, work.cx)?;
-    work.charge(len.checked_add(nodes).ok_or(SpillError::SizeOverflow)?)?;
-    let budget = len
-        .checked_mul(8)
-        .and_then(|bytes| {
-            nodes
-                .checked_mul(128)
-                .and_then(|node_bytes| bytes.checked_add(node_bytes))
-        })
-        .ok_or(SpillError::SizeOverflow)?;
-    let _codec = pool.reserve(work.cx, budget).map_err(SpillError::Memory)?;
-    for &key in definition.group_key_columns() {
-        let bytes = row.values()[key]
-            .canonical_bytes()
-            .map_err(NativeSpoolError::Encode)?;
-        work.charge(8)?;
-        hash.update(&(bytes.len() as u64).to_be_bytes());
-        for chunk in bytes.chunks(4096) {
-            work.charge(chunk.len())?;
-            hash.update(chunk);
-        }
-    }
-    Ok(hash.finalize().0)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn split_partition<A, B>(
-    parent: &Partition,
-    source: &mut SpillFile<A>,
-    destination: &mut SpillFile<B>,
-    definition: &SpillAggregateDefinition,
-    page_bytes: usize,
-    work: &mut Work<'_>,
-    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
-) -> Result<[NativeResultSpool; 2]>
-where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-{
-    if parent.depth >= 256 {
-        return Err(NativeAggregateSpoolError::PartitionDepth);
-    }
-    let pool = source.memory_pool().clone();
-    let mut children = [None, None];
-    // PagedSpillWriter owns an exclusive file borrow. Two bounded read passes
-    // avoid an unbounded open-writer/file catalog and preserve source order.
-    for selected in [0_u8, 1] {
-        let mut reader = parent.spool.reader(source);
-        let mut writer = destination.paged_writer(work.cx, page_bytes)?;
-        let mut rows = 0_u64;
-        while let Some(bytes) = reader.next_row(work.cx).await? {
-            work.charge(bytes.len())?;
-            let _decoded = decoded_reservation(&pool, work.cx, bytes.as_ref(), 1)?;
-            let row = decode_row(bytes.as_ref(), resolver)?;
-            let hash = key_hash(&row, definition, &pool, work)?;
-            if (hash[parent.depth / 8] >> (parent.depth % 8)) & 1 == selected {
-                work.write(&mut writer, bytes.as_ref()).await?;
-                rows = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            }
-        }
-        if reader.state() != ScanState::Exhausted {
-            return Err(NativeSpoolError::IncompleteCursor.into());
-        }
-        let run = writer.finish(work.cx).await?;
-        let mut child = parent.spool.clone();
-        child.run = run;
-        child.rows.result_rows = rows;
-        children[usize::from(selected)] = Some(child);
-    }
-    let [Some(left), Some(right)] = children else {
-        return invalid();
-    };
-    if left.row_count().checked_add(right.row_count()) != Some(parent.spool.row_count()) {
-        return invalid();
-    }
-    Ok([left, right])
-}
-
 async fn copy_result<A, B>(
     spool: &NativeResultSpool,
     source: &mut SpillFile<A>,
@@ -1242,7 +1189,7 @@ where
     let mut completed_rows = 0_u64;
     let mut result_writer = destination.paged_writer(cx, page_bytes)?;
     if initial.row_count() == 0 && opened.definition.group_key_columns().is_empty() {
-        let _charge = pool
+        let mut charge = pool
             .reserve(
                 cx,
                 opened
@@ -1252,14 +1199,16 @@ where
                     .ok_or(SpillError::SizeOverflow)?,
             )
             .map_err(SpillError::Memory)?;
-        let state = opened
-            .definition
-            .new_state(&mut |event| opened.input.charge(event))
-            .map_err(execute_error)?;
-        let row = opened
-            .definition
-            .finish(Vec::new(), state, &mut |event| opened.input.charge(event))
-            .map_err(execute_error)?;
+        let state =
+            collection::new_state(&opened.definition, opened.input.as_mut(), &mut charge, cx)?;
+        let row = collection::finish(
+            &opened.definition,
+            Vec::new(),
+            state,
+            opened.input.as_mut(),
+            &mut charge,
+            cx,
+        )?;
         if !opened.definition.has_output_stage() {
             opened.input.finish_result().map_err(execute_error)?;
         }
@@ -1333,7 +1282,7 @@ where
                 )
                 .await?;
             }
-            for group in groups.values.drain(..) {
+            for mut group in groups.values.drain(..) {
                 work.charge(group.largest)?;
                 let keys = opened
                     .definition
@@ -1341,10 +1290,14 @@ where
                     .iter()
                     .map(|&at| group.exemplar.values()[at].clone())
                     .collect();
-                let row = opened
-                    .definition
-                    .finish(keys, group.state, &mut |event| opened.input.charge(event))
-                    .map_err(execute_error)?;
+                let row = collection::finish(
+                    &opened.definition,
+                    keys,
+                    group.state,
+                    opened.input.as_mut(),
+                    &mut group._charge,
+                    cx,
+                )?;
                 if !opened.definition.has_output_stage() {
                     opened.input.finish_result().map_err(execute_error)?;
                 }
@@ -1389,13 +1342,7 @@ where
             };
             partitions = required;
             for child in children {
-                if child.row_count() != 0 {
-                    pending.values.push(Partition {
-                        spool: child,
-                        in_source: !next.in_source,
-                        depth: next.depth + 1,
-                    });
-                }
+                pending.values.push(child);
             }
         }
     }

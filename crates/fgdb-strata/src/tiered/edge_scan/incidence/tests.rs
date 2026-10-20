@@ -344,7 +344,16 @@ fn nested_positions_leave_root_unchanged_and_survive_its_last_candidate() {
             &mut |_| Ok::<_, ()>(()),
         ));
         assert_eq!(scan.work_used(), 0);
-        assert!(scan.driver.as_ref().unwrap().routes.is_none());
+        assert_eq!(
+            scan.driver
+                .as_ref()
+                .unwrap()
+                .root
+                .partition
+                .stats()
+                .bypasses,
+            0
+        );
         let nested = scan
             .next_incident_with_endpoints(
                 &cx,
@@ -372,9 +381,10 @@ fn nested_positions_leave_root_unchanged_and_survive_its_last_candidate() {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            scan.work_used() - first_work < first_work,
-            "directory is not rebuilt"
+        assert_eq!(
+            scan.work_used() - first_work,
+            first_work,
+            "both seeks use immutable descriptor routing without a first-query build"
         );
         drop(second);
         let before = scan
@@ -550,13 +560,19 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
         // while a frame is resident. A scratch request for the whole pool
         // evicts every unpinned frame before it returns, whether it then
         // admits or refuses, and its charge (if any) is released at once.
-        // Opening the scan charges only scratch and loads no frame, so a hold
-        // that then leaves 512 bytes sits below routing's opening 1 KiB scan
-        // reservation, with nothing left to evict. A scratch refusal reports
-        // through the buffer manager as Buffer(Memory(ResourceExhausted)),
-        // and the 1024 requested names routing's opening reservation.
+        // Opening the scan loads no frame, so a hold that then leaves 512
+        // bytes sits below the initial incidence seek reservation, with
+        // nothing left to evict. A scratch refusal reports through the buffer
+        // manager as Buffer(Memory(ResourceExhausted)), and the requested
+        // bytes name that incidence seek reservation.
         drop(view.reserve_scan_bytes(&cx, pool.limit()));
         let evicted = pool.used();
+        let routing_scratch = 1024
+            + size_of_val(&view.edge_scan_incidence_blocks(
+                VId(1),
+                None,
+                BufferedEdgeDirection::Outgoing,
+            ));
         let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
         let hold = pool.reserve(&cx, pool.limit() - pool.used() - 512).unwrap();
         let refused = scan
@@ -574,10 +590,10 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
                 refused,
                 Err(BufferedScanError::Read(BufferedReadError::Buffer(
                     BufferError::Memory(MemoryError::ResourceExhausted {
-                        requested: 1024,
+                        requested,
                         ..
                     })
-                )))
+                ))) if requested == routing_scratch
             ),
             "{:?}",
             refused.as_ref().map(Option::is_some)

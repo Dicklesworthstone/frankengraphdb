@@ -10,12 +10,15 @@
 //! closed-and-reopened store resolves every named partition with nothing
 //! carried in memory, and an absent root is a typed refusal NAMING the
 //! missing identity — never a silently smaller graph.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
 use fgdb_strata::manifest::{
-    MANIFEST_FORMAT_V2, ManifestError, ManifestRecord, ManifestVersion, decode_manifest,
-    encode_manifest, manifest_id, read_manifest,
+    MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, ManifestError, ManifestRecord, ManifestVersion,
+    decode_manifest, encode_manifest, manifest_id, read_manifest,
 };
 use fgdb_strata::root::{BlockRef, PartitionRoot};
 use fgdb_strata::store::{BlockStore, StoreError};
@@ -109,6 +112,34 @@ fn every_strict_prefix_is_a_typed_refusal_with_an_append_control() {
     );
 }
 
+/// Commit packs (fgdb-79kyi) bumped the format: every manifest is written as
+/// V3, so a pre-pack reader, whose decoder admits only V2, refuses it by
+/// version before it reads any partition object. A V2 manifest written before
+/// packs, whose objects are all loose, stays readable with the same records.
+#[test]
+fn manifests_are_written_as_v3_and_v2_stays_readable() {
+    let records = distinct_records();
+    let bytes = encode_manifest(&records).expect("encodes");
+    assert_eq!(
+        u16::from_be_bytes([bytes[4], bytes[5]]),
+        MANIFEST_FORMAT_V3,
+        "the format a pre-pack reader refuses"
+    );
+    assert_ne!(MANIFEST_FORMAT_V3, MANIFEST_FORMAT_V2);
+    let mut previous = bytes.clone();
+    previous[4..6].copy_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
+    assert_eq!(decode_manifest(&previous).expect("a V2 manifest"), records);
+    assert_eq!(decode_manifest(&bytes).expect("a V3 manifest"), records);
+    for format in [0, 1, MANIFEST_FORMAT_V3 + 1, u16::MAX] {
+        let mut other = bytes.clone();
+        other[4..6].copy_from_slice(&format.to_be_bytes());
+        assert_eq!(
+            decode_manifest(&other),
+            Err(ManifestError::UnsupportedFormat { format })
+        );
+    }
+}
+
 #[test]
 fn foreign_bytes_future_formats_and_identity_are_distinct_refusals() {
     let records = distinct_records();
@@ -122,11 +153,11 @@ fn foreign_bytes_future_formats_and_identity_are_distinct_refusals() {
     );
 
     let mut future = bytes.clone();
-    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V2 + 1).to_be_bytes());
+    future[4..6].copy_from_slice(&(MANIFEST_FORMAT_V3 + 1).to_be_bytes());
     assert_eq!(
         decode_manifest(&future),
         Err(ManifestError::UnsupportedFormat {
-            format: MANIFEST_FORMAT_V2 + 1
+            format: MANIFEST_FORMAT_V3 + 1
         })
     );
 
@@ -296,6 +327,52 @@ fn a_reopened_store_resolves_every_partition_the_manifest_names() {
                 record.partition
             );
         }
+    });
+}
+
+/// A database written before commit packs (fgdb-79kyi) keeps resolving: its
+/// V2 manifest sits loose at its content address, exactly as a pre-pack
+/// binary left it, and names roots whose objects are all loose.
+#[test]
+fn a_pre_pack_v2_manifest_left_on_disk_still_resolves() {
+    let dir = scratch_dir("pre-pack-v2");
+    let (manifest_id, records) = under_lab(63, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            let root = publish_partition(&cx, &store, 0, 3).await;
+            let records = vec![ManifestRecord {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                partition: 0,
+                root,
+                published_chain_hash: fgdb_crypto::Digest([0xc3; 32]),
+            }];
+            let mut v2 = encode_manifest(&records).expect("encodes");
+            v2[4..6].copy_from_slice(&MANIFEST_FORMAT_V2.to_be_bytes());
+            let id = ManifestVersion(manifest_id(&K_OID, NAMESPACE, &v2));
+            std::fs::write(store.path(id.0), &v2).expect("a pre-pack manifest file");
+            (id, records)
+        }
+    });
+    under_lab(64, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        let resolved = store
+            .resolve_manifest(&cx, manifest_id)
+            .await
+            .expect("a V2 manifest resolves");
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|(record, _)| *record)
+                .collect::<Vec<_>>(),
+            records
+        );
+        assert!(!resolved[0].1.blocks.is_empty());
     });
 }
 

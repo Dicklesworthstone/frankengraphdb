@@ -21,6 +21,10 @@
 //! - A read that ignored its relation or its source would still satisfy a
 //!   one-vertex fixture. The controls below use a second relation and an isolated
 //!   vertex, and both must come back empty.
+// A root walk's run-ahead proof window nests the store's futures past the
+// default recursion limit when this crate proves one Send (see fgdb-strata's
+// lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

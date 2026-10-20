@@ -1,8 +1,8 @@
 //! Native snapshot -> bounded scalar projection -> Beacon search. Historical
 //! winners are selected by the SAME visitor as GLA, before any label/property
-//! projection. One-shot searches build per execution; `resident` retains and
-//! explicitly refreshes generations. Neither is a new authority, a durable
-//! index descriptor, or an external-memory claim.
+//! projection. Privileged exact searches reuse matching maintained generations;
+//! other reads build their admitted corpus per execution. Neither is a new
+//! authority, a durable index descriptor, or an external-memory claim.
 
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
@@ -13,6 +13,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 
+#[path = "query_beacon/demand.rs"]
+pub(crate) mod demand;
 #[path = "query_beacon/graph.rs"]
 pub(crate) mod graph;
 #[path = "query_beacon/indexed.rs"]
@@ -21,12 +23,12 @@ pub(crate) mod indexed;
 pub(crate) mod procedure;
 #[path = "query_beacon/resident.rs"]
 mod resident;
-pub(crate) use resident::Registry as BeaconRegistry;
 pub use resident::{
     Error as ResidentIndexError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError,
     MaintainedBeaconFailure, MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex,
     RefreshReport, ResidentIndex,
 };
+pub(crate) use resident::{QueryIndexes as BeaconQueryIndexes, Registry as BeaconRegistry};
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
@@ -287,10 +289,55 @@ pub(crate) fn evaluate_filtered(
     Ok(rows)
 }
 
+/// Privileged exact retrieval may use a matching immutable maintained pin.
+/// Capability readers deliberately use evaluate_filtered instead: their
+/// corpus, statistics and topology must be built after source authorization.
+fn evaluate_privileged_filtered(
+    snapshot: &Snapshot,
+    indexes: &BeaconQueryIndexes,
+    at: CommitSeq,
+    options: &Options,
+    query: Search<'_>,
+    work: &RefCell<impl WorkControl>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Rows, BeaconError> {
+    work.borrow_mut().charge(1)?;
+    let config = options.config_for(query)?;
+    query.validate(&config, &mut SharedWork(work))?;
+    let index = match indexes.lookup_exact(
+        at,
+        snapshot.frontier,
+        options,
+        &config,
+        query,
+        &mut SharedWork(work),
+    )? {
+        Some(index) => index,
+        None => build(
+            snapshot,
+            at,
+            options,
+            config,
+            work,
+            Scan::Metered,
+            |_| Ok(true),
+            |_| true,
+            |_| true,
+        )?
+        .snapshot(),
+    };
+    let rows = query.execute_filtered(&index, eligible, &mut SharedWork(work))?;
+    // Reuse cannot bypass final live admission, even for an empty answer.
+    work.borrow_mut().charge(1)?;
+    Ok(rows)
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Search one admitted database generation. None selects its frontier;
     /// as_of selects that generation's historical winners, including updates,
-    /// label changes and tombstones. No asynchronous stale index is consulted.
+    /// label changes and tombstones. Exact retrieval reuses a healthy maintained
+    /// index only at the identical cut and projection/configuration. Historical
+    /// mismatches, unavailable indexes and ANN use ordinary source construction.
     /// This is a privileged API, like read_session; use beacon_search_authorized
     /// when serving capability holders. No graph/value/clock is fabricated.
     pub fn beacon_search(
@@ -317,26 +364,32 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Rows, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            let frontier = self.frontier().map_err(Error::Read)?;
-            let at = options.as_of.unwrap_or(frontier);
+            let current = self.frontier().map_err(Error::Read)?;
+            let at = options.as_of.unwrap_or(current);
             self.snapshot.check_frontier(at).map_err(Error::Read)?;
-            if let Some(pin) = self.maintained_beacon.find_for_search(at, options, query) {
-                return pin
-                    .search_filtered(cx, query, options.policy, eligible)
-                    .map_err(resident::resident_to_read_error);
-            }
-            self.read_session()
-                .map_err(Error::Read)?
-                .beacon_search_filtered(cx, options, query, eligible)
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
+            let result = evaluate_privileged_filtered(
+                &self.snapshot,
+                self.maintained_beacon.query_indexes(),
+                at,
+                options,
+                query,
+                &work,
+                eligible,
+            );
+            work.into_inner().finish(result)
         })
     }
 }
 
 impl EmbeddedReadView {
     /// Reuse this pinned generation, not the writer's current head. A later
-    /// writer publication/drop cannot change these results. Construction is
-    /// currently per-call and in-core; exact vector mode is exact only for the
-    /// explicitly projected f32 coordinates, and ANN remains approximate.
+    /// writer publication/drop cannot change these results. Matching maintained
+    /// pins avoid per-call construction for text and exact vector retrieval.
+    /// Exactness is over explicitly projected f32 coordinates; ANN retains its
+    /// ordinary per-call generation. Both paths remain resident.
     pub fn beacon_search(
         &self,
         cx: &QueryCx,
@@ -350,8 +403,9 @@ impl EmbeddedReadView {
     /// by filtering an already-truncated result. Derive any data-dependent
     /// eligibility from this same view and `options.as_of`. The host predicate
     /// is not an authorization boundary and must be stable and bounded.
-    /// One existing meter covers construction, search and final publication;
-    /// reject-all does not bypass validation, source limits or cancellation.
+    /// One meter covers any required construction, search and final publication.
+    /// A maintained pin needs no source staging; query/result limits and live
+    /// cancellation still apply, including when every endpoint is rejected.
     pub fn beacon_search_filtered(
         &self,
         cx: &QueryCx,
@@ -366,16 +420,13 @@ impl EmbeddedReadView {
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
                 cx.checkpoint()
             }));
-            let result = evaluate_filtered(
+            let result = evaluate_privileged_filtered(
                 &self.snapshot,
+                &self.beacon_indexes,
                 at,
                 options,
                 query,
                 &work,
-                Scan::Metered,
-                |_| Ok(true),
-                |_| true,
-                |_| true,
                 eligible,
             );
             work.into_inner().finish(result)

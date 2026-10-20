@@ -13,7 +13,7 @@ use asupersync::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use core::future::poll_fn;
 use core::ops::{Deref, DerefMut};
 use core::task::Poll;
-use fgdb::{Database, DatabaseState};
+use fgdb::{Database, DatabaseState, EmbeddedReadView, WeakEmbeddedReadView};
 use fgdb_protocol::body::ErrorCode;
 use fgdb_types::PurposeContexts;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +42,7 @@ struct State {
     active: usize,
     stopping: bool,
     failure: Option<String>,
+    published: Option<WeakEmbeddedReadView>,
 }
 
 struct Gate {
@@ -170,13 +171,13 @@ struct Shared {
 
 impl Shared {
     fn fence(&self) {
-        let changed = {
+        let (changed, previous) = {
             let mut state = self
                 .gate
                 .state
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
-            if state.phase != Phase::Ready {
+            let changed = if state.phase != Phase::Ready {
                 false
             } else if let Some(next) = state.generation.checked_add(1) {
                 state.generation = next;
@@ -186,15 +187,17 @@ impl Shared {
                 state.phase = Phase::Fenced;
                 state.failure = Some("database recovery generation exhausted".to_owned());
                 true
-            }
+            };
+            (changed, state.published.take())
         };
+        drop(previous);
         if changed {
             self.gate.signal.committed();
         }
     }
 
     fn failed(&self, reason: String) {
-        {
+        let previous = {
             let mut state = self
                 .gate
                 .state
@@ -202,7 +205,9 @@ impl Shared {
                 .unwrap_or_else(PoisonError::into_inner);
             state.phase = Phase::Fenced;
             state.failure = Some(reason);
-        }
+            state.published.take()
+        };
+        drop(previous);
         self.gate.signal.committed();
     }
 }
@@ -224,6 +229,10 @@ impl DatabaseSlot {
         signal: Arc<CommitSignal>,
         subscriptions: Arc<AtomicUsize>,
     ) -> Result<Self, crate::ServerError> {
+        let published = database
+            .pinned_read_view()
+            .expect("a newly opened served database is healthy")
+            .downgrade();
         let shared = Arc::new(Shared {
             database: RwLock::new(Some(database)),
             gate: Arc::new(Gate {
@@ -233,6 +242,7 @@ impl DatabaseSlot {
                     active: 0,
                     stopping: false,
                     failure: None,
+                    published: Some(published),
                 }),
                 signal,
             }),
@@ -275,6 +285,53 @@ impl DatabaseSlot {
 
     pub(crate) fn enter(&self) -> Result<Operation, Unavailable> {
         self.generation()?.enter()
+    }
+
+    /// Pin one published graph/frontier and its recovery fence together.
+    ///
+    /// During D1/D2 the writer still owns the old immutable snapshot, so a
+    /// read upgrades it without acquiring the writer's lock. A weak record
+    /// alone does not force a history-sized metadata copy on every commit.
+    /// If an otherwise unpinned snapshot is dissociated by Arc::make_mut,
+    /// admission falls back to the existing database lock. That fallback can
+    /// wait through the remaining derived publication I/O; this is not a
+    /// lock-free or universally nonblocking reader contract.
+    pub(crate) async fn read_view(
+        &self,
+        cx: &Cx,
+    ) -> Result<(EmbeddedReadView, Generation), Unavailable> {
+        cx.checkpoint().map_err(|_| Unavailable::Stopping)?;
+        let published = {
+            let state = self
+                .shared
+                .gate
+                .state
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            current(&state, state.generation)?;
+            if state.stopping {
+                return Err(Unavailable::Stopping);
+            }
+            state
+                .published
+                .as_ref()
+                .and_then(WeakEmbeddedReadView::upgrade)
+                .map(|view| {
+                    (
+                        view,
+                        Generation {
+                            gate: Arc::clone(&self.shared.gate),
+                            value: state.generation,
+                        },
+                    )
+                })
+        };
+        if let Some(published) = published {
+            return Ok(published);
+        }
+        let guard = self.read(cx).await?;
+        let view = guard.pinned_read_view().map_err(|_| Unavailable::Fenced)?;
+        Ok((view, guard.generation()))
     }
 
     pub(crate) async fn read(&self, cx: &Cx) -> Result<ReadGuard<'_>, Unavailable> {
@@ -337,12 +394,20 @@ impl DatabaseSlot {
     }
 
     fn stop(&self) {
-        self.shared
-            .gate
-            .state
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .stopping = true;
+        let previous = {
+            let mut state = self
+                .shared
+                .gate
+                .state
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.stopping = true;
+            state.published.take()
+        };
+        // Weak views still own search-index pins. A retained generation fence
+        // must not retain those allocations after this database stops, and
+        // their final destruction must never run under the lifecycle gate.
+        drop(previous);
         self.shared.gate.signal.committed();
     }
 
@@ -410,15 +475,36 @@ impl DerefMut for WriteGuard<'_> {
 }
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
-        if self
-            .guard
-            .as_ref()
-            .is_some_and(|db| !matches!(db.state(), DatabaseState::Healthy { .. }))
-        {
+        let Some(database) = self.guard.as_ref() else {
+            self.shared.fence();
+            return;
+        };
+        if !matches!(database.state(), DatabaseState::Healthy { .. }) {
             // Publish the fence before releasing the write lock. A waiting
             // request cannot acquire this old handle through the gap.
             self.shared.fence();
+            return;
         }
+        // A healthy write publishes its read generation before releasing the
+        // writer lock. A refusing or read-only operation refreshes the same
+        // view, including maintained search pins at an unchanged frontier.
+        let published = database
+            .pinned_read_view()
+            .expect("healthy database")
+            .downgrade();
+        let previous = {
+            let mut state = self
+                .shared
+                .gate
+                .state
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.stopping || current(&state, self.generation.value).is_err() {
+                return;
+            }
+            state.published.replace(published)
+        };
+        drop(previous);
     }
 }
 
@@ -487,18 +573,28 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
         let Ok(mut guard) = shared.database.write(cx).await else {
             return;
         };
+        let published = recovered
+            .pinned_read_view()
+            .expect("recovery returns a healthy database")
+            .downgrade();
         *guard = Some(recovered);
         // Registrations belong to the consumed database. Old consumers never
         // decrement this count, so their later closure cannot spend new slots.
         shared.subscriptions.store(0, Ordering::Release);
-        {
+        let previous = {
             let mut state = shared
                 .gate
                 .state
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
             state.phase = Phase::Ready;
-        }
+            if state.stopping {
+                state.published.take()
+            } else {
+                state.published.replace(published)
+            }
+        };
+        drop(previous);
         drop(guard);
         shared.gate.signal.committed();
     }

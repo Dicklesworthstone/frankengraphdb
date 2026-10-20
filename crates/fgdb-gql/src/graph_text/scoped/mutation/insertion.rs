@@ -35,6 +35,41 @@ struct InsertionSyntax<'a> {
     edges: Vec<NewEdge<'a>>,
 }
 
+/// One statement-wide catalog cache across the read and write compilers.
+/// Forward the host's metadata and time zones, not just its forward symbols.
+struct InsertionResolver<R> {
+    inner: R,
+    symbols: BTreeMap<(GraphSymbolKind, String), Option<GraphSymbol>>,
+}
+
+impl<R: GraphSymbolResolver> GraphSymbolResolver for InsertionResolver<R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(value) = self.symbols.get(&key) {
+            return *value;
+        }
+        let value = self.inner.resolve_symbol(kind, name);
+        self.symbols.insert(key, value);
+        value
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.inner.time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.inner.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        self.inner.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.inner.reverse_relation(id)
+    }
+}
+
 fn insertion_build(at: usize, kind: GraphInsertBuildError) -> GraphInsertTextError {
     GraphInsertTextError {
         offset: at,
@@ -47,6 +82,10 @@ fn expected(at: usize, message: &'static str) -> GraphInsertTextError {
 
 /// Parsed source-free WITH/UNWIND stages and their final imported schema.
 type UnwindPrefix<'a> = (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>);
+type GraphRowPrefix<'a> = (
+    crate::graph_text::parameters::UnresolvedGraphText<'a>,
+    Vec<(Name<'a>, GraphSetColumnType)>,
+);
 
 impl<'a> Parser<'a> {
     /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
@@ -105,6 +144,22 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(true)
+    }
+
+    /// A MATCH-first WITH/UNWIND selects the native graph-to-row compiler.
+    /// The MATCH parser has identified the boundary; restart that same bounded
+    /// statement with its row-source owner, not a rewritten RETURN or a
+    /// fallback after a refused parse. Its parameter table remains live through
+    /// CREATE, while take_part_syntax removes the old graph-local scope.
+    pub(super) fn insertion_graph_row_prefix(
+        &mut self,
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        zones: Option<crate::GqlTimeZones>,
+    ) -> Result<GraphRowPrefix<'a>, crate::GraphSetTextError> {
+        *self = Self::new_with_parameter_types(statement, declarations)?.with_zones(zones);
+        let (source, schema, _) = self.leading_aggregate_prefix(statement)?;
+        Ok((source, schema))
     }
 
     /// Resolve the combined row (imports, then projected MATCH fields) while
@@ -337,15 +392,17 @@ impl<'a> Parser<'a> {
                     "CREATE vertex name distinct from edge and path bindings",
                 ));
             }
-            if row_schema
-                .is_some_and(|schema| schema.iter().any(|(alias, _)| alias.text == name.text))
-            {
-                return Err(expected(
-                    name.at,
-                    "new CREATE vertex name, not an imported row alias",
-                ));
-            }
-            if self
+            if let Some((column, (_, kind))) = row_schema.and_then(|schema| {
+                schema
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (alias, _))| alias.text == name.text)
+            }) {
+                if *kind != GraphSetColumnType::Vertex {
+                    return Err(expected(name.at, "vertex-typed imported CREATE endpoint"));
+                }
+                Some(GraphInsertEndpoint::Column(column))
+            } else if self
                 .syntax
                 .variables
                 .iter()
@@ -656,7 +713,7 @@ impl PreparedGraphInsertText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        mut resolve: impl GraphSymbolResolver,
+        resolve: impl GraphSymbolResolver,
         returning: bool,
     ) -> Result<
         (
@@ -665,13 +722,29 @@ impl PreparedGraphInsertText {
         ),
         GraphInsertTextError,
     > {
+        let mut resolve = InsertionResolver {
+            inner: resolve,
+            symbols: BTreeMap::new(),
+        };
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        let (leading, row_schema) = parser.insertion_unwind_prefix()?;
-        let matched = parser.insertion_match_prefix(&row_schema)?;
+        let (leading, mut row_schema) = parser.insertion_unwind_prefix()?;
+        let mut matched = parser.insertion_match_prefix(&row_schema)?;
+        let read_source = if leading.is_empty()
+            && matched
+            && (parser.is_word("WITH") || parser.is_word("UNWIND"))
+        {
+            let (source, schema) =
+                parser.insertion_graph_row_prefix(statement, declarations, resolve.time_zones())?;
+            row_schema = schema;
+            matched = false;
+            Some(source)
+        } else {
+            None
+        };
+        let row_input = read_source.is_some() || !leading.is_empty();
         let at = parser.current.at;
-        let mut parsed =
-            parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()))?;
+        let mut parsed = parser.insertion_clauses(row_input.then_some(row_schema.as_slice()))?;
         let returning = if returning {
             Some(parser.insertion_return(&mut parsed, &row_schema)?)
         } else {
@@ -685,14 +758,16 @@ impl PreparedGraphInsertText {
             let column = parser.mutation_projection(&mut parsed.projections, variable, key)?;
             correlations.push((row, column));
         }
+        let row_fields = core::mem::take(&mut parser.read_row_fields);
         let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);
-        if !leading.is_empty() && input_types.len() > MAX_PATTERN_VERTICES {
+        let joined_width = input_types.len() + row_fields.len();
+        if row_input && joined_width > MAX_PATTERN_VERTICES {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
                     dimension: crate::algebra::PatternLimitDimension::Columns,
                     limit: MAX_PATTERN_VERTICES,
-                    observed: input_types.len(),
+                    observed: joined_width,
                 }),
             )
             .into());
@@ -701,7 +776,62 @@ impl PreparedGraphInsertText {
             returning.admit(&parser.syntax.parameters)?;
         }
         let syntax = parser.syntax;
-        let relational = if leading.is_empty() {
+        let relational = if let Some(mut source) = read_source {
+            // CREATE/RETURN may add parameters after the read boundary. Every
+            // stage binds the complete table, with the original indices and
+            // occurrences; no source-only schema or argument re-resolution.
+            source.syntax.parameters.clone_from(&syntax.parameters);
+            source
+                .syntax
+                .parameter_offsets
+                .clone_from(&syntax.parameter_offsets);
+            source
+                .syntax
+                .element_keys
+                .extend(syntax.element_keys.iter().cloned());
+            let depth = source.depth();
+            if depth + 1 > crate::MAX_GRAPH_SET_DEPTH {
+                return Err(insertion_build(
+                    at,
+                    GraphInsertBuildError::RelationalInput(crate::GraphSetBuildError::TooDeep {
+                        limit: crate::MAX_GRAPH_SET_DEPTH,
+                        observed: depth + 1,
+                    }),
+                ));
+            }
+            if returning.is_some() && depth + 2 > crate::MAX_GRAPH_SET_DEPTH {
+                return Err(GraphInsertTextError {
+                    offset: at,
+                    kind: GraphInsertTextErrorKind::ReturnBuild(
+                        crate::GraphInsertQueryBuildError::InputDepth(
+                            crate::GraphSetBuildError::TooDeep {
+                                limit: crate::MAX_GRAPH_SET_DEPTH,
+                                observed: depth + 2,
+                            },
+                        ),
+                    ),
+                });
+            }
+            let values = shape_arguments(&syntax.parameters);
+            for (_, value) in parsed
+                .vertices
+                .iter()
+                .flat_map(|v| &v.properties)
+                .chain(parsed.edges.iter().flat_map(|e| &e.properties))
+            {
+                let value = return_projection::bind_read_value(value, &values)?;
+                crate::GraphSetProjection::admit_output(&value, &input_types, 0).map_err(
+                    |kind| crate::GraphSetTextError {
+                        offset: at,
+                        kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
+                    },
+                )?;
+            }
+            // The selection, projection, DISTINCT, grouping, filter, UNWIND
+            // and pages stay one native input. An empty MATCH is never replaced
+            // with a unit row, nor is its occurrence bag deduplicated here.
+            Some(source.resolve(crate::graph_text::LentResolver(&mut resolve))?)
+        } else if leading.is_empty() {
             None
         } else {
             let input = BoundSetTextInput {
@@ -715,14 +845,21 @@ impl PreparedGraphInsertText {
                 singleton: true,
                 leading,
                 correlations: Vec::new(),
+                row_fields,
             };
             // Compile all source and property expression shapes before any
             // catalog callback, including statically unreachable empty lists.
             let values = shape_arguments(&syntax.parameters);
             let shape = input.bind_values(&values)?;
+            if !input.row_fields.is_empty() {
+                input.bind_row_fields(shape.clone(), &values)?;
+            }
             // A matched child adds a cross product and, when correlated, a
             // filter. Admit those ancestors BEFORE any catalog callback.
-            let ancestors = 1 + usize::from(matched) + usize::from(!correlations.is_empty());
+            let ancestors = 1
+                + usize::from(matched)
+                + usize::from(!correlations.is_empty())
+                + 2 * usize::from(!input.row_fields.is_empty());
             shape.check_ancestor_depth(ancestors).map_err(|kind| {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
@@ -752,6 +889,19 @@ impl PreparedGraphInsertText {
             }
             Some(input)
         };
+        if relational
+            .as_ref()
+            .is_some_and(|input| !input.row_fields.is_empty())
+        {
+            for (key, slot) in &syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -1073,5 +1223,169 @@ impl PreparedGraphInsertText {
             None => PreparedGraphInsert::prepare_standalone(self.relation, vertices, edges),
         }
         .map_err(|kind| insertion_build(self.create_at, kind))
+    }
+}
+
+#[cfg(test)]
+mod graph_row_source_tests {
+    use super::*;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Source") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(LabelId(2))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(7))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    fn prepare(text: &str) -> PreparedGraphInsertText {
+        PreparedGraphInsertText::prepare(text, RelationId(7), symbols).unwrap()
+    }
+
+    #[test]
+    fn with_vertex_alias_feeds_an_existing_endpoint_without_a_new_identity() {
+        let template = prepare("MATCH (n:Source) WITH n AS a CREATE (a)-[:R]->(c:Copy {p:7})");
+        assert_eq!(template.vertices.len(), 1);
+        assert_eq!(template.edges[0].source, GraphInsertEndpoint::Column(0));
+        assert_eq!(
+            template.edges[0].destination,
+            GraphInsertEndpoint::CreatedVertex(0)
+        );
+        let InsertTextInput::Relation { input, .. } = &template.input else {
+            panic!("WITH must retain a native relation");
+        };
+        assert!(!input.singleton);
+        assert!(input.selection.is_some());
+        assert!(input.projection.is_some());
+        let bound = template.bind_parameters(&GqlParameters::new()).unwrap();
+        assert!(bound.requires_read());
+        assert!(!bound.is_standalone());
+        assert_eq!(bound.vertices_per_row(), 1);
+        assert_eq!(bound.edges_per_row(), 1);
+        assert_eq!(
+            bound.relational_selection().unwrap().column_types(),
+            &[GraphSetColumnType::Vertex]
+        );
+    }
+
+    #[test]
+    fn with_stages_keep_their_native_row_shape_before_creation() {
+        for text in [
+            "MATCH (n:Source) WITH n AS a,n.p AS p WHERE p>0 ORDER BY p DESC LIMIT 2 \
+             CREATE (a)-[:R {p:p}]->(c:Copy {p:p+1})",
+            "MATCH (n:Source) WITH DISTINCT n.p AS p CREATE (c:Copy {p:p})",
+            "MATCH (n:Source) WITH count(*) AS total CREATE (c:Copy {p:total})",
+            "MATCH (n:Source) WITH n AS a UNWIND [1,2] AS x \
+             CREATE (a)-[:R]->(c:Copy {p:x})",
+            "MATCH (n:Source) UNWIND [1,2] AS x CREATE (n)-[:R]->(c:Copy {p:x})",
+            "MATCH (n:Source) WITH n.p AS p WITH p+1 AS q INSERT (c:Copy {p:q})",
+        ] {
+            let bound = prepare(text)
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            assert!(bound.requires_read(), "{text}");
+            assert!(bound.relational_selection().is_some(), "{text}");
+            assert_eq!(bound.vertices_per_row(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn one_parameter_table_spans_match_with_create_and_return() {
+        let text = "MATCH (n:Source {p:$value}) WITH n AS a,$value AS p \
+                    CREATE (a)-[:R {p:p+$extra}]->(c:Copy {p:$value}) RETURN a,c,c.p";
+        let (template, returning) =
+            PreparedGraphInsertText::prepare_definition(text, RelationId(7), &[], symbols, true)
+                .unwrap();
+        assert!(returning.is_some());
+        assert_eq!(template.parameter_schema().len(), 2);
+        assert_eq!(template.parameter_schema()[0].name, "value");
+        assert_eq!(template.parameter_schema()[0].occurrences, 3);
+        assert_eq!(template.parameter_schema()[1].name, "extra");
+        for value in [-7, 0, 19] {
+            let arguments = GqlParameters::new()
+                .with_int64("value", value)
+                .unwrap()
+                .with_int64("extra", 2)
+                .unwrap();
+            assert!(template.bind_parameters(&arguments).is_ok());
+        }
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    }
+
+    #[test]
+    fn dropped_bindings_and_nonvertex_endpoints_refuse_before_catalog_access() {
+        for text in [
+            "MATCH (n:Source) WITH 1 AS a CREATE (a)-[:R]->(c)",
+            "MATCH (n:Source) WITH n.p AS a CREATE (a)-[:R]->(c)",
+            "MATCH (n)-[r:R]->(m) WITH r AS a CREATE (a)-[:R]->(c)",
+            "MATCH (n:Source) WITH n AS a CREATE (a:Copy)-[:R]->(c)",
+            "MATCH (n:Source) WITH n AS a CREATE (a {})-[:R]->(c)",
+            "MATCH (n:Source) WITH 1 AS x CREATE (c:Copy {p:n.p})",
+            "MATCH (n:Source) WITH n AS a CREATE (c:Copy {p:a})",
+        ] {
+            let mut calls = 0;
+            let result =
+                PreparedGraphInsertText::prepare(text, RelationId(7), |kind, name: &str| {
+                    calls += 1;
+                    symbols(kind, name)
+                });
+            assert!(result.is_err(), "{text}");
+            assert_eq!(calls, 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_match_name_can_declare_a_new_vertex() {
+        let template = prepare("MATCH (n:Source) WITH n AS a CREATE (n:Copy)-[:R]->(a)");
+        assert_eq!(template.vertices.len(), 1);
+        assert_eq!(
+            template.edges[0].source,
+            GraphInsertEndpoint::CreatedVertex(0)
+        );
+        assert_eq!(
+            template.edges[0].destination,
+            GraphInsertEndpoint::Column(0)
+        );
+    }
+
+    #[test]
+    fn graph_and_write_symbols_share_one_catalog_binding() {
+        let mut calls = BTreeMap::new();
+        let template = PreparedGraphInsertText::prepare(
+            "MATCH (n:Source {p:$p}) WITH n AS a,n.p AS p \
+             CREATE (a)-[:R {p:p}]->(c:Source {p:p})",
+            RelationId(7),
+            |kind, name: &str| {
+                *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.values().all(|&count| count == 1));
+        let arguments = GqlParameters::new().with_int64("p", 3).unwrap();
+        template.bind_parameters(&arguments).unwrap();
+        assert!(calls.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn existing_standalone_and_match_insertions_keep_their_original_lanes() {
+        let standalone = prepare("CREATE (c:Copy {p:1})")
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(standalone.is_standalone());
+        assert!(!standalone.requires_read());
+        let matched = prepare("MATCH (n:Source) CREATE (n)-[:R]->(c:Copy)")
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(matched.selection().is_some());
+        assert!(matched.relational_selection().is_none());
+        let rows = prepare("UNWIND [1,2] AS x CREATE (c:Copy {p:x})")
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        assert!(!rows.requires_read());
+        assert!(!rows.is_standalone());
     }
 }

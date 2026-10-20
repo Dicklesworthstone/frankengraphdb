@@ -62,7 +62,10 @@ impl<'a> Cell<'a> {
         let scalar = frame(&mut body)?;
         if !body.is_empty()
             || scalar.is_empty()
-            || scalar[0] > 7
+            // Scalar profile V2 adds temporal ranks after the property-value
+            // List/Map tags (8/9). Keep those holes and unknown tags refused;
+            // valid temporal payloads remain borrowed memcomparable bytes.
+            || !matches!(scalar[0], 0x00..=0x07 | 0x0a..=0x0e)
             || (scalar[0] == 0 && scalar.len() != 1)
         {
             return Err(invalid());
@@ -388,3 +391,208 @@ pub(super) fn compare(
     }
     Ok(Ordering::Equal)
 }
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use fgdb_types::{
+        CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime,
+        CanonicalScalar, CanonicalTime, PurposeContexts,
+    };
+
+    fn values() -> Vec<GraphValue> {
+        let midnight = CanonicalLocalTime::MIDNIGHT;
+        let date = CanonicalDate::from_epoch_day(-1).unwrap();
+        let scalars = [
+            CanonicalScalar::Null,
+            CanonicalScalar::Int(7),
+            CanonicalScalar::Date(date),
+            CanonicalScalar::LocalTime(midnight),
+            CanonicalScalar::Time(CanonicalTime::new(midnight, 3600).unwrap()),
+            CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, midnight)),
+            CanonicalScalar::Duration(CanonicalDuration::new(-1, 2, -3).unwrap()),
+        ];
+        let mut values = Vec::new();
+        for scalar in scalars {
+            let value = GraphValue::Scalar(scalar);
+            values.push(value.clone());
+            values.push(GraphValue::List(vec![value.clone()].into_boxed_slice()));
+            values.push(GraphValue::map(vec![("when".into(), value)]).unwrap());
+        }
+        values
+    }
+
+    fn encoded(value: &GraphValue) -> Vec<u8> {
+        GraphValueRow::from_owned_values(vec![value.clone()])
+            .canonical_bytes()
+            .unwrap()
+    }
+
+    #[test]
+    fn temporal_frames_preserve_typed_order_equality_and_visible_prefixes() {
+        let ((), report) = run_async_under_lab(0x50a7_0010, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let values = values();
+            let frames: Vec<_> = values.iter().map(encoded).collect();
+            let mut work = Work {
+                cx: &cx,
+                used: 0,
+                limit: u64::MAX,
+            };
+            for (value, bytes) in values.iter().zip(&frames) {
+                validate(bytes, 1, &mut work).unwrap();
+                let hidden = GraphValueRow::from_owned_values(vec![value.clone(), value.clone()])
+                    .canonical_bytes()
+                    .unwrap();
+                let prefix = visible_prefix(&hidden, 2, 1, &mut work).unwrap();
+                let mut visible = ROW.to_vec();
+                visible.extend_from_slice(&1_u64.to_be_bytes());
+                visible.extend_from_slice(prefix);
+                assert_eq!(
+                    &visible, bytes,
+                    "visible cells keep their exact encoded bytes"
+                );
+            }
+            for (a, left) in values.iter().enumerate() {
+                for (b, right) in values.iter().enumerate() {
+                    assert_eq!(
+                        equal_columns(
+                            &frames[a],
+                            &frames[b],
+                            &[GraphValueOrder::ascending(0)],
+                            1,
+                            &mut work,
+                        )
+                        .unwrap(),
+                        left == right
+                    );
+                    for descending in [false, true] {
+                        for nulls_first in [false, true] {
+                            let expected = match (left.is_null(), right.is_null()) {
+                                (true, false) if nulls_first => Ordering::Less,
+                                (true, false) => Ordering::Greater,
+                                (false, true) if nulls_first => Ordering::Greater,
+                                (false, true) => Ordering::Less,
+                                _ if descending => right.cmp(left),
+                                _ => left.cmp(right),
+                            };
+                            let order = [GraphValueOrder {
+                                column: 0,
+                                descending,
+                                nulls_first,
+                            }];
+                            assert_eq!(
+                                compare(&frames[a], &frames[b], &order, 1, &mut work).unwrap(),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn temporal_admission_keeps_reserved_and_unknown_scalar_tags_closed() {
+        let ((), report) = run_async_under_lab(0x50a7_0011, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let scalar = CanonicalScalar::Date(CanonicalDate::from_epoch_day(0).unwrap());
+            let payload = scalar.encode().unwrap();
+            let value = GraphValue::Scalar(scalar);
+            for hidden in [
+                value.clone(),
+                GraphValue::List(vec![value].into_boxed_slice()),
+            ] {
+                let valid = GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    hidden,
+                ])
+                .canonical_bytes()
+                .unwrap();
+                assert!(valid.ends_with(&payload));
+                let tag_at = valid.len() - payload.len();
+                for tag in (8_u8..=9).chain(15..=u8::MAX) {
+                    let mut malformed = valid.clone();
+                    malformed[tag_at] = tag;
+                    assert!(GraphValueRow::decode_canonical(&malformed).is_err());
+                    let mut work = Work {
+                        cx: &cx,
+                        used: 0,
+                        limit: u64::MAX,
+                    };
+                    assert!(matches!(
+                        validate(&malformed, 2, &mut work),
+                        Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+                    ));
+                    assert!(matches!(
+                        visible_prefix(&malformed, 2, 1, &mut work),
+                        Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+                    ));
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn temporal_comparison_keeps_exact_work_and_cancellation_boundaries() {
+        let ((), report) = run_async_under_lab(0x50a7_0012, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let bytes = encoded(&GraphValue::List(values().into_boxed_slice()));
+            let order = [GraphValueOrder::ascending(0)];
+            let exercise = |work: &mut Work<'_>| {
+                validate(&bytes, 1, work)?;
+                compare(&bytes, &bytes, &order, 1, work)
+            };
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let mut work = Work {
+                cx: &observed,
+                used: 0,
+                limit: u64::MAX,
+            };
+            assert_eq!(exercise(&mut work).unwrap(), Ordering::Equal);
+            let required = work.used;
+            assert!(required > 0);
+            for limit in [required - 1, required] {
+                let mut work = Work {
+                    cx: &cx,
+                    used: 0,
+                    limit,
+                };
+                let result = exercise(&mut work);
+                if limit == required {
+                    assert_eq!(result.unwrap(), Ordering::Equal);
+                    assert_eq!(work.used, required);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(NativeSpoolError::SortWorkLimit { .. })
+                    ));
+                }
+            }
+            for stop in 1..=probe.calls() {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let mut work = Work {
+                    cx: &interrupted,
+                    used: 0,
+                    limit: u64::MAX,
+                };
+                assert!(matches!(
+                    exercise(&mut work),
+                    Err(NativeSpoolError::Spill(SpillError::Interrupted(_)))
+                ));
+                assert_eq!(probe.calls(), stop);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[path = "language_order.rs"]
+mod language_order;

@@ -1,6 +1,45 @@
 // Query-selected graph creation stages one ordinary WriteBatch. Selection and
 // computed payloads are frozen before allocation; commit remains explicit.
 
+struct InsertGraphSource<'a, V: Vfs> {
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a fgdb_types::QueryCx,
+}
+
+impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::error::Error>>
+    for InsertGraphSource<'_, V>
+{
+    fn supports_pattern_factors(&self) -> bool {
+        true
+    }
+
+    fn pattern(
+        &mut self,
+        pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        TxnGqlError<WriteTxnError>,
+    > {
+        self.transaction
+            .execute_graph_pattern_governed(self.database, self.cx, pattern, policy)
+    }
+
+    fn pattern_factors(
+        &mut self,
+        request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Option<Result<fgdb_gql::GraphPatternFactorExecution, TxnGqlError<WriteTxnError>>> {
+        Some(self.transaction.execute_graph_pattern_factors_governed(
+            self.database,
+            self.cx,
+            request,
+            policy,
+        ))
+    }
+}
+
 impl WriteTxn {
     /// Stage CREATE/INSERT and its native RETURN rows as one atomic operation.
     /// The prepared query evaluates its complete selection, creation payloads,
@@ -44,12 +83,12 @@ impl WriteTxn {
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let proposal = query.execute_governed(
+            let proposal = query.execute_governed_with_source(
                 policy,
-                |pattern, allowance| {
-                    workspace
-                        .txn
-                        .execute_graph_pattern_governed(database, cx, pattern, allowance)
+                InsertGraphSource {
+                    transaction: workspace.txn,
+                    database,
+                    cx,
                 },
                 allocate,
                 || cx.checkpoint(),
@@ -157,8 +196,10 @@ impl WriteTxn {
         fgdb_gql::insertion::GraphInsertStats,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
-        self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, false)
-            .map(|(stats, _, _)| stats)
+        self.execute_graph_insert_governed_inner(
+            database, cx, insertion, policy, allocate, false, None,
+        )
+        .map(|(stats, _, _)| stats)
     }
 
     /// Stage the same insertion while retaining the exact identities accepted
@@ -184,9 +225,12 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
-        self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, true)
+        self.execute_graph_insert_governed_inner(
+            database, cx, insertion, policy, allocate, true, None,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_graph_insert_governed_inner<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -195,6 +239,7 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
         retain_identities: bool,
+        independent: Option<&mut IndependentEdgeWrites>,
     ) -> Result<
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
@@ -216,20 +261,23 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
-            let proposal = insertion.execute_governed(
+            let proposal = insertion.execute_governed_with_source(
                 policy,
-                |pattern, allowance| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                InsertGraphSource {
+                    transaction: self,
+                    database,
+                    cx,
                 },
                 allocate,
                 || cx.checkpoint(),
             )?;
-            self.stage_graph_insert_batch(
+            self.stage_graph_insert_batch_with_independent(
                 database,
                 cx,
                 insertion.relation(),
                 proposal,
                 retain_identities,
+                independent,
             )
         })
     }
@@ -244,6 +292,29 @@ impl WriteTxn {
         relation: RelationId,
         proposal: fgdb_gql::insertion::GraphInsertBatch,
         retain_identities: bool,
+    ) -> Result<
+        WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
+        TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
+    > {
+        self.stage_graph_insert_batch_with_independent(
+            database,
+            cx,
+            relation,
+            proposal,
+            retain_identities,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_graph_insert_batch_with_independent<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        relation: RelationId,
+        proposal: fgdb_gql::insertion::GraphInsertBatch,
+        retain_identities: bool,
+        independent: Option<&mut IndependentEdgeWrites>,
     ) -> Result<
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
@@ -296,7 +367,27 @@ impl WriteTxn {
             batches.push(batch);
         }
         batches.extend(groups.into_values());
-        if let Some(first) = batches.first() {
+        if let Some(independent) = independent {
+            if !batches.is_empty() {
+                self.ensure_database(database).map_err(source)?;
+                let live = database
+                    .frontier()
+                    .map_err(WriteTxnError::from)
+                    .map_err(source)?;
+                if live != self.basis {
+                    return Err(source(WriteTxnError::SnapshotAdvanced {
+                        pinned: self.basis,
+                        live,
+                    }));
+                }
+                if batches.len() != 1 {
+                    return Err(source(WriteTxnError::UnsupportedAtomicMutation));
+                }
+                independent
+                    .stage(database, batches.remove(0))
+                    .map_err(source)?;
+            }
+        } else if let Some(first) = batches.first() {
             let relation = first.relation;
             if batches.iter().all(|batch| batch.relation == relation)
                 && self.staged.iter().all(|batch| batch.relation == relation)

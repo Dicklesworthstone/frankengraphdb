@@ -91,6 +91,9 @@ impl core::fmt::Debug for GqlParameterValue {
 }
 
 /// Checked immutable list storage; cloning arguments never clones list payloads.
+/// A list may carry a bulk UNWIND source up to the parameter transcript ceiling.
+/// Ordinary expression/predicate binding keeps its separate 64 KiB operand cap;
+/// a large transport document does not enlarge a scalar expression's allowance.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GqlListParameter {
     value: std::sync::Arc<crate::algebra::GraphValue>,
@@ -102,12 +105,16 @@ impl GqlListParameter {
         if !value.validate_bounds() {
             return Err(GqlParameterError::ListLiteral);
         }
+        let canonical_bytes = value
+            .canonical_byte_len()
+            .map_err(|_| GqlParameterError::ListLiteral)?;
+        if canonical_bytes > MAX_GQL_PARAMETER_TRANSCRIPT_BYTES {
+            return Err(GqlParameterError::ListLiteral);
+        }
         let canonical = value
             .canonical_bytes()
             .map_err(|_| GqlParameterError::ListLiteral)?;
-        if canonical.len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES {
-            return Err(GqlParameterError::ListLiteral);
-        }
+        debug_assert_eq!(canonical.len(), canonical_bytes);
         Ok(Self {
             value: std::sync::Arc::new(value),
             canonical: canonical.into(),
@@ -1274,6 +1281,105 @@ mod tests {
         let clone = args.clone().with_int64("extra", 1).unwrap();
         assert_eq!(clone.canonical_byte_len(), clone.canonical_bytes().len());
         assert!(clone.canonical_byte_len() > args.canonical_byte_len());
+    }
+
+    #[test]
+    fn bulk_lists_use_the_transcript_envelope_and_keep_shared_storage() {
+        use crate::algebra::GraphValue;
+        use fgdb_types::CanonicalScalar;
+
+        let list = GqlListParameter::new(
+            (0..5_000)
+                .map(|id| {
+                    GraphValue::map(vec![
+                        ("id".into(), GraphValue::Scalar(CanonicalScalar::Int(id))),
+                        (
+                            "value".into(),
+                            GraphValue::Scalar(CanonicalScalar::Int(id * 2)),
+                        ),
+                    ])
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert!(list.canonical_bytes().len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        assert!(list.canonical_bytes().len() < MAX_GQL_PARAMETER_TRANSCRIPT_BYTES);
+        assert_eq!(list.values().len(), 5_000);
+        let shared = list.clone();
+        assert!(core::ptr::eq(list.value(), shared.value()));
+        assert!(core::ptr::eq(
+            list.canonical_bytes(),
+            shared.canonical_bytes()
+        ));
+        let arguments = GqlParameters::new()
+            .with_list("rows", list.values().to_vec())
+            .unwrap();
+        assert_eq!(
+            arguments.canonical_byte_len(),
+            arguments.canonical_bytes().len()
+        );
+    }
+
+    #[test]
+    fn bulk_list_byte_and_structure_boundaries_refuse_atomically() {
+        use crate::algebra::GraphValue;
+        use fgdb_types::CanonicalScalar;
+
+        let document = |key_bytes| {
+            vec![
+                GraphValue::map(vec![(
+                    "x".repeat(key_bytes).into(),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                )])
+                .unwrap(),
+            ]
+        };
+        let empty = GqlListParameter::new(document(0)).unwrap();
+        let framing = GqlParameterValue::List(empty.clone())
+            .transcript_entry_bytes("rows".len())
+            .unwrap()
+            + PARAMETER_TRANSCRIPT_HEADER_BYTES;
+        let exact =
+            GqlListParameter::new(document(MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - framing)).unwrap();
+        let mut arguments = GqlParameters::new();
+        arguments
+            .insert("rows", GqlParameterValue::List(exact))
+            .unwrap();
+        assert_eq!(
+            arguments.canonical_byte_len(),
+            MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
+        );
+        assert_eq!(
+            arguments.canonical_bytes().len(),
+            MAX_GQL_PARAMETER_TRANSCRIPT_BYTES
+        );
+        let frozen = arguments.clone();
+        assert!(matches!(
+            arguments.insert("next", GqlParameterValue::Int64(1)),
+            Err(GqlParameterError::TranscriptBytesExceeded { .. })
+        ));
+        assert_eq!(arguments, frozen);
+
+        let too_large = MAX_GQL_PARAMETER_TRANSCRIPT_BYTES - empty.canonical_bytes().len() + 1;
+        assert_eq!(
+            GqlListParameter::new(document(too_large)),
+            Err(GqlParameterError::ListLiteral)
+        );
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        assert!(GqlListParameter::new(vec![null.clone(); GraphValue::MAX_LIST_NODES - 1]).is_ok());
+        assert_eq!(
+            GqlListParameter::new(vec![null.clone(); GraphValue::MAX_LIST_NODES]),
+            Err(GqlParameterError::ListLiteral)
+        );
+        let mut nested = null;
+        for _ in 0..GraphValue::MAX_LIST_DEPTH {
+            nested = GraphValue::List(vec![nested].into());
+        }
+        assert_eq!(
+            GqlListParameter::new(vec![nested]),
+            Err(GqlParameterError::ListLiteral)
+        );
     }
 
     #[test]

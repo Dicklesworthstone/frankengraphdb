@@ -119,10 +119,15 @@ fn projected_branches_read_final_state_and_hidden_payloads_never_enter_return() 
             SET r.p=r.p*2 RETURN r.p AS value,r.secret AS hidden"
         ));
         let mut matched_cost = None;
+        // The large hidden payload is half the 16 KiB stored-object ceiling
+        // (strata's MAX_STORED_OBJECT_BYTES): a row past it is refused at
+        // preparation (eb4bf6ec), so the 32,000-byte text this law used no
+        // longer reaches the upsert it is about.
+        let large = 8_192;
         for secret in [
             None,
             Some(CanonicalScalar::Int(99)),
-            Some(CanonicalScalar::ucs_basic_text(&"x".repeat(32_000)).unwrap()),
+            Some(CanonicalScalar::ucs_basic_text(&"x".repeat(large)).unwrap()),
         ] {
             let mut db = Database::open_memory(&contexts.commit(), keys())
                 .await

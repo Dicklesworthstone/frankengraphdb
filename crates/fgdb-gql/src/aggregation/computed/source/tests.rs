@@ -115,7 +115,12 @@ fn original_occurrences_and_all_aggregate_functions_survive_the_source_boundary(
         // Same original receiver, independently entered with admitted source.
         // This comparison covers exact averages, extrema and distinct states.
         let original = query
-            .finish_materialized_governed::<u8, usize>(input(&values), policy(), || Ok(()))
+            .finish_materialized_governed::<u8, usize>(
+                input(&values),
+                &mut crate::set_ops::no_element_reads,
+                policy(),
+                || Ok(()),
+            )
             .unwrap();
         assert_eq!(result.value, original.value);
     }

@@ -612,3 +612,913 @@ fn reusable_templates_bind_before_execution_and_compose_across_invocations() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod independent_edges {
+    use super::*;
+    use fgdb::{WriteTxn, WriteTxnError};
+    use fgdb_delta_types::DeltaRow;
+    use fgdb_gql::{
+        GqlQueryError, GraphMutationProgramDimension, GraphWriteProgramReceipt,
+        GraphWriteStepError, GraphWriteStepReceipt, GraphWriteStepStats,
+    };
+    use fgdb_types::QueryCx;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    type Outcome = Result<
+        GraphWriteProgramReceipt,
+        GraphWriteProgramError<WriteTxnError, &'static str, Box<asupersync::error::Error>>,
+    >;
+
+    /// The live predecessor: the ordinary public per-step insertion method
+    /// still calls WriteTxn::write and prepares its complete staged prefix.
+    /// The public savepoint gives this test driver the same error rollback as
+    /// the program guard, without a production flag or another evaluator.
+    fn incumbent(
+        txn: &mut WriteTxn,
+        db: &mut Database<MemVfs>,
+        cx: &QueryCx,
+        query: &PreparedGraphWriteProgram,
+        allowance: GraphWriteProgramPolicy,
+        mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, &'static str>,
+    ) -> Outcome {
+        txn.savepoint(db, "independent-edge-oracle").unwrap();
+        let result = cx.with_restriction(|| {
+            let mut receipts = Vec::with_capacity(query.statements().len());
+            let stats = query.execute_governed(
+                allowance,
+                |statement, input, remaining| {
+                    let GraphWriteStatement::Insert(input) = input else {
+                        panic!("the retained predecessor fixture contains only insertions");
+                    };
+                    txn.execute_graph_insert_returning_governed(
+                        db,
+                        cx,
+                        input,
+                        remaining.insertion_policy(),
+                        |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                    )
+                    .map(|(stats, vertices, edges)| {
+                        receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                        GraphWriteStepStats::Insert(stats)
+                    })
+                    .map_err(GraphWriteStepError::Insert)
+                },
+                || cx.checkpoint(),
+            )?;
+            Ok(GraphWriteProgramReceipt::new(stats, receipts))
+        });
+        if result.is_err() {
+            txn.rollback_to_savepoint(db, "independent-edge-oracle")
+                .unwrap();
+        }
+        txn.release_savepoint(db, "independent-edge-oracle")
+            .unwrap();
+        result
+    }
+
+    fn edge_identity(request: GraphWriteIdentityRequest) -> Result<ElementId, &'static str> {
+        match request.request {
+            GraphInsertRequest::Edge { row: 0, edge: 0 } if request.statement == 0 => {
+                Ok(ElementId::Edge(EId(u128::MAX)))
+            }
+            GraphInsertRequest::Edge { .. } => identity(request),
+            GraphInsertRequest::Vertex { .. } => panic!("edge-only insertion allocated a vertex"),
+        }
+    }
+
+    fn loops(count: usize) -> PreparedGraphWriteProgram {
+        program(&vec![
+            "MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:R {p:n.p}]->(n)";
+            count
+        ])
+    }
+
+    fn compare_receipts(new: &GraphWriteProgramReceipt, old: &GraphWriteProgramReceipt) {
+        assert_eq!(new.steps(), old.steps());
+        let mut comparable = new.stats();
+        // The new physical path no longer walks irrelevant staged edge rows
+        // for a vertex-only selection. Both report their actual work.
+        comparable.evaluator = old.stats().evaluator;
+        assert_eq!(comparable, old.stats());
+    }
+
+    #[test]
+    fn independent_chunks_match_the_live_prefix_oracle_and_global_birth_order() {
+        let ((), report) = run_async_under_lab(0x6d17_0101, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            seed(&mut db, &c.commit()).await;
+            let mut extra = WriteBatch::new(R);
+            extra.create_vertex(VId(3), vec![BASE], vec![(P, CanonicalScalar::Int(20))]);
+            extra.create_vertex(
+                VId(u128::MAX),
+                vec![BASE],
+                vec![(P, CanonicalScalar::Int(30))],
+            );
+            db.write(&c.commit(), extra).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let saved = db.read_session().unwrap();
+            let query = program(&[
+                "MATCH (a:Base),(b:Base) WHERE a.p=10 AND b.p=20 CREATE (a)-[:R {p:b.p}]->(b)",
+                "MATCH (n:Base) WHERE n.p=99 CREATE (n)-[:R]->(n)",
+                "MATCH (n:Base) WHERE n.p=30 CREATE (n)-[:R {p:n.p}]->(n)",
+                "MATCH (a:Base),(b:Base) WHERE a.p=10 AND b.p=20 CREATE (a)-[:R {p:b.p}]->(b)",
+            ]);
+            for step in query.statements() {
+                let GraphWriteStatement::Insert(input) = step else {
+                    unreachable!();
+                };
+                assert_eq!(input.independent_edge_append_relation(), Some(R));
+            }
+            let frozen = query.canonical_bytes();
+            let mut warm = db.begin(&c.txn()).unwrap();
+            incumbent(
+                &mut warm,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                edge_identity,
+            )
+            .unwrap();
+            warm.abort();
+            let mut old_txn = db.begin(&c.txn()).unwrap();
+            let old = incumbent(
+                &mut old_txn,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                edge_identity,
+            )
+            .unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.savepoint(&db, "before").unwrap();
+            let requests = RefCell::new(Vec::new());
+            let new = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    |request| {
+                        requests.borrow_mut().push(request);
+                        edge_identity(request)
+                    },
+                )
+                .unwrap();
+            compare_receipts(&new, &old);
+            assert_eq!(new.stats().created_edges, 5);
+            assert!(new.stats().evaluator.work_units < old.stats().evaluator.work_units);
+            assert_eq!(
+                txn.staged_effect_digest().unwrap(),
+                old_txn.staged_effect_digest().unwrap()
+            );
+            let expected = old_txn.edges(&db).unwrap();
+            assert_eq!(txn.edges(&db).unwrap(), expected);
+            assert_eq!(db.edges().unwrap().len(), 2);
+            assert_eq!(query.canonical_bytes(), frozen);
+            old_txn.abort();
+            txn.rollback_to_savepoint(&db, "before").unwrap();
+            assert_eq!(txn.edges(&db).unwrap().len(), 2);
+            let retry = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    edge_identity,
+                )
+                .unwrap();
+            compare_receipts(&retry, &new);
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            let births: BTreeMap<_, _> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .flat_map(|coordinate| &coordinate.rows)
+                .map(|row| match row {
+                    DeltaRow::CreateEdge {
+                        eid, birth_ordinal, ..
+                    } => (*eid, *birth_ordinal),
+                    _ => panic!("the edge program published another effect kind"),
+                })
+                .collect();
+            let expected_births: BTreeMap<_, _> = requests
+                .borrow()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, &request)| {
+                    let ElementId::Edge(eid) = edge_identity(request).unwrap() else {
+                        unreachable!();
+                    };
+                    (eid, ordinal as u64 + 1)
+                })
+                .collect();
+            assert_eq!(
+                births, expected_births,
+                "empty steps do not renumber births"
+            );
+            assert!(saved.edge(EId(u128::MAX)).unwrap().is_none());
+            let committed = db.edges().unwrap();
+            db.compact(&c.commit()).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.edges().unwrap(), committed);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn dependent_inputs_and_existing_work_keep_the_ordinary_overlay() {
+        let ((), report) = run_async_under_lab(0x6d17_0102, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            for text in [
+                "MATCH (a)-[:R]->(b) CREATE (a)-[:R]->(b)",
+                "MATCH (n:Base) CREATE (n)-[:R]->(new:New)",
+                "UNWIND [1] AS x MATCH (n:Base) CREATE (n)-[:R]->(n)",
+            ] {
+                let input = PreparedGraphInsertText::prepare(text, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+                assert_eq!(input.independent_edge_append_relation(), None, "{text}");
+            }
+            let dependent = program(&[
+                "MATCH (a)-[:R]->(b) CREATE (a)-[:R]->(b)",
+                "MATCH (a)-[:R]->(b) CREATE (a)-[:R]->(b)",
+            ]);
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let actual = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &dependent,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+            assert_eq!(
+                actual.created_edges,
+                2 + 4,
+                "the second step sees the first two edges"
+            );
+            assert_eq!(txn.edges(&db).unwrap().len(), 8);
+            txn.abort();
+
+            let query = loops(3);
+            let mut old = db.begin(&c.txn()).unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let mut changed = WriteBatch::new(R);
+            changed.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(9)));
+            old.write(&mut db, changed.clone()).unwrap();
+            txn.write(&mut db, changed).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            let expected =
+                incumbent(&mut old, &mut db, &c.query(), &query, policy(), identity).unwrap();
+            let actual = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+            assert_eq!(actual.stats(), expected.stats());
+            assert_eq!(
+                actual.stats().created_edges,
+                0,
+                "MATCH sees the staged property"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+            old.abort();
+            txn.abort();
+
+            // Each step is individually independent, but their coordinates
+            // differ. The ordinary atomic path must retain both relations.
+            let other = RelationId(2);
+            let first = loops(2).statements()[0].clone();
+            let second = PreparedGraphInsertText::prepare(
+                "MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:S {p:n.p}]->(n)",
+                other,
+                |kind: GraphSymbolKind, name: &str| {
+                    if kind == GraphSymbolKind::Relation && name == "S" {
+                        Some(GraphSymbol::Relation(other))
+                    } else {
+                        symbols(kind, name)
+                    }
+                },
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            assert_eq!(second.independent_edge_append_relation(), Some(other));
+            let query = PreparedGraphWriteProgram::prepare(vec![first, second.into()]).unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let actual = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+            assert_eq!(actual.created_edges, 2);
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let relations: Vec<_> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .map(|coordinate| coordinate.relation)
+                .collect();
+            assert_eq!(relations, vec![R, other]);
+            for (eid, relation) in [(EId(100_000), R), (EId(110_000), other)] {
+                let edge = db.edge(eid).unwrap().unwrap();
+                assert_eq!(edge.entry.relation, relation);
+                assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(1)));
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(10))]);
+            }
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn late_chunk_refusals_match_the_incumbent_before_any_later_allocation() {
+        let ((), report) = run_async_under_lab(0x6d17_0103, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let mut retired = WriteBatch::new(R);
+            retired.add_edge(EId(13), VId(1), VId(2), vec![]);
+            db.write(&c.commit(), retired).await.unwrap();
+            let mut retired = WriteBatch::new(R);
+            retired.delete_edge(EId(13));
+            db.write(&c.commit(), retired).await.unwrap();
+            let value = PreparedGraphInsertText::prepare(
+                "MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:R {p:$value}]->(n)",
+                R,
+                symbols,
+            )
+            .unwrap();
+            for mode in 0..6 {
+                let mut statements = loops(3).statements().to_vec();
+                if mode == 3 {
+                    statements[1] = value
+                        .bind_parameters(
+                            &GqlParameters::new()
+                                .with_scalar(
+                                    "value",
+                                    CanonicalScalar::bytes(vec![0x5a; 20_000]).unwrap(),
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into();
+                } else if mode == 4 {
+                    statements[1] =
+                        program(&["MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:R {p:1/0}]->(n)"])
+                            .statements()[0]
+                            .clone();
+                }
+                let query = PreparedGraphWriteProgram::prepare(statements).unwrap();
+                let allocate = |request: GraphWriteIdentityRequest| {
+                    if request.statement != 1 {
+                        return edge_identity(request);
+                    }
+                    match mode {
+                        0 => Ok(ElementId::Edge(EId(u128::MAX))),
+                        1 => Ok(ElementId::Edge(EId(11))),
+                        2 => Ok(ElementId::Edge(EId(13))),
+                        5 => Err("second allocator refused"),
+                        _ => edge_identity(request),
+                    }
+                };
+                let mut expected_requests = Vec::new();
+                let mut old = db.begin(&c.txn()).unwrap();
+                let expected =
+                    incumbent(&mut old, &mut db, &c.query(), &query, policy(), |request| {
+                        expected_requests.push(request);
+                        allocate(request)
+                    })
+                    .unwrap_err();
+                let mut requests = Vec::new();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let actual = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        policy(),
+                        |request| {
+                            requests.push(request);
+                            allocate(request)
+                        },
+                    )
+                    .unwrap_err();
+                assert_eq!(actual.to_string(), expected.to_string(), "mode={mode}");
+                assert!(matches!(
+                    &actual,
+                    GraphWriteProgramError::Insert { statement: 1, .. }
+                ));
+                assert_eq!(requests, expected_requests, "mode={mode}");
+                assert!(requests.iter().all(|request| request.statement < 2));
+                assert_eq!(requests.len(), if mode == 4 { 1 } else { 2 });
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                let retry = txn
+                    .execute_graph_write_program_governed(
+                        &mut db,
+                        &c.query(),
+                        &loops(3),
+                        policy(),
+                        edge_identity,
+                    )
+                    .unwrap();
+                assert_eq!(retry.created_edges, 3);
+                old.abort();
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn exact_program_allowances_and_every_checkpoint_preserve_atomic_retry() {
+        let ((), report) = run_async_under_lab(0x6d17_0104, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let query = loops(3);
+            let mut warm = db.begin(&c.txn()).unwrap();
+            incumbent(
+                &mut warm,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                edge_identity,
+            )
+            .unwrap();
+            warm.abort();
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let mut measured = db.begin(&c.txn()).unwrap();
+            let full = measured
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                    &query,
+                    policy(),
+                    edge_identity,
+                )
+                .unwrap();
+            let checkpoints = probe.calls();
+            let stats = full.stats();
+            let exact = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(
+                    stats.selection.snapshot_records,
+                    stats.selection.result_rows,
+                    stats.evaluator.work_units,
+                    stats.evaluator.scratch_entries,
+                ),
+                0,
+                0,
+                stats.created_edges,
+            );
+            measured.abort();
+            for dimension in 0..=5 {
+                let mut allowance = exact;
+                match dimension {
+                    0 | 1 => {
+                        allowance.mutations.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            stats.selection.snapshot_records - u64::from(dimension == 0),
+                            stats.selection.result_rows - u64::from(dimension == 1),
+                        );
+                    }
+                    2 => allowance.mutations.query.evaluator.max_work_units -= 1,
+                    3 => allowance.mutations.query.evaluator.max_scratch_entries -= 1,
+                    4 => allowance.max_created_edges -= 1,
+                    _ => {}
+                }
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let result = txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    allowance,
+                    edge_identity,
+                );
+                if dimension == 5 {
+                    assert_eq!(result.unwrap().stats(), stats);
+                } else {
+                    let error = result.unwrap_err();
+                    if dimension == 4 {
+                        assert!(matches!(
+                            error,
+                            GraphWriteProgramError::CreationBudget { .. }
+                        ));
+                    } else {
+                        let GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
+                            dimension: actual,
+                            ..
+                        }) = error
+                        else {
+                            panic!("expected cumulative dimension {dimension}: {error:?}");
+                        };
+                        assert_eq!(
+                            actual,
+                            [
+                                GraphMutationProgramDimension::SnapshotRecords,
+                                GraphMutationProgramDimension::SelectedRows,
+                                GraphMutationProgramDimension::WorkUnits,
+                                GraphMutationProgramDimension::ScratchEntries,
+                            ][dimension]
+                        );
+                    }
+                    assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                }
+                txn.abort();
+            }
+            assert!(checkpoints > 3);
+            for stop in 1..=checkpoints {
+                let mut txn = db.begin(&c.txn()).unwrap();
+                txn.savepoint(&db, "before").unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let result = txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                    &query,
+                    exact,
+                    edge_identity,
+                );
+                assert!(
+                    matches!(
+                        result,
+                        Err(GraphWriteProgramError::Program(
+                            GraphMutationProgramError::Interrupted { .. }
+                        )) | Err(GraphWriteProgramError::Insert {
+                            source: GqlQueryError::Interrupted(_),
+                            ..
+                        })
+                    ),
+                    "checkpoint {stop}/{checkpoints}: {result:?}"
+                );
+                assert_eq!(probe.calls(), stop);
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                let retry = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        exact,
+                        edge_identity,
+                    )
+                    .unwrap();
+                assert_eq!(retry.stats(), stats);
+                assert_eq!(retry.steps(), full.steps());
+                txn.rollback_to_savepoint(&db, "before").unwrap();
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// Paired complete bound-program preparation and normal MemVfs commit.
+    /// Binding, fixture creation, cache warmup and oracle inspection are outside
+    /// both timers. Every trial starts at the same seeded basis, uses the same
+    /// caller allocator/policy and publishes through the ordinary commit path.
+    /// This reports observations; wall-clock ratios are never correctness gates.
+    #[test]
+    #[ignore = "paired 250/1000/4000-record preparation and commit measurement"]
+    fn independent_edge_program_paired_measurement() {
+        use fgdb::EdgeRecord;
+        use fgdb_gql::PreparedGraphWriteScript;
+        use std::time::{Duration, Instant};
+
+        struct Measurement {
+            preparation: Duration,
+            commit: Duration,
+            receipt: GraphWriteProgramReceipt,
+            digest: fgdb_crypto::Digest,
+            edges: Vec<EdgeRecord>,
+        }
+
+        async fn measure(
+            c: &PurposeContexts,
+            query: &PreparedGraphWriteProgram,
+            allowance: GraphWriteProgramPolicy,
+            independent: bool,
+        ) -> Measurement {
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let mut warm = db.begin(&c.txn()).unwrap();
+            incumbent(
+                &mut warm,
+                &mut db,
+                &c.query(),
+                &loops(2),
+                policy(),
+                edge_identity,
+            )
+            .unwrap();
+            warm.abort();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let started = Instant::now();
+            let receipt = if independent {
+                txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    edge_identity,
+                )
+            } else {
+                incumbent(
+                    &mut txn,
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    edge_identity,
+                )
+            }
+            .unwrap();
+            let preparation = started.elapsed();
+            // Inspect the exact prepared authority without charging this
+            // benchmark-only encoding to either implementation's elapsed time.
+            let digest = txn.staged_effect_digest().unwrap();
+            let started = Instant::now();
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let commit = started.elapsed();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), query.statements().len() + 2);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+            Measurement {
+                preparation,
+                commit,
+                receipt,
+                digest,
+                edges,
+            }
+        }
+
+        fn equivalent(old: &Measurement, new: &Measurement) {
+            compare_receipts(&new.receipt, &old.receipt);
+            assert_eq!(new.digest, old.digest);
+            assert_eq!(new.edges, old.edges);
+            assert!(
+                new.receipt.stats().evaluator.work_units < old.receipt.stats().evaluator.work_units,
+                "the actual ordinary overlay must still walk the staged edge prefix"
+            );
+        }
+
+        fn summary(mut samples: Vec<Duration>) -> [f64; 3] {
+            samples.sort_unstable();
+            [
+                samples[0],
+                samples[samples.len() / 2],
+                samples[samples.len() - 1],
+            ]
+            .map(|time| time.as_secs_f64() * 1000.0)
+        }
+
+        let ((), report) = run_async_under_lab(0x6d17_01ff, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let script = PreparedGraphWriteScript::prepare(
+                "MATCH (a:Base),(b:Base) WHERE a.p=$source AND b.p=$target CREATE (a)-[:R {p:$value}]->(b)",
+                R,
+                symbols,
+            )
+            .unwrap();
+            eprintln!(
+                "edge_program_measurement storage=MemVfs allocator=deterministic_caller scope=bound_program_preparation_and_commit debug_assertions={} warmup_pairs=1 measured_pairs=5",
+                cfg!(debug_assertions)
+            );
+            for records in [250, 1000, 4000] {
+                let args: Vec<_> = (0..records)
+                    .map(|record| {
+                        let (source, target) = if record % 2 == 0 { (10, 20) } else { (20, 10) };
+                        GqlParameters::new()
+                            .with_int64("source", source)
+                            .unwrap()
+                            .with_int64("target", target)
+                            .unwrap()
+                            .with_int64("value", record as i64)
+                            .unwrap()
+                    })
+                    .collect();
+                let batch = script
+                    .bind_parameter_sets_with_limit(&args, records)
+                    .unwrap();
+                let query = batch.program();
+                assert_eq!(query.statements().len(), records);
+                assert!(query.statements().iter().all(|step| matches!(step,
+                    GraphWriteStatement::Insert(input)
+                        if input.independent_edge_append_relation() == Some(R)
+                )));
+                let allowance = GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                    0,
+                    0,
+                    records as u64,
+                );
+                // The expected graph is enumerated independently of either
+                // execution: one directed edge per input, plus the seed pair.
+                let mut expected = BTreeMap::from([
+                    (EId(11), (VId(1), R, VId(2), Vec::new())),
+                    (EId(12), (VId(1), R, VId(2), Vec::new())),
+                ]);
+                for record in 0..records {
+                    let eid = if record == 0 {
+                        EId(u128::MAX)
+                    } else {
+                        EId(100_000 + record as u128 * 10_000)
+                    };
+                    let (source, target) = if record % 2 == 0 {
+                        (VId(1), VId(2))
+                    } else {
+                        (VId(2), VId(1))
+                    };
+                    expected.insert(
+                        eid,
+                        (
+                            source,
+                            R,
+                            target,
+                            vec![(P, CanonicalScalar::Int(record as i64))],
+                        ),
+                    );
+                }
+                let verify_graph = |measured: &Measurement| {
+                    let actual: BTreeMap<_, _> = measured
+                        .edges
+                        .iter()
+                        .map(|edge| {
+                            (
+                                edge.entry.eid,
+                                (
+                                    edge.entry.src,
+                                    edge.entry.relation,
+                                    edge.entry.dst,
+                                    edge.props.clone(),
+                                ),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(actual, expected);
+                    assert_eq!(measured.receipt.stats().created_edges, records as u64);
+                    assert_eq!(measured.receipt.stats().created_vertices, 0);
+                };
+                let old = measure(&c, query, allowance, false).await;
+                let new = measure(&c, query, allowance, true).await;
+                equivalent(&old, &new);
+                verify_graph(&new);
+                let mut old_samples = Vec::new();
+                let mut new_samples = Vec::new();
+                for pair in 0..5 {
+                    let (old, new) = if pair % 2 == 0 {
+                        (
+                            measure(&c, query, allowance, false).await,
+                            measure(&c, query, allowance, true).await,
+                        )
+                    } else {
+                        let new = measure(&c, query, allowance, true).await;
+                        let old = measure(&c, query, allowance, false).await;
+                        (old, new)
+                    };
+                    equivalent(&old, &new);
+                    verify_graph(&new);
+                    eprintln!(
+                        "edge_program_pair records={records} pair={} first={} ordinary_prepare_ms={:.3} independent_prepare_ms={:.3} ordinary_commit_ms={:.3} independent_commit_ms={:.3} ordinary_work={} independent_work={}",
+                        pair + 1,
+                        if pair % 2 == 0 {
+                            "ordinary"
+                        } else {
+                            "independent"
+                        },
+                        old.preparation.as_secs_f64() * 1000.0,
+                        new.preparation.as_secs_f64() * 1000.0,
+                        old.commit.as_secs_f64() * 1000.0,
+                        new.commit.as_secs_f64() * 1000.0,
+                        old.receipt.stats().evaluator.work_units,
+                        new.receipt.stats().evaluator.work_units,
+                    );
+                    old_samples.push(old);
+                    new_samples.push(new);
+                }
+                eprintln!(
+                    "edge_program_summary records={records} order=min_median_max_ms ordinary_prepare={:?} independent_prepare={:?} ordinary_commit={:?} independent_commit={:?} ordinary_prepare_plus_commit={:?} independent_prepare_plus_commit={:?}",
+                    summary(
+                        old_samples
+                            .iter()
+                            .map(|sample| sample.preparation)
+                            .collect()
+                    ),
+                    summary(
+                        new_samples
+                            .iter()
+                            .map(|sample| sample.preparation)
+                            .collect()
+                    ),
+                    summary(old_samples.iter().map(|sample| sample.commit).collect()),
+                    summary(new_samples.iter().map(|sample| sample.commit).collect()),
+                    summary(
+                        old_samples
+                            .iter()
+                            .map(|sample| sample.preparation + sample.commit)
+                            .collect()
+                    ),
+                    summary(
+                        new_samples
+                            .iter()
+                            .map(|sample| sample.preparation + sample.commit)
+                            .collect()
+                    ),
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn failed_private_chunks_keep_unobserved_edge_identity_dependencies() {
+        let ((), report) = run_async_under_lab(0x6d17_0105, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            for mode in 0..3 {
+                let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+                seed(&mut db, &c.commit()).await;
+                let mut extra = WriteBatch::new(R);
+                extra.create_vertex(VId(3), vec![], vec![]);
+                extra.create_vertex(VId(4), vec![], vec![]);
+                extra.add_edge(EId(55), VId(3), VId(4), vec![]);
+                db.write(&c.commit(), extra).await.unwrap();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    txn.execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &loops(3),
+                        policy(),
+                        |request| {
+                            if request.statement == 1 {
+                                return match mode {
+                                    0 => Err("refuse after one private chunk"),
+                                    1 => panic!("unwind after one private chunk"),
+                                    _ => Ok(ElementId::Edge(EId(55))),
+                                };
+                            }
+                            edge_identity(request)
+                        },
+                    )
+                }));
+                if mode == 1 {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_err());
+                }
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                // No transaction graph read may repair the discarded witness.
+                // Both winner endpoints are outside the Base selection. Only
+                // the successful/refused preparation's edge ID overlaps.
+                let mut winner = WriteBatch::new(R);
+                if mode == 2 {
+                    winner.set_edge_property(EId(55), P, Some(CanonicalScalar::Int(1)));
+                } else {
+                    winner.add_edge(EId(u128::MAX), VId(3), VId(4), vec![]);
+                }
+                db.write(&c.commit(), winner).await.unwrap();
+                assert!(matches!(
+                    txn.finish(&mut db, &c.commit()).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+                assert_eq!(c.txn().outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

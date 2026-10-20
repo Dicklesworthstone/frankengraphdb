@@ -302,7 +302,15 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
 ) -> Result<impl FnMut() -> AggregateStep + use<'q, C>, QueryError> {
     // Includes exact historical-cut admission even when LIMIT/HAVING returns
     // no rows. The source owns the existing immutable generation, not a copy.
-    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view
+        .vertex_scan_source(cx, at)
+        .map_err(QueryError::Read)?
+        .with_root_equality_predicates(plan.leading_root_predicates(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        })
+        .with_root_prefix(plan.leading_root_prefix(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        });
     let source = ScopedSource {
         inner,
         execution: execution.clone(),

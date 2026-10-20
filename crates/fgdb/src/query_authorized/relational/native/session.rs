@@ -366,6 +366,32 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             )
         })
     }
+
+    fn attach_prepared(
+        &mut self,
+        cx: &QueryCx,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+    ) -> Result<AuthorizedPreparedRead, QueryError> {
+        let owner = Arc::clone(&self.owner);
+        self.run(cx, |_, _, _, _, _, _| {
+            if crate::query::explain::without_terminator(selector.statement()) != native.statement()
+            {
+                return Err(QueryError::Authorization(
+                    AuthorizationError::WrongAuthority,
+                ));
+            }
+            refuse_element_identity(selector.statement())?;
+            Ok((
+                AuthorizedPreparedRead {
+                    owner,
+                    selector,
+                    native,
+                },
+                0,
+            ))
+        })
+    }
 }
 
 // Single statements and batches use exactly the same selector, classification,
@@ -502,24 +528,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
         let mut session =
             self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
-        let owner = Arc::clone(&session.owner);
-        let prepared = session.run(cx, |_, _, _, _, _, _| {
-            if crate::query::explain::without_terminator(selector.statement()) != native.statement()
-            {
-                return Err(QueryError::Authorization(
-                    AuthorizationError::WrongAuthority,
-                ));
-            }
-            refuse_element_identity(selector.statement())?;
-            Ok((
-                AuthorizedPreparedRead {
-                    owner,
-                    selector,
-                    native,
-                },
-                0,
-            ))
-        })?;
+        let prepared = session.attach_prepared(cx, selector, native)?;
         Ok((session, prepared))
     }
 
@@ -543,46 +552,125 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         resolver: R,
         policy: GqlQueryPolicy,
-        mut clock: C,
+        clock: C,
     ) -> Result<AuthorizedReadSession<'a, R, C>, QueryError> {
-        if authority.namespace() != self.keys.namespace {
-            return Err(QueryError::Authorization(
-                AuthorizationError::WrongAuthority,
-            ));
-        }
-        let now = clock();
-        let capability = authority
-            .verify_at(token, branch, now)
-            .map_err(QueryError::Authorization)?;
-        let mut last_now_ms = now;
-        let view = {
-            let permit = capability
-                .begin_read_at(branch, now)
-                .map_err(QueryError::Authorization)?;
-            let mut tracked_clock = || {
-                let now = clock();
-                last_now_ms = last_now_ms.max(now);
-                now
-            };
-            let mut execution = Execution::new(cx, permit, &mut tracked_clock);
-            execution.checkpoint()?;
-            let view = self.read_session().map_err(QueryError::Read)?;
-            execution.deliver(0)?;
-            view
-        };
-        Ok(AuthorizedReadSession {
-            state: Some(State {
-                view: Some(view),
-                capability,
-                branch: branch.to_owned(),
-                resolver,
-                policy,
-                clock,
-                last_now_ms,
-            }),
-            owner: Arc::new(()),
-        })
+        admit_read_session(
+            self.keys.namespace,
+            cx,
+            authority,
+            token,
+            branch,
+            resolver,
+            policy,
+            clock,
+            || self.read_session(),
+        )
     }
+}
+
+impl EmbeddedReadView {
+    /// Narrow this exact authenticated generation into an owned read session.
+    /// The namespace travels with the view; supplying a different issuer cannot
+    /// relabel its data. All scope, clock, retirement and per-execution rules are
+    /// identical to [`Database::authorized_read_session`]. A live writer is not
+    /// borrowed or consulted, so a host must preserve its own recovery fence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+    ) -> Result<AuthorizedReadSession<'a, R, C>, QueryError> {
+        admit_read_session(
+            self.namespace,
+            cx,
+            authority,
+            token,
+            branch,
+            resolver,
+            policy,
+            clock,
+            || Ok(self.clone()),
+        )
+    }
+
+    /// Attach host-owned immutable templates to this exact read generation.
+    /// The catalog/source contract and live authority checks are those of
+    /// [`Database::authorized_prepared_read_session`]; the host retains its
+    /// connection and recovery-generation fences.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+    ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
+        let mut session =
+            self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
+        let prepared = session.attach_prepared(cx, selector, native)?;
+        Ok((session, prepared))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
+    namespace: fgdb_types::DatabaseSecurityNamespaceId,
+    cx: &QueryCx,
+    authority: &'a Authority,
+    token: &CapabilityToken,
+    branch: &str,
+    resolver: R,
+    policy: GqlQueryPolicy,
+    mut clock: C,
+    pin: impl FnOnce() -> Result<EmbeddedReadView, crate::ReadError>,
+) -> Result<AuthorizedReadSession<'a, R, C>, QueryError> {
+    if authority.namespace() != namespace {
+        return Err(QueryError::Authorization(
+            AuthorizationError::WrongAuthority,
+        ));
+    }
+    let now = clock();
+    let capability = authority
+        .verify_at(token, branch, now)
+        .map_err(QueryError::Authorization)?;
+    let mut last_now_ms = now;
+    let view = {
+        let permit = capability
+            .begin_read_at(branch, now)
+            .map_err(QueryError::Authorization)?;
+        let mut tracked_clock = || {
+            let now = clock();
+            last_now_ms = last_now_ms.max(now);
+            now
+        };
+        let mut execution = Execution::new(cx, permit, &mut tracked_clock);
+        execution.checkpoint()?;
+        let view = pin().map_err(QueryError::Read)?;
+        execution.deliver(0)?;
+        view
+    };
+    Ok(AuthorizedReadSession {
+        state: Some(State {
+            view: Some(view),
+            capability,
+            branch: branch.to_owned(),
+            resolver,
+            policy,
+            clock,
+            last_now_ms,
+        }),
+        owner: Arc::new(()),
+    })
 }
 
 #[cfg(test)]

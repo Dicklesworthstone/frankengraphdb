@@ -10,6 +10,7 @@ enum Kind {
     Null,
     Integer,
     Float,
+    Decimal,
     Boolean,
     Text,
     Dynamic,
@@ -41,6 +42,20 @@ impl Kind {
         } else {
             self.merge(other)
         }
+    }
+    // CASE/COALESCE may retain different numeric kinds without converting
+    // either result. Keep a numeric representative while checking all arms;
+    // returning Dynamic too early would accidentally admit a later Boolean.
+    // This does not relax comparison admission or emit an arithmetic cast.
+    fn merge_numeric_result(self, other: Self) -> Option<Self> {
+        self.merge_comparison(other).or_else(|| {
+            matches!(
+                (self, other),
+                (Self::Decimal, Self::Integer | Self::Float)
+                    | (Self::Integer | Self::Float, Self::Decimal)
+            )
+            .then_some(Self::Decimal)
+        })
     }
 }
 struct Node {
@@ -135,7 +150,7 @@ fn prepare_root(
             if !integer_root && matches!(op, Op::Unary(_) | Op::Binary(_)) {
                 if !matches!(
                     nodes[child].kind,
-                    Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
+                    Kind::Null | Kind::Integer | Kind::Float | Kind::Decimal | Kind::Dynamic
                 ) {
                     return Err(wrong());
                 }
@@ -177,10 +192,9 @@ fn prepare_root(
             }
         }
         // Keep checking exact domains even if another member is dynamic/null.
-        // Outside an integer root, result branches mixing Integer and Float
-        // (CASE WHEN c THEN 1 ELSE 1.0 END, fgdb-0g2ou) merge to Dynamic, as a
-        // property load does: each row keeps its own numeric type, and a
-        // non-numeric member still refuses. Integer roots stay strict.
+        // Outside an integer root, result branches mixing numeric kinds merge
+        // to Dynamic: each row keeps its kind, with no implicit decimal cast.
+        // Non-numeric members still refuse. Integer roots stay strict.
         let merge_positions = |positions: &[usize],
                                numeric_comparison: bool|
          -> Result<Kind, GraphIntegerBuildError> {
@@ -196,7 +210,7 @@ fn prepare_root(
                     known = if numeric_comparison {
                         known.merge_comparison(kind)
                     } else if merged.is_none() && !integer_root {
-                        let numeric = known.merge_comparison(kind);
+                        let numeric = known.merge_numeric_result(kind);
                         mixed |= numeric.is_some();
                         numeric
                     } else {
@@ -217,6 +231,7 @@ fn prepare_root(
                 CanonicalScalar::Null => Kind::Null,
                 CanonicalScalar::Int(_) => Kind::Integer,
                 CanonicalScalar::Float(_) => Kind::Float,
+                CanonicalScalar::Decimal(_) => Kind::Decimal,
                 CanonicalScalar::Bool(_) => Kind::Boolean,
                 CanonicalScalar::Text(_) => Kind::Text,
                 // A temporal parameter is resolved per row like a property
@@ -239,9 +254,22 @@ fn prepare_root(
                     child_kind(0)
                 } else if children
                     .iter()
+                    .any(|&child| nodes[child].kind == Kind::Decimal)
+                {
+                    Kind::Decimal
+                } else if children
+                    .iter()
                     .any(|&child| nodes[child].kind == Kind::Float)
                 {
                     Kind::Float
+                } else if children
+                    .iter()
+                    .any(|&child| nodes[child].kind == Kind::Dynamic)
+                {
+                    // Property arithmetic may produce Decimal or temporal
+                    // values as well as Int/Float. Do not narrow a later
+                    // comparison or conditional based on unobserved data.
+                    Kind::Dynamic
                 } else {
                     Kind::Integer
                 }
@@ -287,6 +315,7 @@ fn prepare_root(
         // Retain dynamic numeric possibilities separately from the known-kind
         // admission above. An integer fallback cannot narrow a dynamic property
         // load, but a Boolean/text fallback still refuses an arithmetic use.
+        // This flag also selects decimal and temporal scalar dispatch.
         let may_float = match op {
             Op::ScalarColumn(_) | Op::Local(_) => true,
             // A temporal literal or parameter takes the dynamic arithmetic
@@ -294,6 +323,7 @@ fn prepare_root(
             Op::Scalar(value) => matches!(
                 value.value(),
                 CanonicalScalar::Float(_)
+                    | CanonicalScalar::Decimal(_)
                     | CanonicalScalar::Date(_)
                     | CanonicalScalar::LocalTime(_)
                     | CanonicalScalar::Time(_)

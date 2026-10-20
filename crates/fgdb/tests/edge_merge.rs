@@ -95,7 +95,7 @@ fn one_existing_relationship_matches_without_allocation_or_write() {
             .unwrap();
         assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(10)));
         assert_eq!(stats.created_edges, 0);
-        // The native host inspects every overlay edge (10 and 13); only edge
+        // The pair probe inspects both parallel edges (10 and 13); only edge
         // 10 satisfies the map.
         assert_eq!(stats.overlay_edges, 2);
         assert_eq!(allocations.get(), 0);
@@ -328,10 +328,117 @@ fn wrong_identity_collision_and_concurrent_matching_insert_never_publish_duplica
 
         assert!(
             first.commit(&mut db, &commit).await.is_err(),
-            "whole-edge scan must reject a concurrent matching relationship insert"
+            "the pair's incidence gap must reject a concurrent matching relationship insert"
         );
         assert!(db.edge(EId(100)).unwrap().is_none());
         assert!(db.edge(EId(200)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn indexed_pair_probe_preserves_parallel_properties_orientation_and_staged_rollback() {
+    let ((), report) = run_async_under_lab(0xed9e_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=600_u128 {
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+            if id > 1 {
+                seed.add_edge(EId(id), VId(id - 1), VId(id), weight(7));
+            }
+        }
+        seed.add_edge(EId(1000), VId(100), VId(102), weight(7));
+        seed.add_edge(EId(1001), VId(100), VId(102), weight(3));
+        seed.add_edge(EId(1002), VId(100), VId(100), weight(7));
+        db.write(&commit, seed).await.unwrap();
+
+        // Even with complete vertex admission this leaves room for only the
+        // pair's two records, not the other 600 relationships. Independent
+        // indexed-root admission can further reduce the vertex side.
+        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(602, 10, 5_000_000, 5_000_000));
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.savepoint(&db, "before-pair-edits").unwrap();
+        for merge in [
+            definition(100, Some(102)),
+            definition(102, Some(100)).with_undirected(),
+        ] {
+            let (stats, outcome) = txn
+                .execute_graph_edge_merge_governed(
+                    &mut db,
+                    &query,
+                    &merge,
+                    bounded,
+                    |_| -> Result<ElementId, ()> {
+                        panic!("the matching parallel edge must not allocate")
+                    },
+                )
+                .unwrap();
+            assert_eq!(stats.overlay_edges, 2);
+            assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1000)));
+        }
+        let (stats, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(100)).with_undirected(),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the self-loop already exists") },
+            )
+            .unwrap();
+        assert_eq!(stats.overlay_edges, 1, "a self-loop has one EId");
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1002)));
+
+        let mut edits = WriteBatch::new(R);
+        edits.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(3)));
+        edits.set_edge_property(EId(1001), WEIGHT, Some(CanonicalScalar::Int(7)));
+        txn.write(&mut db, edits).unwrap();
+        let (_, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the staged property now matches") },
+            )
+            .unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1001)));
+
+        let mut replacement = WriteBatch::new(R);
+        replacement.delete_edge(EId(1001));
+        replacement.add_edge(EId(u128::MAX), VId(100), VId(102), weight(7));
+        txn.write(&mut db, replacement).unwrap();
+        let (stats, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the staged replacement already exists") },
+            )
+            .unwrap();
+        assert_eq!(stats.overlay_edges, 2);
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(u128::MAX)));
+        txn.rollback_to_savepoint(&db, "before-pair-edits").unwrap();
+        let (_, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("rollback restores the basis match") },
+            )
+            .unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1000)));
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert!(db.edge(EId(u128::MAX)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

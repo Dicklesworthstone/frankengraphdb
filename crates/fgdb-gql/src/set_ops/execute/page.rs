@@ -37,7 +37,7 @@ pub(super) fn collect<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(supports(query));
@@ -96,7 +96,7 @@ where
         // Reuse the complete fold, including every nested local page and its
         // deferred semantic-error law. The fold applies THIS page exactly once.
         // It drains expressions even after the receiver has enough rows.
-        fold::visit(query, source, meter, operand, &mut |row, meter| {
+        fold::visit(query, source, meter, operand, &mut |row, _, meter| {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             rows.push(row);
             Ok(())

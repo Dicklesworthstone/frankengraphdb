@@ -157,6 +157,14 @@ fn async_edge_aggregate_refusals_keep_typed_failures_and_release_pending_orienta
 
 #[test]
 fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustion() {
+    // A correlated fixed-hop probe is an async join input now (3faae262,
+    // 0e7c7e7c; fgdb-dvtfk); the rest are still refused.
+    assert!(
+        AsyncSpillAggregatePlan::compile(&definition(
+            "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS rows LIMIT 0"
+        ))
+        .is_ok()
+    );
     for text in [
         "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",

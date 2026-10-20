@@ -1,5 +1,8 @@
 //! Published FGSB/FGSP one-bit damage: cached answers are not storage verification.
 //! Every record is printed only after its path's exact assertions have passed.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::fs::Vfs;
 use asupersync::io::{AsyncRead, ReadBuf};
