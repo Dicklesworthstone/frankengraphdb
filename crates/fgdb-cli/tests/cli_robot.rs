@@ -2505,6 +2505,10 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
             "undirected",
             "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
         ),
+        (
+            "undirected",
+            "CALL fnx.eigenvector_centrality() YIELD score AS rank,node AS id",
+        ),
     ] {
         let mut args = projection.to_vec();
         args.extend_from_slice(&["--direction", direction, call]);
@@ -2769,6 +2773,10 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
             "undirected",
             "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
         ),
+        (
+            "undirected",
+            "CALL fnx.eigenvector_centrality() YIELD score AS rank,node AS id",
+        ),
     ] {
         let mut args = projection.to_vec();
         args.extend_from_slice(&["--direction", direction, call]);
@@ -2951,6 +2959,16 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "--graph-relation",
                 "KNOWS",
                 "CALL fnx.degree_centrality() YIELD vertex,score",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.eigenvector_centrality() YIELD vertex,score",
             ],
             3,
             "query",
