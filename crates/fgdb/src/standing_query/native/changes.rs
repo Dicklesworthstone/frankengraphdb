@@ -112,6 +112,28 @@ impl<V: Vfs + Clone> Database<V> {
         from: Option<CommitSeq>,
         policy: GqlQueryPolicy,
     ) -> Result<(CommitSeq, ZSet<Vec<QueryValue>>), StandingQueryError> {
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(|_| StandingQueryFailure::Interrupted)
+        };
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        self.native_bag_metered(cx, handle, from, &mut meter)
+    }
+
+    // Replay snapshot reconstruction must copy its current baseline through
+    // this SAME mapper and spend the SAME allowance as subsequent rewinding.
+    // This seam grants no source/handle exception and resets no counters.
+    pub(in crate::standing_query) fn native_bag_metered(
+        &self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+        from: Option<CommitSeq>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(CommitSeq, ZSet<Vec<QueryValue>>), StandingQueryError> {
         let query = self.admitted_standing_query(cx, handle)?;
         let layout = handle
             .native
@@ -125,15 +147,6 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(unavailable(from));
         }
         cx.with_restriction(|| {
-            let mut checkpoint = || {
-                cx.checkpoint()
-                    .map_err(|_| StandingQueryFailure::Interrupted)
-            };
-            let mut meter = Meter {
-                policy,
-                stats: StandingQueryStats::default(),
-                checkpoint: &mut checkpoint,
-            };
             let width = layout.columns().len();
             let rows = match layout {
                 Layout::Rows { .. } | Layout::Circuit { .. } => {
@@ -141,7 +154,7 @@ impl<V: Vfs + Clone> Database<V> {
                         Some(from) => sets::delta(query).ok_or_else(|| unavailable(from))?,
                         None => sets::rows(query).ok_or(StandingQueryError::Unsupported)?,
                     };
-                    collect_bag(rows, from.is_some(), width, &mut meter, row_cells)
+                    collect_bag(rows, from.is_some(), width, meter, row_cells)
                 }
                 Layout::Aggregate { slots, .. } | Layout::GroupCircuit { slots, .. } => {
                     let view = match from {
@@ -154,7 +167,7 @@ impl<V: Vfs + Clone> Database<V> {
                         view.rows(),
                         from.is_some(),
                         width,
-                        &mut meter,
+                        meter,
                         |row, meter| aggregate_cells(row, slots, meter),
                     )
                 }
