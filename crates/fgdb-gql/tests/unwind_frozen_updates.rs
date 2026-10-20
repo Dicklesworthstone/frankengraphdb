@@ -130,7 +130,7 @@ impl Graph {
                     let properties = &mut self.vertices.get_mut(&vertex).unwrap().properties;
                     match value {
                         Some(value) => {
-                            properties.insert(key, value.into());
+                            properties.insert(key, value);
                         }
                         None => {
                             properties.remove(&key);

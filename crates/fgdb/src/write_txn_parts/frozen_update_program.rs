@@ -64,7 +64,7 @@ impl WriteTxn {
                             .map_err(GraphWriteStepError::Mutation)?;
                         let vertex = match intent {
                             GraphMutationIntent::Property { vertex, key, value } => {
-                                batch.set_vertex_property(vertex, key, value);
+                                batch.set_vertex_property_value(vertex, key, value);
                                 vertex
                             }
                             GraphMutationIntent::Label {
