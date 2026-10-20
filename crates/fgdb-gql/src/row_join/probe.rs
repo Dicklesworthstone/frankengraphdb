@@ -251,6 +251,7 @@ mod tests {
             typed_probe.copy_cell(&int(7), &mut allow).unwrap(),
             typed_probe.copy_cell(&float(7.0), &mut allow).unwrap()
         );
+        drop(typed_probe);
         let mut join = IncrementalRowJoin::new(typed);
         join.prepare(
             &bag(&vec![(row(vec![int(7)]), 2)]),
@@ -466,6 +467,239 @@ mod tests {
                 changed(&new, &old)
             );
             assert_eq!(join.rows(), &bag(&new));
+        }
+    }
+
+    #[test]
+    fn same_probe_key_never_hides_an_invalid_typed_row_retraction() {
+        let left = vec![(row(vec![int(7), int(10)]), 2)];
+        let right = vec![(row(vec![float(7.0), int(20)]), 3)];
+        for kind in KINDS {
+            let spec = definition(kind, false, true);
+            let mut join = seeded(spec.clone(), &left, &right);
+            let original = seeded(spec, &left, &right);
+            // Both missing rows have the SAME private key as a retained row,
+            // but their original typed payloads were never inserted.
+            let missing_left = bag(&vec![(row(vec![float(7.0), int(10)]), -1)]);
+            let missing_right = bag(&vec![(row(vec![int(7), int(20)]), -1)]);
+            for (dl, dr, side) in [
+                (missing_left, ZSet::new(), 0),
+                (ZSet::new(), missing_right, 1),
+            ] {
+                assert_eq!(
+                    join.prepare(&dl, &dr, LIMBS, None, &mut allow).unwrap_err(),
+                    RowJoinError::NegativeMultiplicity { side }
+                );
+                assert_eq!(join, original);
+            }
+        }
+        let scalar = RowJoinSpec::cross(
+            &[GraphSetColumnType::Scalar; 2],
+            &[GraphSetColumnType::Scalar; 2],
+        )
+        .unwrap()
+        .with_predicate(&[equal(0, 2)])
+        .unwrap();
+        let mut join = IncrementalRowJoin::new(scalar.clone());
+        let invalid = bag(&vec![(row(vec![GraphValue::Vertex(VId(7)), int(0)]), 1)]);
+        assert_eq!(
+            join.prepare(&invalid, &ZSet::new(), LIMBS, Some(0), &mut allow)
+                .unwrap_err(),
+            RowJoinError::InputSchema { side: 0 }
+        );
+        assert_eq!(join, IncrementalRowJoin::new(scalar));
+    }
+
+    #[test]
+    fn dynamic_non_witness_rows_are_retained_and_outer_padded_independently() {
+        for value in [
+            null(),
+            GraphValue::List(vec![int(7)].into_boxed_slice()),
+            GraphValue::map(vec![("k".into(), int(7))]).unwrap(),
+        ] {
+            let left = row(vec![value.clone(), int(10)]);
+            let right = row(vec![value, int(20)]);
+            for kind in KINDS {
+                let l = vec![(left.clone(), 2)];
+                let r = vec![(right.clone(), 3)];
+                let spec = definition(kind, false, true);
+                let mut join = seeded(spec.clone(), &l, &r);
+                let mut expected = Vec::new();
+                if matches!(kind, RowJoinKind::Left | RowJoinKind::Full) {
+                    let mut cells = left.values().to_vec();
+                    cells.extend([null(), null()]);
+                    expected.push((row(cells), 2));
+                }
+                if matches!(kind, RowJoinKind::Right | RowJoinKind::Full) {
+                    let mut cells = vec![null(), null()];
+                    cells.extend_from_slice(right.values());
+                    expected.push((row(cells), 3));
+                }
+                if kind == RowJoinKind::Anti {
+                    expected.push((left.clone(), 2));
+                }
+                assert_eq!(join.rows(), &bag(&expected));
+                // Even an unmatched input's full original count is owned.
+                let excessive = bag(&vec![(right.clone(), -4)]);
+                assert_eq!(
+                    join.prepare(&ZSet::new(), &excessive, LIMBS, None, &mut allow)
+                        .unwrap_err(),
+                    RowJoinError::NegativeMultiplicity { side: 1 }
+                );
+                assert_eq!(join, seeded(spec, &l, &r));
+            }
+        }
+    }
+
+    #[test]
+    fn maintained_projection_keeps_aliases_repeated_cells_and_simultaneous_collisions() {
+        use crate::row_projection::IncrementalRowProjection;
+        use crate::{
+            GqlParameters, GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol,
+            GraphSymbolKind, PreparedGraphSet, PreparedGraphText,
+        };
+        use fgdb_delta_types::PropertyKeyId;
+
+        let leaf = || -> PreparedGraphSet {
+            PreparedGraphText::prepare("MATCH (n) RETURN n.k AS k,n.p AS p", |kind, name| {
+                match (kind, name) {
+                    (GraphSymbolKind::Property, "k") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(1)))
+                    }
+                    (GraphSymbolKind::Property, "p") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(2)))
+                    }
+                    _ => None,
+                }
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .with_duplicates()
+            .into()
+        };
+        let query = leaf()
+            .cross_join(leaf())
+            .unwrap()
+            .project(
+                vec![
+                    GraphSetProjection::new("right_key", GraphSetValue::Column(2)),
+                    GraphSetProjection::new("left_key", GraphSetValue::Column(0)),
+                    GraphSetProjection::new("again", GraphSetValue::Column(2)),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap()
+            .nested()
+            .unwrap()
+            .filter(&[equal(0, 1)])
+            .unwrap();
+        let frozen = query.canonical_bytes();
+        let (_, _, spec, output) = query
+            .incremental_selected_join_with_control(&mut |_| Ok::<_, usize>(()))
+            .unwrap()
+            .unwrap();
+        assert!(spec.keys().is_empty());
+        assert_eq!(Probe::new(&spec, &mut allow).unwrap().columns(), &[(0, 0)]);
+        assert_eq!(
+            output.columns().collect::<Vec<_>>(),
+            ["right_key", "left_key", "again"]
+        );
+        let mut join = IncrementalRowJoin::new(spec);
+        let mut projection = IncrementalRowProjection::new(output);
+        let left = vec![
+            (row(vec![int(7), int(10)]), 2),
+            (row(vec![int(7), int(30)]), 1),
+        ];
+        let right = vec![(row(vec![float(7.0), int(20)]), 3)];
+        let initial = join
+            .prepare(&bag(&left), &bag(&right), LIMBS, None, &mut allow)
+            .unwrap()
+            .commit();
+        projection
+            .prepare(&initial, LIMBS, None, &mut allow)
+            .unwrap()
+            .commit();
+        let result = row(vec![float(7.0), int(7), float(7.0)]);
+        assert_eq!(projection.rows(), &bag(&vec![(result.clone(), 9)]));
+        let delta = join
+            .prepare(
+                &bag(&vec![(left[0].0.clone(), -2)]),
+                &bag(&vec![(right[0].0.clone(), -2)]),
+                LIMBS,
+                Some(1),
+                &mut allow,
+            )
+            .unwrap()
+            .commit();
+        let delta = projection
+            .prepare(&delta, LIMBS, Some(1), &mut allow)
+            .unwrap()
+            .commit();
+        assert_eq!(delta, bag(&vec![(result.clone(), -8)]));
+        assert_eq!(projection.rows(), &bag(&vec![(result, 1)]));
+        assert_eq!(query.canonical_bytes(), frozen);
+    }
+
+    #[test]
+    fn selective_scalar_updates_compare_against_the_live_unindexed_derivative() {
+        // Both operators use the same native matcher and exact delta kernels.
+        // Double NOT prevents proof extraction in the incumbent, while leaving
+        // its eager three-valued truth unchanged. These are logical event
+        // assertions, NOT a wall-clock or end-to-end database benchmark.
+        for n in [32_i64, 128] {
+            let left: Rows = (0..n).map(|k| (row(vec![int(k), int(0)]), 1)).collect();
+            let right: Rows = (0..n)
+                .map(|k| (row(vec![float(k as f64), int(1)]), 1))
+                .collect();
+            let expected: Rows = (0..n)
+                .map(|k| (row(vec![int(k), int(0), float(k as f64), int(1)]), 1))
+                .collect();
+            let mut indexed = IncrementalRowJoin::new(definition(RowJoinKind::Full, true, true));
+            let mut general = IncrementalRowJoin::new(definition(RowJoinKind::Full, true, false));
+            let apply = |join: &mut IncrementalRowJoin,
+                         dl: &ZSet<GraphValueRow>,
+                         dr: &ZSet<GraphValueRow>| {
+                let mut events = 0_u64;
+                join.prepare(dl, dr, LIMBS, None, &mut |_| {
+                    events += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .commit();
+                events
+            };
+            let (dl, dr) = (bag(&left), bag(&right));
+            let indexed_events = apply(&mut indexed, &dl, &dr);
+            let general_events = apply(&mut general, &dl, &dr);
+            assert_eq!(indexed.rows(), &bag(&expected));
+            assert_eq!(general.rows(), indexed.rows());
+            assert!(indexed_events < general_events);
+
+            // Change one left row from matching to unmatched. Only its key's
+            // original right row can gain a null extension; other keys remain
+            // untouched. A final output cap must still refuse the extra row.
+            let update = bag(&vec![
+                (row(vec![int(0), int(0)]), -1),
+                (row(vec![int(0), int(2)]), 1),
+            ]);
+            assert_eq!(
+                indexed
+                    .prepare(&update, &ZSet::new(), LIMBS, Some(n as u64), &mut allow)
+                    .unwrap_err(),
+                RowJoinError::ResultBudget { limit: n as u64 }
+            );
+            assert_eq!(indexed.rows(), &bag(&expected));
+            let indexed_events = apply(&mut indexed, &update, &ZSet::new());
+            let general_events = apply(&mut general, &update, &ZSet::new());
+            let mut after = expected[1..].to_vec();
+            after.extend([
+                (row(vec![int(0), int(2), null(), null()]), 1),
+                (row(vec![null(), null(), float(0.0), int(1)]), 1),
+            ]);
+            assert_eq!(indexed.rows(), &bag(&after));
+            assert_eq!(general.rows(), indexed.rows());
+            assert!(indexed_events < general_events);
         }
     }
 }
