@@ -863,6 +863,54 @@ fn imported_nested_map_keys_keep_public_slots_and_parameter_templates() {
 }
 
 #[test]
+fn imported_map_return_reads_its_entries_and_no_other_leaf_does() {
+    // RETURN reads an imported map's entries as CREATE does (fgdb-0s2pq). A
+    // missing key reads NULL; an entry and a created property mix freely.
+    let query = prepare(
+        "UNWIND [{p:1,t:5},{p:2}] AS row CREATE (c {q:row.p}) \
+         RETURN row.p AS p,row.t AS t,row.p+c.q AS sum,c.q AS stored ORDER BY p",
+    );
+    assert_eq!(query.columns(), &["p", "t", "sum", "stored"]);
+    let batch = run(&query).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![int(1), int(5), int(2), int(1)],
+            vec![
+                int(2),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                int(4),
+                int(2)
+            ],
+        ]
+    );
+    // UNWIND types its column Any, so a non-map element fails when read, as
+    // openCypher's property access on an integer does.
+    assert!(run(&prepare("UNWIND [1] AS row CREATE (c) RETURN row.p AS p")).is_err());
+    // Only the imported leaf reads `.key`: a later endpoint in the same RETURN
+    // still refuses before the catalog, and a scalar WITH import still refuses.
+    for text in [
+        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
+        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN startNode(e).p,row.p AS p",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    assert!(
+        PreparedGraphInsertQueryText::prepare("WITH 1 AS x CREATE (c) RETURN x.p", R, symbols)
+            .is_err()
+    );
+}
+
+#[test]
 fn imported_map_correlations_refuse_scope_and_depth_changes_before_catalog() {
     for text in [
         "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p OR a.q=1 CREATE (c) RETURN c",

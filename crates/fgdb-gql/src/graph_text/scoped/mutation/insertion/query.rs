@@ -118,6 +118,8 @@ impl<'a> ParsedReturn<'a> {
         syntax: &mut InsertionSyntax<'a>,
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<usize>, GraphPatternTextError> {
+        // Only an imported map leaf reads `.key` entries, and only its own.
+        parser.resolved_entries = false;
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);
         };
@@ -229,7 +231,10 @@ impl<'a> ParsedReturn<'a> {
         // After WITH, `a.key` of an element the row carries is the row's
         // hidden read (fgdb-sl4ym); CREATE never changes an element it did
         // not create, so that read is also the value after it.
-        if vertex.is_none() && edge.is_none() && input.is_some() {
+        if vertex.is_none()
+            && edge.is_none()
+            && let Some(imported) = input
+        {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let key = lookahead.next()?;
@@ -240,6 +245,16 @@ impl<'a> ParsedReturn<'a> {
                     return self
                         .column(Binding::Input(column), name, GraphSetColumnType::Stored)
                         .map(Some);
+                }
+                // An imported map's `row.key` reads that entry through a let
+                // slot after this leaf, as CREATE's insertion_source_value
+                // does (fgdb-0s2pq). A scalar, list or element import keeps
+                // its refusal below.
+                let kind = source[imported].1;
+                if matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Stored) {
+                    let name = parser.name()?;
+                    parser.resolved_entries = true;
+                    return self.column(Binding::Input(imported), name, kind).map(Some);
                 }
             }
         }
@@ -565,11 +580,14 @@ impl<'a> Parser<'a> {
                 ));
             }
         } else {
+            let entries = self.resolved_entries;
             let items = self.write_return_items(&mut InsertLeaves {
                 returning: &mut returning,
                 syntax: &mut *syntax,
                 source,
-            })?;
+            });
+            self.resolved_entries = entries;
+            let items = items?;
             returning.projection = items.projection;
             returning.grouping = items.grouping;
             output = items.output;
