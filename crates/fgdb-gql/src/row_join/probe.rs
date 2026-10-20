@@ -86,29 +86,40 @@ impl<'a> Probe<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::IntegerComparison;
     use crate::GraphSetOperand;
+    use crate::algebra::IntegerComparison;
     use fgdb_types::{CanonicalDecimal, CanonicalF64, EId, VId};
 
     const LIMBS: LimbLimit = LimbLimit::new(4);
     const KINDS: [RowJoinKind; 6] = [
-        RowJoinKind::Inner, RowJoinKind::Left, RowJoinKind::Right,
-        RowJoinKind::Full, RowJoinKind::Semi, RowJoinKind::Anti,
+        RowJoinKind::Inner,
+        RowJoinKind::Left,
+        RowJoinKind::Right,
+        RowJoinKind::Full,
+        RowJoinKind::Semi,
+        RowJoinKind::Anti,
     ];
     type Rows = Vec<(GraphValueRow, i128)>;
 
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
-    fn int(n: i64) -> GraphValue { GraphValue::Scalar(CanonicalScalar::Int(n)) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
+    fn int(n: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(n))
+    }
     fn float(n: f64) -> GraphValue {
         GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(n)))
     }
-    fn null() -> GraphValue { GraphValue::Scalar(CanonicalScalar::Null) }
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
     fn row(values: Vec<GraphValue>) -> GraphValueRow {
         GraphValueRow::from_owned_values(values)
     }
     fn equal(a: usize, b: usize) -> GraphSetPredicateOp {
         GraphSetPredicateOp::Compare {
-            left: GraphSetOperand::Column(a), comparison: IntegerComparison::Equal,
+            left: GraphSetOperand::Column(a),
+            comparison: IntegerComparison::Equal,
             right: GraphSetOperand::Column(b),
         }
     }
@@ -123,49 +134,80 @@ mod tests {
         if residual {
             code.extend([
                 GraphSetPredicateOp::Compare {
-                    left: GraphSetOperand::Column(1), comparison: IntegerComparison::Less,
+                    left: GraphSetOperand::Column(1),
+                    comparison: IntegerComparison::Less,
                     right: GraphSetOperand::Column(3),
                 },
                 GraphSetPredicateOp::And,
             ]);
         }
         RowJoinSpec::cross(&[GraphSetColumnType::Any; 2], &[GraphSetColumnType::Any; 2])
-            .unwrap().with_kind(kind).with_predicate(&code).unwrap()
+            .unwrap()
+            .with_kind(kind)
+            .with_predicate(&code)
+            .unwrap()
     }
     fn bag(rows: &Rows) -> ZSet<GraphValueRow> {
         ZSet::from_updates(
-            rows.iter().map(|(row, n)| (row.clone(), ZWeight::from_i128(*n))),
-            LIMBS, &mut allow,
-        ).unwrap()
+            rows.iter()
+                .map(|(row, n)| (row.clone(), ZWeight::from_i128(*n))),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
     }
     fn changed(after: &Rows, before: &Rows) -> ZSet<GraphValueRow> {
-        bag(&after.iter().cloned()
-            .chain(before.iter().map(|(row, n)| (row.clone(), -n))).collect())
+        bag(&after
+            .iter()
+            .cloned()
+            .chain(before.iter().map(|(row, n)| (row.clone(), -n)))
+            .collect())
     }
     fn seeded(spec: RowJoinSpec, left: &Rows, right: &Rows) -> IncrementalRowJoin {
         let mut join = IncrementalRowJoin::new(spec);
-        join.prepare(&bag(left), &bag(right), LIMBS, None, &mut allow).unwrap().commit();
+        join.prepare(&bag(left), &bag(right), LIMBS, None, &mut allow)
+            .unwrap()
+            .commit();
         join
     }
 
     #[test]
     fn private_key_equivalence_matches_native_truth_without_rewriting_payloads() {
         let spec = RowJoinSpec::cross(&[GraphSetColumnType::Any], &[GraphSetColumnType::Any])
-            .unwrap().with_predicate(&[equal(0, 1)]).unwrap();
+            .unwrap()
+            .with_predicate(&[equal(0, 1)])
+            .unwrap();
         let probe = Probe::new(&spec, &mut allow).unwrap();
         assert_eq!(probe.columns(), &[(0, 0)]);
         let values = vec![
-            null(), int(0), int(7), int(-7), int(i64::MIN), int(i64::MAX),
-            int(9_007_199_254_740_993), float(-0.0), float(7.0), float(-7.0),
-            float(0.5), float(f64::from_bits(1)), float(-9_223_372_036_854_775_808.0),
-            float(9_223_372_036_854_775_808.0), float(9_007_199_254_740_992.0),
-            float(f64::NEG_INFINITY), float(f64::INFINITY), float(f64::NAN),
-            GraphValue::Scalar(CanonicalScalar::Decimal(CanonicalDecimal::from_integer(7).unwrap())),
+            null(),
+            int(0),
+            int(7),
+            int(-7),
+            int(i64::MIN),
+            int(i64::MAX),
+            int(9_007_199_254_740_993),
+            float(-0.0),
+            float(7.0),
+            float(-7.0),
+            float(0.5),
+            float(f64::from_bits(1)),
+            float(-9_223_372_036_854_775_808.0),
+            float(9_223_372_036_854_775_808.0),
+            float(9_007_199_254_740_992.0),
+            float(f64::NEG_INFINITY),
+            float(f64::INFINITY),
+            float(f64::NAN),
+            GraphValue::Scalar(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_integer(7).unwrap(),
+            )),
             GraphValue::Scalar(CanonicalScalar::Bool(true)),
             GraphValue::Scalar(CanonicalScalar::ucs_basic_text("7").unwrap()),
             GraphValue::Scalar(CanonicalScalar::bytes(vec![7]).unwrap()),
-            GraphValue::Vertex(VId(0)), GraphValue::Vertex(VId(u128::MAX)),
-            GraphValue::Edge(EId(0)), GraphValue::Edge(EId(u128::MAX)),
+            GraphValue::Vertex(VId(0)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Edge(EId(0)),
+            GraphValue::Edge(EId(u128::MAX)),
             GraphValue::List(vec![int(7)].into_boxed_slice()),
             GraphValue::Vertices(vec![VId(7)].into_boxed_slice()),
             GraphValue::Edges(vec![EId(7)].into_boxed_slice()),
@@ -175,40 +217,102 @@ mod tests {
             for b in &values {
                 let left = row(vec![a.clone()]);
                 let right = row(vec![b.clone()]);
-                let frozen = (left.canonical_bytes().unwrap(), right.canonical_bytes().unwrap());
+                let frozen = (
+                    left.canonical_bytes().unwrap(),
+                    right.canonical_bytes().unwrap(),
+                );
                 let ka = probe.copy_cell(a, &mut allow).unwrap();
                 let kb = probe.copy_cell(b, &mut allow).unwrap();
                 let native = spec.matches(&left, &right, &mut allow).unwrap();
                 assert_eq!(native, !ka.is_null() && !kb.is_null() && ka == kb);
-                assert_eq!((left.canonical_bytes().unwrap(), right.canonical_bytes().unwrap()), frozen);
+                assert_eq!(
+                    (
+                        left.canonical_bytes().unwrap(),
+                        right.canonical_bytes().unwrap()
+                    ),
+                    frozen
+                );
             }
         }
-        assert!(spec.keys().is_empty(), "a private probe must not become a typed join condition");
-        let typed = RowJoinSpec::new(&[GraphSetColumnType::Scalar], &[GraphSetColumnType::Scalar], &[(0, 0)])
-            .unwrap().with_predicate(&[equal(0, 1)]).unwrap();
+        assert!(
+            spec.keys().is_empty(),
+            "a private probe must not become a typed join condition"
+        );
+        let typed = RowJoinSpec::new(
+            &[GraphSetColumnType::Scalar],
+            &[GraphSetColumnType::Scalar],
+            &[(0, 0)],
+        )
+        .unwrap()
+        .with_predicate(&[equal(0, 1)])
+        .unwrap();
         let typed_probe = Probe::new(&typed, &mut allow).unwrap();
-        assert_ne!(typed_probe.copy_cell(&int(7), &mut allow).unwrap(),
-            typed_probe.copy_cell(&float(7.0), &mut allow).unwrap());
+        assert_ne!(
+            typed_probe.copy_cell(&int(7), &mut allow).unwrap(),
+            typed_probe.copy_cell(&float(7.0), &mut allow).unwrap()
+        );
         let mut join = IncrementalRowJoin::new(typed);
-        join.prepare(&bag(&vec![(row(vec![int(7)]), 2)]),
-            &bag(&vec![(row(vec![float(7.0)]), 3)]), LIMBS, None, &mut allow)
-            .unwrap().commit();
-        assert!(join.rows().is_empty(), "explicit typed equality is intentionally different");
+        join.prepare(
+            &bag(&vec![(row(vec![int(7)]), 2)]),
+            &bag(&vec![(row(vec![float(7.0)]), 3)]),
+            LIMBS,
+            None,
+            &mut allow,
+        )
+        .unwrap()
+        .commit();
+        assert!(
+            join.rows().is_empty(),
+            "explicit typed equality is intentionally different"
+        );
     }
 
     #[test]
     fn candidate_proof_keeps_boolean_boundaries_and_repeated_cross_positions() {
         for (code, keys) in [
             (vec![equal(0, 2)], vec![(0, 0)]),
-            (vec![equal(2, 0), equal(0, 2), GraphSetPredicateOp::And], vec![(0, 0)]),
-            (vec![equal(0, 2), equal(0, 3), GraphSetPredicateOp::And], vec![(0, 0), (0, 1)]),
-            (vec![equal(0, 2), equal(2, 0), GraphSetPredicateOp::Or], vec![(0, 0)]),
-            (vec![equal(0, 2), GraphSetPredicateOp::Truth(Some(true)), GraphSetPredicateOp::Or], vec![]),
-            (vec![equal(0, 2), GraphSetPredicateOp::Truth(None), GraphSetPredicateOp::Or], vec![]),
-            (vec![equal(0, 2), GraphSetPredicateOp::Not, GraphSetPredicateOp::Not], vec![]),
+            (
+                vec![equal(2, 0), equal(0, 2), GraphSetPredicateOp::And],
+                vec![(0, 0)],
+            ),
+            (
+                vec![equal(0, 2), equal(0, 3), GraphSetPredicateOp::And],
+                vec![(0, 0), (0, 1)],
+            ),
+            (
+                vec![equal(0, 2), equal(2, 0), GraphSetPredicateOp::Or],
+                vec![(0, 0)],
+            ),
+            (
+                vec![
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(Some(true)),
+                    GraphSetPredicateOp::Or,
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    equal(0, 2),
+                    GraphSetPredicateOp::Truth(None),
+                    GraphSetPredicateOp::Or,
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    equal(0, 2),
+                    GraphSetPredicateOp::Not,
+                    GraphSetPredicateOp::Not,
+                ],
+                vec![],
+            ),
         ] {
-            let spec = RowJoinSpec::cross(&[GraphSetColumnType::Any; 2], &[GraphSetColumnType::Any; 2])
-                .unwrap().with_predicate(&code).unwrap();
+            let spec =
+                RowJoinSpec::cross(&[GraphSetColumnType::Any; 2], &[GraphSetColumnType::Any; 2])
+                    .unwrap()
+                    .with_predicate(&code)
+                    .unwrap();
             assert_eq!(Probe::new(&spec, &mut allow).unwrap().columns(), keys);
             assert!(spec.keys().is_empty());
         }
@@ -216,12 +320,21 @@ mod tests {
 
     fn input(mask: usize, right: bool) -> Rows {
         let rows = if right {
-            [(row(vec![float(7.0), int(20)]), 3), (row(vec![int(7), int(5)]), 2)]
+            [
+                (row(vec![float(7.0), int(20)]), 3),
+                (row(vec![int(7), int(5)]), 2),
+            ]
         } else {
-            [(row(vec![int(7), int(10)]), 2), (row(vec![float(7.0), int(30)]), 1)]
+            [
+                (row(vec![int(7), int(10)]), 2),
+                (row(vec![float(7.0), int(30)]), 1),
+            ]
         };
-        rows.into_iter().enumerate().filter(|(at, _)| mask & (1 << at) != 0)
-            .map(|(_, entry)| entry).collect()
+        rows.into_iter()
+            .enumerate()
+            .filter(|(at, _)| mask & (1 << at) != 0)
+            .map(|(_, entry)| entry)
+            .collect()
     }
     // Every fixture key has the mathematical value seven. Only the literal
     // integer payload comparison decides residual truth here; no production
@@ -239,7 +352,10 @@ mod tests {
                 if matches(l, r) {
                     found = true;
                     if kind.includes_right() {
-                        out.push((row(l.values().iter().chain(r.values()).cloned().collect()), lw * rw));
+                        out.push((
+                            row(l.values().iter().chain(r.values()).cloned().collect()),
+                            lw * rw,
+                        ));
                     }
                 }
             }
@@ -247,7 +363,8 @@ mod tests {
                 RowJoinKind::Semi if found => out.push((l.clone(), *lw)),
                 RowJoinKind::Anti if !found => out.push((l.clone(), *lw)),
                 RowJoinKind::Left | RowJoinKind::Full if !found => {
-                    let mut cells = l.values().to_vec(); cells.extend([null(), null()]);
+                    let mut cells = l.values().to_vec();
+                    cells.extend([null(), null()]);
                     out.push((row(cells), *lw));
                 }
                 _ => {}
@@ -256,7 +373,8 @@ mod tests {
         if matches!(kind, RowJoinKind::Right | RowJoinKind::Full) {
             for (r, rw) in right {
                 if !left.iter().any(|(l, _)| matches(l, r)) {
-                    let mut cells = vec![null(), null()]; cells.extend_from_slice(r.values());
+                    let mut cells = vec![null(), null()];
+                    cells.extend_from_slice(r.values());
                     out.push((row(cells), *rw));
                 }
             }
@@ -285,11 +403,23 @@ mod tests {
                             assert_eq!(pending.delta(), &delta);
                         }
                         assert_eq!(join, seeded(spec.clone(), &l0, &r0));
-                        assert_eq!(join.prepare(&dl, &dr, LIMBS, None, &mut allow).unwrap().commit(), delta);
+                        assert_eq!(
+                            join.prepare(&dl, &dr, LIMBS, None, &mut allow)
+                                .unwrap()
+                                .commit(),
+                            delta
+                        );
                         assert_eq!(join.rows(), &bag(&new));
                         assert_eq!(join.spec(), &frozen);
-                        join.prepare(&changed(&l0, &l1), &changed(&r0, &r1), LIMBS, None, &mut allow)
-                            .unwrap().commit();
+                        join.prepare(
+                            &changed(&l0, &l1),
+                            &changed(&r0, &r1),
+                            LIMBS,
+                            None,
+                            &mut allow,
+                        )
+                        .unwrap()
+                        .commit();
                         assert_eq!(join, seeded(spec, &l0, &r0));
                     }
                 }
@@ -307,22 +437,34 @@ mod tests {
             let original = seeded(spec, &l0, &r0);
             let (dl, dr) = (changed(&l1, &l0), changed(&r1, &r0));
             let mut checkpoints = 0;
-            drop(join.prepare(&dl, &dr, LIMBS, None, &mut |_| {
-                checkpoints += 1; Ok::<_, usize>(())
-            }).unwrap());
+            drop(
+                join.prepare(&dl, &dr, LIMBS, None, &mut |_| {
+                    checkpoints += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
+            );
             assert_eq!(join, original);
             for stop in 1..=checkpoints {
                 let mut calls = 0;
-                let error = join.prepare(&dl, &dr, LIMBS, None, &mut |_| {
-                    calls += 1; if calls == stop { Err(stop) } else { Ok(()) }
-                }).unwrap_err();
+                let error = join
+                    .prepare(&dl, &dr, LIMBS, None, &mut |_| {
+                        calls += 1;
+                        if calls == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .unwrap_err();
                 assert_eq!(error, RowJoinError::Delta(ZSetError::Control(stop)));
                 assert_eq!(calls, stop);
                 assert_eq!(join, original);
             }
             let old = oracle(&l0, &r0, kind, true);
             let new = oracle(&l1, &r1, kind, true);
-            assert_eq!(join.prepare(&dl, &dr, LIMBS, None, &mut allow).unwrap().commit(), changed(&new, &old));
+            assert_eq!(
+                join.prepare(&dl, &dr, LIMBS, None, &mut allow)
+                    .unwrap()
+                    .commit(),
+                changed(&new, &old)
+            );
             assert_eq!(join.rows(), &bag(&new));
         }
     }
