@@ -32,6 +32,9 @@ const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 const REL: RelationId = RelationId(1);
 
+#[path = "block_store/root_append.rs"]
+mod root_append;
+
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-blockstore-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch dir");

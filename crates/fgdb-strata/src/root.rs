@@ -150,6 +150,32 @@ pub struct PartitionRoot {
     pub vertex_patches: Vec<PatchRef>,
 }
 
+/// Borrow the membership already owned by a publication memo. Keeping this
+/// private to Strata lets the append path reuse the canonical encoder without
+/// constructing another complete pair of reference vectors.
+#[derive(Clone, Copy)]
+pub(crate) struct PartitionRootRef<'a> {
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub blocks: &'a [BlockRef],
+    pub vertex_patches: &'a [PatchRef],
+}
+
+impl<'a> From<&'a PartitionRoot> for PartitionRootRef<'a> {
+    fn from(root: &'a PartitionRoot) -> Self {
+        Self {
+            graph: root.graph,
+            branch: root.branch,
+            partition: root.partition,
+            published_at: root.published_at,
+            blocks: &root.blocks,
+            vertex_patches: &root.vertex_patches,
+        }
+    }
+}
+
 /// The immutable birth bound to one permanently spent EId.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeBirth {
@@ -537,7 +563,7 @@ impl core::error::Error for RootError {}
 /// definitions of lawfulness.
 /// Refuse a root the flat (V3) and two-level (V4) formats cannot name: their
 /// decoders refuse counts past the flat ceilings, so their encoders must too.
-fn within_flat_ceilings(root: &PartitionRoot) -> Result<(), RootError> {
+fn within_flat_ceilings(root: PartitionRootRef<'_>) -> Result<(), RootError> {
     let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
     if declared > MAX_FLAT_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared });
@@ -550,11 +576,23 @@ fn within_flat_ceilings(root: &PartitionRoot) -> Result<(), RootError> {
 }
 
 pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
+    validate_root_suffix(root.into(), (0, 0))
+}
+
+/// The caller must have validated the carried prefixes at a publication no
+/// later than this root's. The first new reference still compares against the
+/// final carried reference: skipping that boundary would admit a regression.
+fn validate_root_suffix(
+    root: PartitionRootRef<'_>,
+    carried: (usize, usize),
+) -> Result<(), RootError> {
+    assert!(carried.0 <= root.blocks.len());
+    assert!(carried.1 <= root.vertex_patches.len());
     let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
     if declared > MAX_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared });
     }
-    for (index, block) in root.blocks.iter().enumerate() {
+    for (index, block) in root.blocks.iter().enumerate().skip(carried.0) {
         if block.first_seq.0 == 0 || block.last_seq.0 == 0 {
             return Err(RootError::SequenceZero { at: index });
         }
@@ -594,7 +632,7 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
             declared: declared_patches,
         });
     }
-    for (index, patch) in root.vertex_patches.iter().enumerate() {
+    for (index, patch) in root.vertex_patches.iter().enumerate().skip(carried.1) {
         if patch.first_seq.0 == 0 || patch.last_seq.0 == 0 {
             return Err(RootError::PatchSequenceZero { at: index });
         }
@@ -659,7 +697,7 @@ pub fn root_logical_digest(root: &PartitionRoot) -> [u8; 32] {
 /// Encode a root canonically, refusing anything that is not.
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
-    within_flat_ceilings(root)?;
+    within_flat_ceilings(root.into())?;
 
     let mut out =
         Vec::with_capacity(HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN);
@@ -1171,7 +1209,9 @@ pub fn encode_root_v4(
     namespace: DatabaseSecurityNamespaceId,
     cache: &mut SegmentCache,
 ) -> Result<EncodedRoot, RootError> {
-    encode_segmented(root, (k_oid, namespace), cache, Segmented::V4)
+    validate_root(root)?;
+    within_flat_ceilings(root.into())?;
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V4)
 }
 
 /// Encode a root in format V5, sealing only the full segments and full index
@@ -1183,19 +1223,31 @@ pub fn encode_root_v5(
     namespace: DatabaseSecurityNamespaceId,
     cache: &mut SegmentCache,
 ) -> Result<EncodedRoot, RootError> {
+    validate_root(root)?;
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V5)
+}
+
+/// Encode an extension of an authenticated publication memo. The store alone
+/// supplies `carried`, after checking the exact prior root identity, coordinate,
+/// reference counts and nonregressing publication. Everything after that prefix,
+/// including both append boundaries, takes the ordinary structural checks.
+pub(crate) fn encode_root_v5_append(
+    root: PartitionRootRef<'_>,
+    carried: (usize, usize),
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    cache: &mut SegmentCache,
+) -> Result<EncodedRoot, RootError> {
+    validate_root_suffix(root, carried)?;
     encode_segmented(root, (k_oid, namespace), cache, Segmented::V5)
 }
 
 fn encode_segmented(
-    root: &PartitionRoot,
+    root: PartitionRootRef<'_>,
     identity: (&[u8; 32], DatabaseSecurityNamespaceId),
     cache: &mut SegmentCache,
     format: Segmented,
 ) -> Result<EncodedRoot, RootError> {
-    validate_root(root)?;
-    if format == Segmented::V4 {
-        within_flat_ceilings(root)?;
-    }
     let coordinate = (root.graph, root.branch, root.partition);
     if cache.coordinate != Some(coordinate) {
         *cache = SegmentCache {
@@ -1205,7 +1257,7 @@ fn encode_segmented(
     }
     let mut sealed = (Vec::new(), Vec::new());
     seal_list(
-        &root.blocks,
+        root.blocks,
         (&mut cache.blocks, &mut cache.block_index),
         (coordinate, SegmentClass::Blocks),
         identity,
@@ -1213,7 +1265,7 @@ fn encode_segmented(
         &mut sealed,
     )?;
     seal_list(
-        &root.vertex_patches,
+        root.vertex_patches,
         (&mut cache.patches, &mut cache.patch_index),
         (coordinate, SegmentClass::VertexPatches),
         identity,
@@ -2392,3 +2444,6 @@ pub fn patches_visible_at(root: &PartitionRoot, as_of: CommitSeq) -> Vec<usize> 
 
 #[cfg(test)]
 mod edge_history_tests;
+
+#[cfg(test)]
+mod append_tests;

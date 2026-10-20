@@ -4530,16 +4530,23 @@ impl<V: Vfs + Clone> Database<V> {
                     error,
                 }),
             })?;
-        let root = folded
-            .publish_in_place(self.keys.block_keys(), frontier)
-            .map_err(|error| WriteError::CommittedNeedsRecovery {
-                recovery,
-                source: Box::new(RebuildError::Fold {
-                    commit_seq: frontier.0,
-                    error,
-                }),
-            })?;
         let (blocks, patches) = (folded.sealed(), folded.sealed_patches());
+        let (block_prefix, patch_prefix) =
+            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
+        assert!(block_prefix <= blocks.len());
+        assert!(patch_prefix <= patches.len());
+        // This writer only appends sealed objects. Its prior root already
+        // owns the unchanged references, so construct only the new suffix.
+        // The store binds its carried membership to that exact root identity
+        // before skipping any prefix validation (fgdb-d5vo4).
+        let new_refs: Vec<_> = blocks[block_prefix..]
+            .iter()
+            .map(fgdb_strata::writer::SealedBlock::reference)
+            .collect();
+        let new_patch_refs: Vec<_> = patches[patch_prefix..]
+            .iter()
+            .map(fgdb_strata::writer::SealedPatch::reference)
+            .collect();
         // The immutable prefix remains memoized. New block, hosted-property,
         // and vertex objects share publication authority and one directory
         // barrier; no receipt escapes before the entire data batch completes.
@@ -4550,9 +4557,9 @@ impl<V: Vfs + Clone> Database<V> {
         // References inside the root prefix these receipts already verified
         // hold receipts by construction (the retained writer's sealed objects
         // extend the last published root in order), so only the rest is probed.
-        let (block_prefix, patch_prefix) = self.receipts.verified_root_prefix(PARTITION);
+        let (receipted_blocks, receipted_patches) = self.receipts.verified_root_prefix(PARTITION);
         let unpublished_blocks: Vec<&fgdb_strata::writer::SealedBlock> = blocks
-            [block_prefix.min(blocks.len())..]
+            [receipted_blocks.min(blocks.len())..]
             .iter()
             .filter(|block| {
                 !self
@@ -4561,7 +4568,7 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .collect();
         let unpublished_patches: Vec<&fgdb_strata::writer::SealedPatch> = patches
-            [patch_prefix.min(patches.len())..]
+            [receipted_patches.min(patches.len())..]
             .iter()
             .filter(|patch| {
                 !self
@@ -4626,23 +4633,73 @@ impl<V: Vfs + Clone> Database<V> {
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         // Every root-scope law runs here. The root itself is written below,
         // together with the manifest that names it (fgdb-90i03).
-        let verified_root = self
+        let appended = self
             .store
-            .verify_root(cx, &root, &mut self.receipts)
+            .verify_root_append(
+                cx,
+                fgdb_strata::store::RootAppend {
+                    basis: self.snapshot.root,
+                    graph: GRAPH,
+                    branch: BRANCH,
+                    partition: PARTITION,
+                    published_at: frontier,
+                    carried_blocks: block_prefix,
+                    carried_patches: patch_prefix,
+                    blocks: &new_refs,
+                    vertex_patches: &new_patch_refs,
+                },
+                &mut self.receipts,
+            )
             .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
+        let verified_root = match appended {
+            Some(verified) => verified,
+            None => {
+                // A missing or mismatched memo grants no prefix shortcut.
+                // Recovery/replacement paths and arbitrary roots retain the
+                // complete structural, span, history and chain checks.
+                let root = fgdb_strata::root::PartitionRoot {
+                    graph: GRAPH,
+                    branch: BRANCH,
+                    partition: PARTITION,
+                    published_at: frontier,
+                    blocks: blocks
+                        .iter()
+                        .map(fgdb_strata::writer::SealedBlock::reference)
+                        .collect(),
+                    vertex_patches: patches
+                        .iter()
+                        .map(fgdb_strata::writer::SealedPatch::reference)
+                        .collect(),
+                };
+                assert!(root.blocks.starts_with(&self.snapshot.refs));
+                assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
+                self.store
+                    .verify_root(cx, &root, &mut self.receipts)
+                    .await
+                    .map_err(|error| WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::from(error)),
+                    })?
+            }
+        };
         let root_id = verified_root.id();
         // The manifest names the published root (fgdb-63w2) and binds it to
         // the chain commitment at this very commit (fgdb-90hw): the durable
         // path from this directory to its partition advances in the same
         // publish, carrying the authority claim open verifies.
-        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), root.published_at)
+        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("the commit that published this root is on its own chain");
-        let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
-            .expect("one root is one canonical record");
+        let manifest_records = [ManifestRecord {
+            graph: GRAPH,
+            branch: BRANCH,
+            partition: PARTITION,
+            root: root_id,
+            published_chain_hash,
+        }];
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         // Root and manifest share one concurrent inode sync, each one's
@@ -4689,20 +4746,11 @@ impl<V: Vfs + Clone> Database<V> {
         // this publication's suffix is decoded, and the root's references pair
         // with the writer's sealed objects by position. Nothing here rebuilds
         // an identity map over every object of the partition.
-        assert!(root.blocks.starts_with(&self.snapshot.refs));
-        assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
-        assert_eq!(root.blocks.len(), blocks.len());
-        assert_eq!(root.vertex_patches.len(), patches.len());
-        let (block_prefix, patch_prefix) =
-            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::RefreshEdgeSnapshot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut fresh: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> =
-            Vec::with_capacity(root.blocks.len() - block_prefix);
-        for (reference, sealed) in root.blocks[block_prefix..]
-            .iter()
-            .zip(&blocks[block_prefix..])
-        {
+            Vec::with_capacity(new_refs.len());
+        for (reference, sealed) in new_refs.iter().zip(&blocks[block_prefix..]) {
             assert_eq!(
                 reference.block_id, sealed.block_id,
                 "a publish's root names its sealed blocks in order"
@@ -4761,12 +4809,8 @@ impl<V: Vfs + Clone> Database<V> {
             DerivedPublicationStage::RefreshVertexSnapshot,
         );
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut fresh_patches: Vec<VertexPatchRows> =
-            Vec::with_capacity(root.vertex_patches.len() - patch_prefix);
-        for (reference, sealed) in root.vertex_patches[patch_prefix..]
-            .iter()
-            .zip(&patches[patch_prefix..])
-        {
+        let mut fresh_patches: Vec<VertexPatchRows> = Vec::with_capacity(new_patch_refs.len());
+        for (reference, sealed) in new_patch_refs.iter().zip(&patches[patch_prefix..]) {
             assert_eq!(
                 reference.patch_id, sealed.patch_id,
                 "a publish's root names its sealed patches in order"
@@ -4797,27 +4841,32 @@ impl<V: Vfs + Clone> Database<V> {
         // that nothing has read yet) stays unbuilt: building it here would
         // move the whole-generation cost from open into the first write.
         let adjacency = match self.snapshot.adjacency.get() {
-            Some(index) => std::sync::OnceLock::from(Arc::new(
-                index.extend(&decoded, self.snapshot.refs.len()),
-            )),
+            Some(index) => {
+                std::sync::OnceLock::from(Arc::new(index.extend(&decoded, block_prefix)))
+            }
             None => std::sync::OnceLock::new(),
         };
         // The property index likewise: a handle that has looked nothing up
         // by value (a CLI load by caller keys) never builds or extends one.
         let property_index = match self.snapshot.property_index.get() {
-            Some(index) => std::sync::OnceLock::from(Arc::new(
-                index.extend(&decoded_patches, self.snapshot.patch_refs.len()),
-            )),
+            Some(index) => {
+                std::sync::OnceLock::from(Arc::new(index.extend(&decoded_patches, patch_prefix)))
+            }
             None => std::sync::OnceLock::new(),
         };
+        let previous = Arc::make_mut(&mut self.snapshot);
+        let mut refs = std::mem::take(&mut previous.refs);
+        let mut patch_refs = std::mem::take(&mut previous.patch_refs);
+        refs.extend(new_refs);
+        patch_refs.extend(new_patch_refs);
         self.snapshot = Arc::new(Snapshot {
             adjacency,
             property_index,
             blocks: decoded,
             block_props: decoded_props,
-            refs: root.blocks,
+            refs,
             patches: decoded_patches,
-            patch_refs: root.vertex_patches,
+            patch_refs,
             frontier,
             root: root_id,
             manifest,
