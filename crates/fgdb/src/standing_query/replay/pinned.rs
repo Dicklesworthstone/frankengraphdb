@@ -4,6 +4,8 @@
 //! No row payload is read or copied when opening, and pulling moves one already
 //! admitted Arc. The pin allowance is separate from cumulative delivery work.
 
+mod merged;
+
 use super::*;
 use std::num::NonZeroUsize;
 
