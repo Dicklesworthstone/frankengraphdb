@@ -21,7 +21,6 @@ use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 use fgdb_delta_types::{ElementId, PropertyKeyId};
-use fgdb_types::CanonicalScalar;
 
 mod relational_join;
 mod selected_cross;

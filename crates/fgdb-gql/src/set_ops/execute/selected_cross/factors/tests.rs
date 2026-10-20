@@ -5,13 +5,13 @@ use crate::{
     PreparedGraphPatternFactors, PreparedGraphSetText,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalDecimal, CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalDecimal, CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const LABEL: LabelId = LabelId(1);
 type SourceResult = Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>>;
-type Records = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Records = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 
 // A fixed already admitted table, evaluated through the actual GLA kernel in
 // both modes. The factor owner reports this domain once and carries the first
@@ -29,7 +29,15 @@ impl Source {
             records: values
                 .iter()
                 .enumerate()
-                .map(|(at, value)| (VId(at as u128 + 1), (vec![LABEL], vec![(P, value.clone())])))
+                .map(|(at, value)| {
+                    (
+                        VId(at as u128 + 1),
+                        (
+                            vec![LABEL],
+                            vec![(P, CanonicalPropertyValue::from(value.clone()))],
+                        ),
+                    )
+                })
                 .collect(),
             factor,
             patterns: 0,

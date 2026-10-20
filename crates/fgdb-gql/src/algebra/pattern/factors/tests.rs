@@ -2,7 +2,7 @@ use super::*;
 use crate::algebra::{GraphColumn, GraphValue, GraphValueOrder};
 use crate::{GqlQueryError, GqlQueryPolicy};
 use fgdb_delta_types::RelationId;
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
 const KEY: PropertyKeyId = PropertyKeyId(1);
 
@@ -23,7 +23,7 @@ fn columns() -> [GraphColumn<'static>; 5] {
 }
 
 fn evaluate(pattern: &PreparedGraphPattern<GraphValueRow>) -> Vec<GraphValueRow> {
-    let property = CanonicalScalar::Int(7);
+    let property = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let execution: Result<_, GqlQueryError<(), ()>> =
         pattern.plan().execute_governed_with_properties(
             3,
