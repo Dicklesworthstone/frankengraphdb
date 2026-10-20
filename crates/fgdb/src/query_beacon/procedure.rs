@@ -960,6 +960,21 @@ pub(crate) fn privileged(
     remaining: GqlQueryPolicy,
     cx: &QueryCx,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
+    privileged_with_registry(snapshot, registry, at, call, arguments, remaining, cx)
+}
+
+/// Privileged host with optional access to the opened database's maintained
+/// Beacon registry. Reuses a healthy current pin when one covers the bound
+/// definition and lanes; otherwise builds for this execution from `snapshot`.
+pub(crate) fn privileged_with_registry(
+    snapshot: &Snapshot,
+    registry: Option<&super::BeaconQueryIndexes>,
+    at: CommitSeq,
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    remaining: GqlQueryPolicy,
+    cx: &QueryCx,
+) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
     let (search, eligible) =
         HybridSearch::bind_snapshot_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = Cell::new(0_u64);

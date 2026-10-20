@@ -760,7 +760,8 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
     assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
 
-    // A repeated or malformed limit is a usage error.
+    // A repeated or malformed limit is a usage error. Compact takes no
+    // execution limits.
     let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
     refused(&fixture.robot("query", &twice), 2, "usage");
     refused(
@@ -777,6 +778,11 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     let count = fixture.robot("query", &["MATCH (n:Person {id: 9}) RETURN count(*) AS c"]);
     succeeded(&count, "rows");
     assert!(String::from_utf8_lossy(&count.stdout).contains(r#""value":"0""#));
+    refused(
+        &fixture.robot("compact", &["--max-work-units", "1"]),
+        2,
+        "usage",
+    );
 }
 
 /// `--bindings-file` adds its bindings to the flags' (the fixture binds

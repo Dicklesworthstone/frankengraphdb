@@ -68,7 +68,7 @@ mod set_aggregate_queries {
                     },
                     |call, arguments, remaining| {
                         if crate::query::is_hybrid(call) {
-                            return crate::query::hybrid_procedure(
+                            return crate::query::hybrid_procedure_with_registry(
                                 &self.snapshot,
                                 Some(self.maintained_beacon.query_indexes()),
                                 as_of,

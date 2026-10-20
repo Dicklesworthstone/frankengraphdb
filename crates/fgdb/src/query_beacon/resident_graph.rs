@@ -184,7 +184,7 @@ impl PinnedIndex {
     // Both entrypoints and refusal-cut tests exercise this single execution
     // body; the unfiltered request uses the constant-true result predicate.
     #[allow(clippy::too_many_arguments)]
-    fn search_graph_filtered_with_work(
+    pub(crate) fn search_graph_filtered_with_work(
         &self,
         cx: &QueryCx,
         query: GraphHybridQuery<'_>,

@@ -85,12 +85,15 @@ fn verify_current(
     definition: &Options,
 ) {
     let pin = db.beacon_index_snapshot(cx, handle).unwrap();
+    let view = db.read_session().unwrap();
     assert_eq!(pin.source_sequence(), db.frontier().unwrap());
     for query in [text_query(), vector_query()] {
+        let expected = view.beacon_search(cx, definition, query).unwrap();
         assert_eq!(
             pin.search(cx, query, ReadPolicy::default()).unwrap(),
-            db.beacon_search(cx, definition, query).unwrap(),
+            expected,
         );
+        assert_eq!(db.beacon_search(cx, definition, query).unwrap(), expected);
     }
 }
 
@@ -534,6 +537,163 @@ fn ambiguous_publication_fences_current_search_and_recovery_does_not_transfer_re
                 .search(&cx, vector_query(), ReadPolicy::default())
                 .unwrap()),
             [VId(1)]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_commits() {
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
+    let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Label, "Doc") => Some(GraphSymbol::Label(DOC)),
+        (GraphSymbolKind::Relation, "LINKS") => Some(GraphSymbol::Relation(LINKS)),
+        (GraphSymbolKind::Property, "body") => Some(GraphSymbol::Property(BODY)),
+        (GraphSymbolKind::Property, "x") => Some(GraphSymbol::Property(X)),
+        _ => None,
+    };
+    let ((), report) = run_async_under_lab(0xbeac_4007, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed_batch = WriteBatch::new(LINKS);
+        for id in 1..=64_u128 {
+            seed_batch.create_vertex(
+                VId(id),
+                vec![DOC],
+                vec![
+                    (
+                        BODY,
+                        text(if id <= 4 {
+                            "graph storage engine"
+                        } else {
+                            "background filler document"
+                        }),
+                    ),
+                    (X, CanonicalScalar::Int(id as i64)),
+                ],
+            );
+        }
+        seed_batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+        seed_batch.add_edge(EId(2), VId(2), VId(3), vec![]);
+        db.write(&commit, seed_batch).await.unwrap();
+
+        let statement_two_lane = "CALL hybrid.search(\
+            label => 'Doc', text => 'graph', text_property => 'body', \
+            vector => [1.0], vector_properties => ['x'], \
+            eligible => [2, 3, 4], k => 2, candidates => 4\
+        ) YIELD node, score, vector_rank, text_rank \
+        RETURN node, score, vector_rank, text_rank";
+        let statement_three_lane = "CALL hybrid.search(\
+            label => 'Doc', text => 'graph', text_property => 'body', \
+            vector => [1.0], vector_properties => ['x'], \
+            seeds => [1], relation => 'LINKS', max_hops => 2, \
+            eligible => [2, 3], k => 2, candidates => 4, graph_candidates => 4\
+        ) YIELD node, score, graph_hops \
+        RETURN node, score, graph_hops";
+
+        let generous = GqlQueryPolicy::new(1_000, 100, 1_000_000, 100_000);
+        // Tight policy: zero snapshot_records (which forbids any one-shot
+        // corpus scan/staging) and bounded search work budget.
+        let tight = GqlQueryPolicy::new(0, 10, 2_000, 64);
+
+        // Before registration, Database::query must scan all 64 vertices and fails `tight`.
+        assert!(
+            db.query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+                .is_err()
+        );
+
+        let handle = db
+            .register_beacon_graph_index(&cx, &options(), ReadPolicy::default())
+            .unwrap();
+
+        // After registration, Database::query reuses the maintained index and fits `tight`,
+        // while the un-cached EmbeddedReadView still requires the full scan and fails `tight`.
+        let view = db.read_session().unwrap();
+        assert!(
+            view.query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+                .is_err()
+        );
+        let expected_two_lane = view
+            .query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                generous,
+            )
+            .unwrap();
+        let actual_two_lane = db
+            .query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+            .unwrap();
+        assert_eq!(actual_two_lane, expected_two_lane);
+
+        let expected_three_lane = view
+            .query(
+                &cx,
+                statement_three_lane,
+                &GqlParameters::new(),
+                symbols,
+                generous,
+            )
+            .unwrap();
+        let actual_three_lane = db
+            .query(
+                &cx,
+                statement_three_lane,
+                &GqlParameters::new(),
+                symbols,
+                tight,
+            )
+            .unwrap();
+        assert_eq!(actual_three_lane, expected_three_lane);
+
+        // Mutate vertex 4 and add edge 2 -> 4, advancing the maintained index.
+        let mut update = WriteBatch::new(LINKS);
+        update.set_vertex_property(VId(4), X, Some(CanonicalScalar::Int(1)));
+        update.add_edge(EId(3), VId(2), VId(4), vec![]);
+        db.write(&commit, update).await.unwrap();
+
+        let view_after = db.read_session().unwrap();
+        let expected_after = view_after
+            .query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                generous,
+            )
+            .unwrap();
+        let actual_after = db
+            .query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+            .unwrap();
+        assert_eq!(actual_after, expected_after);
+        assert_ne!(actual_after, actual_two_lane);
+
+        // Database::beacon_search_filtered and search_beacon_index_filtered also reuse the pin.
+        let mut tight_options = options();
+        tight_options.policy.max_staging_rows = 0;
+        tight_options.policy.max_work_units = 500;
+        assert!(
+            view_after
+                .beacon_search_filtered(&cx, &tight_options, vector_query(), |id| id == VId(4))
+                .is_err()
+        );
+        let filtered_rows = db
+            .beacon_search_filtered(&cx, &tight_options, vector_query(), |id| id == VId(4))
+            .unwrap();
+        assert_eq!(ids(filtered_rows.clone()), [VId(4)]);
+        assert_eq!(
+            db.search_beacon_index_filtered(
+                &cx,
+                &handle,
+                vector_query(),
+                tight_options.policy,
+                |id| id == VId(4),
+            )
+            .unwrap(),
+            filtered_rows
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

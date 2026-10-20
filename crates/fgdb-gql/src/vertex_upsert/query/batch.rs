@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn full_width_identity_is_not_collapsed_or_replaced_by_row_number() {
-        let query = prepare("MERGE (n:Item) RETURN n AS node");
+        let query = prepare("MERGE (n:Item) RETURN DISTINCT n AS node");
         let low = GraphValue::Vertex(VId(7));
         let high = GraphValue::Vertex(VId((1_u128 << 112) + 7));
         // A RETURN without ORDER BY is a bag: both full-width identities come

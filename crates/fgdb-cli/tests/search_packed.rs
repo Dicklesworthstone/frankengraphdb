@@ -278,11 +278,11 @@ fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql()
     );
     assert_eq!(rows(&packed).len(), 1);
     assert!(rows(&packed)[0].ends_with("{\"type\":\"float\",\"value\":\"0\"}]}"));
-    // A composed GQL read uses its explicit ORDER BY, not an assumption that
-    // procedure-local ranking survives every later relational operator.
+    // Without ORDER BY, CALL hybrid.search preserves its rank order, including
+    // across implied vertex property reads (fgdb-euy8y).
     let query = format!(
         "CALL hybrid.search(vector => [{vector}], vector_property => 'embedding', k => 1) \
-        YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance ORDER BY distance"
+        YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance"
     );
     let gql = db.okay("query", &[&query]);
     assert_eq!(rows(&packed), rows(&gql));
@@ -290,6 +290,36 @@ fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql()
         terminal_number(&packed, "seq"),
         terminal_number(&gql, "seq")
     );
+    let seeded = Fixture::new();
+    seeded.seed();
+    let multi_packed = seeded.search(true, &["--k", "3"]);
+    let multi_gql = seeded.okay(
+        "query",
+        &[
+            "CALL hybrid.search(vector => [1, 0], vector_property => 'embedding', k => 3) \
+             YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance",
+        ],
+    );
+    assert_eq!(rows(&multi_packed), rows(&multi_gql));
+    let multi_props = seeded.okay(
+        "query",
+        &[
+            "CALL hybrid.search(vector => [1, 0], vector_property => 'embedding', k => 3) \
+             YIELD node, vector_distance RETURN node.name AS title, vector_distance AS distance",
+        ],
+    );
+    let titles: Vec<&str> = rows(&multi_props)
+        .into_iter()
+        .map(|row| {
+            row.split_once("\"type\":\"text\",\"value\":\"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(titles, ["near", "middle", "far"]);
 }
 
 #[test]

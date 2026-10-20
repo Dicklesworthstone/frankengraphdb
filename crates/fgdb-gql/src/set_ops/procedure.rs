@@ -159,6 +159,14 @@ impl PreparedProcedureCall {
     pub fn vertex_outputs(&self) -> &[usize] {
         &self.vertices
     }
+    /// Whether the procedure's own deterministic ranking order (rather than
+    /// canonical tuple order) is its output contract when no explicit ORDER BY
+    /// overrides it. `hybrid.search` returns top-k hits ordered by fused score
+    /// descending, ties broken by ascending vertex ID.
+    #[must_use]
+    pub fn preserves_row_order(&self) -> bool {
+        self.namespace == "hybrid"
+    }
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         for text in [&self.namespace, &self.name] {
             bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
