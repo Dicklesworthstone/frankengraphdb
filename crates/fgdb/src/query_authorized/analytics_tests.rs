@@ -43,12 +43,10 @@ fn builds() -> usize {
 }
 
 /// The reuse witnesses share the process-wide sidecar: a contended lookup
-/// lawfully builds, so the tests that count builds take turns.
+/// lawfully builds, so the tests that count builds take turns, together with
+/// the session tests that fill it.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    super::reuse_test_turn()
 }
 
 fn issuer() -> Authority {

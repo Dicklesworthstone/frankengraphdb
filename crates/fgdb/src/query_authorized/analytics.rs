@@ -38,6 +38,16 @@ type Error = FnxReadError<ReadError, QueryError>;
 static REUSE: LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)> =
     LiveCache::new(PROJECTION_CACHE_BYTES);
 
+/// A contended or full REUSE lawfully builds. So the tests that count builds,
+/// and every test that fills REUSE through authorized calls, take turns on
+/// this one lock.
+#[cfg(test)]
+pub(crate) fn reuse_test_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// None retains the existing whole-snapshot key: when no field or incidence
 /// is masked, changing only live allowances does not change the graph or its
 /// replay tape. A scoped key keeps the complete, exact compiled program; no
