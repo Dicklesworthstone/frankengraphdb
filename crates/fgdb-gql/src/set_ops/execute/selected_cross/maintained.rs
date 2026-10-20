@@ -15,6 +15,23 @@ pub type MaintainedSelectedJoin<'a> = (
     RowProjectionSpec,
 );
 
+impl RowJoinSpec {
+    /// Share the resident selected-product necessity proof with the maintained
+    /// row adapter. Positions refer to the original validated left/right input,
+    /// not its projected output. These are candidate-probe hints, NOT explicit
+    /// typed keys or a replacement ON. The row adapter must use predicate
+    /// equivalence for these hints and still run the complete native predicate.
+    pub(crate) fn predicate_probe_keys_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<(usize, usize)>, E> {
+        match self.predicate() {
+            Some(code) => required_keys(self.left_types().len(), code, None, control),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
 impl PreparedGraphSet {
     /// Lower an unpaged WHERE-over-product bag for incremental maintenance.
     /// Reuses the snapshot probe's necessary-equality proof and the ordinary
@@ -24,8 +41,8 @@ impl PreparedGraphSet {
     /// Only same-domain Vertex/Edge equalities become typed arrangement keys.
     /// Scalar and dynamic Any equalities remain in ON: Scalar admits Int/Float
     /// pairs whose WHERE equality differs from RowJoinSpec's typed identity.
-    /// Without an identity key, the existing predicate join scans candidates;
-    /// this trades scalar selectivity for correct mixed-representation results.
+    /// The row adapter may privately index necessary ON equalities using their
+    /// predicate equivalence, while these explicit keys retain typed identity.
     /// An equality under NOT or only one OR arm is never an arrangement key.
     /// No authorization or source support is inferred here.
     ///
