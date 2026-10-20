@@ -183,7 +183,11 @@ fn disjoint_routing_is_logarithmic_and_wide_incoming_ranges_do_not_inflate_outgo
             None,
             BufferedEdgeDirection::Outgoing,
         );
-        assert!(work <= count.ilog2() as usize + 2);
+        // An outgoing seek is the lower-bound search (at most ilog2 + 1
+        // steps), one unit per matching block and one terminal check of the
+        // next descriptor: a matching endpoint costs ilog2 + 3, measured 15
+        // at 4,096 blocks.
+        assert!(work <= count.ilog2() as usize + 3);
     }
     let (actual, work) = lookup(
         &outgoing,

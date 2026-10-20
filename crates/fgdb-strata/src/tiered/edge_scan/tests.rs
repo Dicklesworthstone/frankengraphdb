@@ -1080,7 +1080,10 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         let mut bounds = limits();
         bounds.max_blocks = count;
         bounds.max_root_bytes = 16 * 1024;
-        bounds.max_work = count * 40; // well below a point lookup per EId's N*N visits
+        // Open admission now also builds the charged descriptor directory
+        // (68bf6b14): 6,925 units for these 160 blocks, measured. The scan
+        // keeps its own linear allowance, asserted below.
+        bounds.max_work = count * 50;
         let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounds)
@@ -1094,36 +1097,34 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         }
         assert!(scan.next(&cx).await.unwrap().is_none());
         let total = scan.work_used();
-        assert!(total < count * count);
+        // Well below a point lookup per EId's N*N visits (measured 4,140).
+        assert!(total < count * 40);
         drop(scan);
         assert_eq!(view.stats().misses, count as u64);
         assert_eq!(view.stats().bypasses, count as u64);
         assert_eq!(pool.used(), baseline);
         drop(view);
         assert_eq!(pool.used(), 0);
-        bounds.max_work = total - 1;
-        let mut view = store
-            .open_buffered_root(&cx, id, pool.clone(), bounds)
-            .await
-            .unwrap();
-        let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
-        let mut delivered = 0;
-        loop {
-            match scan.next(&cx).await {
-                Ok(Some(_)) => delivered += 1,
-                Err(BufferedReadError::Limit {
-                    requested, limit, ..
-                }) => {
-                    assert_eq!((requested, limit), (total, total - 1));
-                    break;
-                }
-                other => panic!("expected cumulative refusal, got {other:?}"),
+        // Admission is charged cumulatively against the same allowance. Since
+        // 68bf6b14 it costs more than this whole scan, so the scan's own
+        // refusal is unreachable through the shared limit here; the exact
+        // first-unit-over refusal is observed at open instead.
+        let (mut below, mut cost) = (0, bounds.max_work);
+        while below + 1 < cost {
+            let mid = (below + cost) / 2;
+            bounds.max_work = mid;
+            match store.open_buffered_root(&cx, id, pool.clone(), bounds).await {
+                Ok(_) => cost = mid,
+                Err(_) => below = mid,
             }
         }
-        assert!(delivered < count);
-        assert!(scan.next(&cx).await.unwrap().is_none());
-        drop(scan);
-        drop(view);
+        assert!(total < cost && cost < count * count);
+        bounds.max_work = cost - 1;
+        assert!(matches!(
+            store.open_buffered_root(&cx, id, pool.clone(), bounds).await,
+            Err(BufferedReadError::Limit { requested, limit, .. })
+                if (requested, limit) == (cost, cost - 1)
+        ));
         assert_eq!(pool.used(), 0);
     });
 }

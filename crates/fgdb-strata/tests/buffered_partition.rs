@@ -1518,7 +1518,9 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
         bounded.max_root_bytes = 16 * 1024;
         bounded.max_source_bytes = source_bytes;
         bounded.max_blocks = 240;
-        bounded.max_work = 240 * 4;
+        // Work is not under test: open also builds the charged descriptor
+        // directory (68bf6b14), measured at 11,778 units for 240 blocks.
+        bounded.max_work = 240 * 64;
         let mut view = store
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
