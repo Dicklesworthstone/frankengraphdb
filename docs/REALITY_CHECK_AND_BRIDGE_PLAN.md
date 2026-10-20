@@ -97,8 +97,9 @@ after `1563ee5b`. Method:
 
 ### Product verdict
 
-**The steering landed, `main` is close to green, and the durable vision has
-not moved for a third consecutive check.**
+**The steering landed, `main` came within a few commits of green and lost
+compile again two hours later, and the durable vision has not moved for a
+third consecutive check.**
 - **Landed:**
   - the 10-17 document and beads;
   - all stranded lanes (stored List/Map values, writes after WITH, math);
@@ -111,7 +112,7 @@ not moved for a third consecutive check.**
   - Chronicle, the verification registries and the storage ADR: zero commits by anyone.
   - Sealed images are rebuilt per call and never persisted. `--sealed` is slower than decoding.
   - Compaction only grows the directory.
-- **Not steered:** 4 of the remote stream's 101 commits cite a bridge bead. It pushed 19 never-compiled commits to `main` today, nine of them during this measurement.
+- **Not steered:** 4 of the remote stream's 101 commits cite a bridge bead. It pushed 19 never-compiled commits to `main` today, nine of them during this measurement, and at that tip three test targets no longer compile.
 
 ### What governs the state at `df93ba15`
 
@@ -127,7 +128,11 @@ not moved for a third consecutive check.**
    - Workspace clippy has exactly one finding, `type_complexity` at `crates/fgdb/src/write_txn_parts/frozen_update_program.rs:13` (`e396b1bc`). With it allowed, clippy exits 0.
    - Tests are in the evidence table. The 10 unrun commits' own laws pass, and they add nothing to the `fgdb`/`fgdb-gql` red tallies.
    - The CLI's robot contract is red. The binary's schema no longer equals the frozen fixture (2 laws). `remote.rs:813-817` also emits a `subscription_reset` event the schema lacks.
-   - Nine more UNRUN commits landed during the measurement (`f97c9fff`..`92e83e49`, +3.5k lines). Their re-check is under Evidence.
+   - Nine more UNRUN commits landed during the measurement (`f97c9fff`..`92e83e49`, +3.5k lines). At `92e83e49`:
+     - three new test targets no longer compile; they were written against the pre-widening `CanonicalScalar` property type, the semantic conflict the 10-17 check predicted for every reader of stored values;
+     - rustfmt is red in 22 files.
+
+     So `main` went from "compiles, not green" to "test targets do not compile" within two hours of the last repair.
 3. **Security: RUSTSEC-2026-0382 was published today.** `rustls-webpki` 0.103.15 "may accept distrusted intermediates". It sits on every TLS path (`fgdbd --tls-*`, `fgdb remote --tls-ca-file`). `dependency_policy_e2e` is red on it alone; cargo-deny and the four controls pass.
 4. **The durable architecture is where it was on 10-13.**
    - **Chronicle:** zero diff. No group commit, retention tiers, `BETWEEN` or `BranchManifest`; `pack.rs` is dead.
@@ -187,7 +192,7 @@ not moved for a third consecutive check.**
 | `fgdbd` end to end | keygen, tokens, serve FGP+HTTP+Bolt, remote query/write, scoped and read-only tokens, HTTP, Studio, subscribe, Neo4j driver 6.4 | 0 | all served. Scoped token hides `:Person` (count 0). Read-only write denied. No token: 401. Subscription: baseline plus live delta. Bolt reads work. Driver `execute_query` writes refuse (explicit transaction) |
 | road-ny footprint | `fgdb load` / `compact` / reads / writes / Prism, `/usr/bin/time -l` | 0 | load 14.4 s, 2.1 GB. Disk 332 → 378 → 403 B/edge. Point read 0.94 s cold. Default `count(*)` refused (100k budget). One-row write 1.9 s, 1.5 GB. PageRank 2.3 s / 0.69 GB decoded, 6.8 s / 2.4 GB `--sealed` |
 | Work graph | `br sync --import-only` on a fresh copy of the tracked `.beads` | 1 | duplicate import comment id 2876 (56 duplicated ids); `br doctor`: `jsonl.duplicate_ids` |
-| Tip re-check | fmt, check, clippy at `92e83e49` (css) | — | TIP_RESULT |
+| Tip re-check | fmt, `check --all-targets` at `92e83e49` (css), after 9 more UNRUN commits | 1 / 101 | rustfmt red in 22 files (was 10). Three new test targets **do not compile**: 5 × E0277 from tests written against the pre-k3nub `CanonicalScalar` property type (`fgdb-gql` `compound_stored_aggregates`, `fgdb` `vertex_merge_scripts_all`, `vertex_merge_no_return`). Library targets compile |
 
 ### Vision checklist (2026-10-17 → 2026-10-20)
 
