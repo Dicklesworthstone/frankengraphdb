@@ -348,13 +348,21 @@ fn theta_work_is_inside_cumulative_budgets_and_cancellation() {
 
 #[test]
 fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
+    // A carried vertex's property re-matches it by identity (fgdb-dhcfo;
+    // multipart_reads pins the rows).
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n MATCH (m) WHERE m.p > n.p RETURN n,m",
+            symbols
+        )
+        .is_ok()
+    );
     for text in [
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OR m.p = 2 RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE NOT n <> m RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE (n <> m) RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
         "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + 1 RETURN m",
-        "MATCH (n) WITH n MATCH (m) WHERE m.p > n.p RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
         "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
     ] {

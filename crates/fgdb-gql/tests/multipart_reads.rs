@@ -531,20 +531,14 @@ fn a_carried_vertex_property_read_after_a_later_match_re_matches_it_by_identity(
         execute("MATCH (a) WITH a MATCH (b) RETURN a.p AS x, b.p AS y ORDER BY x, y").len(),
         16
     );
-    // OPTIONAL: only the new binding null-extends; the carried value stays.
-    let optional = execute(
-        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p > a.p + 1 RETURN a.p AS x, b.p AS y ORDER BY x, y",
-    );
-    let null = GraphValue::Scalar(CanonicalScalar::Null);
-    let int = |value: i64| GraphValue::Scalar(CanonicalScalar::Int(value));
-    assert_eq!(
-        optional,
-        vec![
-            GraphValueRow::from_owned_values(vec![int(1), int(3)]),
-            GraphValueRow::from_owned_values(vec![int(2), null.clone()]),
-            GraphValueRow::from_owned_values(vec![int(2), null.clone()]),
-            GraphValueRow::from_owned_values(vec![int(3), null]),
-        ]
+    // OPTIONAL stays refused: a read through a re-matched vertex would be
+    // NULL on a null-extended row although the carried vertex is not.
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p > a.p RETURN a.p AS x, b.p AS y",
+            symbols
+        )
+        .is_err()
     );
     // A binding the WITH dropped is still unknown after the next MATCH.
     assert!(

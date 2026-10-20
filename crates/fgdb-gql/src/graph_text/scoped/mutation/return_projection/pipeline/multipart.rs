@@ -447,11 +447,13 @@ impl<'a> Parser<'a> {
         let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.read_comparisons = Some(Vec::new());
-        // A carried vertex whose property this part reads (`WITH a MATCH (b)
-        // WHERE a.p < b.p`) re-matches by identity, exactly as the name-reuse
-        // form `MATCH (a), (b)` does: the key loop below correlates it with
-        // the carried column (fgdb-dhcfo).
-        if kind.is_some() {
+        // A carried vertex whose property a required part reads (`WITH a
+        // MATCH (b) WHERE a.p < b.p`) re-matches by identity, exactly as the
+        // name-reuse form `MATCH (a), (b)` does: the key loop below
+        // correlates it with the carried column (fgdb-dhcfo). Not in an
+        // OPTIONAL part, where a read through the re-matched vertex would be
+        // NULL on a null-extended row although the carried vertex is not.
+        if kind == Some(RowJoinKind::Inner) {
             for name in self.carried_property_reads(incoming)? {
                 self.capacity(
                     self.syntax.variables.len(),
