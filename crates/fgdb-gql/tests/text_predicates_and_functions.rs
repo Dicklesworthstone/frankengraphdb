@@ -602,14 +602,15 @@ fn composite_values_are_operands_of_scalar_operators() {
     ] {
         assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
     }
-    // A write's SET carries no let slots: the composite still refuses there.
+    // A write's SET reads the composite in the value language too: every
+    // vertex gets size([2]) + 1 = 2 (CLI read-back).
     assert!(
         fgdb_gql::PreparedGraphMutationText::prepare(
             "MATCH (n) SET n.text = size([x IN [1, 2] WHERE x > 1]) + 1",
             fgdb_delta_types::RelationId(1),
             symbols,
         )
-        .is_err()
+        .is_ok()
     );
 }
 

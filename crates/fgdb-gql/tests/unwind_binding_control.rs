@@ -71,8 +71,10 @@ fn controlled_and_plain_binding_have_identical_programs_and_locations() {
         })
         .unwrap();
     assert_eq!(definitions, 1);
-    // Entire statement reservation, both records, then terminal acceptance.
-    assert_eq!(binding_units, [2, 1, 1, 1]);
+    // The feeds-later-match inspection of the lowered definition, one unit
+    // per byte (ce01f9bf, multi-row batches only), then the entire statement
+    // reservation, both records and terminal acceptance.
+    assert_eq!(binding_units, [QUERY.len() as u64, 2, 1, 1, 1]);
     assert_eq!(plain.program(), bound.program());
     // Independently bind native statements, without the UNWIND lowering or
     // either batch wrapper, so equality is not just one wrapper calling itself.

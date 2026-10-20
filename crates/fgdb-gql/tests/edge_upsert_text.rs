@@ -68,14 +68,23 @@ fn native_selection_and_branches_share_one_frozen_parameter_contract() {
 
 #[test]
 fn malformed_branch_direction_and_target_never_reach_catalog_resolution() {
+    // afbab8f8 admits undirected and property-keyed relationship upserts: an
+    // undirected MERGE matches either orientation and creates left to right.
+    for text in [
+        "MATCH (a),(b) MERGE (a)-[e:R]-(b) ON MATCH SET e.w=1",
+        "MATCH (a),(b) MERGE (a)-[e:R {w:1}]->(b) ON MATCH SET e.w=1",
+    ] {
+        assert!(
+            PreparedGraphEdgeUpsertText::prepare(text, R, symbols).is_ok(),
+            "{text}"
+        );
+    }
     for text in [
         "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON MATCH SET e.w=1 ON MATCH SET e.p=2",
-        "MATCH (a),(b) MERGE (a)-[e:R]-(b) ON MATCH SET e.w=1",
         "MATCH (a),(b) MERGE (a)<-[e:R]->(b) ON MATCH SET e.w=1",
         "MATCH (a),(b) MERGE (a)-[a:R]->(b) ON MATCH SET a.w=1",
         "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON MATCH SET a.w=1",
         "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON CREATE SET e.w=a.p",
-        "MATCH (a),(b) MERGE (a)-[e:R {w:1}]->(b) ON MATCH SET e.w=1",
         "MATCH (a),(b) MERGE (a)-[e:R]->(b)",
     ] {
         let calls = Cell::new(0);

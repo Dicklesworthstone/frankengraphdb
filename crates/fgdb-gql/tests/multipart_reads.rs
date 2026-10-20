@@ -413,12 +413,17 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
             .map(|(value, vid)| scalar_vertex(value, vid))
             .to_vec()
     );
-    // Not a top-level AND conjunct, not equality, or inside a scope that hides
-    // the imported columns: refused before any catalog call, as before.
+    // A comparison that is not equality filters the same imported product:
+    // every vertex below the maximum 3.
+    assert_eq!(
+        execute("MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q ORDER BY q"),
+        [1, 2, 3].map(|id| vertices(&[id])).to_vec()
+    );
+    // Not a top-level AND conjunct, or inside a scope that hides the
+    // imported columns: refused before any catalog call, as before.
     for text in [
         "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m OR q.p = 1 RETURN q",
         "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE NOT q.p = m RETURN q",
-        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q",
         "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q",
     ] {
         let mut calls = 0;
@@ -467,12 +472,19 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
     );
     // Relationship identity needs identified edges: multipart_optional_reads
     // a_top_level_where_identity_correlates_a_carried_relationship.
-    // Not a top-level AND conjunct, or not equality: refused before any
-    // catalog call, as for the property form.
+    // Inequality filters the carried product: each of the four vertices is
+    // every other carried vertex's b, three times.
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) WHERE a <> b RETURN b ORDER BY b"),
+        [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+            .map(|id| vertices(&[id]))
+            .to_vec()
+    );
+    // Not a top-level AND conjunct: refused before any catalog call, as for
+    // the property form.
     for text in [
         "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
         "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",
-        "MATCH (a) WITH a MATCH (b) WHERE a <> b RETURN b",
     ] {
         let mut calls = 0;
         assert!(

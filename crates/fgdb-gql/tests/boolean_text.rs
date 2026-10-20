@@ -570,14 +570,14 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
         fgdb_gql::PreparedGraphSetText::prepare("MATCH (a) WITH a.n AS n RETURN n:L AS x", symbols)
             .is_err()
     );
-    assert!(
-        fgdb_gql::PreparedGraphMutationText::prepare(
-            "MATCH (a) SET a.n = a:L",
-            RelationId(1),
-            symbols
-        )
-        .is_err()
-    );
+    // A written label test is the same Boolean value a RETURN reads: SET
+    // stores true or false (both the CLI and the TCK runner read it back).
+    for text in ["MATCH (a) SET a.n = a:L", "MATCH (a) SET a.n = 'L' IN labels(a)"] {
+        assert!(
+            fgdb_gql::PreparedGraphMutationText::prepare(text, RelationId(1), symbols).is_ok(),
+            "{text}"
+        );
+    }
 }
 
 /// openCypher binds IN tighter than comparisons, AND, OR and XOR, and looser
