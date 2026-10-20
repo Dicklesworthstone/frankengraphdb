@@ -386,9 +386,9 @@ where
     if let Some(requested) = stage.order()
         && !stage.columns().is_empty()
     {
-        // Empty requested order is native canonical tuple order, whose NULL
-        // position differs from an explicit default ASC key. Reserve this
-        // bounded physical key vector before constructing it.
+        // Empty requested order is native canonical tuple order. Explicit
+        // keys use language orderability, including numeric representation
+        // ties. Preserve that distinction before expanding an empty key list.
         let count = if requested.is_empty() {
             stage.columns().len()
         } else {
@@ -415,11 +415,12 @@ where
             charge,
         );
         let (sorted, used) = transformed
-            .sort_continuing(
+            .sort_query_continuing(
                 work.cx,
                 destination,
                 source,
                 &order.0,
+                !requested.is_empty(),
                 limits.run_rows,
                 limits.max_runs,
                 limits.page_bytes,
