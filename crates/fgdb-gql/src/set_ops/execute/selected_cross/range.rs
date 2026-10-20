@@ -2,7 +2,8 @@
 //!
 //! This is a resident access path, not a predicate evaluator or a spill index.
 //! Right rows remain in place. Only their ordinals and scalar-family intervals
-//! are indexed; every returned candidate still runs the complete native WHERE.
+//! are indexed. Row emission still runs the complete native WHERE; a proved
+//! complete band can instead contribute its exact interval cardinality.
 
 use super::*;
 use core::ops::Range;
@@ -113,6 +114,14 @@ impl Index {
         let Some(constraint) = required(width, code, columns, control)? else {
             return Ok(None);
         };
+        Self::with_constraint(constraint, right, control).map(Some)
+    }
+
+    fn with_constraint<E>(
+        constraint: Constraint,
+        right: &[GraphValueRow],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let at = constraint.key.1;
         let mut ordinals = Vec::new();
         for (ordinal, row) in right.iter().enumerate() {
@@ -144,11 +153,11 @@ impl Index {
             control(GlaExecutionEvent::ScratchEntry)?;
             families.push(position..position + 1);
         }
-        Ok(Some(Self {
+        Ok(Self {
             constraint,
             ordinals,
             families,
-        }))
+        })
     }
 
     fn range<E>(
@@ -157,8 +166,19 @@ impl Index {
         right: &[GraphValueRow],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Range<usize>, E> {
+        self.range_for(self.constraint, row, right, control)
+    }
+
+    fn range_for<E>(
+        &self,
+        constraint: Constraint,
+        row: &GraphValueRow,
+        right: &[GraphValueRow],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Range<usize>, E> {
         control(GlaExecutionEvent::Work)?;
-        let (left_column, right_column) = self.constraint.key;
+        let (left_column, right_column) = constraint.key;
+        debug_assert_eq!(right_column, self.constraint.key.1);
         let value = &row.values()[left_column];
         if scalar(value).is_none() {
             return Ok(0..0);
@@ -172,19 +192,19 @@ impl Index {
                 continue;
             }
             let upper = matches!(
-                self.constraint.comparison,
+                constraint.comparison,
                 IntegerComparison::Less | IntegerComparison::GreaterOrEqual
             );
             let bound = boundary(
                 row,
                 right,
                 &self.ordinals[family.clone()],
-                &[self.constraint.key],
+                &[constraint.key],
                 upper,
                 0,
                 control,
             )? + family.start;
-            return Ok(match self.constraint.comparison {
+            return Ok(match constraint.comparison {
                 IntegerComparison::Less | IntegerComparison::LessOrEqual => bound..family.end,
                 IntegerComparison::Greater | IntegerComparison::GreaterOrEqual => family.start..bound,
                 _ => unreachable!("only checked inequalities are admitted"),
@@ -195,9 +215,11 @@ impl Index {
 
     /// Restore original right order, never key order, before the caller runs
     /// its complete eager predicate and observes output occurrences. Reuse one
-    /// ordinal buffer; no row or scalar payload is cloned. Its capacity is at
-    /// most the right input size. Logical work/scratch admissions remain shared
-    /// and cumulative; these events are not a byte-memory or spill guarantee.
+    /// ordinal buffer; no row or scalar payload is cloned. Retained length is
+    /// at most the right input size; allocator capacity may exceed that length.
+    /// A K-candidate interval adds O(K log K) ordinal ordering, so this path can
+    /// cost more than a full scan for broad predicates. Logical work/scratch
+    /// admissions remain shared and cumulative, not a byte cap or spill claim.
     pub(super) fn select<E>(
         &self,
         row: &GraphValueRow,
@@ -216,6 +238,86 @@ impl Index {
             Ok(a.cmp(b))
         })
     }
+}
+
+// Unlike a necessary constraint, this recognizes the COMPLETE predicate as a
+// conjunction of scalar bounds on one right column. It must refuse residuals,
+// OR and NOT before inspecting inputs or allocating any index. Column mapping
+// and operand reversal are identical to row emission's constraint binding.
+fn complete_band<E>(
+    width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<Vec<Constraint>>, E> {
+    let mut right_column = None;
+    for op in code {
+        control(GlaExecutionEvent::Work)?;
+        if matches!(op, GraphSetPredicateOp::And | GraphSetPredicateOp::Truth(Some(true))) {
+            continue;
+        }
+        let Some(bound) = inequality(op, width, columns) else {
+            return Ok(None);
+        };
+        if right_column.is_some_and(|column| column != bound.key.1) {
+            return Ok(None);
+        }
+        right_column = Some(bound.key.1);
+    }
+    if right_column.is_none() {
+        return Ok(None);
+    }
+    let mut bounds = Vec::new();
+    for op in code {
+        control(GlaExecutionEvent::Work)?;
+        if let Some(bound) = inequality(op, width, columns) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            bounds.push(bound);
+        }
+    }
+    Ok(Some(bounds))
+}
+
+/// Count exact scalar intervals without a selected-ordinal buffer or per-pair
+/// evaluation/copy. Only the caller's existing checked accumulator accepts a
+/// contribution; no product of usize counts is computed here. False means the
+/// immutable predicate shape is not exact, never recovery from a failed build.
+/// For P bounds this uses O(R log R + L*P*log R) scalar-key work and O(R + P)
+/// logical retained metadata. Payload comparison costs remain governed.
+pub(super) fn try_count<E, Context>(
+    left: &[GraphValueRow],
+    right: &[GraphValueRow],
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    context: &mut Context,
+    event: &mut impl FnMut(&mut Context, GlaExecutionEvent) -> Result<(), E>,
+    consume: &mut impl FnMut(usize, &mut Context) -> Result<(), E>,
+) -> Result<bool, E> {
+    let Some(first) = left.first() else {
+        return Ok(true);
+    };
+    let Some(bounds) = complete_band(first.len(), code, columns, &mut |value| {
+        event(context, value)
+    })? else {
+        return Ok(false);
+    };
+    let index = Index::with_constraint(bounds[0], right, &mut |value| event(context, value))?;
+    for row in left {
+        event(context, GlaExecutionEvent::Work)?;
+        let (mut start, mut end) = (0, index.ordinals.len());
+        for &bound in &bounds {
+            let range = index.range_for(bound, row, right, &mut |value| event(context, value))?;
+            start = start.max(range.start);
+            end = end.min(range.end);
+        }
+        // Different scalar families, NULL bounds and contradictory bands can
+        // produce disjoint intervals. They are UNKNOWN/FALSE, never underflow.
+        if end > start {
+            consume(end - start, context)?;
+        }
+    }
+    event(context, GlaExecutionEvent::Work)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -449,5 +551,167 @@ mod tests {
         ).unwrap();
         assert_eq!(result.value, vec![row(vec![int(1), int(2)]), row(vec![int(1), int(4)]), row(vec![int(1), int(2)])]);
         assert_eq!(query.canonical_bytes(), definition);
+    }
+
+    fn counted(
+        left: &[GraphValueRow],
+        right: &[GraphValueRow],
+        code: &[GraphSetPredicateOp],
+        mapping: Option<&[usize]>,
+    ) -> u128 {
+        let mut total = 0_u128;
+        super::super::count_with_context(
+            left, right, code, mapping, &mut total,
+            |_, _| Ok::<_, usize>(()),
+            |amount, total| { *total += amount as u128; Ok(()) },
+        ).unwrap();
+        total
+    }
+
+    #[test]
+    fn complete_bands_count_intersections_and_leave_residuals_to_the_native_predicate() {
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let decimal = GraphValue::Scalar(CanonicalScalar::Decimal(
+            CanonicalDecimal::from_integer(2).unwrap(),
+        ));
+        let left = [
+            row(vec![int(1), float(3.0)]), row(vec![float(2.0), int(2)]),
+            row(vec![int(3), int(1)]), row(vec![null.clone(), int(3)]),
+            row(vec![decimal.clone(), int(3)]), row(vec![decimal.clone(), decimal.clone()]),
+        ];
+        let right = [
+            row(vec![int(3)]), row(vec![float(2.0)]), row(vec![int(1)]),
+            row(vec![int(2)]), row(vec![null]), row(vec![decimal]),
+        ];
+        // r, upper, lower, r: repeated projected cells and reversed operands.
+        let mapping = [2, 1, 0, 2];
+        for first in OPS {
+            for second in OPS {
+                let code = [comparison(0, first, 2), comparison(1, second, 3), GraphSetPredicateOp::And];
+                validate(mapping.len(), &code);
+                assert!(complete_band(2, &code, Some(&mapping), &mut allow).unwrap().is_some());
+                assert_eq!(counted(&left, &right, &code, Some(&mapping)), ordinary(&left, &right, &code, Some(&mapping)).len() as u128);
+            }
+        }
+        let less = comparison(0, IntegerComparison::Less, 2);
+        for code in [
+            vec![less.clone(), GraphSetPredicateOp::Truth(None), GraphSetPredicateOp::And],
+            vec![less.clone(), GraphSetPredicateOp::Truth(Some(true)), GraphSetPredicateOp::Or],
+            vec![less.clone(), GraphSetPredicateOp::Not],
+            vec![less, comparison(0, IntegerComparison::Less, 1), GraphSetPredicateOp::And],
+        ] {
+            validate(3, &code);
+            let mut deliveries = 0;
+            assert!(!try_count(
+                &left, &right, &code, None, &mut deliveries,
+                &mut |_, _| Ok::<_, usize>(()),
+                &mut |_, deliveries| { *deliveries += 1; Ok(()) },
+            ).unwrap());
+            assert_eq!(deliveries, 0, "ineligible counting cannot publish a partial count");
+            assert_eq!(counted(&left, &right, &code, None), ordinary(&left, &right, &code, None).len() as u128);
+        }
+        let different_right_columns = [
+            comparison(0, IntegerComparison::Less, 2),
+            comparison(1, IntegerComparison::Greater, 3),
+            GraphSetPredicateOp::And,
+        ];
+        validate(4, &different_right_columns);
+        assert!(complete_band(2, &different_right_columns, None, &mut allow).unwrap().is_none());
+    }
+
+    #[test]
+    fn exact_range_count_contributes_once_per_left_row_not_per_pair() {
+        let left = vec![row(vec![int(0)]); 10_000];
+        let right = vec![row(vec![float(1.0)]); 10_000];
+        let mut context = (0_usize, 0_usize, 0_usize, 0_u128);
+        super::super::count_with_context(
+            &left, &right, &[comparison(0, IntegerComparison::Less, 1)], None,
+            &mut context,
+            |context, event| {
+                context.0 += 1;
+                context.1 += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                Ok::<_, usize>(())
+            },
+            |amount, context| {
+                context.2 += 1;
+                context.3 += amount as u128;
+                Ok(())
+            },
+        ).unwrap();
+        assert_eq!(context.3, 100_000_000);
+        assert_eq!(context.2, left.len());
+        assert!(context.1 < 3 * right.len(), "no per-pair scratch: {context:?}");
+        assert!(context.0 < 200 * (left.len() + right.len()), "{context:?}");
+    }
+
+    #[test]
+    fn public_count_aggregate_and_zero_page_preserve_completed_children() {
+        use crate::{GraphAggregate, PreparedGraphSetAggregate};
+        let sequence = |name: &str, data: &[i64]| {
+            PreparedGraphSet::singleton().unwind(
+                name.into(),
+                GraphSetValue::List(data.iter().map(|&value| GraphSetValue::Value(int(value))).collect()),
+            ).unwrap()
+        };
+        let no_source = |_: &crate::algebra::PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy|
+            -> Result<crate::GqlQueryExecution<GraphValueRow>, GqlQueryError<usize, usize>> {
+            panic!("source-free range aggregate")
+        };
+        let allowance = GqlQueryPolicy::new(0, 1, 100_000, 5_000);
+        let input = sequence("l", &[0; 128]).cross_join(sequence("r", &[1; 128])).unwrap()
+            .filter(&[comparison(0, IntegerComparison::Less, 1)]).unwrap();
+        let summary = PreparedGraphSetAggregate::prepare(
+            input.clone(), &[], &[GraphAggregate::count_rows("n")], 0, None,
+        ).unwrap();
+        let result = summary.execute_governed(allowance, no_source, || Ok::<_, usize>(())).unwrap();
+        assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(16_384));
+        assert_eq!(result.rows.result_rows, 1);
+        assert!(result.evaluator.scratch_entries < 5_000);
+        assert_eq!(input.with_page(7, Some(5)).count_governed(
+            allowance, no_source, || Ok::<_, usize>(()),
+        ).unwrap().0, Some(5));
+        // No empty result may hide the right child's data exception.
+        let bad = sequence("r", &[1]).project(
+            vec![GraphSetProjection::new("bad", GraphSetValue::Size(Box::new(GraphSetValue::Column(0))))],
+            GraphSetQuantifier::All,
+        ).unwrap();
+        let empty = sequence("l", &[0]).with_page(0, Some(0)).cross_join(bad).unwrap()
+            .filter(&[comparison(0, IntegerComparison::Less, 1)]).unwrap().with_page(0, Some(0));
+        assert!(matches!(
+            empty.count_governed(allowance, no_source, || Ok::<_, usize>(())),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+        ));
+    }
+
+    #[test]
+    fn band_count_refusals_and_consumer_errors_never_restart_pair_enumeration() {
+        let left = [row(vec![int(0), int(3)]), row(vec![int(1), int(2)])];
+        let right = [row(vec![int(1)]), row(vec![int(2)]), row(vec![int(3)]), row(vec![int(2)])];
+        let before = (left.clone(), right.clone());
+        let code = [comparison(0, IntegerComparison::LessOrEqual, 2), comparison(1, IntegerComparison::Greater, 2), GraphSetPredicateOp::And];
+        let attempt = |stop: Option<usize>, reject: bool| -> Result<(usize, u128), usize> {
+            let mut state = (0, 0);
+            super::super::count_with_context(
+                &left, &right, &code, None, &mut state,
+                |state, _| {
+                    state.0 += 1;
+                    if stop == Some(state.0) { Err(state.0) } else { Ok(()) }
+                },
+                |amount, state| {
+                    if reject { return Err(usize::MAX); }
+                    state.1 += amount as u128;
+                    Ok(())
+                },
+            )?;
+            Ok(state)
+        };
+        let expected = attempt(None, false).unwrap();
+        assert_eq!(expected.1, 4);
+        for stop in 1..=expected.0 {
+            assert_eq!(attempt(Some(stop), false), Err(stop));
+            assert_eq!((&left, &right), (&before.0, &before.1));
+        }
+        assert_eq!(attempt(None, true), Err(usize::MAX));
+        assert_eq!(attempt(None, false).unwrap(), expected);
     }
 }

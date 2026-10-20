@@ -237,7 +237,7 @@ fn boundary<E>(
     Ok(lo)
 }
 
-/// The one ordered access structure used by row emission and cardinality.
+/// Equality access structure shared by row emission and cardinality.
 struct Index {
     keys: Vec<Key>,
     ordinals: Vec<usize>,
@@ -310,7 +310,7 @@ impl Index {
 
 /// The consumer is invoked only for TRUE pairs, in the original left-major
 /// sequence. Inputs remain resident; the index is O(right occurrences), with
-/// no key/payload clone. For fixed predicate/key width, index work is
+/// no key/payload clone. For fixed predicate/key width, equality index work is
 /// O(R log R + L log R + matching-key candidates), not O(L*R). Without an
 /// equality key, a necessary scalar inequality can use range probes instead.
 /// Range candidates are restored to original right-ordinal order before the
@@ -406,8 +406,10 @@ pub(super) fn visit_with_context<E, Context>(
 /// Count selected occurrences without constructing output rows. For a pure
 /// conjunction of cross-input equalities, each indexed range is already a
 /// complete TRUE run: contribute its length in one checked caller-owned step.
-/// Residual/OR/NOT predicates use the same borrowed-pair walk, contributing
-/// one per accepted occurrence. No outer join, DISTINCT or coercion is implied.
+/// Pure inequality conjunctions on one right column likewise intersect exact
+/// intervals, including bands bounded by different left columns. Other
+/// residual/OR/NOT predicates use the borrowed-pair walk, contributing one per
+/// accepted occurrence. No outer join, DISTINCT or coercion is implied.
 /// The caller's exact cardinality accumulator owns overflow and final paging.
 pub(super) fn count_with_context<E, Context>(
     left: &[GraphValueRow],
@@ -434,6 +436,17 @@ pub(super) fn count_with_context<E, Context>(
         ) || equality(op, first.len(), columns).is_some();
     }
     if !runs {
+        if range::try_count(
+            left,
+            right,
+            code,
+            columns,
+            context,
+            &mut event,
+            &mut consume,
+        )? {
+            return Ok(());
+        }
         return visit_with_context(
             left,
             right,
