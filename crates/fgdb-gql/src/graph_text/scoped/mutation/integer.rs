@@ -36,6 +36,11 @@ enum ParsedOp {
         keys: Box<[Box<str>]>,
         at: usize,
     },
+    /// `IN $list` (fgdb-dn9q3): the list argument's membership test.
+    ListMembers {
+        index: usize,
+        at: usize,
+    },
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
@@ -120,6 +125,46 @@ fn parameter_field(
     GqlScalarParameter::new(value).map_err(|_| refused())
 }
 
+/// `IN $list` (fgdb-dn9q3): each member becomes a scalar operand, then one
+/// InList over them, so the membership is exactly the literal list's (three
+/// valued, an empty list FALSE). A NULL argument compares `= NULL`, UNKNOWN for
+/// every operand. A nested list or map member, or a list beyond the scalar
+/// predicate byte bound, refuses; prepare_scalar still bounds the instruction
+/// count.
+fn list_members(
+    ops: &mut Vec<GraphIntegerOp>,
+    values: &[GqlParameterValue],
+    index: usize,
+    at: usize,
+) -> Result<(), GraphMutationTextError> {
+    let refused = || failure(at, GraphMutationTextErrorKind::IntegerOperand);
+    let list = match values.get(index) {
+        Some(GqlParameterValue::List(list)) => list,
+        Some(GqlParameterValue::Scalar(value)) if value.kind() == CanonicalScalarKind::Null => {
+            ops.push(GraphIntegerOp::Literal(None));
+            ops.push(GraphIntegerOp::Compare(IntegerComparison::Equal));
+            return Ok(());
+        }
+        _ => return Err(refused()),
+    };
+    if list.canonical_bytes().len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES {
+        return Err(refused());
+    }
+    for member in list.values() {
+        let crate::algebra::GraphValue::Scalar(member) = member else {
+            return Err(refused());
+        };
+        let member = GqlScalarParameter::new(member.clone()).map_err(|_| refused())?;
+        ops.push(GraphIntegerOp::Scalar(
+            member.predicate(IntegerComparison::Equal),
+        ));
+    }
+    ops.push(GraphIntegerOp::InList {
+        members: list.values().len(),
+    });
+    Ok(())
+}
+
 pub(in crate::graph_text) fn bind_integer(
     program: &[MutationIntegerTemplateOp],
     values: &[GqlParameterValue],
@@ -127,7 +172,12 @@ pub(in crate::graph_text) fn bind_integer(
 ) -> Result<GraphIntegerExpression, GraphMutationTextError> {
     let mut ops = Vec::with_capacity(program.len());
     for op in program {
+        if let MutationIntegerTemplateOp::ListMembers { index, at } = op {
+            list_members(&mut ops, values, *index, *at)?;
+            continue;
+        }
         ops.push(match op {
+            MutationIntegerTemplateOp::ListMembers { .. } => unreachable!("expanded above"),
             MutationIntegerTemplateOp::Bound(op) => op.clone(),
             MutationIntegerTemplateOp::Parameter { index, at } => {
                 let value = values
@@ -973,6 +1023,9 @@ impl<'a> Parser<'a> {
                 ParsedOp::ParameterField { index, keys, at } => {
                     MutationIntegerTemplateOp::ParameterField { index, keys, at }
                 }
+                ParsedOp::ListMembers { index, at } => {
+                    MutationIntegerTemplateOp::ListMembers { index, at }
+                }
                 ParsedOp::Unary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Unary(op)),
                 ParsedOp::Binary(op) => {
                     MutationIntegerTemplateOp::Bound(GraphIntegerOp::Binary(op))
@@ -1029,6 +1082,11 @@ impl<'a> Parser<'a> {
                     // bound. NULL checks structure without assuming an integer
                     // or text domain; bind_integer validates the actual scalar.
                     Ok(GraphIntegerOp::Literal(None))
+                }
+                // The members arrive at binding; an empty membership has the
+                // same shape (one operand in, one Boolean out).
+                MutationIntegerTemplateOp::ListMembers { .. } => {
+                    Ok(GraphIntegerOp::InList { members: 0 })
                 }
                 MutationIntegerTemplateOp::Parameter { index, at } => {
                     let kind = self.syntax.parameters[*index].parameter_type;
@@ -1357,23 +1415,36 @@ impl<'a> Parser<'a> {
             {
                 let negate = self.take_word("NOT")?;
                 self.word("IN")?;
-                self.punct(b'[', "[")?;
-                let mut members = 0;
-                if !self.take(b']')? {
-                    loop {
-                        self.scalar_concat(columns, depth + 1, program)?;
-                        members += 1;
-                        if self.take(b']')? {
-                            break;
+                if let TokenKind::Parameter(name) = self.current.kind
+                    && matches!(self.parameter_types.get(name), Some(GqlParameterType::List))
+                {
+                    // `n.p IN $ids`: binding pushes the argument's members as
+                    // the literal list's operands, so the same three-valued
+                    // InList decides (fgdb-dn9q3).
+                    let list_at = self.current.at;
+                    let Number::Parameter(index) = self.number(GqlParameterType::List)? else {
+                        unreachable!("the current native token is a parameter");
+                    };
+                    emit(program, ParsedOp::ListMembers { index, at: list_at }, at)?;
+                } else {
+                    self.punct(b'[', "[")?;
+                    let mut members = 0;
+                    if !self.take(b']')? {
+                        loop {
+                            self.scalar_concat(columns, depth + 1, program)?;
+                            members += 1;
+                            if self.take(b']')? {
+                                break;
+                            }
+                            self.punct(b',', ",")?;
                         }
-                        self.punct(b',', ",")?;
                     }
+                    emit(
+                        program,
+                        ParsedOp::Bound(GraphIntegerOp::InList { members }),
+                        at,
+                    )?;
                 }
-                emit(
-                    program,
-                    ParsedOp::Bound(GraphIntegerOp::InList { members }),
-                    at,
-                )?;
                 if negate {
                     emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
                 }

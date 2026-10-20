@@ -638,6 +638,10 @@ fn bind_fields(
                                 | MutationIntegerTemplateOp::ParameterField { .. } => {
                                     GraphIntegerOp::Literal(None)
                                 }
+                                // One operand in, one Boolean out (fgdb-dn9q3).
+                                MutationIntegerTemplateOp::ListMembers { .. } => {
+                                    GraphIntegerOp::InList { members: 0 }
+                                }
                             })
                             .collect();
                         GraphIntegerExpression::prepare_scalar(&shape).map_err(|kind| {

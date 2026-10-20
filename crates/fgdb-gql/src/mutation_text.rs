@@ -25,6 +25,13 @@ pub(crate) enum MutationIntegerTemplateOp {
         keys: Box<[Box<str>]>,
         at: usize,
     },
+    /// `IN $list` (fgdb-dn9q3): the list argument's members become scalar
+    /// operands and one InList over them at binding, so a membership over a
+    /// list argument is the literal list's.
+    ListMembers {
+        index: usize,
+        at: usize,
+    },
 }
 
 impl MutationIntegerTemplateOp {
@@ -48,6 +55,10 @@ impl MutationIntegerTemplateOp {
                     bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(key.as_bytes());
                 }
+            }
+            Self::ListMembers { index, .. } => {
+                bytes.push(3);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
             }
         }
     }

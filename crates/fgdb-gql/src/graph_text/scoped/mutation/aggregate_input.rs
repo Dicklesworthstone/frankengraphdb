@@ -60,6 +60,10 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
                             ..
                         },
                     ) => a == b && a_keys == b_keys,
+                    (
+                        MutationIntegerTemplateOp::ListMembers { index: a, .. },
+                        MutationIntegerTemplateOp::ListMembers { index: b, .. },
+                    ) => a == b,
                     _ => false,
                 })
         }

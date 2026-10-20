@@ -650,6 +650,137 @@ fn in_ends_its_list_operand_before_boolean_operators() {
     }
 }
 
+/// fgdb-dn9q3: `a.n IN $xs` with a declared List argument is the literal
+/// list's membership, member for member: three-valued, NOT outside the
+/// membership, an empty list FALSE, inside AND/OR as any predicate. A NULL
+/// argument is UNKNOWN for every vertex. A nested member refuses at binding,
+/// and the template stays bindable.
+#[test]
+fn a_list_argument_in_a_pattern_where_is_the_literal_lists_membership() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [
+        Some(CanonicalScalar::Int(1)),
+        Some(CanonicalScalar::Int(2)),
+        Some(CanonicalScalar::Int(3)),
+        Some(CanonicalScalar::Null),
+        None,
+    ]
+    .map(|value| value.map(CanonicalPropertyValue::from));
+    let rows = |pattern: &PreparedGraphPattern<GraphValueRow>| -> Vec<VId> {
+        pattern
+            .plan()
+            .execute_governed_with_properties(
+                values.len() as u64,
+                (1..=values.len()).map(|vid| VId(vid as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(values[vid.0 as usize - 1].as_ref()),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values()[0].as_vertex().unwrap())
+            .collect()
+    };
+    let calls = Cell::new(0);
+    let declared = |predicate: &str| {
+        PreparedGraphText::prepare_with_parameter_types(
+            &format!("MATCH (a) WHERE {predicate} RETURN a"),
+            &[("xs", GqlParameterType::List)],
+            |kind: GraphSymbolKind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap_or_else(|error| panic!("{predicate}: {error:?}"))
+    };
+    let list = |members: &[Option<i64>]| {
+        GqlParameters::new()
+            .with_list(
+                "xs",
+                members
+                    .iter()
+                    .map(|member| {
+                        GraphValue::Scalar(
+                            member.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap()
+    };
+    for (predicate, literal, members, expected) in [
+        (
+            "a.n IN $xs",
+            "a.n IN [1, 3, 3]",
+            &[Some(1), Some(3), Some(3)][..],
+            &[1, 3][..],
+        ),
+        (
+            "a.n NOT IN $xs",
+            "a.n NOT IN [1, 3]",
+            &[Some(1), Some(3)],
+            &[2],
+        ),
+        ("a.n IN $xs", "a.n IN [1, NULL]", &[Some(1), None], &[1]),
+        (
+            "NOT a.n IN $xs",
+            "NOT a.n IN [1, NULL]",
+            &[Some(1), None],
+            &[],
+        ),
+        ("a.n IN $xs", "a.n IN []", &[], &[]),
+        ("a.n NOT IN $xs", "a.n NOT IN []", &[], &[1, 2, 3, 4, 5]),
+        (
+            "a.n IN $xs AND a.n > 1",
+            "a.n IN [1, 2, 3] AND a.n > 1",
+            &[Some(1), Some(2), Some(3)],
+            &[2, 3],
+        ),
+        (
+            "a.n IN $xs OR a.n IS NULL",
+            "a.n IN [2] OR a.n IS NULL",
+            &[Some(2)],
+            &[2, 4, 5],
+        ),
+    ] {
+        let expected: Vec<_> = expected.iter().map(|&vid| VId(vid)).collect();
+        let template = declared(predicate);
+        assert_eq!(
+            rows(&template.bind_parameters(&list(members)).unwrap()),
+            expected,
+            "{predicate}"
+        );
+        assert_eq!(
+            rows(&query(&format!("MATCH (a) WHERE {literal} RETURN a"))),
+            expected,
+            "{literal}"
+        );
+    }
+    // One catalog call per statement: the list never re-enters resolution.
+    assert_eq!(calls.get(), 8);
+    let template = declared("a.n IN $xs");
+    let null = GqlParameters::new().with_null("xs").unwrap();
+    assert!(rows(&template.bind_parameters(&null).unwrap()).is_empty());
+    let negated = declared("a.n NOT IN $xs");
+    assert!(rows(&negated.bind_parameters(&null).unwrap()).is_empty());
+    let nested = GqlParameters::new()
+        .with_list(
+            "xs",
+            vec![GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into(),
+            )],
+        )
+        .unwrap();
+    assert!(template.bind_parameters(&nested).is_err());
+    assert_eq!(
+        rows(&template.bind_parameters(&list(&[Some(2)])).unwrap()),
+        [VId(2)]
+    );
+}
+
 #[test]
 fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolution() {
     for statement in [

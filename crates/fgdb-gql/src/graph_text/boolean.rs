@@ -591,8 +591,15 @@ impl<'a> Parser<'a> {
         if matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
             token = lexer.next()?;
         }
-        Ok(matches!(token.kind, TokenKind::Word(word)
-            if word.eq_ignore_ascii_case("IN") || word.eq_ignore_ascii_case("BETWEEN")))
+        Ok(match token.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("BETWEEN") => true,
+            // A list argument (`n.p IN $ids`) is the scalar compiler's
+            // membership; this lowering reads only a literal list (fgdb-dn9q3).
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => {
+                !matches!(lexer.next()?.kind, TokenKind::Parameter(_))
+            }
+            _ => false,
+        })
     }
 
     fn admit_compound_leaf(&mut self) -> Result<(), GraphPatternTextError> {
