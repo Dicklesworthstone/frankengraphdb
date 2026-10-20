@@ -71,7 +71,7 @@ fn overlay_reads_staged_vertex_but_abort_leaves_no_durable_vertex() {
             .expect("overlay exposes staged vertex");
         assert_eq!(
             staged.props,
-            vec![(PROPERTY, CanonicalScalar::Int(22))],
+            vec![(PROPERTY, CanonicalScalar::Int(22).into())],
             "the transaction reads its own staged property"
         );
         assert!(
@@ -155,7 +155,7 @@ fn committed_overlay_vertex_is_visible_to_independent_replay() {
             .expect("committed overlay vertex is durable");
         assert_eq!(
             vertex.props.get(&PROPERTY),
-            Some(&CanonicalScalar::Int(42)),
+            Some(&CanonicalScalar::Int(42).into()),
             "independent replay sees the committed property"
         );
     });

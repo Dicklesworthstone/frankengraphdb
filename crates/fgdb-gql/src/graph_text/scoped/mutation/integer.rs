@@ -411,6 +411,19 @@ impl<'a> Parser<'a> {
         if self.list_case_follows(row)? {
             return self.list_case_value(columns, nesting, at);
         }
+        // A list- or map-typed parameter is that argument's value. Read it
+        // here: the composite reader would hand a bare parameter back to the
+        // scalar compiler, which sees the same comparison again.
+        if let TokenKind::Parameter(name) = self.current.kind
+            && let Some(kind @ (GqlParameterType::List | GqlParameterType::Map)) =
+                self.parameter_types.get(name).copied()
+        {
+            let at = self.current.at;
+            let Number::Parameter(index) = self.number(kind)? else {
+                unreachable!("the current native token is a parameter");
+            };
+            return Ok(ReadValueTemplate::parameter(index, at, kind));
+        }
         self.composite_value(columns, nesting, at)
     }
 
@@ -732,7 +745,9 @@ impl<'a> Parser<'a> {
                 .position(|(name, _)| name.text == word)
             && match schema[column].1 {
                 crate::GraphSetColumnType::Any => true,
-                crate::GraphSetColumnType::Scalar => self.temporal_field_follows()?,
+                crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Stored => {
+                    self.temporal_field_follows()?
+                }
                 _ => false,
             }
         {
@@ -742,6 +757,35 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// A graph function of literal NULL (`type(null)`, `nodes(null)`) is NULL
+    /// (TCK Graph4 [3], Path1 [1], Path2 [3]); false, with nothing consumed,
+    /// otherwise. Out of line: integer_unary repeats once per nesting level.
+    #[inline(never)]
+    fn null_graph_function(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        if Parser::path_function(Name { text: word, at }).is_err()
+            || !matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+            || !matches!(lexer.next()?.kind, TokenKind::Word(null) if null.eq_ignore_ascii_case("NULL"))
+            || !matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(false);
+        }
+        for _ in 0..4 {
+            self.advance()?;
+        }
+        let null = GqlScalarParameter::new(CanonicalScalar::Null)
+            .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+        emit(program, ParsedOp::Atom(Operand::Literal(null), at), at)?;
+        Ok(true)
     }
 
     /// Whether `.field` follows the current name and names a temporal field,
@@ -835,11 +879,17 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// One operand over resolved leaves, with its own let sink for element
+    /// and map entries (`x.p`, `row.key`).
     pub(super) fn resolved_expression(
         &mut self,
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-    ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression(&mut ExpressionColumns::Resolved(resolve), false)
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Resolved(resolve),
+            ExpressionBoundary::Operand,
+            true,
+        )
     }
 
     fn checked_expression(
@@ -934,10 +984,8 @@ impl<'a> Parser<'a> {
                     // projection) is checked per value by the evaluator, which
                     // answers a typed NonScalar/NonInteger error, never a panic.
                     if let ExpressionColumns::Row(schema) = columns
-                        && !matches!(
-                            schema[column].1,
-                            crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Any
-                        )
+                        && !schema[column].1.is_scalar_like()
+                        && schema[column].1 != crate::GraphSetColumnType::Any
                     {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }
@@ -1527,6 +1575,39 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
+
+    /// openCypher pi() and e(), just after their `(`: the binary64 nearest
+    /// each constant. False, with nothing consumed, for any other function.
+    /// Out of line: integer_unary repeats once per nested parenthesis.
+    #[inline(never)]
+    fn constant_function(
+        &mut self,
+        function: &str,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let constant = if function.eq_ignore_ascii_case("PI") {
+            core::f64::consts::PI
+        } else if function.eq_ignore_ascii_case("E") {
+            core::f64::consts::E
+        } else {
+            return Ok(false);
+        };
+        self.punct(b')', ")")?;
+        let value = crate::GqlScalarParameter::new(CanonicalScalar::Float(
+            fgdb_types::CanonicalF64::new(constant),
+        ))
+        .map_err(|_| failure(at, GraphMutationTextErrorKind::IntegerOperand))?;
+        emit(
+            program,
+            ParsedOp::Bound(GraphIntegerOp::Scalar(
+                value.predicate(IntegerComparison::Equal),
+            )),
+            at,
+        )?;
+        Ok(true)
+    }
+
     fn integer_unary(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
@@ -1583,6 +1664,16 @@ impl<'a> Parser<'a> {
         if self.row_entry_slot(columns, program, at)? {
             return Ok(());
         }
+        // `n[key]` of a MATCH element reads through a let slot too (Graph7).
+        if self.lets.is_some()
+            && matches!(columns, ExpressionColumns::Graph(_))
+            && self.element_subscript_follows()?
+        {
+            return self.composite_slot(columns, depth, program, at);
+        }
+        if self.null_graph_function(program, at)? {
+            return Ok(());
+        }
         let function = if crate::graph_text::SCALAR_FUNCTIONS
             .iter()
             .any(|name| self.is_word(name))
@@ -1598,7 +1689,13 @@ impl<'a> Parser<'a> {
         if let Some(function) = function {
             self.advance()?;
             self.punct(b'(', "(")?;
-            self.scalar_concat(columns, depth + 1, program)?;
+            if self.constant_function(function, program, at)? {
+                return Ok(());
+            }
+            // An argument is a whole expression, comparisons and Boolean
+            // operators included (`toString(1 < 0)`, TCK TypeConversion4 [3]),
+            // exactly as inside parentheses.
+            self.scalar_boolean(columns, depth + 1, program)?;
             let spelled =
                 |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
             let text_op = if spelled(["UPPER", "TOUPPER"]) {
@@ -1622,16 +1719,7 @@ impl<'a> Parser<'a> {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(op), at);
             }
-            let numeric = [
-                ("TOFLOAT", GraphNumericFunction::ToFloat),
-                ("FLOOR", GraphNumericFunction::Floor),
-                ("CEIL", GraphNumericFunction::Ceil),
-                ("ROUND", GraphNumericFunction::Round),
-                ("SQRT", GraphNumericFunction::Sqrt),
-            ]
-            .into_iter()
-            .find_map(|(name, numeric)| function.eq_ignore_ascii_case(name).then_some(numeric));
-            if let Some(numeric) = numeric {
+            if let Some(numeric) = GraphNumericFunction::named(function) {
                 self.punct(b')', ")")?;
                 return emit(
                     program,
@@ -1644,13 +1732,13 @@ impl<'a> Parser<'a> {
                 if !sql {
                     self.punct(b',', ", or FROM")?;
                 }
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 if sql {
                     self.word("FOR")?;
                 } else {
                     self.punct(b',', ",")?;
                 }
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(GraphIntegerOp::Substring), at);
             }
@@ -1659,21 +1747,27 @@ impl<'a> Parser<'a> {
                 return emit(program, ParsedOp::Unary(GraphIntegerUnary::Abs), at);
             }
             self.punct(b',', ",")?;
-            self.scalar_concat(columns, depth + 1, program)?;
+            self.scalar_boolean(columns, depth + 1, program)?;
             if function.eq_ignore_ascii_case("NULLIF") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
             }
+            if function.eq_ignore_ascii_case("ATAN2") {
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(GraphIntegerOp::Atan2), at);
+            }
             emit(program, ParsedOp::Coalesce, at)?;
             while self.take(b',')? {
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 emit(program, ParsedOp::Coalesce, at)?;
             }
             self.punct(b')', ")")?;
             return Ok(());
         }
+        // `$doc.key` reads a map argument's field; `$from..` is a slice bound
+        // before the range dots (TCK List2 [10]), not a field read.
         if let TokenKind::Parameter(name) = self.current.kind
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            && self.property_dot_follows()?
         {
             self.parameter_types
                 .entry(name.to_owned())
@@ -1792,6 +1886,16 @@ impl<'a> Parser<'a> {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
             ExpressionColumns::Resolved(resolve) => match resolve(self)? {
+                // `.key` after a resolved value reads its entry through a let
+                // slot, as a row scope's row_entry_slot does: an imported
+                // map's `row.key` beside MATCH reads (fgdb-0s2pq). Other
+                // resolver scopes keep their own entry rules.
+                Some(column) if self.lets.is_some() && self.resolved_entries => {
+                    match self.map_entries(ReadValueTemplate::Column(column))? {
+                        ReadValueTemplate::Column(column) => Operand::Column(column),
+                        entry => return self.let_slot(program, entry, at),
+                    }
+                }
                 Some(column) => Operand::Column(column),
                 None => self.row_operand(&[])?,
             },
@@ -1995,7 +2099,7 @@ impl<'a> Parser<'a> {
 mod predicate_boundary_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::VId;
+    use fgdb_types::{CanonicalPropertyValue, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -2008,12 +2112,24 @@ mod predicate_boundary_tests {
     fn rows(predicate: &str) -> Vec<VId> {
         let p = PropertyKeyId(1);
         let q = PropertyKeyId(2);
-        let values = [
-            vec![(p, CanonicalScalar::Int(0)), (q, CanonicalScalar::Int(1))],
-            vec![(p, CanonicalScalar::Int(1)), (q, CanonicalScalar::Int(0))],
-            vec![(p, CanonicalScalar::Int(2)), (q, CanonicalScalar::Int(2))],
-            vec![(p, CanonicalScalar::Null), (q, CanonicalScalar::Int(1))],
-            vec![(q, CanonicalScalar::Int(1))],
+        let values: [Vec<(PropertyKeyId, CanonicalPropertyValue)>; 5] = [
+            vec![
+                (p, CanonicalScalar::Int(0).into()),
+                (q, CanonicalScalar::Int(1).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Int(1).into()),
+                (q, CanonicalScalar::Int(0).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Int(2).into()),
+                (q, CanonicalScalar::Int(2).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Null.into()),
+                (q, CanonicalScalar::Int(1).into()),
+            ],
+            vec![(q, CanonicalScalar::Int(1).into())],
         ];
         let pattern =
             PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"), symbols)

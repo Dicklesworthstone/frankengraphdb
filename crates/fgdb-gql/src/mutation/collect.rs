@@ -49,6 +49,44 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
     checkpoint: F,
 }
+
+/// Record one element-field proposal: an equal repeat is one effect, a
+/// different value for the same field is a conflict, and every new field
+/// counts against the statement's effect limit.
+#[allow(clippy::too_many_arguments)]
+fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
+    proposals: &mut BTreeMap<(ElementId, Field), Proposal<'a>>,
+    meter: &mut Meter<F>,
+    target: ElementId,
+    field: Field,
+    value: Value<'a>,
+    row: usize,
+    action: usize,
+) -> ResultOf<(), E, C> {
+    if let Some(previous) = proposals.get(&(target, field)) {
+        if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
+            return Err(GqlQueryError::Source(
+                GraphMutationError::ConflictingAssignment {
+                    first_row: previous.row,
+                    first_action: previous.action,
+                    row,
+                    action,
+                },
+            ));
+        }
+        return Ok(());
+    }
+    let observed = proposals.len() as u128 + 1;
+    if observed > u128::from(meter.policy.max_effects) {
+        return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
+            limit: meter.policy.max_effects,
+            observed,
+        }));
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    proposals.insert((target, field), Proposal { value, row, action });
+    Ok(())
+}
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ResultOf<(), E, C>
     where
@@ -153,6 +191,42 @@ fn element(value: &crate::algebra::GraphValue) -> Option<ElementId> {
     }
 }
 
+/// The properties `SET target = {...}` unsets: every name in the target's
+/// frozen property map that `keep` does not name, resolved through the
+/// selection's reverse catalog (injective, checked at preparation).
+fn cleared_fields<E, C, F: FnMut() -> Result<(), C>>(
+    current: &crate::algebra::GraphValue,
+    keep: &[fgdb_delta_types::PropertyKeyId],
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    row: usize,
+    action: usize,
+    meter: &mut Meter<F>,
+) -> ResultOf<Vec<Field>, E, C> {
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row,
+            binding: action,
+        })
+    };
+    let catalog = catalog.ok_or_else(invalid)?;
+    let (names, _) = current.as_map().ok_or_else(invalid)?;
+    let mut fields = Vec::new();
+    for name in names {
+        meter.event(GlaExecutionEvent::Work)?;
+        let key = catalog
+            .properties
+            .iter()
+            .find(|(_, known)| known.as_bytes() == name.as_bytes())
+            .map(|(key, _)| *key)
+            .ok_or_else(invalid)?;
+        if !keep.contains(&key) {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            fields.push(Field::Property(key));
+        }
+    }
+    Ok(fields)
+}
+
 enum MapField<'a> {
     Frozen(&'a crate::algebra::GraphValue),
     Assigned(&'a CanonicalScalar),
@@ -194,9 +268,9 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
     }
     for (at, (key, value)) in old_keys.iter().zip(old_values).enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
-        if !matches!(value, GraphValue::Scalar(_))
-            || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes()
-        {
+        // A frozen field is any stored value, a List or Map included
+        // (fgdb-k3nub); a graph element never is.
+        if !value.is_stored_value() || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes() {
             return Err(invalid());
         }
     }
@@ -562,19 +636,67 @@ fn execute_erased<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
+            // DELETE p / DETACH DELETE p (TCK Delete3): every node of the
+            // path, and for a plain DELETE every relationship too, each its
+            // own delete proposal. DETACH removes the rest of their edges.
+            if let crate::algebra::GraphValue::Path(path) = &row.values()[action.target()] {
+                let detach = matches!(action, GraphMutationAction::DetachDelete { .. });
+                let edges = path
+                    .steps()
+                    .iter()
+                    .filter(|_| !detach)
+                    .map(|(edge, _)| ElementId::Edge(*edge));
+                for target in edges.chain(path.nodes().map(ElementId::Vertex)) {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    propose(
+                        &mut proposals,
+                        &mut meter,
+                        target,
+                        Field::Delete,
+                        Value::Delete(detach),
+                        row_at,
+                        action_at,
+                    )?;
+                }
+                continue;
+            }
             // Only canonical null can remain after the schema check. An
             // absent OPTIONAL target does not execute an assignment RHS.
             let Some(target) = element(&row.values()[action.target()]) else {
                 continue;
             };
-            let (field, value) = match action {
+            let proposed = match action {
+                GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(
+                    &row.values()[*current],
+                    keep,
+                    mutation.selection.plan().reverse_catalog.as_deref(),
+                    row_at,
+                    action_at,
+                    &mut meter,
+                )?
+                .into_iter()
+                .map(|field| (field, Value::Property(None)))
+                .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let single = match action {
+                GraphMutationAction::ClearProperties { .. } => None,
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
-                        GraphMutationValue::Column(column) => Value::Property(Some(
-                            row.values()[*column]
-                                .as_scalar()
-                                .expect("complete input schema checked"),
-                        )),
+                        // A Stored-domain property column can hold a List
+                        // or Map at run time (fgdb-k3nub). SET cannot write
+                        // one yet, so it refuses typed; it panicked here.
+                        GraphMutationValue::Column(column) => {
+                            let Some(value) = row.values()[*column].as_scalar() else {
+                                return Err(GqlQueryError::Source(
+                                    GraphMutationError::NonScalarValue {
+                                        row: row_at,
+                                        action: action_at,
+                                    },
+                                ));
+                            };
+                            Value::Property(Some(value))
+                        }
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
                             let value = expression
@@ -622,45 +744,29 @@ fn execute_erased<E, C>(
                             Value::Computed(value)
                         }
                     };
-                    (Field::Property(*key), value)
+                    Some((Field::Property(*key), value))
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => {
-                    (Field::Property(*key), Value::Property(None))
+                    Some((Field::Property(*key), Value::Property(None)))
                 }
                 GraphMutationAction::SetLabel { label, present, .. } => {
-                    (Field::Label(*label), Value::Label(*present))
+                    Some((Field::Label(*label), Value::Label(*present)))
                 }
-                GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete(true)),
-                GraphMutationAction::Delete { .. } => (Field::Delete, Value::Delete(false)),
+                GraphMutationAction::DetachDelete { .. } => {
+                    Some((Field::Delete, Value::Delete(true)))
+                }
+                GraphMutationAction::Delete { .. } => Some((Field::Delete, Value::Delete(false))),
             };
-            if let Some(previous) = proposals.get(&(target, field)) {
-                if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
-                    return Err(GqlQueryError::Source(
-                        GraphMutationError::ConflictingAssignment {
-                            first_row: previous.row,
-                            first_action: previous.action,
-                            row: row_at,
-                            action: action_at,
-                        },
-                    ));
-                }
-            } else {
-                let observed = proposals.len() as u128 + 1;
-                if observed > u128::from(policy.max_effects) {
-                    return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
-                        limit: policy.max_effects,
-                        observed,
-                    }));
-                }
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                proposals.insert(
-                    (target, field),
-                    Proposal {
-                        value,
-                        row: row_at,
-                        action: action_at,
-                    },
-                );
+            for (field, value) in proposed.into_iter().chain(single) {
+                propose(
+                    &mut proposals,
+                    &mut meter,
+                    target,
+                    field,
+                    value,
+                    row_at,
+                    action_at,
+                )?;
             }
         }
     }
@@ -737,6 +843,7 @@ fn execute_erased<E, C>(
 mod tests {
     use super::*;
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_types::CanonicalPropertyValue;
     fn query() -> PreparedGraphPattern<GraphValueRow> {
         PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a,b.p AS p", |kind, _| {
             Some(match kind {
@@ -772,6 +879,11 @@ mod tests {
         values: &[CanonicalScalar],
         policy: GraphMutationPolicy,
     ) -> ResultOf<GraphMutationBatch, (), ()> {
+        let values: Vec<CanonicalPropertyValue> = values
+            .iter()
+            .cloned()
+            .map(CanonicalPropertyValue::from)
+            .collect();
         mutation.execute_governed(
             policy,
             |plan, policy| {
@@ -960,7 +1072,7 @@ mod tests {
 
     #[test]
     fn late_rhs_source_failure_never_returns_an_earlier_partial_assignment() {
-        let value = CanonicalScalar::Int(7);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let reads = std::cell::Cell::new(0);
         let result: ResultOf<GraphMutationBatch, &str, ()> = mutation().execute_governed(
             policy(),

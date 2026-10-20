@@ -61,10 +61,7 @@ impl RowAggregateSpec {
             return Err(RowAggregateBuildError::TooManyColumns);
         }
         for (column, kind) in schema.iter().enumerate() {
-            if !matches!(
-                kind,
-                GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
-            ) {
+            if !(kind.is_scalar_like() || *kind == GraphSetColumnType::Vertex) {
                 return Err(RowAggregateBuildError::UnsupportedColumn { column });
             }
         }
@@ -78,7 +75,7 @@ impl RowAggregateSpec {
         }
         match schema.get(value) {
             None => return Err(RowAggregateBuildError::UnknownColumn { column: value }),
-            Some(GraphSetColumnType::Scalar) => {}
+            Some(kind) if kind.is_scalar_like() => {}
             Some(_) => return Err(RowAggregateBuildError::RequiresScalarArgument),
         }
         Ok(Self {

@@ -32,7 +32,7 @@ use crate::{
     GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1055,7 +1055,7 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1085,8 +1085,8 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1119,7 +1119,7 @@ impl PreparedGraphAggregate {
         graph: &PositionedGraph<'_, T>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1147,8 +1147,8 @@ impl PreparedGraphAggregate {
         graph: &PositionedGraph<'_, T>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1174,7 +1174,7 @@ impl PreparedGraphAggregate {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         positioned: Option<(&PositionedGraph<'_, T>, A)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl crate::GovernedCheckpoint<C>,
@@ -1273,6 +1273,11 @@ impl PreparedGraphAggregate {
                                 Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
+                            // Group keys borrow the source; a stored List or
+                            // Map refuses here rather than read as NULL
+                            // (fgdb-k3nub).
+                            let value = crate::integer_expression::stored_scalar(value)
+                                .map_err(GqlQueryError::from)?;
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
                         ValueProjection::Path { .. }

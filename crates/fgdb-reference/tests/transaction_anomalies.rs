@@ -39,7 +39,8 @@ use fgdb_reference::txn::{
 };
 use fgdb_reference::{ConflictKey, ReferenceDatabase, collect_conflict_keys};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 use std::collections::BTreeSet;
 
@@ -52,8 +53,8 @@ const LABEL: LabelId = LabelId(10);
 const PROP: PropertyKeyId = PropertyKeyId(100);
 const SEMANTICS: ObjectId = ObjectId([0x11; 32]);
 
-fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value)
+fn int(value: i64) -> CanonicalPropertyValue {
+    CanonicalScalar::Int(value).into()
 }
 
 fn create(vid: u128, value: i64) -> Statement {
@@ -107,7 +108,7 @@ fn prop_of(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<i64> {
         .props
         .get(&PROP)?
     {
-        CanonicalScalar::Int(value) => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
         _ => None,
     }
 }
@@ -1179,7 +1180,7 @@ fn operation_key() -> OperationKey {
 
 fn read(graph: &fgdb_reference::ReferenceGraph, vid: u128) -> Option<i64> {
     match graph.vertex(VId(vid))?.props.get(&PROP)? {
-        CanonicalScalar::Int(value) => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
         _ => None,
     }
 }

@@ -121,7 +121,7 @@ fn server_projects_all_occurrences_and_rebinds_under_one_output_row() {
         for (edge, expected) in [(E1, 16), (E2, 26), (E3, 33), (EId(900), 777)] {
             assert_eq!(
                 guard.edge(edge).unwrap().unwrap().props,
-                vec![(VALUE, CanonicalScalar::Int(expected))]
+                vec![(VALUE, CanonicalScalar::Int(expected).into())]
             );
         }
         drop(guard);
@@ -194,7 +194,7 @@ fn server_refusals_preserve_state_and_zero_output_does_not_suppress_actions() {
                 for (edge, expected) in [(E1, 12), (E2, 22), (E3, 31), (EId(900), 777)] {
                     assert_eq!(
                         guard.edge(edge).unwrap().unwrap().props,
-                        vec![(VALUE, CanonicalScalar::Int(expected))]
+                        vec![(VALUE, CanonicalScalar::Int(expected).into())]
                     );
                 }
             }

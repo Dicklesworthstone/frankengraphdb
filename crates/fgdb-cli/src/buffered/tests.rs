@@ -291,9 +291,16 @@ fn buffered_flags_are_query_only_unique_and_do_not_change_ordinary_streaming() {
             "query",
             vec!["--buffered", "--certify-to", "unused", "MATCH (n) RETURN n"],
         ),
+        // `--buffered` with a standalone CALL fnx is buffered analytics
+        // (a78471f6); spilling is still not part of that profile.
         (
             "query",
-            vec!["--buffered", "CALL fnx.pagerank() YIELD vertex,score"],
+            vec![
+                "--buffered",
+                "--spill-dir",
+                "unused",
+                "CALL fnx.pagerank() YIELD vertex,score",
+            ],
         ),
         ("write", vec!["--buffered", "CREATE (n)"]),
         ("create", vec!["--buffered"]),
@@ -601,6 +608,16 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
             ),
             ("UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0", 2),
             ("MATCH (n) RETURN DISTINCT n.p AS value LIMIT 0", 2),
+            // A plain WITH between UNWIND and the correlated MATCH keeps the
+            // native correlation (a61ef1dc), so it spills like the form above.
+            (
+                "UNWIND [11,2,11,NULL] AS wanted WITH wanted MATCH (n {p:wanted}) RETURN wanted,n",
+                2,
+            ),
+            (
+                "UNWIND [1,2] AS item WITH item MATCH (n {p:item}) RETURN item,n LIMIT 0",
+                2,
+            ),
         ] {
             let mut options = spill_options(&directory, text);
             let prepared = okay(prepare_query(&options));
@@ -718,6 +735,16 @@ fn buffered_external_values_preserve_native_rows_and_complete_group_output_contr
             ),
             ("RETURN 42 AS answer LIMIT 0", 2),
             ("RETURN COUNT(*) AS rows LIMIT 0", 2),
+            // A collected list unwound again is a values relation, no
+            // longer a refused descendant.
+            (
+                "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
+                2,
+            ),
+            (
+                "UNWIND [2,1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x ORDER BY x",
+                2,
+            ),
         ] {
             let mut options = spill_options(&directory, text);
             options.budget.records = Some(0);
@@ -906,10 +933,8 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         // Unsupported relational descendants remain visible through an outer
         // computed projection and LIMIT zero, before database/scratch opening.
         for text in [
-            "UNWIND [1,2] AS item WITH item MATCH (n {p:item}) RETURN item,n LIMIT 0",
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
             "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m),(z) RETURN {value:m.p} AS value LIMIT 0",
-            "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
         ] {
             let options = spill_options(&directory, text);
             let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();

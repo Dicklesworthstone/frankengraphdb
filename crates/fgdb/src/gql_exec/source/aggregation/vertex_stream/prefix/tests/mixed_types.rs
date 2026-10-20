@@ -66,7 +66,7 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
         .collect();
     rows[0].retired_at = Some(CommitSeq(2));
     let mut unrelated = row(VId(10_000), 1, CanonicalScalar::Null);
-    unrelated.props = vec![(PropertyKeyId(8), collated("Ab"))];
+    unrelated.props = vec![(PropertyKeyId(8), collated("Ab").into())];
     rows.push(unrelated);
     rows.push(row(
         VId(u128::MAX),
@@ -87,7 +87,7 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
         .filter(|row| {
             row.props.iter().any(|(key, value)| {
                 *key == KEY
-                    && matches!(value, CanonicalScalar::Text(value)
+                    && matches!(value.as_scalar(), Some(CanonicalScalar::Text(value))
                 if value.as_str().starts_with("Ab"))
             })
         })
@@ -142,7 +142,7 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
             .flat_map(|patch| patch.iter())
             .filter(|row| {
                 alternate_binding
-                    || matches!(&row.props[0].1, CanonicalScalar::Text(value)
+                    || matches!(row.props[0].1.as_scalar(), Some(CanonicalScalar::Text(value))
                         if value.as_str().starts_with("Ab"))
             })
             .map(|row| row.vid)

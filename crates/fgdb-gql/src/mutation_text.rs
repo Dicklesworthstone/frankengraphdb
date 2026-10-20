@@ -75,6 +75,14 @@ pub(crate) enum MutationActionTemplate {
         key: PropertyKeyId,
         value: crate::set_text::ReadValueTemplate,
     },
+    /// A value-language right-hand side over the WITH row of a write after
+    /// WITH (fgdb-sl4ym), read from the bound row relation.
+    ValueProperty {
+        target: usize,
+        key: PropertyKeyId,
+        value: crate::set_text::ReadValueTemplate,
+        at: usize,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
@@ -91,6 +99,11 @@ pub struct PreparedGraphMutationText {
     /// A leading OPTIONAL MATCH: binding left-joins the unit relation with
     /// the selection, so an empty match still yields one all-NULL row.
     pub(crate) optional_root: bool,
+    /// `MATCH ... WITH ... SET`: the read relation through the last WITH
+    /// stage (fgdb-sl4ym). Every action and RETURN binding indexes its row,
+    /// and it owns the statement's parameter table. Boxed: most mutations
+    /// have no WITH row, and inline it doubled every write statement's size.
+    pub(crate) row: Option<Box<crate::set_text::BoundSetTextInput>>,
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -123,7 +123,7 @@ impl PreparedGraphVertexUpsertQuery {
             .iter()
             .map(|binding| match binding {
                 GraphVertexReturnBinding::Vertex => GraphSetColumnType::Vertex,
-                GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Scalar,
+                GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Stored,
                 GraphVertexReturnBinding::Properties => GraphSetColumnType::Any,
                 GraphVertexReturnBinding::Labels => GraphSetColumnType::List,
             })
@@ -309,7 +309,8 @@ impl PreparedGraphVertexUpsertQuery {
                 }
                 for (at, (key, value)) in keys.iter().zip(values).enumerate() {
                     work()?;
-                    if !matches!(value, GraphValue::Scalar(_))
+                    // Any stored value, a List or Map included (fgdb-k3nub).
+                    if !value.is_stored_value()
                         || at != 0 && keys[at - 1].as_bytes() >= key.as_bytes()
                     {
                         return Err(invalid());

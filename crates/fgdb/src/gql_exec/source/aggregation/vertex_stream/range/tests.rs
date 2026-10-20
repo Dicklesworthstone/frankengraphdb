@@ -18,9 +18,9 @@ fn row(vid: VId, at: u64, value: CanonicalScalar) -> VertexRow {
         retired_at: None,
         labels: vec![],
         props: vec![
-            (PropertyKeyId(6), CanonicalScalar::Int(0)),
-            (KEY, value),
-            (PropertyKeyId(8), CanonicalScalar::Int(0)),
+            (PropertyKeyId(6), CanonicalScalar::Int(0).into()),
+            (KEY, value.into()),
+            (PropertyKeyId(8), CanonicalScalar::Int(0).into()),
         ],
     }
 }
@@ -52,7 +52,11 @@ fn oracle(patches: &[VertexPatchRows], constraints: &[(CanonicalScalar, C)]) -> 
             row.props
                 .iter()
                 .find(|(key, _)| *key == KEY)
-                .is_some_and(|(_, value)| matches(value, constraints))
+                .is_some_and(|(_, value)| {
+                    value
+                        .as_scalar()
+                        .is_some_and(|value| matches(value, constraints))
+                })
         })
         .map(|row| row.vid)
         .collect::<BTreeSet<_>>()

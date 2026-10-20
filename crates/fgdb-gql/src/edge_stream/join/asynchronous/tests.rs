@@ -63,9 +63,9 @@ struct Image {
     from: VId,
     to: VId,
     relation: RelationId,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
-    left: Vec<(PropertyKeyId, CanonicalScalar)>,
-    right: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    left: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    right: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 struct Record {
     image: Arc<Image>,
@@ -161,7 +161,14 @@ impl Source {
                 if id == IDS[2] {
                     Vec::new()
                 } else {
-                    vec![(P, CanonicalScalar::Int(if id == IDS[0] { 4 } else { 7 }))]
+                    vec![(
+                        P,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(if id == IDS[0] {
+                            4
+                        } else {
+                            7
+                        })),
+                    )]
                 }
             };
             source.outgoing.entry(from).or_default().insert(EId(id));
@@ -172,7 +179,7 @@ impl Source {
                     from,
                     to,
                     relation,
-                    props: vec![(P, CanonicalScalar::Int(prop))],
+                    props: vec![(P, CanonicalScalar::Int(prop).into())],
                     left: properties(from),
                     right: properties(to),
                 }),
@@ -399,7 +406,7 @@ fn oracle(
                         continue;
                     }
                     if filter
-                        && !matches!((&left.props[0].1, &right.props[0].1),
+                        && !matches!((left.props[0].1.as_scalar().unwrap(), right.props[0].1.as_scalar().unwrap()),
                         (CanonicalScalar::Int(x), CanonicalScalar::Int(y)) if *x >= 0 && *y < 2)
                     {
                         continue;
@@ -410,8 +417,8 @@ fn oracle(
                         GraphValue::Edge(s),
                         GraphValue::Vertex(b),
                         GraphValue::Vertex(c),
-                        GraphValue::Scalar(left.props[0].1.clone()),
-                        GraphValue::Scalar(right.props[0].1.clone()),
+                        GraphValue::Scalar(left.props[0].1.as_scalar().unwrap().clone()),
+                        GraphValue::Scalar(right.props[0].1.as_scalar().unwrap().clone()),
                     ]);
                 }
             }

@@ -6,7 +6,7 @@ use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::VertexScanDomain;
 use fgdb_strata::AdjacencyEntry;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Private statement-lifetime owner. Neither the transaction nor database can
@@ -274,7 +274,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         control: &mut C,
         mut visit: impl FnMut(
             &'s AdjacencyEntry,
-            &'s [(PropertyKeyId, CanonicalScalar)],
+            &'s [(PropertyKeyId, CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Option<Result<(), E>>
@@ -304,7 +304,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             }
             let mut replacements = edges.iter().peekable();
             let mut emit = |entry: &'s AdjacencyEntry,
-                            properties: &'s [(PropertyKeyId, CanonicalScalar)],
+                            properties: &'s [(PropertyKeyId, CanonicalPropertyValue)],
                             control: &mut C| {
                 if observe(entry) {
                     self.transaction

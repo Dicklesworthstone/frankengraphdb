@@ -650,7 +650,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
 
 // A bounded transient row, using the same sealed GLA collector as row streams.
 // The generic bound exposes its inherited projection without a second encoder.
-fn project_input_row<Row: VertexScanOutput, E>(
+fn project_input_row<Row: VertexScanOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,
@@ -711,7 +711,11 @@ where
                 meter.event(event)
             })
             .map_err(lift)?;
-            Ok(Input::Scalar(found.map(|(_, value)| value)))
+            // A stored List or Map refuses rather than read as NULL
+            // (fgdb-k3nub).
+            let value = crate::integer_expression::stored_scalar(found.map(|(_, value)| value))
+                .map_err(GqlQueryError::from)?;
+            Ok(Input::Scalar(value))
         }
         _ => unreachable!("projection profile checked before source access"),
     }

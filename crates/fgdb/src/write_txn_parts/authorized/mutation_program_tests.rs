@@ -183,22 +183,22 @@ fn dependent_statements_see_canonical_masked_effects_and_publish_once() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(11)),
-                (Q, CanonicalScalar::Int(10)),
-                (SECRET, CanonicalScalar::Int(77))
+                (P, CanonicalScalar::Int(11).into()),
+                (Q, CanonicalScalar::Int(10).into()),
+                (SECRET, CanonicalScalar::Int(77).into())
             ]
         );
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(110)),
-                (Q, CanonicalScalar::Int(10))
+                (P, CanonicalScalar::Int(110).into()),
+                (Q, CanonicalScalar::Int(10).into())
             ]
         );
         for id in [11, 12] {
             assert_eq!(
                 db.edge(EId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]
+                vec![(P, CanonicalScalar::Int(11).into())]
             );
         }
         assert_eq!(

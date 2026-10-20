@@ -108,7 +108,7 @@ fn autocommit_merge_uses_read_close_for_match_and_write_commit_for_create() {
         ));
         assert_eq!(
             db.vertex(VId(9)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(9))]
+            vec![(P, CanonicalScalar::Int(9).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), baseline);
     });

@@ -101,11 +101,11 @@ fn mutation_return_publishes_once_and_zero_matches_close_without_a_marker() {
         ));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(5))]
+            vec![(P, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(8))]
+            vec![(P, CanonicalScalar::Int(8).into())]
         );
         assert_eq!(db.delta_since(CommitSeq(1)).unwrap().count(), 1);
 
@@ -160,11 +160,11 @@ fn result_failures_abort_all_mutations_but_limit_zero_does_not_skip_effects() {
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(4))]
+                vec![(P, CanonicalScalar::Int(4).into())]
             );
             assert_eq!(
                 db.vertex(VId(2)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7))]
+                vec![(P, CanonicalScalar::Int(7).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
@@ -188,7 +188,7 @@ fn result_failures_abort_all_mutations_but_limit_zero_does_not_skip_effects() {
         for id in [VId(1), VId(2)] {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(20))]
+                vec![(P, CanonicalScalar::Int(20).into())]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);

@@ -31,7 +31,8 @@ fn execute(text: &str) -> Vec<GraphAggregateRow> {
         .unwrap()
         .bind_relation_parameters(&GqlParameters::new())
         .unwrap();
-    let values = SCORES.map(CanonicalScalar::Int);
+    let values =
+        SCORES.map(|score| fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(score)));
     query
         .execute_governed(
             GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),

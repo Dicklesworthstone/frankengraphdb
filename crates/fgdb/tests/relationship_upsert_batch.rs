@@ -117,7 +117,7 @@ fn multiple_pairs_keep_parallel_matches_and_one_atomic_creation() {
         assert_eq!(db.edges().unwrap().len(), 3);
         assert_eq!(
             db.edge(EId(100)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(2))]
+            vec![(Q, CanonicalScalar::Int(2).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -220,7 +220,7 @@ fn changed_merge_key_is_rechecked_in_the_next_occurrence() {
         transaction.abort();
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert!(db.edge(EId(100)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -495,7 +495,7 @@ fn bulk_autocommit_survives_compaction_and_reopen() {
         for edge in [EId(100), EId(101)] {
             assert_eq!(
                 reopened.edge(edge).unwrap().unwrap().props,
-                vec![(Q, CanonicalScalar::Int(7))]
+                vec![(Q, CanonicalScalar::Int(7).into())]
             );
         }
     });

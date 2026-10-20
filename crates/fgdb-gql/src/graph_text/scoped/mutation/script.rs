@@ -246,6 +246,32 @@ fn classify(
     if matched {
         parser.parse_match_prefix()?;
     }
+    // MATCH ... WITH ... CREATE/SET/REMOVE/DELETE: the write reads the WITH
+    // row (fgdb-sl4ym).
+    if matched && parser.is_word("WITH") {
+        parser.write_row_prefix().map_err(|source| {
+            let kind = match source.kind {
+                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                _ => GraphPatternTextErrorKind::Expected("a bounded WITH before a write clause"),
+            };
+            error(source.offset, kind)
+        })?;
+        return if parser.is_word("CREATE") || parser.is_word("INSERT") {
+            Ok(Kind::Insert)
+        } else if ["SET", "REMOVE", "DETACH", "DELETE"]
+            .iter()
+            .any(|word| parser.is_word(word))
+        {
+            Ok(Kind::Mutation)
+        } else {
+            Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "CREATE, SET, REMOVE or DELETE after MATCH ... WITH",
+                ),
+            ))
+        };
+    }
     if parser.is_word("CREATE") || parser.is_word("INSERT") {
         return Ok(Kind::Insert);
     }

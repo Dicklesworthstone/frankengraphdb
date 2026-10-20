@@ -13,7 +13,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{BufferedEdgeDirection, BufferedEdgeEndpoints};
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(7);
@@ -29,7 +30,7 @@ const EDGES: [(u128, usize, usize, i64); 5] = [
     (u128::MAX, 1, 1, 11),
 ];
 
-type Properties = Vec<(PropertyKeyId, CanonicalScalar)>;
+type Properties = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 type Row = (
     EId,
     VId,
@@ -139,7 +140,8 @@ fn expected(cut: u64) -> Vec<Row> {
                 21
             } else {
                 index as i64 + 1
-            }),
+            })
+            .into(),
         )]
     };
     let mut rows: Vec<_> = edges
@@ -152,7 +154,7 @@ fn expected(cut: u64) -> Vec<Row> {
                 relation,
                 vec![(
                     P,
-                    CanonicalScalar::Int(if cut >= 2 && id == 0 { 17 } else { value }),
+                    CanonicalScalar::Int(if cut >= 2 && id == 0 { 17 } else { value }).into(),
                 )],
                 vertex(src),
                 vertex(dst),
@@ -385,7 +387,7 @@ fn high_degree_reads_and_counts_do_not_require_an_adjacency_result_vector() {
                 value.edge().props,
                 [(
                     P,
-                    CanonicalScalar::Int(if count < 256 { count as i64 } else { 999 })
+                    CanonicalScalar::Int(if count < 256 { count as i64 } else { 999 }).into()
                 )]
             );
             count += 1;

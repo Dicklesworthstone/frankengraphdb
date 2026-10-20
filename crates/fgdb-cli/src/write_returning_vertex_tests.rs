@@ -117,8 +117,8 @@ fn both_drivers_update_all_targets_before_grouping_and_preserve_limits() {
                 assert_eq!(
                     database.vertex(VId(id)).unwrap().unwrap().props,
                     vec![
-                        (P, CanonicalScalar::Int(key)),
-                        (Q, CanonicalScalar::Int(value))
+                        (P, CanonicalScalar::Int(key).into()),
+                        (Q, CanonicalScalar::Int(value).into())
                     ],
                 );
             }
@@ -141,8 +141,8 @@ fn both_drivers_update_all_targets_before_grouping_and_preserve_limits() {
                     assert_eq!(
                         database.vertex(VId(id)).unwrap().unwrap().props,
                         vec![
-                            (P, CanonicalScalar::Int(key)),
-                            (Q, CanonicalScalar::Int(value))
+                            (P, CanonicalScalar::Int(key).into()),
+                            (Q, CanonicalScalar::Int(value).into())
                         ],
                     );
                 }
@@ -202,8 +202,8 @@ fn pagination_and_with_filters_do_not_limit_the_frozen_match_set() {
                 assert_eq!(
                     database.vertex(VId(id)).unwrap().unwrap().props,
                     vec![
-                        (P, CanonicalScalar::Int(key)),
-                        (Q, CanonicalScalar::Int(value))
+                        (P, CanonicalScalar::Int(key).into()),
+                        (Q, CanonicalScalar::Int(value).into())
                     ],
                 );
             }
@@ -246,8 +246,8 @@ fn an_empty_match_creates_once_and_subsequent_execution_uses_on_match() {
                 assert_eq!(
                     vertices[0].props,
                     vec![
-                        (P, CanonicalScalar::Int(7)),
-                        (Q, CanonicalScalar::Int(expected))
+                        (P, CanonicalScalar::Int(7).into()),
+                        (Q, CanonicalScalar::Int(expected).into())
                     ],
                 );
                 assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -305,8 +305,8 @@ fn a_late_return_error_restores_the_prior_staged_prefix() {
             assert_eq!(
                 database.vertex(VId(id)).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(1)),
-                    (Q, CanonicalScalar::Int(value))
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(value).into())
                 ],
             );
         }

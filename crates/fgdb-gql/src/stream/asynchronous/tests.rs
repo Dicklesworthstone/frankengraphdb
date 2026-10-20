@@ -14,7 +14,7 @@ struct Sample {
     vid: VId,
     visible: bool,
     labels: Vec<LabelId>,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 #[derive(Default)]
@@ -253,7 +253,7 @@ fn sample(vid: u128, value: Option<CanonicalScalar>, visible: bool) -> Sample {
         labels: vec![LabelId(1)],
         properties: value
             .into_iter()
-            .map(|value| (PropertyKeyId(1), value))
+            .map(|value| (PropertyKeyId(1), CanonicalPropertyValue::Scalar(value)))
             .collect(),
     }
 }
@@ -648,8 +648,10 @@ fn async_sort_input_preserves_duplicate_occurrences_hidden_keys_and_the_entire_l
             sample(4, Some(CanonicalScalar::Int(99)), false),
         ];
         for (index, row) in rows.iter_mut().enumerate() {
-            row.properties
-                .push((PropertyKeyId(2), CanonicalScalar::Int(index as i64 + 1)));
+            row.properties.push((
+                PropertyKeyId(2),
+                CanonicalScalar::Int(index as i64 + 1).into(),
+            ));
         }
         let input = source(rows);
         let signals = input.signals.clone();

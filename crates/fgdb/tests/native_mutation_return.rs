@@ -33,6 +33,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(L)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
         _ => None,
@@ -84,6 +85,176 @@ fn seed() -> WriteBatch {
         vec![(P, CanonicalScalar::Int(7)), (ID, CanonicalScalar::Int(2))],
     );
     batch
+}
+
+/// fgdb-sl4ym (TCK Delete6 [5]-[7], [12]-[14]): `MATCH ... WITH ... SET /
+/// REMOVE / DELETE` writes once per WITH row. Targets are the elements the
+/// row carries, values read the row, and RETURN or a WITH tail reads the
+/// row's values captured before the write.
+#[test]
+fn writes_after_with_target_the_row_and_return_its_captured_values() {
+    let ((), report) = run_async_under_lab(0xa071_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let set = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p SET n.id = p * 10 RETURN p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(set, &["p"]), vec![vec![int(4)], vec![int(7)]]);
+        for (vid, id) in [(VId(1), 40), (VId(2), 70)] {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            assert!(
+                vertex
+                    .props
+                    .contains(&(ID, CanonicalScalar::Int(id).into())),
+                "{vertex:?}"
+            );
+        }
+        // A carried element's property reads its value before the write in
+        // SET, and after it in RETURN.
+        let carried = write(
+            &mut db,
+            "MATCH (n:L) WITH n SET n.id = n.p + 100 RETURN n.id AS id, n.p AS p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(carried, &["id", "p"]),
+            vec![vec![int(104), int(4)], vec![int(107), int(7)]]
+        );
+        // A plain WITH may order and page the rows the write then reads.
+        assert!(matches!(
+            write(
+                &mut db,
+                "MATCH (n:L) WITH n ORDER BY n.p LIMIT 1 REMOVE n.id"
+            )
+            .await
+            .unwrap(),
+            QueryResult::Write { .. }
+        ));
+        let first = db.vertex(VId(1)).unwrap().unwrap();
+        assert!(first.props.iter().all(|(key, _)| *key != ID), "{first:?}");
+        let tail = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p WHERE p > 5 DELETE n WITH p WHERE p % 7 = 0 RETURN p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(tail, &["p"]), vec![vec![int(7)]]);
+        assert_eq!(db.vertex(VId(2)).unwrap(), None);
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (n:L) WITH n.p AS x SET x.id = 1",
+            "MATCH (n:L) WITH n AS a SET n.id = 1",
+            "MATCH (n:L) WITH collect(n) AS ns SET ns.id = 1",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        let total = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p DELETE n RETURN sum(p) AS total",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(total, &["total"]), vec![vec![int(4)]]);
+        assert!(
+            db.vertices()
+                .unwrap()
+                .iter()
+                .all(|row| row.retired_at.is_some())
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// TCK Delete3: `DELETE p` deletes a matched path's relationships and nodes
+/// (refused while a node keeps another relationship); `DETACH DELETE p`
+/// deletes its nodes with every edge; a NULL OPTIONAL path deletes nothing.
+#[test]
+fn deleting_a_path_deletes_its_elements() {
+    let ((), report) = run_async_under_lab(0xa071_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        for id in [3, 4] {
+            batch.create_vertex(
+                VId(id),
+                vec![L],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        batch.add_edge(fgdb_types::EId(10), VId(1), VId(2), vec![]);
+        batch.add_edge(fgdb_types::EId(11), VId(2), VId(3), vec![]);
+        batch.add_edge(fgdb_types::EId(12), VId(2), VId(4), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let path = "p = (a:L {id: 1})-[:R]->()-[:R]->(c:L {id: 3})";
+        let frontier = db.frontier().unwrap();
+        // Node 2 keeps edge 12, so a plain DELETE of the path is refused.
+        assert!(
+            write(&mut db, &format!("MATCH {path} DELETE p"))
+                .await
+                .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        write(
+            &mut db,
+            "OPTIONAL MATCH p = (:L {id: 9})-[:R]->() DETACH DELETE p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.frontier().unwrap(), frontier);
+        write(&mut db, &format!("MATCH {path} DETACH DELETE p"))
+            .await
+            .unwrap();
+        for (vid, live) in [(1, false), (2, false), (3, false), (4, true)] {
+            assert_eq!(db.vertex(VId(vid)).unwrap().is_some(), live, "vertex {vid}");
+        }
+        assert!(
+            db.edges().unwrap().is_empty(),
+            "every edge left with node 2"
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -140,7 +311,7 @@ fn public_autocommit_returns_parameterized_mutation_rows_with_collection_types()
         for (id, expected) in [(VId(1), 6), (VId(2), 9)] {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(expected))
+                (P, CanonicalScalar::Int(expected).into())
             );
         }
         let result = db
@@ -331,7 +502,7 @@ fn returning_write_classes_share_one_outer_workspace_and_refusals_preserve_its_p
         assert_eq!(db.vertices().unwrap().len(), 1);
         assert_eq!(
             db.vertex(vertex).unwrap().unwrap().props[0],
-            (P, CanonicalScalar::Int(11))
+            (P, CanonicalScalar::Int(11).into())
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -399,7 +570,7 @@ fn public_dispatch_preserves_creation_effect_and_final_result_limits() {
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
             assert_eq!(
                 db.vertex(VId(10)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(4))
+                (P, CanonicalScalar::Int(4).into())
             );
         }
         let result = db
@@ -420,7 +591,7 @@ fn public_dispatch_preserves_creation_effect_and_final_result_limits() {
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
         assert_eq!(
             db.vertex(VId(10)).unwrap().unwrap().props[0],
-            (P, CanonicalScalar::Int(7))
+            (P, CanonicalScalar::Int(7).into())
         );
         let result = db
             .query_write(
@@ -518,11 +689,11 @@ fn public_return_cancellation_and_bad_tail_never_publish_a_successful_prefix() {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(4))
+                (P, CanonicalScalar::Int(4).into())
             );
             assert_eq!(
                 db.vertex(VId(2)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(7))
+                (P, CanonicalScalar::Int(7).into())
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }

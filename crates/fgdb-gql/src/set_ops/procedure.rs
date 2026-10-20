@@ -16,7 +16,6 @@ use crate::{
     GraphSetValue,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::CanonicalScalar;
 
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
@@ -297,7 +296,7 @@ pub trait GraphSetSource<E, C> {
         &mut self,
         _element: ElementId,
         _key: PropertyKeyId,
-    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         None
     }
 }
@@ -348,7 +347,7 @@ impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
         &mut self,
         element: ElementId,
         key: PropertyKeyId,
-    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         match &mut self.elements {
             Some(read) => read(element, key),
             None => self.source.element_property(element, key),
@@ -450,7 +449,7 @@ pub struct WithElementReads<S, R> {
 impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
 where
     S: GraphSetSource<E, C>,
-    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
 {
     fn pattern(
         &mut self,
@@ -484,7 +483,7 @@ where
         &mut self,
         element: ElementId,
         key: PropertyKeyId,
-    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         Some((self.elements)(element, key))
     }
 }

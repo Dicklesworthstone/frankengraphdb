@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphWalkBounds, GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
@@ -148,7 +148,7 @@ fn scoped_any_aggregation_counts_pairs_and_existence_never_multiplies_outer_rows
             [VId(1), VId(2)],
             [(EId(1), VId(1), R, VId(1)), (EId(2), VId(1), R, VId(1))],
             |_, _| Ok::<_, ()>(true),
-            |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
+            |_, _| Ok::<Option<&CanonicalPropertyValue>, ()>(None),
             wide(),
             || Ok::<_, ()>(()),
         )

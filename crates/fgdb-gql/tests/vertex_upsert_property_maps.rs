@@ -284,7 +284,10 @@ fn malformed_complete_map_inputs_refuse_before_grouping_or_limit_zero() {
                 keys: vec!["p".into(), "p".into()].into_boxed_slice(),
                 values: vec![int(1), int(2)].into_boxed_slice(),
             },
-            map(vec![("p", list(vec![int(1)]))]),
+            // A stored List is a property value (fgdb-k3nub); a graph
+            // element, alone or inside a list, never is.
+            map(vec![("p", GraphValue::Vertex(VId(1)))]),
+            map(vec![("p", list(vec![GraphValue::Vertex(VId(1))]))]),
         ] {
             assert!(matches!(
                 query.project_governed::<(), ()>(

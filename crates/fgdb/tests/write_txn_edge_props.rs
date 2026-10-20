@@ -75,7 +75,7 @@ fn staged_edge_property_is_private_and_abort_discards_it() {
                     .expect("overlay edge read succeeds")
                     .expect("overlay edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(11))]
+                vec![(PROPERTY, CanonicalScalar::Int(11).into())]
             );
             assert!(
                 database
@@ -138,7 +138,7 @@ fn committed_edge_property_consumes_one_sequence_and_survives_reopen() {
                     .expect("overlay edge")
                     .expect("overlay edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(22))]
+                vec![(PROPERTY, CanonicalScalar::Int(22).into())]
             );
 
             committed = transaction
@@ -170,7 +170,7 @@ fn committed_edge_property_consumes_one_sequence_and_survives_reopen() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(22))]
+            vec![(PROPERTY, CanonicalScalar::Int(22).into())]
         );
     });
 }
@@ -229,7 +229,7 @@ fn concurrent_property_change_of_observed_edge_aborts_reader_with_read_01() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(33))]
+            vec![(PROPERTY, CanonicalScalar::Int(33).into())]
         );
         assert!(
             reopened.vertex(VId(3)).expect("reopen vertex").is_none(),

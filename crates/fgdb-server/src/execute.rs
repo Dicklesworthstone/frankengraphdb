@@ -921,9 +921,8 @@ fn procedure_statement<C>(
         return false;
     };
     match procedure {
-        fgdb::ProcedureError::Bind(_) => true,
         fgdb::ProcedureError::Search(search) => !matches!(search, fgdb::HybridCallError::Index(_)),
-        _ => false,
+        other => other.is_statement_refusal(),
     }
 }
 

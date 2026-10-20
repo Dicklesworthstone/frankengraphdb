@@ -38,7 +38,7 @@ use fgdb_codec::elias_fano::EliasFanoError;
 use fgdb_codec::identity::IdentityColumnError;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
 };
 use image::{Image, Row, RowScan, RowScanStep};
 use std::sync::Arc;
@@ -423,7 +423,7 @@ impl SealedPartition {
 #[derive(Debug)]
 pub struct SealedEdge<'a> {
     pub entry: AdjacencyEntry,
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 
 /// One bounded pull. Yield is resumable exhaustion of the caller's scheduling

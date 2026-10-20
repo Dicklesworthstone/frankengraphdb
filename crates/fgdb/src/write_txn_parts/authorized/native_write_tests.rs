@@ -155,7 +155,10 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
         );
         assert_eq!(
             db.vertex(a).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(21))]
+            vec![
+                (P, CanonicalScalar::Int(10).into()),
+                (Q, CanonicalScalar::Int(21).into())
+            ]
         );
         assert!(db.edge(edge).unwrap().is_none());
         assert!(!calls.is_empty());
@@ -441,7 +444,10 @@ fn string_parameters_remain_data_and_write_only_creation_remains_usable() {
         assert_eq!(db.vertices().unwrap().len(), 1);
         // The one created vertex takes engine vertex counter 1 of this handle.
         let created = crate::write_txn::engine_vertex(&keys(), 1);
-        assert_eq!(db.vertex(created).unwrap().unwrap().props, vec![(P, value)]);
+        assert_eq!(
+            db.vertex(created).unwrap().unwrap().props,
+            vec![(P, value.into())]
+        );
         let before = db.frontier().unwrap();
         let error = db
             .query_write_authorized(
@@ -513,14 +519,14 @@ fn masked_selection_and_forbidden_noop_tails_use_authorized_native_staging() {
         assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[VId(10)][..]));
         assert_eq!(
             db.vertex(VId(20)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2))]
+            vec![(P, CanonicalScalar::Int(2).into())]
         );
         assert!(
             db.vertex(VId(10))
                 .unwrap()
                 .unwrap()
                 .props
-                .contains(&(SECRET, CanonicalScalar::Int(7)))
+                .contains(&(SECRET, CanonicalScalar::Int(7).into()))
         );
         let before = (db.frontier().unwrap(), db.vertices().unwrap());
         let error = db

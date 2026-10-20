@@ -24,7 +24,7 @@ fn vertex(key: &str, value: i64) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.into(),
         labels: vec![LabelId(1)],
-        props: vec![(K, CanonicalScalar::Int(value))],
+        props: vec![(K, CanonicalScalar::Int(value).into())],
     })
 }
 fn matched_edge(value: i64) -> BulkRow {

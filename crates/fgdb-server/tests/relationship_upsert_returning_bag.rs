@@ -141,7 +141,7 @@ impl Fixture {
                     .iter()
                     .find(|(key, _)| *key == PropertyKeyId(1))
                     .unwrap();
-                let CanonicalScalar::Int(value) = &value.1 else {
+                let Some(CanonicalScalar::Int(value)) = value.1.as_scalar() else {
                     panic!("integer property")
                 };
                 *value

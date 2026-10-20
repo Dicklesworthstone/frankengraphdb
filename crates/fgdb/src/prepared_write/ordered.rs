@@ -554,7 +554,7 @@ mod budget_tests {
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
             assert_eq!(
                 db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7))]
+                vec![(P, CanonicalScalar::Int(7).into())]
             );
             assert_eq!(
                 db.edge(EId(50)).unwrap().unwrap().entry.relation,
@@ -651,7 +651,7 @@ mod budget_tests {
             assert!(db.edge(EId(60)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(0))]
+                vec![(P, CanonicalScalar::Int(0).into())]
             );
         });
         assert!(report.lab_test_passed(), "{report:?}");

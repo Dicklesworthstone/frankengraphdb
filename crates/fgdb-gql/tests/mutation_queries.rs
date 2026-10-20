@@ -7,7 +7,7 @@ use fgdb_gql::{
     GraphMutationPolicy, GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -18,7 +18,7 @@ const OLD: PropertyKeyId = PropertyKeyId(3);
 const TEXT: PropertyKeyId = PropertyKeyId(4);
 const UPDATED: LabelId = LabelId(1);
 const SEEN: LabelId = LabelId(2);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type MutationResult<C = ()> = Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>>;
 
@@ -79,11 +79,14 @@ fn run(
     )
 }
 fn props() -> Props {
-    BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
-        ((VId(3), P), CanonicalScalar::Int(30)),
-    ])
+    BTreeMap::from(
+        [
+            ((VId(1), P), CanonicalScalar::Int(10)),
+            ((VId(2), P), CanonicalScalar::Int(20)),
+            ((VId(3), P), CanonicalScalar::Int(30)),
+        ]
+        .map(|(key, value)| (key, CanonicalPropertyValue::from(value))),
+    )
 }
 
 #[test]
@@ -273,12 +276,13 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
 
 #[test]
 fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() {
+    // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4).
+    assert!(PreparedGraphMutationText::prepare("MATCH (a) SET a = {p: 1}", R, symbols).is_ok());
     for text in [
         "MATCH (a) SET a += {}",
         "MATCH (a) SET a.p=1,a += {}",
         "MATCH (a) SET a += $map",
         "MATCH (a) SET a += a.p",
-        "MATCH (a) SET a = {p: 1}",
         "MATCH (a) REMOVE a += {p: 1}",
         "MATCH (a) SET a + {p: 1}",
         "MATCH (a) SET a += {p 1}",

@@ -19,7 +19,9 @@ fn value(db: &Database<MemVfs>, vertex: VId, key: PropertyKeyId) -> CanonicalSca
         .props
         .into_iter()
         .find_map(|(candidate, value)| (candidate == key).then_some(value))
-        .unwrap_or(CanonicalScalar::Null)
+        .map_or(CanonicalScalar::Null, |value| {
+            value.as_scalar().expect("scalar property").clone()
+        })
 }
 
 fn changed_key_program() -> PreparedGraphWriteProgram {

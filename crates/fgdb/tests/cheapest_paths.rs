@@ -12,7 +12,8 @@ use fgdb_gql::{
     GraphWalkBounds, PreparedGraphCheapestPath,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 type Answer = Option<(i128, Vec<(EId, VId)>)>;
@@ -99,7 +100,9 @@ fn oracle(edges: &[EdgeRecord], query: &PreparedGraphCheapestPath) -> Answer {
                     .props
                     .iter()
                     .find_map(|(key, value)| match value {
-                        CanonicalScalar::Int(value) if *key == query.weight_property() => {
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                            if *key == query.weight_property() =>
+                        {
                             Some(*value)
                         }
                         _ => None,

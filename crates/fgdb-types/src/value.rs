@@ -712,6 +712,15 @@ impl CanonicalPropertyValue {
         !matches!(self, Self::Scalar(_))
     }
 
+    /// Whether `bytes` begin with the List or Map tag. A durable reader
+    /// decodes such bytes with [`Self::decode`] and every other value with
+    /// [`CanonicalScalar::decode`], so scalar bytes keep exactly their scalar
+    /// decoding, errors included (fgdb-k3nub).
+    #[must_use]
+    pub fn is_collection_encoding(bytes: &[u8]) -> bool {
+        matches!(bytes.first(), Some(&(TAG_LIST | TAG_MAP)))
+    }
+
     /// The lowest scalar profile that admits every scalar this value holds,
     /// at any depth. Map keys are text and need no more than version 1.
     #[must_use]
@@ -742,7 +751,15 @@ impl CanonicalPropertyValue {
     /// Decodes one complete value. Artifact-bound text and timestamps are
     /// read as [`CanonicalScalar::decode`] reads them.
     pub fn decode(bytes: &[u8]) -> Result<Self, CanonicalPropertyValueError> {
-        Self::decode_with(bytes, None)
+        Self::decode_with(bytes, None, false)
+    }
+
+    /// Decodes one stored value from authenticated durable storage without a
+    /// live resolver, as [`CanonicalScalar::decode_stored`] does for a scalar:
+    /// a committed zoned timestamp at any depth keeps its stored metadata
+    /// (fgdb-zshkh).
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, CanonicalPropertyValueError> {
+        Self::decode_with(bytes, None, true)
     }
 
     /// Decodes one complete value against an explicit artifact resolver, as
@@ -751,12 +768,13 @@ impl CanonicalPropertyValue {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalPropertyValueError> {
-        Self::decode_with(bytes, Some(resolver))
+        Self::decode_with(bytes, Some(resolver), false)
     }
 
     fn decode_with(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
+        stored: bool,
     ) -> Result<Self, CanonicalPropertyValueError> {
         if bytes.len() > MAX_PROPERTY_VALUE_BYTES {
             return Err(CanonicalPropertyValueError::EncodedValueTooLarge {
@@ -764,7 +782,7 @@ impl CanonicalPropertyValue {
                 maximum: MAX_PROPERTY_VALUE_BYTES,
             });
         }
-        decode_property_value(bytes, resolver, 0)
+        decode_property_value(bytes, resolver, stored, 0)
     }
 }
 
@@ -807,7 +825,7 @@ impl CanonicalPropertyValue {
         bytes: &[u8],
         resolver: &R,
     ) -> Result<Self, CanonicalPropertyValueError> {
-        Self::decode_with(bytes, Some(resolver))
+        Self::decode_with(bytes, Some(resolver), false)
     }
 }
 
@@ -1145,6 +1163,7 @@ impl PropertyValueWriter {
 fn decode_property_value(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
+    stored: bool,
     depth: usize,
 ) -> Result<CanonicalPropertyValue, CanonicalPropertyValueError> {
     check_nesting_depth(depth)?;
@@ -1152,7 +1171,7 @@ fn decode_property_value(
         .split_first()
         .ok_or(CanonicalPropertyValueError::EmptyEncoding)?;
     match tag {
-        tag if is_scalar_tag(tag) => CanonicalScalar::decode_inner(bytes, resolver)
+        tag if is_scalar_tag(tag) => CanonicalScalar::decode_inner_mode(bytes, resolver, stored)
             .map(CanonicalPropertyValue::Scalar)
             .map_err(CanonicalPropertyValueError::ScalarDecode),
         TAG_LIST => {
@@ -1162,7 +1181,7 @@ fn decode_property_value(
             while reader.collection_item()? {
                 check_collection_count(values.len().saturating_add(1))?;
                 reader.ordered_field(&mut child)?;
-                let value = decode_property_value(&child, resolver, depth + 1)?;
+                let value = decode_property_value(&child, resolver, stored, depth + 1)?;
                 values.try_reserve(1).map_err(|_| {
                     CanonicalPropertyValueError::AllocationFailed {
                         requested: values.len().saturating_add(1),
@@ -1207,7 +1226,7 @@ fn decode_property_value(
                 core::mem::swap(&mut previous_key, &mut field);
                 has_previous_key = true;
                 reader.ordered_field(&mut field)?;
-                let value = decode_property_value(&field, resolver, depth + 1)?;
+                let value = decode_property_value(&field, resolver, stored, depth + 1)?;
                 entries.try_reserve(1).map_err(|_| {
                     CanonicalPropertyValueError::AllocationFailed {
                         requested: entries.len().saturating_add(1),

@@ -71,7 +71,7 @@ fn blind_write_cannot_lose_conflict_history_after_validator_resets() {
                 .expect("winner row")
                 .expect("vertex")
                 .props,
-            vec![(P, CanonicalScalar::Int(10))]
+            vec![(P, CanonicalScalar::Int(10).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -92,7 +92,7 @@ fn disjoint_staged_writes_survive_multiple_frontier_advances() {
         txn.commit(&mut db, &cx).await.expect("disjoint commit");
         assert_eq!(
             db.vertex(VId(1)).expect("result").expect("vertex").props,
-            vec![(P, CanonicalScalar::Int(5))]
+            vec![(P, CanonicalScalar::Int(5).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

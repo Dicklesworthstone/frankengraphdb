@@ -4,7 +4,7 @@
 #[derive(Default)]
 struct PointProjection<'a> {
     exists: bool,
-    property: Option<&'a CanonicalScalar>,
+    property: Option<&'a CanonicalPropertyValue>,
     label: bool,
 }
 
@@ -12,12 +12,15 @@ struct PointProjection<'a> {
 /// selected historical row and canonical staged values; it never clones a
 /// vertex, inspects a hidden payload, or enumerates the host's known keys.
 struct PointProperties<'a> {
-    base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)],
-    edits: std::collections::BTreeMap<fgdb_delta_types::PropertyKeyId, Option<&'a CanonicalScalar>>,
+    base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)],
+    edits: std::collections::BTreeMap<
+        fgdb_delta_types::PropertyKeyId,
+        Option<&'a CanonicalPropertyValue>,
+    >,
 }
 
 impl<'a> PointProperties<'a> {
-    fn new(base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)]) -> Self {
+    fn new(base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)]) -> Self {
         Self {
             base,
             edits: std::collections::BTreeMap::new(),
@@ -26,7 +29,7 @@ impl<'a> PointProperties<'a> {
 
     fn effective_properties(
         &self,
-    ) -> impl Iterator<Item = (fgdb_delta_types::PropertyKeyId, &CanonicalScalar)> {
+    ) -> impl Iterator<Item = (fgdb_delta_types::PropertyKeyId, &CanonicalPropertyValue)> {
         self.base
             .iter()
             .filter(|(key, _)| !self.edits.contains_key(key))
@@ -101,7 +104,7 @@ impl<'a> PointProjection<'a> {
     fn from_fields<E>(
         field: PointReadField,
         labels: &[LabelId],
-        properties: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)],
+        properties: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)],
         control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let mut projected = Self {
@@ -360,18 +363,20 @@ impl WriteTxn {
                 match coordinate {
                     Some((block, row)) => {
                         control(SourceEvent::SnapshotRecord)?;
-                        let properties: &[(fgdb_delta_types::PropertyKeyId, CanonicalScalar)] =
-                            match snapshot.block_props.get(block).and_then(Option::as_ref) {
-                                Some(block) => {
-                                    let locator = block.locators[row];
-                                    if locator == 0 {
-                                        &[]
-                                    } else {
-                                        &block.rows[usize::from(locator) - 1]
-                                    }
+                        let properties: &[(
+                            fgdb_delta_types::PropertyKeyId,
+                            CanonicalPropertyValue,
+                        )] = match snapshot.block_props.get(block).and_then(Option::as_ref) {
+                            Some(block) => {
+                                let locator = block.locators[row];
+                                if locator == 0 {
+                                    &[]
+                                } else {
+                                    &block.rows[usize::from(locator) - 1]
                                 }
-                                None => &[],
-                            };
+                            }
+                            None => &[],
+                        };
                         PointProjection::from_fields(field, &[], properties, control)?
                     }
                     None => PointProjection::default(),

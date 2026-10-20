@@ -392,7 +392,7 @@ fn block_props(
                 let rows: Vec<_> = (0..1 + rng.below(3))
                     .map(|_| {
                         let value = rng.below(1_000);
-                        vec![(PropertyKeyId(1), CanonicalScalar::Int(value as i64))]
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(value as i64).into())]
                     })
                     .collect();
                 let locators = block

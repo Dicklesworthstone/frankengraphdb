@@ -350,7 +350,7 @@ mod tests {
                 created_at: CommitSeq(*created),
                 retired_at: retired.map(CommitSeq),
                 labels: vec![],
-                props: vec![(KEY, value.clone())],
+                props: vec![(KEY, value.clone().into())],
             })
             .collect();
         decode_patch(&encode_patch(&rows).unwrap()).unwrap()
@@ -424,7 +424,10 @@ mod tests {
                         .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
                         .unwrap()
                         .filter(|row| {
-                            C::Equal.accepts_scalar_pair(Some(&row.props[0].1), Some(&float(100.0)))
+                            C::Equal.accepts_scalar_pair(
+                                row.props[0].1.as_scalar(),
+                                Some(&float(100.0)),
+                            )
                         })
                         .map(|row| row.vid)
                 })

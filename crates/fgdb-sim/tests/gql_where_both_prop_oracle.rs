@@ -21,10 +21,10 @@ fn reference_destinations(graph: &ReferenceGraph) -> Vec<VId> {
         .filter(|(_, edge)| {
             graph
                 .vertex(edge.src)
-                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1)))
-                && graph
-                    .vertex(edge.dst)
-                    .is_some_and(|vertex| vertex.props.get(&M) == Some(&CanonicalScalar::Int(9)))
+                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1).into()))
+                && graph.vertex(edge.dst).is_some_and(|vertex| {
+                    vertex.props.get(&M) == Some(&CanonicalScalar::Int(9).into())
+                })
         })
         .map(|(_, edge)| edge.dst)
         .collect();

@@ -10,7 +10,7 @@ use fgdb_gql::spill_set::{
     AsyncSpillElementSource, AsyncSpillSetPlan, SpillSetRowError, SpillSetStage, SpillSetValuesPlan,
 };
 use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded};
-use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
+use fgdb_types::CanonicalScalarResolver;
 
 // A property lends its scalar while owning the authenticated cold record and
 // that record's byte grant. The evaluator reserves its destination copy before
@@ -20,8 +20,8 @@ enum PinnedProperty {
     Edge(BufferedValue<BufferedEdge>, usize),
 }
 
-impl std::borrow::Borrow<CanonicalScalar> for PinnedProperty {
-    fn borrow(&self) -> &CanonicalScalar {
+impl std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> for PinnedProperty {
+    fn borrow(&self) -> &fgdb_types::CanonicalPropertyValue {
         match self {
             Self::Vertex(record, at) => &record.props[*at].1,
             Self::Edge(record, at) => &record.props[*at].1,

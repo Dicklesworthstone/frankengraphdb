@@ -9,11 +9,17 @@ impl VertexMergeOutput for VertexMergeTargets {
     const UNIQUE: bool = false;
 
     fn matched(matched: std::collections::BTreeSet<VId>) -> Self {
-        Self { matched, created: None }
+        Self {
+            matched,
+            created: None,
+        }
     }
 
     fn created(vertex: VId) -> Self {
-        Self { matched: std::collections::BTreeSet::new(), created: Some(vertex) }
+        Self {
+            matched: std::collections::BTreeSet::new(),
+            created: Some(vertex),
+        }
     }
 }
 impl VertexMergeTargets {
@@ -22,7 +28,10 @@ impl VertexMergeTargets {
     }
 
     fn outcomes(&self) -> impl Iterator<Item = fgdb_gql::GraphVertexMergeOutcome> + '_ {
-        self.matched.iter().copied().map(fgdb_gql::GraphVertexMergeOutcome::Matched)
+        self.matched
+            .iter()
+            .copied()
+            .map(fgdb_gql::GraphVertexMergeOutcome::Matched)
             .chain(self.created.map(fgdb_gql::GraphVertexMergeOutcome::Created))
     }
 
@@ -49,12 +58,18 @@ impl VertexMergeTargets {
 }
 
 type VertexMergeBatchResult<A> = Result<
-    (fgdb_gql::GraphVertexMergeStats, Vec<fgdb_gql::GraphVertexMergeOutcome>),
+    (
+        fgdb_gql::GraphVertexMergeStats,
+        Vec<fgdb_gql::GraphVertexMergeOutcome>,
+    ),
     TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
 >;
 
 type VertexUpsertBatchResult<A> = Result<
-    (fgdb_gql::GraphVertexUpsertStats, Vec<fgdb_gql::GraphVertexMergeOutcome>),
+    (
+        fgdb_gql::GraphVertexUpsertStats,
+        Vec<fgdb_gql::GraphVertexMergeOutcome>,
+    ),
     TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
 >;
 
@@ -87,8 +102,16 @@ fn vertex_targets_event<E>(
     let scratch = u128::from(evaluator.scratch_entries)
         + u128::from(event == GlaExecutionEvent::ScratchEntry);
     for (observed, limit, dimension) in [
-        (work, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-        (scratch, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+        (
+            work,
+            policy.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            scratch,
+            policy.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
     ] {
         if observed > u128::from(limit) {
             return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
@@ -121,7 +144,10 @@ impl WriteTxn {
         use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(infrastructure)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(infrastructure)?;
         if live != self.basis {
             return Err(infrastructure(WriteTxnError::SnapshotAdvanced {
                 pinned: self.basis,
@@ -130,7 +156,10 @@ impl WriteTxn {
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && merge.relation() != first.relation
         {
             return Err(infrastructure(WriteTxnError::RelationMismatch {
@@ -145,20 +174,29 @@ impl WriteTxn {
                 merge,
                 policy,
                 |pattern, allowance| {
-                    workspace.txn.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                    workspace
+                        .txn
+                        .execute_graph_pattern_governed(database, cx, pattern, allowance)
                 },
                 allocate,
                 || cx.checkpoint(),
             )?;
             if let Some(creation) = proposal.creation {
                 stage_vertex_merge_creation::<V, A>(
-                    workspace.txn, database, cx, merge.relation(), creation,
+                    workspace.txn,
+                    database,
+                    cx,
+                    merge.relation(),
+                    creation,
                 )?;
             }
             let mut stats = proposal.stats;
             let outcomes = proposal.outcome.into_outcomes(|event| {
                 vertex_targets_event::<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>(
-                    cx, policy.query, &mut stats.evaluator, event,
+                    cx,
+                    policy.query,
+                    &mut stats.evaluator,
+                    event,
                 )
             })?;
             workspace.accept();
@@ -180,11 +218,18 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> VertexUpsertBatchResult<A> {
         self.with_vertex_upsert_targets(
-            database, cx, upsert, policy, allocate,
+            database,
+            cx,
+            upsert,
+            policy,
+            allocate,
             |_, _, mut stats, targets| {
                 let outcomes = targets.into_outcomes(|event| {
                     vertex_upsert_batch_event::<A>(
-                        cx, policy.merge.query, &mut stats.merge.evaluator, event,
+                        cx,
+                        policy.merge.query,
+                        &mut stats.merge.evaluator,
+                        event,
                     )
                 })?;
                 Ok((stats, outcomes))
@@ -218,18 +263,26 @@ impl WriteTxn {
     ) -> VertexUpsertBatchQueryResult<A> {
         use fgdb_gql::algebra::GraphValue;
         use fgdb_gql::{
-            GlaExecutionEvent, GqlQueryError, GraphVertexReturnBinding,
-            GraphVertexUpsertError,
+            GlaExecutionEvent, GqlQueryError, GraphVertexReturnBinding, GraphVertexUpsertError,
         };
         self.with_vertex_upsert_targets(
-            database, cx, query.upsert(), vertex_upsert_query_selection_policy(policy), allocate,
+            database,
+            cx,
+            query.upsert(),
+            vertex_upsert_query_selection_policy(policy),
+            allocate,
             |transaction, database, stats, targets| {
                 // Final reads and row operators remain inside the same guard
                 // as every action. Only the final result spends the row grant.
                 let mut evaluator = stats.merge.evaluator;
                 let rows = {
                     let mut control = |event| {
-                        vertex_upsert_batch_event::<A>(cx, policy.merge.query, &mut evaluator, event)
+                        vertex_upsert_batch_event::<A>(
+                            cx,
+                            policy.merge.query,
+                            &mut evaluator,
+                            event,
+                        )
                     };
                     control(GlaExecutionEvent::Work)?;
                     let mut rows = Vec::new();
@@ -239,20 +292,32 @@ impl WriteTxn {
                         for binding in query.bindings() {
                             control(GlaExecutionEvent::ScratchEntry)?;
                             row.push(match *binding {
-                                GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
-                                GraphVertexReturnBinding::Property(key) => GraphValue::Scalar(
-                                    vertex_upsert_property(
-                                        transaction, database, outcome.vertex(), key, &mut control,
-                                    )?,
-                                ),
+                                GraphVertexReturnBinding::Vertex => {
+                                    GraphValue::Vertex(outcome.vertex())
+                                }
+                                GraphVertexReturnBinding::Property(key) => {
+                                    GraphValue::Scalar(vertex_upsert_property(
+                                        transaction,
+                                        database,
+                                        outcome.vertex(),
+                                        key,
+                                        &mut control,
+                                    )?)
+                                }
                                 GraphVertexReturnBinding::Properties => vertex_upsert_properties(
-                                    transaction, database, outcome.vertex(), query.property_catalog(),
+                                    transaction,
+                                    database,
+                                    outcome.vertex(),
+                                    query.property_catalog(),
                                     |_| true,
                                     || cx.checkpoint().map_err(GqlQueryError::Interrupted),
                                     &mut control,
                                 )?,
                                 GraphVertexReturnBinding::Labels => vertex_upsert_labels(
-                                    transaction, database, outcome.vertex(), query.property_catalog(),
+                                    transaction,
+                                    database,
+                                    outcome.vertex(),
+                                    query.property_catalog(),
                                     |_| true,
                                     || cx.checkpoint().map_err(GqlQueryError::Interrupted),
                                     &mut control,
@@ -263,10 +328,15 @@ impl WriteTxn {
                     }
                     rows
                 };
-                let returning = query.project_rows_governed(
-                    rows, stats.merge.match_selection, evaluator, policy.merge.query,
-                    || cx.checkpoint(),
-                ).map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;
+                let returning = query
+                    .project_rows_governed(
+                        rows,
+                        stats.merge.match_selection,
+                        evaluator,
+                        policy.merge.query,
+                        || cx.checkpoint(),
+                    )
+                    .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;
                 Ok((stats, returning))
             },
         )
@@ -288,15 +358,21 @@ impl WriteTxn {
             &mut Database<V>,
             fgdb_gql::GraphVertexUpsertStats,
             VertexMergeTargets,
-        ) -> Result<T, TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>>,
+        ) -> Result<
+            T,
+            TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
+        >,
     ) -> Result<T, TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>> {
         use fgdb_gql::{
-            GlaExecutionEvent, GqlQueryError, GraphVertexUpsertBranch,
-            GraphVertexUpsertError, GraphVertexUpsertStats,
+            GlaExecutionEvent, GqlQueryError, GraphVertexUpsertBranch, GraphVertexUpsertError,
+            GraphVertexUpsertStats,
         };
         let infrastructure = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
         self.ensure_database(database).map_err(infrastructure)?;
-        let live = database.frontier().map_err(WriteTxnError::from).map_err(infrastructure)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(infrastructure)?;
         if live != self.basis {
             return Err(infrastructure(WriteTxnError::SnapshotAdvanced {
                 pinned: self.basis,
@@ -305,7 +381,10 @@ impl WriteTxn {
         }
         if let Some(first) = self.staged.first()
             && !self.program_multi_relation
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
             && upsert.merge().relation() != first.relation
         {
             return Err(infrastructure(WriteTxnError::RelationMismatch {
@@ -320,11 +399,14 @@ impl WriteTxn {
                 upsert.merge(),
                 policy.merge,
                 |pattern, allowance| {
-                    workspace.txn.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                    workspace
+                        .txn
+                        .execute_graph_pattern_governed(database, cx, pattern, allowance)
                 },
                 allocate,
                 || cx.checkpoint(),
-            ).map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
+            )
+            .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
             let targets = proposal.outcome;
             let (branch, actions) = if targets.created.is_some() {
                 (GraphVertexUpsertBranch::Create, upsert.on_create())
@@ -335,9 +417,11 @@ impl WriteTxn {
             // before staging the first one, without refreshing it per target.
             let observed = (targets.len() as u128)
                 .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
-                .ok_or_else(|| GqlQueryError::Source(GraphVertexUpsertError::Merge(
-                    fgdb_gql::GraphVertexMergeError::AccountingOverflow,
-                )))?;
+                .ok_or_else(|| {
+                    GqlQueryError::Source(GraphVertexUpsertError::Merge(
+                        fgdb_gql::GraphVertexMergeError::AccountingOverflow,
+                    ))
+                })?;
             if observed > u128::from(policy.max_actions) {
                 return Err(GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
                     limit: policy.max_actions,
@@ -346,8 +430,13 @@ impl WriteTxn {
             }
             if let Some(creation) = proposal.creation {
                 stage_vertex_merge_creation::<V, A>(
-                    workspace.txn, database, cx, upsert.merge().relation(), creation,
-                ).map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
+                    workspace.txn,
+                    database,
+                    cx,
+                    upsert.merge().relation(),
+                    creation,
+                )
+                .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
             }
             let mut stats = GraphVertexUpsertStats {
                 merge: proposal.stats,
@@ -356,12 +445,19 @@ impl WriteTxn {
             };
             for outcome in targets.outcomes() {
                 vertex_upsert_batch_event::<A>(
-                    cx, policy.merge.query, &mut stats.merge.evaluator, GlaExecutionEvent::Work,
+                    cx,
+                    policy.merge.query,
+                    &mut stats.merge.evaluator,
+                    GlaExecutionEvent::Work,
                 )?;
                 // No native field borrow or lock survives a clause boundary.
                 let state = std::cell::RefCell::new((&mut *workspace.txn, &mut *database));
                 let action_stats = vertex_upsert_actions::<WriteTxnError, A, _>(
-                    upsert, policy, stats.merge, outcome, || cx.checkpoint(),
+                    upsert,
+                    policy,
+                    stats.merge,
+                    outcome,
+                    || cx.checkpoint(),
                     |key, control| {
                         let state = state.borrow();
                         vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
@@ -369,7 +465,10 @@ impl WriteTxn {
                     |batch| {
                         let mut state = state.borrow_mut();
                         let (transaction, database) = &mut *state;
-                        transaction.write(database, batch).map(|_| ()).map_err(infrastructure)
+                        transaction
+                            .write(database, batch)
+                            .map(|_| ())
+                            .map_err(infrastructure)
                     },
                 )?;
                 stats.merge.evaluator = action_stats.merge.evaluator;
@@ -418,18 +517,22 @@ impl<V: Vfs + Clone> Database<V> {
     > {
         use fgdb_gql::{GqlQueryError, GraphVertexUpsertError};
         let infrastructure = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
-        let mut transaction = self.begin(txn_cx)
+        let mut transaction = self
+            .begin(txn_cx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, rows) = match transaction.execute_graph_vertex_upserts_query_governed(
-            self, query_cx, query, policy, allocate,
-        ) {
+        let (stats, rows) = match transaction
+            .execute_graph_vertex_upserts_query_governed(self, query_cx, query, policy, allocate)
+        {
             Ok(result) => result,
             Err(error) => {
                 transaction.abort();
                 return Err(error);
             }
         };
-        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
         Ok((stats, rows, completion))
     }
 }

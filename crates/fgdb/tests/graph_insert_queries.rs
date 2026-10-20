@@ -111,8 +111,11 @@ fn verify_created(db: &Database<MemVfs>) {
         assert_eq!(
             vertex.props,
             vec![
-                (P, CanonicalScalar::Int(p)),
-                (Q, q.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                (P, CanonicalScalar::Int(p).into()),
+                (
+                    Q,
+                    q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into()
+                )
             ]
         );
         let edge = db.edge(EId(10_000 + row * 4)).unwrap().unwrap();
@@ -330,7 +333,7 @@ fn data_and_count_refusals_precede_allocation_and_do_not_discard_earlier_staging
         txn.abort();
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(20))]
+            vec![(P, CanonicalScalar::Int(20).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

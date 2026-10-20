@@ -14,7 +14,8 @@ use fgdb_gql::{
     GqlBudgetDimension, GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -128,7 +129,11 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], anti: bool) -> Vec<Vec<G
                         vertices.iter().any(|row| {
                             row.vid == second.entry.dst && row.props.iter().any(|(key, value)| {
                                 *key == SCORE
-                                    && matches!(value, CanonicalScalar::Int(score) if *score >= 5)
+                                    && matches!(
+                                        value,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(score))
+                                            if *score >= 5
+                                    )
                             })
                         })
                     })
@@ -141,7 +146,7 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], anti: bool) -> Vec<Vec<G
                         .props
                         .iter()
                         .find(|(key, _)| *key == META)
-                        .map(|(_, value)| value.clone())
+                        .map(|(_, value)| value.as_scalar().expect("scalar fixture").clone())
                         .unwrap_or(CanonicalScalar::Null),
                 ),
             ]);

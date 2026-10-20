@@ -1,9 +1,57 @@
 //! Borrowed, binding-dependent property selection in the shared GLA visitor.
 
 use crate::GlaExecutionEvent;
-use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
+use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphValue, IntegerComparison};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+
+/// Two stored List or Map property values compare as composite values do:
+/// element by element, three-valued (fgdb-9cawv, fgdb-k3nub). Both are
+/// admitted as owned query values first; a collection against a scalar,
+/// vertex or edge is the caller's UNKNOWN and never reaches here.
+pub(crate) fn compare_stored<E: From<crate::GraphIntegerError>>(
+    comparison: IntegerComparison,
+    left: &CanonicalPropertyValue,
+    right: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    use crate::set_ops::projection::membership;
+    let left = GraphValue::admit_property_value(left, control)?;
+    let right = GraphValue::admit_property_value(right, control)?;
+    match comparison {
+        IntegerComparison::Equal => membership::equal(&left, &right, control),
+        IntegerComparison::NotEqual => {
+            Ok(membership::equal(&left, &right, control)?.map(|equal| !equal))
+        }
+        ordered => membership::order(ordered, &left, &right, control),
+    }
+}
+
+impl IntegerComparison {
+    /// [`Self::accepts_scalar_pair`] over stored property values
+    /// (fgdb-k3nub), decided exactly as CompareProperties decides it: two
+    /// stored Lists or Maps compare element by element, a collection against
+    /// a scalar or an absent value is UNKNOWN, and otherwise the scalar pair
+    /// compares. Only TRUE is kept. Element evaluation charges `control`; a
+    /// collection beyond the query bounds raises StoredValueBounds.
+    pub fn accepts_property_pair<E: From<crate::GraphIntegerError>>(
+        self,
+        left: Option<&CanonicalPropertyValue>,
+        right: Option<&CanonicalPropertyValue>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        if let (Some(left), Some(right)) = (left, right)
+            && left.is_collection()
+            && right.is_collection()
+        {
+            return Ok(compare_stored(self, left, right, control)? == Some(true));
+        }
+        Ok(self.accepts_scalar_pair(
+            left.and_then(CanonicalPropertyValue::as_scalar),
+            right.and_then(CanonicalPropertyValue::as_scalar),
+        ))
+    }
+}
 
 /// Both source reads are explicit and fallible; no source failure is a missing
 /// value. A null binding has no property source and rejects without a read.
@@ -14,11 +62,11 @@ pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     paths: &[Option<crate::algebra::GraphPath>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     edge_property: &mut impl FnMut(
         fgdb_types::EId,
         PropertyKeyId,
-    ) -> Result<Option<&'a CanonicalScalar>, E>,
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     if let GlaOperator::SelectBoolean { expression } = operator {
@@ -33,7 +81,7 @@ pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
 pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     if let GlaOperator::SelectBoolean { expression } = operator {
@@ -59,11 +107,47 @@ pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     let left = property(*left, *left_key)?;
     control(GlaExecutionEvent::Work)?;
     let right = property(*right, *right_key)?;
+    if let (Some(left), Some(right)) = (left, right)
+        && left.is_collection()
+        && right.is_collection()
+    {
+        control(GlaExecutionEvent::Work)?;
+        return Ok(compare_stored(*comparison, left, right, control)? == Some(true));
+    }
+    // A collection against a scalar compares UNKNOWN, as an absent value does.
+    let (left, right) = (
+        left.and_then(CanonicalPropertyValue::as_scalar),
+        right.and_then(CanonicalPropertyValue::as_scalar),
+    );
     for value in [left, right].into_iter().flatten() {
         charge_payload(value, control)?;
     }
     control(GlaExecutionEvent::Work)?;
     Ok(comparison.accepts_scalar_pair(left, right))
+}
+
+/// [`charge_payload`] for a stored property value (fgdb-k3nub): a scalar is
+/// charged exactly as `charge_payload` charges it; a List or Map charges one
+/// unit per element, each map key's payload quanta, and every nested scalar.
+pub(crate) fn charge_stored_payload<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => charge_payload(scalar, control),
+        CanonicalPropertyValue::List(list) => list.values().iter().try_for_each(|value| {
+            control(GlaExecutionEvent::Work)?;
+            charge_stored_payload(value, &mut *control)
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+            control(GlaExecutionEvent::Work)?;
+            let key = entry.key().as_str().len();
+            for _ in 0..key.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                control(GlaExecutionEvent::Work)?;
+            }
+            charge_stored_payload(entry.value(), &mut *control)
+        }),
+    }
 }
 
 /// Reserve each borrowed variable-size payload before comparing it. The two
@@ -142,7 +226,7 @@ mod tests {
             !compare_properties(
                 &comparison(),
                 &[Some(VId(1)), None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
                     "must not read null bindings"
                 )),
                 &mut |_| Ok(())
@@ -153,8 +237,12 @@ mod tests {
 
     #[test]
     fn payload_work_and_both_source_reads_can_be_interrupted() {
-        let first = CanonicalScalar::ucs_basic_text(&"a".repeat(4096)).unwrap();
-        let second = CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap();
+        let first = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"a".repeat(4096)).unwrap(),
+        );
+        let second = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap(),
+        );
         let values = [&first, &second];
         let mut events = 0;
         let complete = compare_properties(
@@ -202,10 +290,14 @@ mod tests {
                 &bindings,
                 &[],
                 &mut |_, _| {
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected vertex read"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "unexpected vertex read",
+                    ))
                 },
                 &mut |_, _| {
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected edge read"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "unexpected edge read",
+                    ))
                 },
                 &mut |_| Err(Failure::Source("unexpected work for null bindings")),
             );
@@ -237,7 +329,7 @@ mod tests {
 
     #[test]
     fn element_comparison_can_be_cancelled_before_each_source_read() {
-        let value = CanonicalScalar::ucs_basic_text("").unwrap();
+        let value = CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("").unwrap());
         for stop in 1..=3 {
             let mut events = 0;
             let mut reads = 0;
@@ -283,7 +375,10 @@ mod tests {
 
     #[test]
     fn captured_edges_never_replace_vertex_property_operands() {
-        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let values: [CanonicalPropertyValue; 2] = [
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ];
         for (comparison, expected) in [
             (IntegerComparison::Equal, false),
             (IntegerComparison::NotEqual, true),
@@ -329,7 +424,9 @@ mod tests {
                     &comparison(),
                     &ids,
                     &paths,
-                    &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("vertex read")),
+                    &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "vertex read"
+                    )),
                     &mut |_, _| Err(Failure::Source("edge read")),
                     &mut |_| Err(Failure::Source("work after a NULL binding")),
                 ),
@@ -401,8 +498,8 @@ mod tests {
             .iter()
             .find(|op| matches!(op, GlaOperator::SelectBoolean { .. }))
             .unwrap();
-        let vertex_value = CanonicalScalar::Int(5);
-        let edge_value = CanonicalScalar::Int(10);
+        let vertex_value = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
+        let edge_value = CanonicalPropertyValue::from(CanonicalScalar::Int(10));
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
         let result = compare_element_properties(

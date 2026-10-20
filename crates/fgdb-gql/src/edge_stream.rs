@@ -32,7 +32,7 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::sync::Arc;
 
 pub use crate::stream::{
@@ -256,7 +256,8 @@ pub struct EdgeScanRow<'a> {
     pub source: VId,
     pub target: VId,
     pub relation: RelationId,
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 impl core::fmt::Debug for EdgeScanRow<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -331,7 +332,8 @@ pub trait EdgeScanSource {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.edge(eid, control)? else {
             return Ok(None);
         };
@@ -368,7 +370,8 @@ pub trait EdgeScanSource {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.vertex(vid, control)? else {
             return Ok(None);
         };
@@ -820,7 +823,7 @@ struct Binding<'a> {
     eid: EId,
     ids: [VId; 2],
     vertices: [VertexScanRow<'a>; 2],
-    edge: &'a [(PropertyKeyId, CanonicalScalar)],
+    edge: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 fn seek<'a, T, K: Ord, E>(
     values: &'a [T],
@@ -846,7 +849,7 @@ impl<'a> Binding<'a> {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<&'a CanonicalScalar>, E> {
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E> {
         let slot = if vid == self.ids[0] {
             0
         } else {
@@ -866,7 +869,7 @@ impl<'a> Binding<'a> {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<&'a CanonicalScalar>, E> {
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E> {
         debug_assert_eq!(eid, self.eid);
         seek(self.edge, &key, |entry| entry.0, control).map(|entry| entry.map(|(_, v)| v))
     }
@@ -942,7 +945,7 @@ impl EdgeScanPlan {
         }
         Ok(Some(paths))
     }
-    fn project<E>(
+    fn project<E: From<crate::GraphIntegerError>>(
         &self,
         row: &Binding<'_>,
         paths: &[Option<GraphPath>],
@@ -951,7 +954,7 @@ impl EdgeScanPlan {
         collect_one::<GraphValueRow, E>(&self.projection, row, paths, control)
     }
 }
-fn collect_one<Row: GlaOutput, E>(
+fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     projection: &GlaOperator,
     row: &Binding<'_>,
     paths: &[Option<GraphPath>],

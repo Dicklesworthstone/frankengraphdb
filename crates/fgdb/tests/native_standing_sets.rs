@@ -50,7 +50,9 @@ fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
             row.props
                 .iter()
                 .find(|(key, _)| *key == P)
-                .map_or(CanonicalScalar::Null, |(_, value)| value.clone()),
+                .map_or(CanonicalScalar::Null, |(_, value)| {
+                    value.as_scalar().expect("scalar fixture").clone()
+                }),
         );
         for (label, bag) in [(LabelId(1), &mut left), (LabelId(2), &mut right)] {
             if row.labels.contains(&label) {

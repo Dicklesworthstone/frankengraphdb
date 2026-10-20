@@ -109,7 +109,7 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
     for (entries, values) in definitions {
         let props: Vec<_> = values
             .into_iter()
-            .map(|n| vec![(P, CanonicalScalar::Int(n))])
+            .map(|n| vec![(P, CanonicalScalar::Int(n).into())])
             .collect();
         let patch = store
             .put_edge_property_patch(&cx, &encode_property_patch(&props).unwrap())
@@ -142,7 +142,7 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
             created_at: CommitSeq(1),
             retired_at: None,
             labels: vec![LabelId(9)],
-            props: vec![(P, CanonicalScalar::Int(id as i64 * 10))],
+            props: vec![(P, CanonicalScalar::Int(id as i64 * 10).into())],
         })
         .collect();
     let patch = store
@@ -237,7 +237,7 @@ fn retained_histories_match_independent_all_direction_cut_and_position_oracles()
                                 assert_eq!(
                                     candidate.row.as_ref().map(|r| r.edge().props.clone()),
                                     visible(candidate.eid, cut)
-                                        .map(|value| vec![(P, CanonicalScalar::Int(value))])
+                                        .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
                                 );
                                 if let Some(row) = candidate.row {
                                     assert_eq!(row.edge().entry.src, row.source_vertex().vid);
@@ -245,7 +245,11 @@ fn retained_histories_match_independent_all_direction_cut_and_position_oracles()
                                     for vertex in [row.source_vertex(), row.target_vertex()] {
                                         assert_eq!(
                                             vertex.props,
-                                            [(P, CanonicalScalar::Int(vertex.vid.0 as i64 * 10))]
+                                            [(
+                                                P,
+                                                CanonicalScalar::Int(vertex.vid.0 as i64 * 10)
+                                                    .into()
+                                            )]
                                         );
                                     }
                                     assert_eq!(

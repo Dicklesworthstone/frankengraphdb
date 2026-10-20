@@ -142,7 +142,7 @@ mod sealed {
 
     pub trait Projection: Sized {
         fn accepts_projection(projection: &GlaOperator, order: &GlaOperator) -> bool;
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
@@ -154,7 +154,7 @@ mod sealed {
             matches!(projection, GlaOperator::Project { slot } if slot.ordinal() == 0)
                 && matches!(order, GlaOperator::OrderByVertexId)
         }
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             _row: VertexScanRow<'_>,
             _projection: &GlaOperator,
@@ -177,7 +177,7 @@ mod sealed {
                     _ => false,
                 })
         }
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
@@ -188,7 +188,7 @@ mod sealed {
     }
 }
 
-fn collect_one<Row: GlaOutput, E>(
+fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,
@@ -254,7 +254,10 @@ mod projected_tests {
     const P: PropertyKeyId = PropertyKeyId(1);
 
     struct Source {
-        rows: Vec<(VId, Vec<(PropertyKeyId, CanonicalScalar)>)>,
+        rows: Vec<(
+            VId,
+            Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)>,
+        )>,
         at: usize,
         fail: Option<VId>,
         reads: Arc<AtomicUsize>,
@@ -266,7 +269,7 @@ mod projected_tests {
                 rows: [VId(0), VId(9), VId(u128::MAX)]
                     .into_iter()
                     .zip(values)
-                    .map(|(id, value)| (id, vec![(P, CanonicalScalar::Int(value))]))
+                    .map(|(id, value)| (id, vec![(P, CanonicalScalar::Int(value).into())]))
                     .collect(),
                 at: 0,
                 fail: None,

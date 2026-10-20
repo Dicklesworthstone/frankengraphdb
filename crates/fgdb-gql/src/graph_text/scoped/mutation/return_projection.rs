@@ -277,11 +277,11 @@ fn dynamic_column_at(
     }))
 }
 
-/// The column domain of one graph input: a property is a scalar, a bare
+/// The column domain of one graph input: a property is a stored value, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
     if input.property.is_some() {
-        return GraphSetColumnType::Scalar;
+        return GraphSetColumnType::Stored;
     }
     match input.path {
         None => GraphSetColumnType::Vertex,
@@ -322,7 +322,9 @@ fn map_capable(
                 .and_then(|schema| schema.get(*at))
                 .is_some_and(|(_, kind)| match kind {
                     GraphSetColumnType::Any => true,
-                    GraphSetColumnType::Scalar => crate::set_ops::temporal_field_name(key),
+                    GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
+                        crate::set_ops::temporal_field_name(key)
+                    }
                     _ => false,
                 })
         }
@@ -343,7 +345,7 @@ enum ListFunction {
     Reduce,
 }
 
-struct GraphProjectionHead<'a> {
+pub(super) struct GraphProjectionHead<'a> {
     with: bool,
     /// A written WITH that neither groups nor deduplicates. openCypher lets
     /// its own WHERE and pages also read the MATCH bindings it drops.
@@ -354,13 +356,14 @@ struct GraphProjectionHead<'a> {
 impl<'a> GraphProjectionHead<'a> {
     fn schema(&self, parameters: &[GqlParameterSpec]) -> pipeline::RowSchema<'a> {
         // Match the native source-column domains. A property on an edge is
-        // still a scalar; the Edge marker selects its owner, not its value type.
+        // still a stored value; the Edge marker selects its owner, not its
+        // value type.
         let types: Vec<_> = self
             .inputs
             .iter()
             .map(|input| {
                 if input.property.is_some() {
-                    return GraphSetColumnType::Scalar;
+                    return GraphSetColumnType::Stored;
                 }
                 match input.path {
                     Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
@@ -420,6 +423,31 @@ impl<'a> Parser<'a> {
     /// How many parentheses wrap a lone name here, as in `((n))`, when no
     /// operator, subscript or entry read follows the last one; `None` for
     /// anything else, which keeps its scalar reading (`(x) + 1`, `(n.p)`).
+    /// A parenthesized group that is not a lone name (parenthesized_name owns
+    /// those), directly followed by `.key` or `[`. Lookahead only.
+    fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_punct(b'(') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut lone = lexer.clone();
+        if matches!(lone.next()?.kind, TokenKind::Word(_))
+            && matches!(lone.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(false);
+        }
+        skip_group(&mut lexer)?;
+        let mut after = lexer.clone();
+        Ok(match after.next()?.kind {
+            TokenKind::Punct(b'[') => true,
+            TokenKind::Punct(b'.') => matches!(
+                after.next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            ),
+            _ => false,
+        })
+    }
+
     fn parenthesized_name(&self) -> Result<Option<usize>, GraphPatternTextError> {
         if !self.is_punct(b'(') {
             return Ok(None);
@@ -1142,6 +1170,49 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The read part of a write after WITH (fgdb-sl4ym): the WITH head over
+    /// the MATCH just parsed and every later stage, up to the write clause,
+    /// with the row schema there. The write reads that row and nothing else.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn write_row_prefix(
+        &mut self,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
+        let mut head = self.graph_projection_head()?;
+        if !head.with {
+            return Err(GraphSetTextError {
+                offset: self.current.at,
+                kind: GraphSetTextErrorKind::Expected("WITH before the write clause"),
+            });
+        }
+        self.hoist_boundary_reads(&mut head, 0)?;
+        let schema = head.schema(&self.syntax.parameters);
+        // A carried element's hidden reads stay in the row: the write's
+        // values and RETURN read them as the boundary does.
+        self.write_prefix = true;
+        let prefix = self.row_pipeline_prefix(schema);
+        self.write_prefix = false;
+        let (stages, schema, _) = prefix?;
+        Ok((head, stages, schema))
+    }
+
+    /// The relation [`Self::write_row_prefix`] parsed, once the write and any
+    /// RETURN after it are read: every parameter of the statement is in it.
+    pub(super) fn finish_write_row_prefix(
+        self,
+        statement: &'a str,
+        head: GraphProjectionHead<'a>,
+        stages: Vec<ReadStageTemplate>,
+    ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
+        self.finish_graph_projection(statement, head, stages)
+    }
+
     fn finish_graph_projection(
         mut self,
         statement: &'a str,
@@ -1286,7 +1357,7 @@ impl<'a> Parser<'a> {
             self.boundary_property_map(schema, source.text).or_else(|| {
                 schema.iter().position(|(name, kind)| {
                     name.text == source.text
-                        && matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Scalar)
+                        && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
                 })
             })
         } else {
@@ -1651,6 +1722,25 @@ impl<'a> Parser<'a> {
     /// or `>=`, as in `[1, 0] >= [1]`. The scalar compiler reads such a
     /// comparison whole in the value language; it never compares composites.
     pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
+        // A list- or map-typed parameter compared whole (`$rows = [1]`), as
+        // its literal is and as `[1] = $rows` already was. `$rows[0]` and
+        // `$map.key` keep their element and entry reads.
+        if let TokenKind::Parameter(name) = self.current.kind {
+            if !matches!(
+                self.parameter_types.get(name),
+                Some(crate::GqlParameterType::List | crate::GqlParameterType::Map)
+            ) {
+                return Ok(false);
+            }
+            let mut lexer = self.lexer.clone();
+            return Ok(match lexer.next()?.kind {
+                TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+                TokenKind::Punct(b'<' | b'>') => true,
+                TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+                TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
+                _ => false,
+            });
+        }
         let list = self.is_punct(b'[');
         if !(self.is_punct(b'{') || (list && !self.starts_let_operand()?)) {
             return Ok(false);
@@ -1762,6 +1852,23 @@ impl<'a> Parser<'a> {
         let mut lexer = self.lexer.clone();
         skip_group(&mut lexer)?;
         Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
+    }
+
+    /// Whether a MATCH vertex or fixed-length relationship is subscripted
+    /// here, `n[key]`: openCypher dynamic property access (Graph7), read as
+    /// the subscript of the element's property map.
+    pub(super) fn element_subscript_follows(&self) -> Result<bool, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        Ok(!self.elements.contains(&word)
+            && !self.syntax.names_path(word)
+            && (self.syntax.variables.iter().any(|name| name.text == word)
+                || self
+                    .syntax
+                    .visible_edge(word)
+                    .is_some_and(|(edge, _)| edge.walk.is_none()))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'[')))
     }
 
     /// Whether a list operand of a `+` chain starts here (list_operand_at).
@@ -2101,6 +2208,15 @@ impl<'a> Parser<'a> {
                 self.punct(b')', ")")?;
             }
             inner
+        } else if self.parenthesized_postfix_value()? {
+            // `(list[1]).key`, `([1, 2])[0]`: a parenthesized value that a
+            // map read or subscript follows is one value, read whole; the
+            // postfix loop below applies (TCK Graph6 [4], [8], Map1 [3]).
+            self.advance()?;
+            let inner =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            inner
         } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
@@ -2111,13 +2227,18 @@ impl<'a> Parser<'a> {
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(resolve) = resolve.as_mut() {
-            let operand = if resolve.whole() {
-                self.resolved_predicate(&mut |parser| resolve.leaf(parser))
+            // Element and map entries (`x.p` of a comprehension element over
+            // COLLECT, an imported `row.key`) take let slots, as the element
+            // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
+            let base = core::mem::replace(&mut self.let_base, depth);
+            let parsed = if resolve.whole() {
+                self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
             } else {
                 self.resolved_expression(&mut |parser| resolve.leaf(parser))
-            }
-            .map_err(expression_error)?;
-            self.read_value_template(operand, at)?
+            };
+            self.let_base = base;
+            let (operand, slots) = parsed.map_err(expression_error)?;
+            self.scalar_let_value(operand, slots, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             // `n IS NULL` is a scalar predicate over the element, which the
             // scalar compiler reads (element_null_operand).
@@ -2134,7 +2255,19 @@ impl<'a> Parser<'a> {
                 )
                 && !matches!(self.lexer.clone().next()?.kind,
                     TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
-            if bare {
+            if bare && self.element_subscript_follows()? {
+                // `n[key]` subscripts n's property map, so an absent key
+                // reads NULL and a non-text key fails as for any map.
+                let variable = self.property_variable()?;
+                ReadValueTemplate::Column(self.projection_slot(
+                    columns,
+                    Projection {
+                        variable,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                    },
+                )?)
+            } else if bare {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
             } else {
@@ -2918,6 +3051,11 @@ pub(in crate::graph_text) fn bind_read_value(
 ) -> Result<GraphSetValue, GraphSetTextError> {
     Ok(match value {
         ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
+        // NULL belongs to every type: a NULL value is dynamically typed, so a
+        // later `.key` or subscript of it reads NULL (TCK Map1 [2], Null1 [5]).
+        ReadValueTemplate::Literal(value) if matches!(value.value(), CanonicalScalar::Null) => {
+            GraphSetValue::TypedNull(GraphSetColumnType::Any)
+        }
         ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
         ReadValueTemplate::Parameter {
             index,

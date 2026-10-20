@@ -68,11 +68,11 @@ struct Image {
     from: VId,
     to: VId,
     relation: RelationId,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)>,
 }
 struct Data {
     edges: Vec<Image>,
-    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    vertices: BTreeMap<VId, Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)>>,
 }
 struct Record {
     data: Arc<Data>,
@@ -139,8 +139,8 @@ struct Source {
 impl Source {
     fn new(mask: usize) -> Self {
         let vertices = BTreeMap::from([
-            (IDS[0], vec![(P, CanonicalScalar::Int(1))]),
-            (IDS[1], vec![(P, CanonicalScalar::Int(2))]),
+            (IDS[0], vec![(P, CanonicalScalar::Int(1).into())]),
+            (IDS[1], vec![(P, CanonicalScalar::Int(2).into())]),
             (IDS[2], Vec::new()),
         ]);
         let edges = EDGES
@@ -152,7 +152,7 @@ impl Source {
                 from: IDS[from],
                 to: IDS[to],
                 relation,
-                props: vec![(P, CanonicalScalar::Int(p))],
+                props: vec![(P, CanonicalScalar::Int(p).into())],
             })
             .collect();
         Self {

@@ -497,7 +497,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
                         .column(
                             EdgeBinding::EndpointProperty { start, key },
                             key,
-                            GraphSetColumnType::Scalar,
+                            GraphSetColumnType::Stored,
                         )
                         .map(Some);
                 }
@@ -517,7 +517,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
                 let key = parser.name()?;
                 return self
                     .returning
-                    .column(EdgeBinding::Property(key), key, GraphSetColumnType::Scalar)
+                    .column(EdgeBinding::Property(key), key, GraphSetColumnType::Stored)
                     .map(Some);
             }
             return self
@@ -572,7 +572,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
         let key = parser.name()?;
         let column = parser.mutation_projection(self.columns, name, Some(key))?;
         self.returning
-            .column(EdgeBinding::Input(column), key, GraphSetColumnType::Scalar)
+            .column(EdgeBinding::Input(column), key, GraphSetColumnType::Stored)
             .map(Some)
     }
 

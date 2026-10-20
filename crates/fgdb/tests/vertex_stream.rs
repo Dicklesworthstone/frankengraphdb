@@ -110,7 +110,7 @@ fn equality_streams_seek_exact_numeric_domains_and_match_the_storage_oracle() {
                         row.props
                             .iter()
                             .find(|(key, _)| *key == KEY)
-                            .map(|(_, value)| value),
+                            .map(|(_, value)| value.as_scalar().expect("scalar property")),
                         Some(&literal),
                     )
                 })

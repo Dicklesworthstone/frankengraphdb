@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -90,6 +90,9 @@ fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
         for right in &choices {
             for mask in 0..16 {
                 let values = [left.clone(), right.clone()];
+                let stored = values
+                    .clone()
+                    .map(|value| value.map(CanonicalPropertyValue::from));
                 let mut edges: Vec<_> = universe
                     .iter()
                     .enumerate()
@@ -123,7 +126,7 @@ fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
                             [],
                             edges.iter().copied(),
                             |_, _| Ok::<_, ()>(true),
-                            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+                            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
                             wide(),
                             || Ok::<_, ()>(()),
                         )
@@ -268,8 +271,8 @@ fn boolean_constants_and_keyword_named_variables_keep_null_and_identity_semantic
     }
     for value in [
         None,
-        Some(CanonicalScalar::Null),
-        Some(CanonicalScalar::Bool(true)),
+        Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
+        Some(CanonicalPropertyValue::from(CanonicalScalar::Bool(true))),
     ] {
         let pattern = query("MATCH (a) WHERE NOT (a.n=1) RETURN a");
         let result = pattern
@@ -333,8 +336,8 @@ fn declared_scalar_rebinding_keeps_schema_catalog_and_prior_plans_immutable() {
                 .unwrap(),
         )
         .unwrap();
-    let status = CanonicalScalar::ucs_basic_text(payload).unwrap();
-    let enabled = CanonicalScalar::Bool(true);
+    let status = CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text(payload).unwrap());
+    let enabled = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     for (pattern, count) in [(&original, 1), (&changed, 0)] {
         let result = pattern
             .plan()
@@ -390,7 +393,8 @@ fn optional_and_exists_children_use_boolean_selection_before_match_success_and_g
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(10),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(0), R, VId(1)),
         (VId(0), R, VId(1)),
@@ -566,6 +570,9 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
         fgdb_gql::PreparedGraphSetText::prepare("MATCH (a) WITH a.n AS n RETURN n:L AS x", symbols)
             .is_err()
     );
+    // A written label test is the same Boolean value a RETURN reads: SET
+    // stores true or false (both the CLI and the TCK runner read it back).
+    // Both spellings lower to one canonical mutation.
     assert_eq!(
         fgdb_gql::PreparedGraphMutationText::prepare(
             "MATCH (a) SET a.n = a:L",
@@ -706,7 +713,8 @@ fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolutio
 #[test]
 fn boolean_text_keeps_exact_controls_and_eager_errors_even_with_a_zero_page() {
     let pattern = query("MATCH (a)-[:R]->(b) WHERE a.n<b.n OR b.n IS NULL RETURN a,b LIMIT 1");
-    let values = [CanonicalScalar::Int(0), CanonicalScalar::Int(2)];
+    let values =
+        [CanonicalScalar::Int(0), CanonicalScalar::Int(2)].map(CanonicalPropertyValue::from);
     let edges = [(VId(0), R, VId(1)); 2];
     let mut total = 0;
     let measured = pattern

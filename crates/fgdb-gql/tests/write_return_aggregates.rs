@@ -12,7 +12,7 @@ use fgdb_gql::{
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphMutationQueryText,
     PreparedGraphVertexUpsertQueryText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -22,7 +22,7 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 type CreateResult =
     Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<(), ()>, usize>>;
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -102,7 +102,7 @@ fn create_groups_actual_frozen_identities_and_null_keys() {
     assert_eq!(
         query.column_types(),
         &[
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
             GraphSetColumnType::Scalar,
             GraphSetColumnType::Scalar,
             GraphSetColumnType::Scalar,
@@ -267,9 +267,9 @@ fn mutate(
 #[test]
 fn mutation_groups_post_statement_values_and_duplicate_matches_without_rematching() {
     let properties = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(5)),
-        ((VId(2), P), CanonicalScalar::Int(7)),
-        ((VId(3), P), CanonicalScalar::Int(11)),
+        ((VId(1), P), CanonicalScalar::Int(5).into()),
+        ((VId(2), P), CanonicalScalar::Int(7).into()),
+        ((VId(3), P), CanonicalScalar::Int(11).into()),
     ]);
     let edges = [
         (VId(1), R, VId(2)),

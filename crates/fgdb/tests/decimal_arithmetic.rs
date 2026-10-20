@@ -107,6 +107,9 @@ fn amount(db: &Database<MemVfs>, vertex: VId) -> CanonicalScalar {
         .find(|(key, _)| *key == AMOUNT)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 
 fn arithmetic(error: &(dyn core::error::Error + 'static)) -> Option<GraphIntegerErrorKind> {
@@ -257,7 +260,7 @@ fn parameterized_decimal_reads_and_writes_preserve_rounding_masking_and_reopen()
                     .unwrap()
                     .unwrap()
                     .props
-                    .contains(&(SECRET, d(0)))
+                    .contains(&(SECRET, d(0).into()))
             );
         }
         let all = db.vertices().unwrap();

@@ -11,7 +11,7 @@ use fgdb_gql::{
     GraphSetTextErrorKind, GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
     PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
@@ -43,6 +43,10 @@ fn run(
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
     let checkpoint = RefCell::new(checkpoint);
+    let stored: Vec<CanonicalPropertyValue> = values
+        .iter()
+        .map(|value| CanonicalPropertyValue::from(value.clone()))
+        .collect();
     query.execute_governed(
         policy,
         |pattern, remaining| {
@@ -54,10 +58,10 @@ fn run(
                     Ok::<_, &'static str>(
                         predicates
                             .iter()
-                            .all(|test| test.matches(&[], &[(P, values[vid.0 as usize].clone())])),
+                            .all(|test| test.matches(&[], &[(P, stored[vid.0 as usize].clone())])),
                     )
                 },
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )

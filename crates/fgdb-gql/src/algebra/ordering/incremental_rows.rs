@@ -191,7 +191,7 @@ mod tests {
     use crate::GqlQueryPolicy;
     use crate::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder};
     use fgdb_delta_types::{PropertyKeyId, RelationId};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
     use std::cmp::Ordering;
 
     fn definition(
@@ -232,7 +232,8 @@ mod tests {
             CanonicalScalar::Int(7),
             CanonicalScalar::Null,
             CanonicalScalar::Bool(true),
-        ];
+        ]
+        .map(CanonicalPropertyValue::Scalar);
         let edges = [
             (VId(9), RelationId(1), VId(0)),
             (VId(9), RelationId(1), VId(0)),

@@ -14,12 +14,14 @@ use fgdb_gql::{
     PreparedGraphWriteProgram, PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
+const TAGS: PropertyKeyId = PropertyKeyId(3);
 const PERSON: LabelId = LabelId(1);
 const EDGE_TEXT: &str =
     "MATCH (a:Person),(b:Person) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b)";
@@ -36,6 +38,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "tags") => Some(GraphSymbol::Property(TAGS)),
         _ => None,
     }
 }
@@ -196,9 +199,14 @@ fn all_pairs_merge_deduplicates_rows_preserves_pair_slots_and_is_idempotent() {
                 (record.entry.src, record.entry.dst, record.entry.relation),
                 (VId(1), VId(destination), S)
             );
-            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7).into())]);
         }
-        assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, existing_props());
+        // Edge 21 matched on p and keeps its field outside the map.
+        let stored: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = existing_props()
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect();
+        assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, stored);
         let frontier = db.frontier().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let repeated = txn
@@ -790,11 +798,11 @@ fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_o
             (created.entry.src, created.entry.dst, created.entry.relation),
             (VId(1), VId(2), S)
         );
-        assert_eq!(created.props, vec![(P, CanonicalScalar::Int(9))]);
+        assert_eq!(created.props, vec![(P, CanonicalScalar::Int(9).into())]);
         for (eid, p) in [(40, 7), (41, 8), (42, 7), (43, 9)] {
             assert_eq!(
                 db.edge(EId(eid)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p))]
+                vec![(P, CanonicalScalar::Int(p).into())]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -830,6 +838,21 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 vec![(P, CanonicalScalar::Int(p))],
             );
         }
+        // fgdb-kr8j1: a stored List field is a RETURN cell like a scalar.
+        let tags = CanonicalList::try_new(vec![
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::ucs_basic_text("x").unwrap().into(),
+        ])
+        .unwrap();
+        existing.add_edge_values(
+            EId(44),
+            VId(1),
+            VId(2),
+            vec![
+                (P, CanonicalScalar::Int(6).into()),
+                (TAGS, CanonicalPropertyValue::List(tags)),
+            ],
+        );
         db.write(&commit, existing).await.unwrap();
         // RETURN rows as graph values; None if the statement was dispatched
         // to the no-result program engine or a cell left the value domain.
@@ -905,6 +928,21 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
             ),
             Some(vec![vec![int(2)]])
         );
+        let text = |value| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 6}]->(b) RETURN e.tags AS tags, e.p AS p",
+                    0,
+                    &mut none,
+                ),
+                &["tags", "p"],
+            ),
+            Some(vec![vec![
+                GraphValue::List(vec![int(1), text("x")].into_boxed_slice()),
+                int(6),
+            ]])
+        );
         // A miss creates one edge; RETURN reads it from the staged graph.
         let created = staged(
             "(a)-[e:S {p: 5}]->(b) RETURN e.p AS p, e",
@@ -940,7 +978,7 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
             (stored.entry.src, stored.entry.dst, stored.entry.relation),
             (VId(1), VId(2), S)
         );
-        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5))]);
+        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -71,7 +71,10 @@ fn changed_read_aborts_typed_and_replay_contains_only_the_concurrent_writer() {
             .vertex(&database, VId(1))
             .expect("transactional vertex read succeeds")
             .expect("seed vertex exists");
-        assert_eq!(observed.props, vec![(PROPERTY, CanonicalScalar::Int(0))]);
+        assert_eq!(
+            observed.props,
+            vec![(PROPERTY, CanonicalScalar::Int(0).into())]
+        );
         reader
             .write(&mut database, create_vertex(VId(3), 30))
             .expect("reader stages a write disjoint from its read key");
@@ -113,7 +116,7 @@ fn changed_read_aborts_typed_and_replay_contains_only_the_concurrent_writer() {
                 .expect("seed vertex remains")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(11)),
+            Some(&CanonicalScalar::Int(11).into()),
             "only the concurrent writer's property is durable"
         );
         assert!(
@@ -185,7 +188,7 @@ fn disjoint_concurrent_create_preserves_the_readers_later_commit() {
                 .expect("reader's vertex remains")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(31))
+            Some(&CanonicalScalar::Int(31).into())
         );
         assert_eq!(
             graph
@@ -193,7 +196,7 @@ fn disjoint_concurrent_create_preserves_the_readers_later_commit() {
                 .expect("creator's vertex is durable")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(20)),
+            Some(&CanonicalScalar::Int(20).into()),
             "independent replay contains both disjoint commits"
         );
     });

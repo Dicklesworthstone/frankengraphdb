@@ -128,7 +128,7 @@ fn property(db: &Database<MemVfs>, cut: CommitSeq, v: VId) -> CanonicalScalar {
         .props
         .iter()
         .find(|(p, _)| *p == P)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
         .unwrap_or(CanonicalScalar::Null)
 }
 fn support(

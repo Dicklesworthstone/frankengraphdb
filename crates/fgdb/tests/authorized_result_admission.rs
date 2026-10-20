@@ -393,6 +393,9 @@ mod all_target_merge {
             .find(|(key, _)| *key == P)
             .unwrap()
             .1
+            .as_scalar()
+            .expect("scalar property")
+            .clone()
     }
 
     #[test]
@@ -490,8 +493,11 @@ mod all_target_merge {
                 }
                 for (id, expected) in [(VId(1), 11), (SECOND, 21)] {
                     let row = db.vertex(id).unwrap().unwrap();
-                    assert!(row.props.contains(&(K, CanonicalScalar::Int(2))));
-                    assert!(row.props.contains(&(P, CanonicalScalar::Int(expected))));
+                    assert!(row.props.contains(&(K, CanonicalScalar::Int(2).into())));
+                    assert!(
+                        row.props
+                            .contains(&(P, CanonicalScalar::Int(expected).into()))
+                    );
                 }
                 assert_eq!(value(&db, VId(3)), CanonicalScalar::Int(90));
                 assert_eq!(txn.outstanding_obligations(), 0);

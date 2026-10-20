@@ -7,7 +7,9 @@ fn unlimited() -> WorkBudget {
 }
 
 fn bits(hits: &[TextHit]) -> Vec<(VId, u64)> {
-    hits.iter().map(|hit| (hit.id, hit.score.to_bits())).collect()
+    hits.iter()
+        .map(|hit| (hit.id, hit.score.to_bits()))
+        .collect()
 }
 
 // Reconstruct a token tape, then compare windows. This reference does NOT use
@@ -205,7 +207,10 @@ fn selective_queries_seek_past_common_postings_and_dense_queries_do_not_reseek()
         assert_eq!(seen.into_inner(), [VId(1000), VId(3000)]);
         assert!(NEXTS.with(std::cell::Cell::get) < 16);
         assert_eq!(SEEKS.with(std::cell::Cell::get), 2);
-        assert!(work.remaining() > 500, "query must not bill a full union scan");
+        assert!(
+            work.remaining() > 500,
+            "query must not bill a full union scan"
+        );
     }
     let dense = Bm25::build(
         Bm25Config::default(),
@@ -235,7 +240,11 @@ fn phrase_and_endpoint_admission_precede_one_candidate_limit() {
     let all = index
         .search("red red", 1, TextMatch::All, |_| true, &mut unlimited())
         .unwrap();
-    assert_eq!(all[0].id, VId(1), "negative control must favor a non-phrase");
+    assert_eq!(
+        all[0].id,
+        VId(1),
+        "negative control must favor a non-phrase"
+    );
     let phrase = index
         .search(
             "red red",
@@ -311,7 +320,13 @@ fn every_seek_scoring_and_phrase_refusal_returns_no_prefix_and_leaves_index_reus
             Err(BeaconError::WorkBudgetExceeded),
         );
         let actual = index
-            .search("red red blue", 4, mode, |_| true, &mut WorkBudget::new(units))
+            .search(
+                "red red blue",
+                4,
+                mode,
+                |_| true,
+                &mut WorkBudget::new(units),
+            )
             .unwrap();
         assert_eq!(bits(&actual), bits(&expected));
     }

@@ -8,7 +8,6 @@ use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
 use fgdb_strata::AdjacencyEntry;
-use fgdb_types::CanonicalScalar;
 
 pub(super) fn next<C>(
     source: &SnapshotEdgeSource<'_>,
@@ -214,7 +213,7 @@ impl Snapshot {
         control: &mut C,
         mut visit: impl FnMut(
             &'a AdjacencyEntry,
-            &'a [(PropertyKeyId, CanonicalScalar)],
+            &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Result<(), E>
@@ -420,6 +419,7 @@ mod indexed_scan_tests {
     use super::*;
     use crate::gql_exec::source;
     use fgdb_delta_types::RelationId;
+    use fgdb_types::CanonicalScalar;
 
     fn histories(count: u128) -> Vec<Vec<AdjacencyEntry>> {
         let mut blocks = Vec::new();

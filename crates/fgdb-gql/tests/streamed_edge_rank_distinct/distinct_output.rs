@@ -94,7 +94,12 @@ fn completed_group_distinct_matches_batch_for_hidden_sort_columns_and_all_window
     for (id, to, value) in [(1, 0, 0), (2, 1, 5), (3, 1, 5), (4, u128::MAX, 100)] {
         s.edges.insert(
             EId(id),
-            (VId(0), R, VId(to), vec![(P, CanonicalScalar::Int(value))]),
+            (
+                VId(0),
+                R,
+                VId(to),
+                vec![(P, CanonicalScalar::Int(value).into())],
+            ),
         );
     }
     let result = run(&q, s.clone(), wide())
@@ -163,7 +168,7 @@ fn distinct_class_storage_is_not_output_quota_and_late_failures_never_publish_a_
                 VId(0),
                 R,
                 VId(id),
-                vec![(P, CanonicalScalar::Int(id as i64))],
+                vec![(P, CanonicalScalar::Int(id as i64).into())],
             ),
         );
     }

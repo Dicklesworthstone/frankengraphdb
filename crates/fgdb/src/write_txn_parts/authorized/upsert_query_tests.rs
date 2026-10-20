@@ -96,7 +96,7 @@ fn merge_returning_whole_maps_mask_before_naming_and_preserve_atomic_authority()
             ));
             observed.push((rows.value, rows.evaluator));
             let fields = db.vertex(VId(1)).unwrap().unwrap().props;
-            assert!(fields.contains(&(Q, CanonicalScalar::Int(12))));
+            assert!(fields.contains(&(Q, CanonicalScalar::Int(12).into())));
             assert_eq!(fields.iter().any(|(key, _)| *key == SECRET), hidden);
             let before = (db.frontier().unwrap(), db.vertices().unwrap());
             for text in [
@@ -260,7 +260,7 @@ fn merge_returning_masks_hidden_fields_and_never_matches_hidden_vertices() {
                 .unwrap()
                 .unwrap()
                 .props
-                .contains(&(SECRET, CanonicalScalar::Int(71)))
+                .contains(&(SECRET, CanonicalScalar::Int(71).into()))
         );
         // Without the Visible label in MATCH, the hidden vertex would match
         // p=30 in the privileged graph. Masking must remove it before MERGE:
@@ -433,7 +433,7 @@ fn merge_limit_zero_commits_but_expiry_before_completion_discards_all_effects() 
                 .unwrap()
                 .unwrap()
                 .props
-                .contains(&(Q, CanonicalScalar::Int(6)))
+                .contains(&(Q, CanonicalScalar::Int(6).into()))
         );
         assert!(count > 10);
         for cutoff in [1, count / 2, count - 1] {
@@ -538,18 +538,22 @@ fn aggregate_write_returns_mask_before_grouping_and_charge_only_final_rows() {
             if hidden {
                 assert_eq!(
                     db.vertex(VId(3)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(30))]
+                    vec![(P, CanonicalScalar::Int(30).into())]
                 );
                 assert!(
                     db.vertex(VId(1))
                         .unwrap()
                         .unwrap()
                         .props
-                        .contains(&(SECRET, CanonicalScalar::Int(71),))
+                        .contains(&(SECRET, CanonicalScalar::Int(71).into(),))
                 );
                 let second = db.vertex(VId(2)).unwrap().unwrap();
                 assert!(second.labels.contains(&HIDDEN));
-                assert!(second.props.contains(&(SECRET, CanonicalScalar::Int(72))));
+                assert!(
+                    second
+                        .props
+                        .contains(&(SECRET, CanonicalScalar::Int(72).into()))
+                );
             }
             observed.push((result.value, merged.value));
             assert_eq!(txn.outstanding_obligations(), 0);

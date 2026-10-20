@@ -1055,14 +1055,14 @@ mod edge_bulk_overlay_tests {
                         1 => assert_eq!(
                             row.props,
                             vec![
-                                (PropertyKeyId(1), CanonicalScalar::Int(20)),
-                                (PropertyKeyId(2), CanonicalScalar::Int(30)),
+                                (PropertyKeyId(1), CanonicalScalar::Int(20).into()),
+                                (PropertyKeyId(2), CanonicalScalar::Int(30).into()),
                             ]
                         ),
                         2 => assert!(row.props.is_empty()),
                         3 => assert_eq!(
                             row.props,
-                            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]
+                            vec![(PropertyKeyId(1), CanonicalScalar::Int(10).into())]
                         ),
                         _ => panic!("deleted edge was materialized"),
                     }

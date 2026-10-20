@@ -56,7 +56,7 @@ use fgdb_sim::{
 use fgdb_strata::store::StoreError as BlockStoreError;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -718,7 +718,7 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
     assert_eq!(engine_vertex.labels, vec![LabelId(3)]);
     assert_eq!(
         engine_vertex.props,
-        vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]
+        vec![(PropertyKeyId(7), CanonicalScalar::Int(1).into())]
     );
     assert_eq!(
         engine_vertex.labels,
@@ -928,7 +928,7 @@ fn the_spine_agrees_with_the_reference_oracle() {
                 continue;
             };
             let oracle_labels: Vec<LabelId> = vertex.labels.iter().copied().collect();
-            let oracle_props: Vec<(PropertyKeyId, CanonicalScalar)> = vertex
+            let oracle_props: Vec<(PropertyKeyId, CanonicalPropertyValue)> = vertex
                 .props
                 .iter()
                 .map(|(key, value)| (*key, value.clone()))
@@ -3406,7 +3406,10 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
             .await
             .expect("reopens");
         let engine_v1 = engine.vertex(VId(1)).expect("reads").expect("v1 live");
-        assert_eq!(engine_v1.props, vec![(rank, CanonicalScalar::Int(7))]);
+        assert_eq!(
+            engine_v1.props,
+            vec![(rank, CanonicalScalar::Int(7).into())]
+        );
         assert!(engine.vertex(VId(8)).expect("reads").is_none());
         assert!(engine.vertex(VId(9)).expect("reads").is_none());
         assert!(engine.vertex(VId(2)).expect("reads").is_some());
@@ -3421,7 +3424,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(1),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(5))],
+                    props: vec![(rank, CanonicalScalar::Int(5).into())],
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3435,7 +3438,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(8),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(1))],
+                    props: vec![(rank, CanonicalScalar::Int(1).into())],
                 },
             ]),
         ])
@@ -3458,14 +3461,14 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    value: CanonicalScalar::Int(3),
+                    value: CanonicalScalar::Int(3).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    value: CanonicalScalar::Int(7),
+                    value: CanonicalScalar::Int(7).into(),
                 },
             ]),
         ])
@@ -3488,14 +3491,14 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(9),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(1))],
+                    props: vec![(rank, CanonicalScalar::Int(1).into())],
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(9)),
                     name: rank,
-                    value: CanonicalScalar::Int(4),
+                    value: CanonicalScalar::Int(4).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3521,7 +3524,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(8)),
                     name: rank,
-                    value: CanonicalScalar::Int(3),
+                    value: CanonicalScalar::Int(3).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3543,7 +3546,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
         let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
         assert_eq!(
             graph.vertex(VId(1)).expect("v1").props.get(&rank),
-            Some(&CanonicalScalar::Int(7))
+            Some(&CanonicalScalar::Int(7).into())
         );
         assert!(graph.vertex(VId(8)).is_none());
         assert!(graph.vertex(VId(9)).is_none());
@@ -3810,7 +3813,7 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CreateVertex {
                 vid: VId(1),
                 labels: vec![],
-                props: vec![(rank, CanonicalScalar::Int(5))],
+                props: vec![(rank, CanonicalScalar::Int(5).into())],
             },
         ])])
         .expect("oracle seed");
@@ -3831,8 +3834,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                 name: rank,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(7),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(7).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3854,8 +3857,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                 name: rank,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(9),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(9).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3881,8 +3884,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
                 fgdb_reference::intents::Intent::CompareAndSet {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    expected: Some(CanonicalScalar::Int(5)),
-                    value: CanonicalScalar::Int(9),
+                    expected: Some(CanonicalScalar::Int(5).into()),
+                    value: CanonicalScalar::Int(9).into(),
                     mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
                 },
             ]),
@@ -3910,12 +3913,12 @@ fn compare_and_set_agrees_independently_with_the_reference() {
         let oracle_rank = graph.vertex(VId(1)).expect("v1").props.get(&rank).cloned();
         assert_eq!(
             engine_rank,
-            vec![(rank, CanonicalScalar::Int(7))],
+            vec![(rank, CanonicalScalar::Int(7).into())],
             "engine rank must be 7, got {engine_rank:?}"
         );
         assert_eq!(
             oracle_rank,
-            Some(CanonicalScalar::Int(7)),
+            Some(CanonicalScalar::Int(7).into()),
             "oracle rank must be 7, got {oracle_rank:?}"
         );
         assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
@@ -4015,7 +4018,7 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
                     src: VId(1),
                     etype: KNOWS,
                     dst: VId(2),
-                    props: vec![(weight, CanonicalScalar::Int(5))],
+                    props: vec![(weight, CanonicalScalar::Int(5).into())],
                 },
             ]),
         ])
@@ -4037,8 +4040,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                 name: weight,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(7),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(7).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -4060,8 +4063,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                 name: weight,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(9),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(9).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -4087,8 +4090,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
                 fgdb_reference::intents::Intent::CompareAndSet {
                     elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                     name: weight,
-                    expected: Some(CanonicalScalar::Int(5)),
-                    value: CanonicalScalar::Int(9),
+                    expected: Some(CanonicalScalar::Int(5).into()),
+                    value: CanonicalScalar::Int(9).into(),
                     mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
                 },
             ]),
@@ -4121,12 +4124,12 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             .cloned();
         assert_eq!(
             engine_weight,
-            vec![(weight, CanonicalScalar::Int(7))],
+            vec![(weight, CanonicalScalar::Int(7).into())],
             "engine weight must be 7, got {engine_weight:?}"
         );
         assert_eq!(
             oracle_weight,
-            Some(CanonicalScalar::Int(7)),
+            Some(CanonicalScalar::Int(7).into()),
             "oracle weight must be 7, got {oracle_weight:?}"
         );
         assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
@@ -4389,8 +4392,8 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 rows: vec![DeltaRow::Property {
                     elem: ElementId::Vertex(VId(1)),
                     property: prop,
-                    before: Some(CanonicalScalar::Int(0)),
-                    after: Some(CanonicalScalar::Int(2)),
+                    before: Some(CanonicalScalar::Int(0).into()),
+                    after: Some(CanonicalScalar::Int(2).into()),
                 }],
             }],
         )
@@ -4460,8 +4463,8 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 rows: vec![DeltaRow::Property {
                     elem: ElementId::Vertex(VId(1)),
                     property: prop,
-                    before: Some(CanonicalScalar::Int(1)),
-                    after: Some(CanonicalScalar::Int(2)),
+                    before: Some(CanonicalScalar::Int(1).into()),
+                    after: Some(CanonicalScalar::Int(2).into()),
                 }],
             }],
         )
@@ -4488,7 +4491,7 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
             .expect("reopens");
         assert_eq!(db.frontier().expect("healthy frontier").0, 3);
         let row = db.vertex(VId(1)).expect("reads").expect("durable row");
-        assert_eq!(row.props, vec![(prop, CanonicalScalar::Int(2))]);
+        assert_eq!(row.props, vec![(prop, CanonicalScalar::Int(2).into())]);
         let mut after = WriteBatch::new(KNOWS);
         after.set_vertex_property(VId(1), prop, Some(CanonicalScalar::Int(7)));
         let seq = db
@@ -4520,7 +4523,7 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 .iter()
                 .map(|(key, value)| (*key, value.clone()))
                 .collect::<Vec<_>>(),
-            vec![(prop, CanonicalScalar::Int(7))],
+            vec![(prop, CanonicalScalar::Int(7).into())],
             "the oracle serves the committed prefix, not the rejected batch"
         );
     });

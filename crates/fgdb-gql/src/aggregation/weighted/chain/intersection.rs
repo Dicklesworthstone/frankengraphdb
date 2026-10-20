@@ -563,7 +563,7 @@ pub(in crate::aggregation::weighted) fn visit_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M) -> Result<(), VisitError<E, C>>,
 {
@@ -595,7 +595,10 @@ pub(in crate::aggregation::weighted) fn visit_positioned_bindings<'a, E, C, F, R
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M) -> Result<(), VisitError<E, C>>,
 {
@@ -649,7 +652,7 @@ fn search<'a, K: Key, E, C, R, M, P>(
     mut visit: P,
 ) -> Result<(), VisitError<E, C>>
 where
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M) -> Result<(), VisitError<E, C>>,
 {

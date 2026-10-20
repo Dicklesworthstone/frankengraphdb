@@ -334,7 +334,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
         R: FnMut(
             fgdb_types::VId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<&'a fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
         P: FnMut(
             &[crate::algebra::ValueProjection],

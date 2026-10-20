@@ -76,7 +76,7 @@ fn vertex(key: &str) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.into(),
         labels: vec![LabelId(1)],
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())],
     })
 }
 fn edge(key: &str, source: &str, destination: &str) -> BulkRow {
@@ -85,7 +85,7 @@ fn edge(key: &str, source: &str, destination: &str) -> BulkRow {
         source: source.into(),
         destination: destination.into(),
         relation: RelationId(1),
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9).into())],
     })
 }
 fn rows() -> Vec<BulkRow> {
@@ -395,8 +395,8 @@ fn chunk_fit_holds_every_chunks_template_to_the_capsule_budget() {
                     key: format!("v{n}"),
                     labels: (1..=1 + n as u64 % 2).map(LabelId).collect(),
                     props: vec![
-                        (PropertyKeyId(1), CanonicalScalar::Int(n as i64)),
-                        (PropertyKeyId(2), text(n)),
+                        (PropertyKeyId(1), CanonicalScalar::Int(n as i64).into()),
+                        (PropertyKeyId(2), text(n).into()),
                     ],
                 })
             })
@@ -407,7 +407,7 @@ fn chunk_fit_holds_every_chunks_template_to_the_capsule_budget() {
                 source: format!("v{n}").as_str().into(),
                 destination: format!("v{}", n + 1).as_str().into(),
                 relation: RelationId(1),
-                props: vec![(PropertyKeyId(3), text(n + 2_400))],
+                props: vec![(PropertyKeyId(3), text(n + 2_400).into())],
             })
         }));
         let template = |row: &BulkRow| {

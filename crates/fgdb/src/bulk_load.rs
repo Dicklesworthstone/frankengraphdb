@@ -22,7 +22,7 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_strata::{edge_props::EdgePropertyPatchError, vertex::VertexPatchError};
-use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod source;
@@ -31,7 +31,8 @@ mod source;
 pub struct BulkVertex {
     pub key: String,
     pub labels: Vec<LabelId>,
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 #[derive(Clone, Debug)]
 pub struct BulkEdge {
@@ -39,7 +40,7 @@ pub struct BulkEdge {
     pub source: BulkEndpoint,
     pub destination: BulkEndpoint,
     pub relation: RelationId,
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 /// The vertex at one end of a bulk-loaded edge.
@@ -243,9 +244,11 @@ pub enum BulkLoadErrorKind {
     SourceChanged {
         row: usize,
     },
+    /// A source value has no canonical stored encoding: a scalar's or, since
+    /// fgdb-k3nub, a stored List's or Map's.
     SourceEncoding {
         row: usize,
-        source: fgdb_types::ScalarEncodeError,
+        source: fgdb_types::CanonicalPropertyValueError,
     },
     CounterOverflow,
     /// A source reader/decoder failed. No partially read chunk was submitted.
@@ -396,7 +399,7 @@ impl<V: Vfs + Clone> Database<V> {
                 || vertex
                     .props
                     .binary_search_by_key(key, |(property, _)| *property)
-                    .map_or(true, |at| vertex.props[at].1 != *value)
+                    .map_or(true, |at| vertex.props[at].1.as_scalar() != Some(value))
             {
                 continue;
             }
@@ -817,7 +820,7 @@ impl<V: Vfs + Clone> Database<V> {
                             else {
                                 unreachable!("typed allocator")
                             };
-                            vertex_batch.create_vertex(id, v.labels, v.props);
+                            vertex_batch.create_vertex_values(id, v.labels, v.props);
                             new_vertices.insert(v.key, id);
                         }
                         BulkRow::Edge(e) => {
@@ -848,7 +851,7 @@ impl<V: Vfs + Clone> Database<V> {
                             edge_batches
                                 .entry(e.relation)
                                 .or_insert_with(|| WriteBatch::new(e.relation))
-                                .add_edge(id, src, dst, e.props);
+                                .add_edge_values(id, src, dst, e.props);
                             new_edges.insert(e.key, id);
                         }
                     }

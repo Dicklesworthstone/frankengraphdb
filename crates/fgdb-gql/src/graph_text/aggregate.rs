@@ -169,7 +169,7 @@ impl PreparedGraphAggregateText {
     pub fn prepare_with_parameter_types_and_resolver(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl GraphSymbolResolver,
+        mut resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
         // Generated names live until from_syntax has made the child owned.
         // They are private metadata, never inserted into statement text or
@@ -738,6 +738,17 @@ impl PreparedGraphAggregateText {
         );
         let count = parser.syntax.count.take();
         parser.syntax.distinct = false;
+        // Every `x.key` an output reads binds its key now, as a pipeline's
+        // do (fgdb-xnd7x): an element of a collected list then reads that
+        // stored property, and a key the catalog lacks reads NULL.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let child = PreparedGraphText::from_syntax(statement, parser.syntax, resolve)?;
         Ok(Self {
             child,

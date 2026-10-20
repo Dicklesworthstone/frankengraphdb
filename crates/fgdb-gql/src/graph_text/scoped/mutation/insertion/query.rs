@@ -226,6 +226,23 @@ impl<'a> ParsedReturn<'a> {
         if vertex.is_none() && edge.is_none() && input.is_none() && matched.is_none() {
             return Ok(None);
         }
+        // After WITH, `a.key` of an element the row carries is the row's
+        // hidden read (fgdb-sl4ym); CREATE never changes an element it did
+        // not create, so that read is also the value after it.
+        if vertex.is_none() && edge.is_none() && input.is_some() {
+            let mut lookahead = parser.lexer.clone();
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+                let key = lookahead.next()?;
+                if let TokenKind::Word(text) = key.kind
+                    && let Some(column) = parser.boundary_read(source.len())?
+                {
+                    let name = Name { text, at: key.at };
+                    return self
+                        .column(Binding::Input(column), name, GraphSetColumnType::Stored)
+                        .map(Some);
+                }
+            }
+        }
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
             ReturnMapInput::Property(parser.name()?)
@@ -263,7 +280,7 @@ impl<'a> ParsedReturn<'a> {
                 ReturnMapInput::Property(key) => (
                     Binding::VertexProperty(vertex, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
                 ReturnMapInput::Properties => (
                     Binding::VertexProperties(vertex),
@@ -279,7 +296,7 @@ impl<'a> ParsedReturn<'a> {
                 ReturnMapInput::Property(key) => (
                     Binding::EdgeProperty(edge, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
                 ReturnMapInput::Properties => {
                     (Binding::EdgeProperties(edge), name, GraphSetColumnType::Any)
@@ -330,7 +347,7 @@ impl<'a> ParsedReturn<'a> {
                 if matches!(input, ReturnMapInput::Properties) {
                     GraphSetColumnType::Any
                 } else if property.is_some() {
-                    GraphSetColumnType::Scalar
+                    GraphSetColumnType::Stored
                 } else {
                     kind
                 },
@@ -473,7 +490,9 @@ impl<'a> Parser<'a> {
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
         if self.take(b'*')? {
-            for (index, &(name, kind)) in source.iter().enumerate() {
+            // A WITH row's hidden reads are never columns of `*`.
+            let visible = self.visible_width(source);
+            for (index, &(name, kind)) in source[..visible].iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
@@ -481,19 +500,24 @@ impl<'a> Parser<'a> {
                 });
                 output.push((name, kind));
             }
-            let matched: Vec<_> = self
-                .syntax
-                .variables
-                .iter()
-                .copied()
-                .chain(
-                    self.syntax
-                        .visible_edges()
-                        .filter_map(|(edge, _)| edge.variable),
-                )
-                .chain(self.syntax.path)
-                .chain(self.syntax.scope_paths.iter().copied())
-                .collect();
+            // After WITH the row is the whole scope (fgdb-sl4ym): the MATCH
+            // bindings it dropped are not RETURN * columns.
+            let matched: Vec<_> = if self.write_row_scope {
+                Vec::new()
+            } else {
+                self.syntax
+                    .variables
+                    .iter()
+                    .copied()
+                    .chain(
+                        self.syntax
+                            .visible_edges()
+                            .filter_map(|(edge, _)| edge.variable),
+                    )
+                    .chain(self.syntax.path)
+                    .chain(self.syntax.scope_paths.iter().copied())
+                    .collect()
+            };
             for name in matched {
                 if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
                     continue;

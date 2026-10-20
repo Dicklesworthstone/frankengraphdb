@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod map_overlay_tests;
-mod membership;
+pub(crate) mod membership;
 mod subscript;
 mod temporal;
 
@@ -836,7 +836,7 @@ fn admit(
                 let kind = types
                     .get(input)
                     .ok_or(Error::UnknownInput { column, input })?;
-                if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                if !kind.is_scalar_like() && *kind != GraphSetColumnType::Any {
                     return Err(Error::IntegerInput { column, input });
                 }
             }
@@ -884,10 +884,8 @@ fn admit(
         }
         GraphSetValue::Index { list, index } => {
             admit_list(list, types, column, depth + 1, nodes, locals)?;
-            if !matches!(
-                admit(index, types, column, depth + 1, nodes, locals)?,
-                GraphSetColumnType::Scalar | GraphSetColumnType::Any
-            ) {
+            let index = admit(index, types, column, depth + 1, nodes, locals)?;
+            if !index.is_scalar_like() && index != GraphSetColumnType::Any {
                 return Err(Error::ListInput { column });
             }
             GraphSetColumnType::Any
@@ -910,6 +908,7 @@ fn admit(
                     GraphSetColumnType::List
                         | GraphSetColumnType::Any
                         | GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Stored
                         | GraphSetColumnType::Vertices
                         | GraphSetColumnType::Edges
                 )
@@ -953,6 +952,7 @@ fn admit(
                     GraphSetColumnType::List
                         | GraphSetColumnType::Any
                         | GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Stored
                         | GraphSetColumnType::Vertices
                         | GraphSetColumnType::Edges
                 )
@@ -1054,9 +1054,7 @@ fn admit(
                 }
                 _ => false,
             };
-            if nonnull_scalar
-                || !matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Scalar)
-            {
+            if nonnull_scalar || !(kind.is_scalar_like() || kind == GraphSetColumnType::Any) {
                 return Err(Error::MapInput { column });
             }
             // NULL can skip execution, never binding or type admission.
@@ -1107,10 +1105,8 @@ fn admit_scalar(
     nodes: &mut usize,
     locals: usize,
 ) -> Result<(), GraphSetProjectionError> {
-    if !matches!(
-        admit(value, types, column, depth, nodes, locals)?,
-        GraphSetColumnType::Scalar | GraphSetColumnType::Any
-    ) {
+    let kind = admit(value, types, column, depth, nodes, locals)?;
+    if !kind.is_scalar_like() && kind != GraphSetColumnType::Any {
         return Err(GraphSetProjectionError::ListInput { column });
     }
     Ok(())
@@ -1138,7 +1134,7 @@ fn admit_list(
         | GraphSetColumnType::Any
         | GraphSetColumnType::Vertices
         | GraphSetColumnType::Edges => true,
-        GraphSetColumnType::Scalar => !scalar_literal,
+        GraphSetColumnType::Scalar | GraphSetColumnType::Stored => !scalar_literal,
         _ => false,
     };
     if !admitted && !null {
@@ -1611,14 +1607,14 @@ pub(crate) fn evaluate_value<E>(
 /// source's cut (fgdb-xnd7x). `Ok(None)` is an absent property. `None` means
 /// this host reads no element properties, so the read stays a typed error,
 /// never a guessed NULL.
-pub(crate) type ElementRead<'r, E> =
-    dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<CanonicalScalar>, E>> + 'r;
+pub(crate) type ElementRead<'r, E> = dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>
+    + 'r;
 
 /// The element reader of a host that reads no element properties.
 pub(crate) fn no_element_reads<E>(
     _: ElementId,
     _: PropertyKeyId,
-) -> Option<Result<Option<CanonicalScalar>, E>> {
+) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
     None
 }
 
@@ -1680,7 +1676,7 @@ fn list_members<'a, E>(
 
 trait SynchronousElementSource {
     type Error;
-    type Property: Borrow<CanonicalScalar>;
+    type Property: Borrow<fgdb_types::CanonicalPropertyValue>;
 
     fn element_property(
         &mut self,
@@ -1691,16 +1687,19 @@ trait SynchronousElementSource {
 
 impl<E, F: ?Sized> SynchronousElementSource for F
 where
-    F: FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<CanonicalScalar>, E>>,
+    F: FnMut(
+        ElementId,
+        PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>,
 {
     type Error = E;
-    type Property = CanonicalScalar;
+    type Property = fgdb_types::CanonicalPropertyValue;
 
     fn element_property(
         &mut self,
         element: ElementId,
         key: PropertyKeyId,
-    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         self(element, key)
     }
 }
@@ -2313,8 +2312,21 @@ where
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?
                     .map_err(ProjectionFailure::Control)?
                 {
-                    Some(value) => copy_property(value.borrow(), control)
+                    Some(value) => match value.borrow() {
+                        // A stored scalar keeps the borrowed copy's charges.
+                        fgdb_types::CanonicalPropertyValue::Scalar(scalar) => {
+                            copy_property(scalar, control).map_err(ProjectionFailure::Control)?
+                        }
+                        // A stored List or Map reads as the value it is
+                        // (fgdb-k3nub); copy_value charges every node.
+                        stored => copy_value(
+                            &GraphValue::from_property_value(stored).ok_or_else(|| {
+                                failure(GraphIntegerErrorKind::StoredValueBounds)
+                            })?,
+                            control,
+                        )
                         .map_err(ProjectionFailure::Control)?,
+                    },
                     None => {
                         control(GlaExecutionEvent::ScratchEntry)
                             .map_err(ProjectionFailure::Control)?;

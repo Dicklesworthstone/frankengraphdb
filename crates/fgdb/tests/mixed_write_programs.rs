@@ -159,12 +159,32 @@ fn dependent_creations_updates_and_deletion_publish_one_exact_graph() {
         assert_eq!(
             facts,
             vec![
-                (VId(1), vec![BASE], vec![(P, CanonicalScalar::Int(10))]),
-                (VId(2), vec![BASE], vec![(P, CanonicalScalar::Int(20))]),
-                (VId(777), vec![], vec![(P, CanonicalScalar::Int(70))]),
-                (VId(1001), vec![NEW], vec![(P, CanonicalScalar::Int(21))]),
-                (VId(21000), vec![COPY], vec![(P, CanonicalScalar::Int(42))]),
-                (VId(41000), vec![TAIL], vec![(P, CanonicalScalar::Int(99))]),
+                (
+                    VId(1),
+                    vec![BASE],
+                    vec![(P, CanonicalScalar::Int(10).into())]
+                ),
+                (
+                    VId(2),
+                    vec![BASE],
+                    vec![(P, CanonicalScalar::Int(20).into())]
+                ),
+                (VId(777), vec![], vec![(P, CanonicalScalar::Int(70).into())]),
+                (
+                    VId(1001),
+                    vec![NEW],
+                    vec![(P, CanonicalScalar::Int(21).into())]
+                ),
+                (
+                    VId(21000),
+                    vec![COPY],
+                    vec![(P, CanonicalScalar::Int(42).into())]
+                ),
+                (
+                    VId(41000),
+                    vec![TAIL],
+                    vec![(P, CanonicalScalar::Int(99).into())]
+                ),
             ]
         );
         let topology: Vec<_> = expected_edges
@@ -297,7 +317,7 @@ fn late_failures_restore_cascades_properties_and_the_prior_prefix_without_reclai
             assert_eq!(txn.edges(&db).unwrap(), old_edges, "cascade must be undone");
             assert_eq!(
                 txn.vertex(&db, VId(2)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(20))]
+                vec![(P, CanonicalScalar::Int(20).into())]
             );
             assert_eq!(txn.vertices(&db).unwrap().len(), 3);
             txn.commit(&mut db, &commit).await.unwrap();
@@ -601,11 +621,11 @@ fn reusable_templates_bind_before_execution_and_compose_across_invocations() {
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(
             db.vertex(VId(1000)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10))]
+            vec![(P, CanonicalScalar::Int(10).into())]
         );
         assert_eq!(
             db.vertex(VId(11000)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(13))]
+            vec![(P, CanonicalScalar::Int(13).into())]
         );
         assert_eq!(db.frontier().unwrap().0, 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -951,7 +971,7 @@ mod independent_edges {
                 let edge = db.edge(eid).unwrap().unwrap();
                 assert_eq!(edge.entry.relation, relation);
                 assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(1)));
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(10))]);
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(10).into())]);
             }
             assert_eq!(c.txn().outstanding_obligations(), 0);
         });
@@ -1366,7 +1386,12 @@ mod independent_edges {
                             source,
                             R,
                             target,
-                            vec![(P, CanonicalScalar::Int(record as i64))],
+                            vec![(
+                                P,
+                                fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(
+                                    record as i64,
+                                )),
+                            )],
                         ),
                     );
                 }

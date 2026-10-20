@@ -102,20 +102,21 @@ pub(crate) struct UnresolvedGraphText<'a> {
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
-        use crate::GraphSetColumnType::{Scalar, Vertex};
+        use crate::GraphSetColumnType::{Scalar, Stored, Vertex};
         let column_type = |column: &Column<'_>| match column.path {
             Some(GraphPathFunction::Value) => crate::GraphSetColumnType::Path,
             Some(GraphPathFunction::Length) => Scalar,
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
             Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
             // Edge selects the property owner in BoundColumn::declaration;
-            // an edge property itself is a scalar, not an edge identity.
-            Some(GraphPathFunction::Edge) if column.property.is_some() => Scalar,
+            // an edge property itself is a stored value, not an edge identity.
+            Some(GraphPathFunction::Edge) if column.property.is_some() => Stored,
             Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
             Some(GraphPathFunction::Labels) => crate::GraphSetColumnType::List,
             Some(GraphPathFunction::Type) => Scalar,
             Some(GraphPathFunction::Properties) => crate::GraphSetColumnType::Any,
-            None if column.property.is_some() => Scalar,
+            // A property is a scalar or a stored List or Map (fgdb-kr8j1).
+            None if column.property.is_some() => Stored,
             None => Vertex,
         };
         let input_types: Vec<_> = self
@@ -727,37 +728,50 @@ mod projection_schema_tests {
         );
     }
 
+    /// A property is a stored value (fgdb-kr8j1), carried as one through WITH;
+    /// arithmetic over it is a scalar.
     #[test]
     fn edge_property_output_types_match_the_bound_plan_in_every_projection_form() {
-        for terminal in [
-            "RETURN e.cost AS cost",
-            "WITH e.cost AS cost RETURN cost",
-            "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+        for (terminal, kind) in [
+            ("RETURN e.cost AS cost", GraphSetColumnType::Stored),
+            (
+                "WITH e.cost AS cost RETURN cost",
+                GraphSetColumnType::Stored,
+            ),
+            (
+                "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+                GraphSetColumnType::Scalar,
+            ),
         ] {
-            check(
-                &format!("MATCH (a)-[e:R]->(b) {terminal}"),
-                &[GraphSetColumnType::Scalar],
-            );
+            check(&format!("MATCH (a)-[e:R]->(b) {terminal}"), &[kind]);
         }
         check(
             "MATCH (a)-[e:R]->(b) RETURN e AS edge, e.cost AS cost, type(e) AS relation",
             &[
                 GraphSetColumnType::Edge,
-                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Stored,
                 GraphSetColumnType::Scalar,
             ],
         );
     }
 
     #[test]
-    fn scalar_set_operations_accept_edge_and_vertex_property_arms() {
+    fn stored_set_operations_accept_edge_and_vertex_property_arms() {
         for operation in ["UNION ALL", "UNION DISTINCT", "INTERSECT", "EXCEPT"] {
             check(
                 &format!(
                     "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
                      {operation} MATCH (n) RETURN n.cost AS value"
                 ),
-                &[GraphSetColumnType::Scalar],
+                &[GraphSetColumnType::Stored],
+            );
+            // A scalar arm widens to the stored domain, never narrows it.
+            check(
+                &format!(
+                    "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
+                     {operation} MATCH (n) RETURN 1 AS value"
+                ),
+                &[GraphSetColumnType::Stored],
             );
         }
     }

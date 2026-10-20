@@ -21,7 +21,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
@@ -34,7 +34,7 @@ const UN_BANG_NE: &str = "MATCH (a)-[:R]-(b) WHERE a.k != 1 RETURN b";
 fn reference_other_endpoints_of_unequal_carriers(graph: &ReferenceGraph) -> Vec<VId> {
     let carrier = |vid: VId| {
         graph.vertex(vid).is_some_and(
-            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))) if *v != 1),
         )
     };
     let mut rows = Vec::new();

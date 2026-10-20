@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlBudgetDimension, GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphAggregateBuildError,
     GraphAggregateError, GraphAggregateValue, PreparedGraphAggregate,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -86,12 +86,16 @@ fn grouped_and_global_summaries_match_independent_multigraph_enumeration() {
     let input = child();
     let specs = functions();
     let raw = [Some(-5_i64), None, Some(7)];
-    let values = raw.map(|value| value.map(CanonicalScalar::Int));
+    let values = raw
+        .map(|value| value.map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value))));
     let buckets = [
         Some(CanonicalScalar::Int(1)),
         None,
         Some(CanonicalScalar::Int(1)),
     ];
+    let stored_buckets = buckets
+        .clone()
+        .map(|bucket| bucket.map(CanonicalPropertyValue::from));
     let universe = [
         (VId(1), R, VId(2)),
         (VId(2), R, VId(2)),
@@ -122,7 +126,7 @@ fn grouped_and_global_summaries_match_independent_multigraph_enumeration() {
                         Ok(if key == VALUE {
                             values[at].as_ref()
                         } else {
-                            buckets[at].as_ref()
+                            stored_buckets[at].as_ref()
                         })
                     },
                     wide(),
@@ -331,7 +335,7 @@ fn exact_limits_and_group_pagination_do_not_limit_child_occurrences() {
     let input = child();
     let aggregate =
         PreparedGraphAggregate::prepare(input.clone(), &[0], &functions(), 0, None).unwrap();
-    let scalar = CanonicalScalar::Int(i64::MAX);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(i64::MAX));
     let edges = fixture();
     let run = |policy| {
         aggregate.execute_governed(
@@ -389,7 +393,7 @@ fn exact_limits_and_group_pagination_do_not_limit_child_occurrences() {
 fn cancellation_at_every_checkpoint_and_late_source_failures_release_no_rows() {
     let aggregate = PreparedGraphAggregate::prepare(child(), &[0], &functions(), 0, None).unwrap();
     let edges = fixture();
-    let scalar = CanonicalScalar::Int(3);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(3));
     let mut total = 0;
     aggregate
         .execute_governed(
@@ -448,7 +452,7 @@ fn cancellation_at_every_checkpoint_and_late_source_failures_release_no_rows() {
 #[test]
 fn sum_refuses_nonintegers_instead_of_coercing_or_dropping_them() {
     let aggregate = PreparedGraphAggregate::prepare(child(), &[], &functions(), 0, None).unwrap();
-    let scalar = CanonicalScalar::Bool(true);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     let result = aggregate.execute_governed(
         5,
         [],
@@ -473,7 +477,7 @@ fn aggregation_retains_groups_not_the_entire_parallel_path_bag() {
         PreparedGraphAggregate::prepare(input.clone(), &[0], &functions(), 0, None).unwrap();
     let mut edges = vec![(VId(1), R, VId(2)); 64];
     edges.extend(vec![(VId(2), S, VId(3)); 64]);
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let grouped = aggregate
         .execute_governed(
             128,

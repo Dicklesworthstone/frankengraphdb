@@ -235,8 +235,8 @@ pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::{CommitCx, TxnCx};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObligationAcquireError,
-    ObligationId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef,
+    ObligationAcquireError, ObligationId, VId,
 };
 use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
@@ -1247,8 +1247,8 @@ pub enum WriteMismatchPolicy {
 pub struct CompareAndSetMismatch {
     pub elem: ElementId,
     pub name: PropertyKeyId,
-    pub expected: Option<CanonicalScalar>,
-    pub actual: Option<CanonicalScalar>,
+    pub expected: Option<CanonicalPropertyValue>,
+    pub actual: Option<CanonicalPropertyValue>,
 }
 
 impl core::fmt::Debug for CompareAndSetMismatch {
@@ -1389,7 +1389,7 @@ enum PendingRow {
     Vertex {
         vid: VId,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         /// `true` is [`WriteBatch::ensure_vertex`]: live identity is a
         /// no-op, not [`WriteError::AlreadyLive`].
         ensure: bool,
@@ -1398,7 +1398,7 @@ enum PendingRow {
         eid: EId,
         src: VId,
         dst: VId,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         /// `true` is [`WriteBatch::ensure_edge_by_triple`]: a live
         /// `(src, relation, dst)` is a no-op even under a new eid.
         ensure: bool,
@@ -1423,20 +1423,49 @@ enum PendingRow {
     SetEdgeProperty {
         eid: EId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     SetProperty {
         vid: VId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     CompareAndSet {
         elem: ElementId,
         key: PropertyKeyId,
-        expected: Option<Box<CanonicalScalar>>,
-        value: Box<CanonicalScalar>,
+        expected: Option<Box<CanonicalPropertyValue>>,
+        value: Box<CanonicalPropertyValue>,
         mismatch: WriteMismatchPolicy,
     },
+}
+
+/// Visit every scalar a stored value holds, at any depth (fgdb-k3nub). Map
+/// keys are text and carry no artifact binding, so only values are visited.
+fn for_each_stored_scalar<E>(
+    value: &CanonicalPropertyValue,
+    visit: &mut impl FnMut(&CanonicalScalar) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => visit(scalar),
+        CanonicalPropertyValue::List(list) => list
+            .values()
+            .iter()
+            .try_for_each(|value| for_each_stored_scalar(value, &mut *visit)),
+        CanonicalPropertyValue::Map(map) => map
+            .entries()
+            .iter()
+            .try_for_each(|entry| for_each_stored_scalar(entry.value(), &mut *visit)),
+    }
+}
+
+/// Scalar properties as stored values, preserving their order.
+fn property_values(
+    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+) -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
+    props
+        .into_iter()
+        .map(|(key, value)| (key, CanonicalPropertyValue::Scalar(value)))
+        .collect()
 }
 
 impl WriteBatch {
@@ -1473,6 +1502,17 @@ impl WriteBatch {
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     ) -> &mut Self {
+        self.create_vertex_values(vid, labels, property_values(props))
+    }
+
+    /// [`WriteBatch::create_vertex`] with stored property values: scalars,
+    /// Lists and Maps (fgdb-k3nub).
+    pub fn create_vertex_values(
+        &mut self,
+        vid: VId,
+        labels: Vec<LabelId>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
@@ -1492,6 +1532,16 @@ impl WriteBatch {
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     ) -> &mut Self {
+        self.ensure_vertex_values(vid, labels, property_values(props))
+    }
+
+    /// [`WriteBatch::ensure_vertex`] with stored property values.
+    pub fn ensure_vertex_values(
+        &mut self,
+        vid: VId,
+        labels: Vec<LabelId>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
@@ -1510,6 +1560,17 @@ impl WriteBatch {
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.add_edge_values(eid, src, dst, property_values(props))
+    }
+
+    /// [`WriteBatch::add_edge`] with stored property values.
+    pub fn add_edge_values(
+        &mut self,
+        eid: EId,
+        src: VId,
+        dst: VId,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ) -> &mut Self {
         self.rows.push(PendingRow::Edge {
             eid,
@@ -1532,6 +1593,17 @@ impl WriteBatch {
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.ensure_edge_by_triple_values(eid, src, dst, property_values(props))
+    }
+
+    /// [`WriteBatch::ensure_edge_by_triple`] with stored property values.
+    pub fn ensure_edge_by_triple_values(
+        &mut self,
+        eid: EId,
+        src: VId,
+        dst: VId,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ) -> &mut Self {
         self.rows.push(PendingRow::Edge {
             eid,
@@ -1602,6 +1674,16 @@ impl WriteBatch {
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
     ) -> &mut Self {
+        self.set_vertex_property_value(vid, key, value.map(CanonicalPropertyValue::Scalar))
+    }
+
+    /// [`WriteBatch::set_vertex_property`] with a stored property value.
+    pub fn set_vertex_property_value(
+        &mut self,
+        vid: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalPropertyValue>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::SetProperty { vid, key, value });
         self
     }
@@ -1615,6 +1697,16 @@ impl WriteBatch {
         eid: EId,
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
+    ) -> &mut Self {
+        self.set_edge_property_value(eid, key, value.map(CanonicalPropertyValue::Scalar))
+    }
+
+    /// [`WriteBatch::set_edge_property`] with a stored property value.
+    pub fn set_edge_property_value(
+        &mut self,
+        eid: EId,
+        key: PropertyKeyId,
+        value: Option<CanonicalPropertyValue>,
     ) -> &mut Self {
         self.rows
             .push(PendingRow::SetEdgeProperty { eid, key, value });
@@ -1640,8 +1732,8 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Vertex(vid),
             key,
-            expected: expected.map(Box::new),
-            value: Box::new(value),
+            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
+            value: Box::new(CanonicalPropertyValue::Scalar(value)),
             mismatch,
         });
         self
@@ -1659,8 +1751,8 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Edge(eid),
             key,
-            expected: expected.map(Box::new),
-            value: Box::new(value),
+            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
+            value: Box::new(CanonicalPropertyValue::Scalar(value)),
             mismatch,
         });
         self
@@ -3563,7 +3655,8 @@ impl<V: Vfs + Clone> Database<V> {
         // needs no check: every durable container stamps the format its
         // content requires, so an older reader refuses it by name
         // (fgdb-hbi8s).
-        let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
+        // A List or Map is admitted scalar by scalar, at every depth.
+        let mut admit_scalar = |value: &CanonicalScalar| -> Result<(), WriteError> {
             if let CanonicalScalar::Timestamp(timestamp) = value
                 && let Some(zone) = timestamp.zone()
             {
@@ -3580,6 +3673,8 @@ impl<V: Vfs + Clone> Database<V> {
             }
             Ok(())
         };
+        let mut admit =
+            |value: &CanonicalPropertyValue| for_each_stored_scalar(value, &mut admit_scalar);
         for pending in &batch.rows {
             match pending {
                 PendingRow::Vertex { props, .. } | PendingRow::Edge { props, .. } => {
@@ -4251,7 +4346,7 @@ impl<V: Vfs + Clone> Database<V> {
         // property key repeated with two values, at the first such row in
         // input order. Only then does the order matter, so only then are the
         // rows put in the fold's.
-        let repeats_a_key = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+        let repeats_a_key = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
             props.windows(2).any(|pair| pair[0].0 == pair[1].0)
         };
         if rows.iter().any(|row| match row {
@@ -5568,7 +5663,7 @@ fn vertex_statement_transcript(
     vid: VId,
     birth_ordinal: u64,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<Vec<u8>, CanonicalError> {
     let mut out = Vec::new();
     write_vertex_statement_transcript(&mut out, vid, birth_ordinal, labels, props)?;
@@ -5581,7 +5676,7 @@ fn write_vertex_statement_transcript(
     vid: VId,
     birth_ordinal: u64,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), CanonicalError> {
     out.clear();
     out.push(0x01);
@@ -5600,7 +5695,7 @@ fn edge_statement_transcript(
     src: VId,
     relation: RelationId,
     dst: VId,
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<Vec<u8>, CanonicalError> {
     let mut out = Vec::new();
     write_edge_statement_transcript(&mut out, eid, src, relation, dst, props)?;
@@ -5614,7 +5709,7 @@ fn write_edge_statement_transcript(
     src: VId,
     relation: RelationId,
     dst: VId,
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), CanonicalError> {
     out.clear();
     out.push(0x02);
@@ -5627,11 +5722,18 @@ fn write_edge_statement_transcript(
 
 fn append_props_transcript(
     out: &mut Vec<u8>,
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), CanonicalError> {
     out.extend_from_slice(&(props.len() as u32).to_le_bytes());
     for (key, value) in props {
-        let encoded = value.encode().map_err(|_| CanonicalError::Scalar)?;
+        // A scalar's value bytes are its scalar bytes, so a scalar-only
+        // statement keeps its transcript (fgdb-k3nub).
+        let encoded = match value.as_scalar() {
+            Some(scalar) => scalar.encode().map_err(|_| CanonicalError::Scalar)?,
+            None => value
+                .encode()
+                .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))?,
+        };
         out.extend_from_slice(&key.0.to_le_bytes());
         out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
         out.extend_from_slice(&encoded);
@@ -5750,11 +5852,11 @@ fn fold_statement_versions(
 
 /// One vertex's mutable batch-prefix content: `(labels, props)`, both in
 /// canonical order.
-type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 
 fn sort_write_labels_and_props(
     labels: &mut Vec<LabelId>,
-    props: &mut Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 ) {
     labels.sort_unstable();
     labels.dedup();
@@ -5764,7 +5866,7 @@ fn sort_write_labels_and_props(
 /// Sort by key. Identical `(key, value)` repeats collapse (the reference's
 /// `canonical_props`); a key with two different values is left adjacent so
 /// template build refuses `NonCanonicalPropertyOrder` (fgdb-nsrv).
-fn sort_write_props(props: &mut Vec<(PropertyKeyId, CanonicalScalar)>) {
+fn sort_write_props(props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>) {
     props.sort_by_key(|(key, _)| *key);
     let mut kept = 0usize;
     for i in 0..props.len() {
@@ -5966,7 +6068,7 @@ fn derive_versions_and_ordinal(
         }
     }
 
-    let mut edge_statements: Vec<(&AdjacencyEntry, &[(PropertyKeyId, CanonicalScalar)])> =
+    let mut edge_statements: Vec<(&AdjacencyEntry, &[(PropertyKeyId, CanonicalPropertyValue)])> =
         Vec::new();
     for (block, props) in blocks.iter().zip(block_props) {
         for (index, entry) in block.as_ref().iter().enumerate() {
@@ -7479,7 +7581,7 @@ mod lazy_delta_laws {
                 assert_eq!(db.frontier().unwrap(), CommitSeq(2));
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(30)
+                    CanonicalScalar::Int(30).into()
                 );
             }
         });
@@ -7640,7 +7742,7 @@ mod lazy_delta_laws {
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(
                     txn.vertex(&db, VId(2)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(10)
+                    CanonicalScalar::Int(10).into()
                 );
                 // Returning the old V2 value adds a real dependency. Its
                 // changed winner must conflict even though the V1 write is
@@ -7659,7 +7761,7 @@ mod lazy_delta_laws {
                 assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(5));
                 assert_eq!(
                     db.vertex(VId(2)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(33)
+                    CanonicalScalar::Int(33).into()
                 );
 
                 // The ordinary API retains its explicit refresh contract, and
@@ -7872,7 +7974,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         let base = statement_successor(None, &edge);
@@ -7886,7 +7988,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         assert_ne!(
@@ -7899,7 +8001,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(2))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(2).into())],
         )
         .expect("encodes");
         assert_ne!(

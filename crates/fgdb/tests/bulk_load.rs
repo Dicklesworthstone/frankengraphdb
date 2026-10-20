@@ -16,7 +16,8 @@ use fgdb_gql::{
 use fgdb_strata::edge_props::EdgePropertyPatchError;
 use fgdb_strata::vertex::VertexPatchError;
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -75,13 +76,13 @@ fn query_policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(1_000_000, 1_000_000, 100_000_000, 100_000_000)
 }
 
-fn int_property(props: &[(PropertyKeyId, CanonicalScalar)], key: PropertyKeyId) -> i64 {
+fn int_property(props: &[(PropertyKeyId, CanonicalPropertyValue)], key: PropertyKeyId) -> i64 {
     match props
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, value)| value)
     {
-        Some(CanonicalScalar::Int(value)) => *value,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => *value,
         other => panic!("expected integer property {key:?}, got {other:?}"),
     }
 }
@@ -91,8 +92,8 @@ fn vertex(n: usize, payload: i64) -> BulkRow {
         key: format!("v{n}"),
         labels: vec![if n.is_multiple_of(2) { PERSON } else { OTHER }],
         props: vec![
-            (K, CanonicalScalar::Int(n as i64)),
-            (P, CanonicalScalar::Int(payload)),
+            (K, CanonicalScalar::Int(n as i64).into()),
+            (P, CanonicalScalar::Int(payload).into()),
         ],
     })
 }
@@ -110,8 +111,8 @@ fn edge(
         destination: format!("v{destination}").into(),
         relation,
         props: vec![
-            (K, CanonicalScalar::Int(n as i64)),
-            (P, CanonicalScalar::Int(payload)),
+            (K, CanonicalScalar::Int(n as i64).into()),
+            (P, CanonicalScalar::Int(payload).into()),
         ],
     })
 }
@@ -157,14 +158,15 @@ fn crash_rows() -> Vec<BulkRow> {
     rows
 }
 
-type LogicalVertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type LogicalVertices =
+    BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type LogicalEdges = BTreeMap<
     String,
     (
         String,
         String,
         RelationId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ),
 >;
 
@@ -677,11 +679,11 @@ fn duplicate_key_namespace_is_global_across_vertices_and_edges() {
     });
 }
 
-fn oversized_props() -> Vec<(PropertyKeyId, CanonicalScalar)> {
+fn oversized_props() -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
     // Each scalar is valid; their combined indivisible storage row is not.
     vec![
-        (K, CanonicalScalar::bytes(vec![0x41; 8000]).unwrap()),
-        (P, CanonicalScalar::bytes(vec![0x42; 9000]).unwrap()),
+        (K, CanonicalScalar::bytes(vec![0x41; 8000]).unwrap().into()),
+        (P, CanonicalScalar::bytes(vec![0x42; 9000]).unwrap().into()),
     ]
 }
 
@@ -791,7 +793,7 @@ fn zone(key: &str, label: LabelId, k: i64) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.to_owned(),
         labels: vec![label],
-        props: vec![(K, CanonicalScalar::Int(k))],
+        props: vec![(K, CanonicalScalar::Int(k).into())],
     })
 }
 
@@ -805,7 +807,7 @@ fn trip(n: i64, source: BulkEndpoint, destination: BulkEndpoint) -> BulkRow {
         source,
         destination,
         relation: R,
-        props: vec![(P, CanonicalScalar::Int(n))],
+        props: vec![(P, CanonicalScalar::Int(n).into())],
     })
 }
 

@@ -94,7 +94,7 @@ fn property(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
     row.props
         .iter()
         .find(|(k, _)| *k == key)
-        .map(|(_, value)| value)
+        .map(|(_, value)| value.as_scalar().expect("scalar fixture"))
 }
 fn order(left: &Summary, right: &Summary) -> Ordering {
     match (left.3, right.3) {

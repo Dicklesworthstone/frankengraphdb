@@ -9,7 +9,7 @@ const H: PropertyKeyId = PropertyKeyId(2);
 const IDS: [VId; 5] = [VId(0), VId(1), VId(2), VId(3), VId(u128::MAX)];
 struct Masked {
     position: usize,
-    props: Vec<Vec<(PropertyKeyId, CanonicalScalar)>>,
+    props: Vec<Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     reads: Rc<Cell<usize>>,
     dropped: Rc<Cell<bool>>,
     fail_at: Option<VId>,
@@ -23,11 +23,16 @@ impl Masked {
                 .map(|value| {
                     let mut row = Vec::new();
                     if let Some(value) = value {
-                        row.push((P, CanonicalScalar::Int(value)));
+                        row.push((
+                            P,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)),
+                        ));
                     }
                     row.push((
                         H,
-                        CanonicalScalar::ucs_basic_text("hidden-nonnumeric").unwrap(),
+                        CanonicalPropertyValue::Scalar(
+                            CanonicalScalar::ucs_basic_text("hidden-nonnumeric").unwrap(),
+                        ),
                     ));
                     row
                 })

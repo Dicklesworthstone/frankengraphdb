@@ -19,10 +19,15 @@ use std::sync::{
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Edge = (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Edge = (
+    VId,
+    RelationId,
+    VId,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+);
 #[derive(Clone)]
 struct Source {
-    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     edges: BTreeMap<EId, Edge>,
     incident: BTreeMap<(VId, u8), BTreeSet<EId>>,
     after: Option<EId>,
@@ -114,9 +119,9 @@ impl EdgeScanSource for Source {
 fn source(mask: u32) -> Source {
     let ids = [VId(0), VId(1), VId(u128::MAX)];
     let vertices = BTreeMap::from([
-        (ids[0], vec![(P, CanonicalScalar::Int(-3))]),
-        (ids[1], vec![(P, CanonicalScalar::Null)]),
-        (ids[2], vec![(P, CanonicalScalar::Int(7))]),
+        (ids[0], vec![(P, CanonicalScalar::Int(-3).into())]),
+        (ids[1], vec![(P, CanonicalScalar::Null.into())]),
+        (ids[2], vec![(P, CanonicalScalar::Int(7).into())]),
     ]);
     let mut edges = BTreeMap::new();
     let mut incident: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
@@ -136,7 +141,7 @@ fn source(mask: u32) -> Source {
         let from = ids[a];
         let to = ids[b];
         let properties = weight
-            .map(|w| vec![(P, CanonicalScalar::Int(w))])
+            .map(|w| vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(w)))])
             .unwrap_or_default();
         edges.insert(eid, (from, rel, to, properties));
         for key in [(from, 0), (to, 1), (from, 2), (to, 2)] {
@@ -174,9 +179,11 @@ fn run(
 ) -> EdgeAggregateCursor<Source, impl FnMut() -> Result<(), ()>> {
     EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(q).unwrap(), p, || Ok(()))
 }
-fn integer(props: &[(PropertyKeyId, CanonicalScalar)]) -> Option<i128> {
+fn integer(props: &[(PropertyKeyId, CanonicalPropertyValue)]) -> Option<i128> {
     props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(value) if *key == P => Some(i128::from(*value)),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+            Some(i128::from(*value))
+        }
         _ => None,
     })
 }
@@ -420,7 +427,7 @@ fn invalid_data_and_late_source_failures_never_become_partial_counts() {
         match kind {
             0 => s.fail = Some(EId(6)),
             1 => {
-                s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+                s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
             }
             _ => {
                 s.vertices.remove(&VId(1));
@@ -478,7 +485,12 @@ fn many_input_rows_need_only_one_result_allowance_and_wide_sums_are_exact() {
     for id in 0..4096 {
         s.edges.insert(
             EId(id),
-            (VId(0), R, VId(1), vec![(P, CanonicalScalar::Int(i64::MAX))]),
+            (
+                VId(0),
+                R,
+                VId(1),
+                vec![(P, CanonicalScalar::Int(i64::MAX).into())],
+            ),
         );
     }
     let mut stream = run(&q, s, policy());

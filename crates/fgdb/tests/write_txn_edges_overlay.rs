@@ -98,8 +98,14 @@ fn bulk_edges_reuse_the_pinned_basis_and_preserve_ordered_staged_effects() {
             .edges(&database)
             .expect("bulk reads staged effects");
         assert_eq!(edge_ids(&before), vec![EId(10), EId(12)]);
-        assert_eq!(before[0].props, vec![(PROPERTY, CanonicalScalar::Int(7))]);
-        assert_eq!(before[1].props, vec![(PROPERTY, CanonicalScalar::Int(9))]);
+        assert_eq!(
+            before[0].props,
+            vec![(PROPERTY, CanonicalScalar::Int(7).into())]
+        );
+        assert_eq!(
+            before[1].props,
+            vec![(PROPERTY, CanonicalScalar::Int(9).into())]
+        );
         assert_eq!(before[1].entry.created_at, basis);
         let points: Vec<_> = [EId(10), EId(11), EId(12)]
             .into_iter()
@@ -143,7 +149,7 @@ fn bulk_edges_reuse_the_pinned_basis_and_preserve_ordered_staged_effects() {
                 .expect("live edge")
                 .expect("present")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(42))]
+            vec![(PROPERTY, CanonicalScalar::Int(42).into())]
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
@@ -315,7 +321,7 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_reader_with_read_01() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(33))]
+            vec![(PROPERTY, CanonicalScalar::Int(33).into())]
         );
         assert!(
             reopened.vertex(VId(4)).expect("reopen vertex").is_none(),

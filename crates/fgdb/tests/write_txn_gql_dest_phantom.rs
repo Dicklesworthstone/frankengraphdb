@@ -159,7 +159,7 @@ fn a_new_edge_into_the_observed_destination_aborts_the_matcher() {
         );
         assert_eq!(
             db.vertex(VId(9)).expect("reads").expect("row").props,
-            vec![(PROP, int(9))],
+            vec![(PROP, int(9).into())],
             "the phantom writer's source vertex is durable"
         );
     });
@@ -209,12 +209,12 @@ fn a_bare_concurrent_create_still_does_not_abort_the_matcher() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(3)).expect("reads").expect("row").props,
-            vec![(PROP, int(3))],
+            vec![(PROP, int(3).into())],
             "the matcher's create is durable"
         );
         assert_eq!(
             db.vertex(VId(9)).expect("reads").expect("row").props,
-            vec![(PROP, int(9))],
+            vec![(PROP, int(9).into())],
             "the concurrent bare create is durable beside it"
         );
     });

@@ -942,4 +942,3 @@ fn as_of_reads_report_selected_seq_and_certify_to_refuses_overwrite() {
     refused(&overwrite, 2, "usage");
     assert_eq!(std::fs::read(&certificate).unwrap(), original_bytes);
 }
-

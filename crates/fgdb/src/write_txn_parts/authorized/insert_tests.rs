@@ -1,4 +1,7 @@
 //! Public creation entry points with real tokens, collector, storage and reopen.
+// Loaded through #[path], so a child resolves beside this file, as from a
+// mod.rs: name its directory explicitly.
+#[path = "insert_tests/factors.rs"]
 mod factors;
 
 use super::*;
@@ -11,7 +14,10 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphInsertBinding, GraphSetProjection, GraphSetQuantifier,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts,
+};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 
 const R: RelationId = RelationId(1);
@@ -203,7 +209,7 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         assert_eq!(db.edges().unwrap(), all_edges);
         assert_eq!(
             db.vertex(vertices[0]).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(42))]
+            vec![(P, CanonicalScalar::Int(42).into())]
         );
         for (index, source, relation, destination) in [
             (0, vertices[0], R, vertices[1]),
@@ -282,7 +288,7 @@ fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
         for (id, expected) in vertices.iter().zip([3, 1, 3]) {
             assert_eq!(
                 db.vertex(*id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(expected))]
+                vec![(P, CanonicalScalar::Int(expected).into())]
             );
         }
 
@@ -348,14 +354,14 @@ fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
         assert_eq!(
             properties,
             vec![
-                vec![(P, CanonicalScalar::Int(1))],
-                vec![(P, CanonicalScalar::Int(3))],
-                vec![(P, CanonicalScalar::Int(3))],
+                vec![(P, CanonicalScalar::Int(1).into())],
+                vec![(P, CanonicalScalar::Int(3).into())],
+                vec![(P, CanonicalScalar::Int(3).into())],
             ]
         );
         assert_eq!(
             db.vertex(VId(900)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99))]
+            vec![(P, CanonicalScalar::Int(99).into())]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -788,7 +794,7 @@ fn match_insert_uses_masked_properties_and_preserves_occurrence_multiplicity() {
             for (occurrence, vertex) in vertices.iter().copied().enumerate() {
                 assert_eq!(
                     db.vertex(vertex).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(10))]
+                    vec![(P, CanonicalScalar::Int(10).into())]
                 );
                 let first = db.edge(edges[2 * occurrence]).unwrap().unwrap();
                 let second = db.edge(edges[2 * occurrence + 1]).unwrap().unwrap();
@@ -1259,7 +1265,7 @@ fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
             created.sort_by_key(|(vertex, _)| *vertex);
             let ordered: Vec<_> = created
                 .iter()
-                .map(|(_, p)| (P, CanonicalScalar::Int(*p)))
+                .map(|(_, p)| (P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(*p))))
                 .collect();
             assert_eq!(properties, ordered.iter().collect::<Vec<_>>());
             db.compact(&commit).await.unwrap();

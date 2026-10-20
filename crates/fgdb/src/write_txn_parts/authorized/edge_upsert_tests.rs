@@ -208,12 +208,12 @@ fn selected_upsert_branch_alone_executes_and_preserves_hidden_properties() {
                 assert_eq!(
                     props,
                     vec![
-                        (P, CanonicalScalar::Int(11)),
-                        (SECRET, CanonicalScalar::Int(99))
+                        (P, CanonicalScalar::Int(11).into()),
+                        (SECRET, CanonicalScalar::Int(99).into())
                     ]
                 );
             } else {
-                assert_eq!(props, vec![(P, CanonicalScalar::Int(7))]);
+                assert_eq!(props, vec![(P, CanonicalScalar::Int(7).into())]);
             }
             assert_eq!(db.vertices().unwrap(), vertices);
             let seq = db.frontier().unwrap();
@@ -640,7 +640,7 @@ fn mixed_program_observes_created_and_updated_relationships_and_commits_once() {
         assert_eq!(receipt.steps()[5].deleted_edges(), Some(&[merged][..]));
         assert_eq!(
             db.vertex(source).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99))]
+            vec![(P, CanonicalScalar::Int(99).into())]
         );
         assert!(db.edge(merged).unwrap().is_none());
         assert!(db.edge(inserted).unwrap().is_some());

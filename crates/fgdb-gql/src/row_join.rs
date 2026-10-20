@@ -106,12 +106,8 @@ impl RowJoinSpec {
                 // A vertex or edge key is its identity: a relationship carried
                 // past WITH into a later MATCH correlates as a vertex does.
                 if is_key
-                    && !matches!(
-                        kind,
-                        GraphSetColumnType::Scalar
-                            | GraphSetColumnType::Vertex
-                            | GraphSetColumnType::Edge
-                    )
+                    && !kind.is_scalar_like()
+                    && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 {
                     return Err(RowJoinBuildError::UnsupportedColumn { side, column });
                 }

@@ -121,7 +121,7 @@ fn stage_creation<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 unreachable!("validated vertex MERGE contains no edge creation")
             };
             let mut batch = WriteBatch::new(relation);
-            batch.create_vertex(vertex, labels, properties);
+            batch.create_vertex_values(vertex, labels, properties);
             for row in batch.rows {
                 stage(transaction, database, batch.relation, row, execution)?;
             }
@@ -310,6 +310,7 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         control,
                         upsert_staging,
                     )
+                    .and_then(selection::scalar)
                 },
                 |batch| {
                     let mut state = state.borrow_mut();

@@ -285,15 +285,18 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                 core::cmp::Ordering::Greater => high = mid,
                 core::cmp::Ordering::Equal => {
                     control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+                    // A stored List or Map never meets a scalar root bound.
+                    let value = row.properties[mid].1.as_scalar();
                     return Ok(match &self.candidates {
                         RootCandidates::Pending { equality, .. }
                         | RootCandidates::Indexed { equality, .. } => IntegerComparison::Equal
-                            .accepts_scalar_pair(
-                                Some(&row.properties[mid].1),
-                                Some(&equality.value),
-                            ),
-                        RootCandidates::Range(range) => range.accepts(&row.properties[mid].1),
-                        RootCandidates::Prefix(prefix) => prefix.accepts(&row.properties[mid].1),
+                            .accepts_scalar_pair(value, Some(&equality.value)),
+                        RootCandidates::Range(range) => {
+                            value.is_some_and(|value| range.accepts(value))
+                        }
+                        RootCandidates::Prefix(prefix) => {
+                            value.is_some_and(|value| prefix.accepts(value))
+                        }
                         RootCandidates::Histories => unreachable!("history roots admit every row"),
                     });
                 }

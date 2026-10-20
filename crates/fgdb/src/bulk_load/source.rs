@@ -45,7 +45,10 @@ pub(super) fn admit_keys(
                     BulkEndpoint::Match(matched) => matched
                         .value
                         .encode()
-                        .map_err(|source| BulkLoadErrorKind::SourceEncoding { row, source })?
+                        .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                            row,
+                            source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(source),
+                        })?
                         .len(),
                 };
                 limit(row, "key_bytes", policy.max_key_bytes, len)?;
@@ -242,7 +245,9 @@ fn transcript_row(
                         let bytes = matched.value.encode().map_err(|source| {
                             BulkLoadErrorKind::SourceEncoding {
                                 row: ordinal,
-                                source,
+                                source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(
+                                    source,
+                                ),
                             }
                         })?;
                         framed(emit, &bytes)?;
@@ -272,11 +277,14 @@ fn transcript_row(
 /// or `CreateEdge` row its template carries, as fgdb-delta-types encodes it.
 /// That is a tag, the identity, birth ordinal (and an edge's endpoints and
 /// relation) at fixed widths, a u32 count before the labels (u64 each) and
-/// the properties (u64 key, u32-counted scalar encoding each), and absent
+/// the properties (u64 key, u32-counted value encoding each), and absent
 /// key and valid-time tags. Sorting can only drop a duplicate label, so this
 /// bounds the row from above.
 pub(super) fn template_len(ordinal: usize, row: &BulkRow) -> Result<usize, BulkLoadErrorKind> {
-    let props = |props: &[(fgdb_delta_types::PropertyKeyId, fgdb_types::CanonicalScalar)]| {
+    let props = |props: &[(
+        fgdb_delta_types::PropertyKeyId,
+        fgdb_types::CanonicalPropertyValue,
+    )]| {
         props.iter().try_fold(4_usize, |len, (_, value)| {
             let encoded = value
                 .encode()
@@ -390,20 +398,21 @@ mod template_len_tests {
         };
         let mut checked = 0;
         for at in 0..500_usize {
-            let mut props: Vec<(PropertyKeyId, CanonicalScalar)> = (0..random(5))
-                .map(|key| {
-                    let value = match random(4) {
-                        0 => CanonicalScalar::Int(random(1 << 40) as i64 - (1 << 39)),
-                        1 => CanonicalScalar::Bool(random(2) == 0),
-                        2 => CanonicalScalar::Text(
-                            CanonicalText::new_ucs_basic(&"x".repeat(random(300) as usize))
-                                .unwrap(),
-                        ),
-                        _ => CanonicalScalar::Null,
-                    };
-                    (PropertyKeyId(10 - key), value)
-                })
-                .collect();
+            let mut props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> =
+                (0..random(5))
+                    .map(|key| {
+                        let value = match random(4) {
+                            0 => CanonicalScalar::Int(random(1 << 40) as i64 - (1 << 39)),
+                            1 => CanonicalScalar::Bool(random(2) == 0),
+                            2 => CanonicalScalar::Text(
+                                CanonicalText::new_ucs_basic(&"x".repeat(random(300) as usize))
+                                    .unwrap(),
+                            ),
+                            _ => CanonicalScalar::Null,
+                        };
+                        (PropertyKeyId(10 - key), value.into())
+                    })
+                    .collect();
             let (row, canonical) = if at % 2 == 0 {
                 let mut labels: Vec<LabelId> = (0..random(4)).map(|l| LabelId(9 - l)).collect();
                 let row = BulkRow::Vertex(BulkVertex {

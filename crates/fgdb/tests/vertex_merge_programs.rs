@@ -148,7 +148,10 @@ fn public_script_updates_every_original_target_and_keeps_ordered_bulk_receipts()
         for (vertex, p) in IDS.into_iter().zip([23, 25, 27]) {
             assert_eq!(
                 db.vertex(vertex).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(8))]
+                vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(8).into())
+                ]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -200,7 +203,10 @@ fn late_statement_failure_rolls_back_the_program_but_not_an_earlier_transaction_
             for (vertex, p) in IDS.into_iter().zip([1, 2, 3]) {
                 assert_eq!(
                     txn.vertex(&db, vertex).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(7))]
+                    vec![
+                        (P, CanonicalScalar::Int(p).into()),
+                        (Q, CanonicalScalar::Int(7).into())
+                    ]
                 );
             }
             assert!(txn.vertex(&db, PREFIX).unwrap().is_some());
@@ -278,11 +284,17 @@ fn create_match_sequences_keep_singleton_receipts_and_statement_allocator_coordi
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(5)), (Q, CanonicalScalar::Int(70))]
+            vec![
+                (P, CanonicalScalar::Int(5).into()),
+                (Q, CanonicalScalar::Int(70).into())
+            ]
         );
         assert_eq!(
             db.vertex(last).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(71))]
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(71).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

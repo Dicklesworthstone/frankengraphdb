@@ -157,8 +157,8 @@ fn authorized_program_expressions_have_identical_work_floors_and_preserve_privat
                                 successful_stats = Some(stats);
                             }
                             let row = db.vertex(VId(1)).unwrap().unwrap();
-                            assert_eq!(row.props[0], (P, CanonicalScalar::Int(7)));
-                            assert_eq!(row.props[1], (Q, CanonicalScalar::Int(10)));
+                            assert_eq!(row.props[0], (P, CanonicalScalar::Int(7).into()));
+                            assert_eq!(row.props[1], (Q, CanonicalScalar::Int(10).into()));
                             assert_eq!(&row.props[2..], &before.1[0].props[1..]);
                             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
                         }
@@ -319,14 +319,14 @@ fn parallel_edge_actions_and_final_return_share_scope_stable_field_accounting() 
                                     ]
                                 );
                                 let after = db.edge(EId(id)).unwrap().unwrap();
-                                assert_eq!(after.props[0], (P, CanonicalScalar::Int(p)));
-                                assert_eq!(after.props[1], (Q, CanonicalScalar::Int(p + 2)));
+                                assert_eq!(after.props[0], (P, CanonicalScalar::Int(p).into()));
+                                assert_eq!(after.props[1], (Q, CanonicalScalar::Int(p + 2).into()));
                                 assert_eq!(after.props.len(), if hidden { 66 } else { 2 });
                                 for (key, value) in &after.props[2..] {
                                     assert!((10..74).contains(&key.0));
                                     assert_eq!(
                                         *value,
-                                        CanonicalScalar::bytes(vec![0x39; 65]).unwrap()
+                                        CanonicalScalar::bytes(vec![0x39; 65]).unwrap().into()
                                     );
                                 }
                             }

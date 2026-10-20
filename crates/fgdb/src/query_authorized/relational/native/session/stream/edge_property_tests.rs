@@ -3,12 +3,12 @@ use super::super::failure_tests::{BRANCH, grant, issuer, policy};
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::LabelId;
-use fgdb_types::PurposeContexts;
+use fgdb_types::{CanonicalPropertyValue, PurposeContexts};
 use fgdb_warden::{LimitDimension, Scope};
 use std::cell::Cell;
 
 struct Raw {
-    fields: Vec<(PropertyKeyId, CanonicalScalar)>,
+    fields: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     relation: RelationId,
     hidden_target: bool,
     self_loop: bool,
@@ -17,7 +17,10 @@ struct Raw {
 impl Raw {
     fn new(fields: Vec<(PropertyKeyId, CanonicalScalar)>) -> Self {
         Self {
-            fields,
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| (key, value.into()))
+                .collect(),
             relation: RelationId(1),
             hidden_target: false,
             self_loop: false,
@@ -70,7 +73,7 @@ impl VertexScanSource for Raw {
 }
 #[derive(Debug, PartialEq)]
 struct Observation {
-    result: Result<Option<Option<CanonicalScalar>>, AuthorizationError>,
+    result: Result<Option<Option<CanonicalPropertyValue>>, AuthorizationError>,
     native_work: u64,
     signed_work: u64,
     nodes: u64,
@@ -211,7 +214,7 @@ fn relation_and_both_endpoints_are_admitted_before_charging_or_lending_a_field()
         let mut raw = Raw::new(fields.clone());
         raw.self_loop = true;
         let value = observe(cx, raw, EId(7), PropertyKeyId(17), u64::MAX);
-        assert_eq!(value.result, Ok(Some(Some(CanonicalScalar::Int(7)))));
+        assert_eq!(value.result, Ok(Some(Some(CanonicalScalar::Int(7).into()))));
         assert_eq!(value.nodes, 1, "a self-loop has one unique endpoint");
         assert_eq!(
             observe(cx, Raw::new(fields), EId(7), PropertyKeyId(7), u64::MAX).result,

@@ -96,7 +96,7 @@ fn unit_creates_exactly_one_structure_without_observing_any_graph_source() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![LabelId(2)],
-                properties: vec![(P, CanonicalScalar::Int(7))]
+                properties: vec![(P, CanonicalScalar::Int(7).into())]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(101),

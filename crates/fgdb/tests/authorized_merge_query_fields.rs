@@ -281,8 +281,8 @@ fn vertex_scalar_actions_and_return_have_scope_stable_admission_boundaries() {
                             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
                             for original in &before.1 {
                                 let current = db.vertex(original.vid).unwrap().unwrap();
-                                assert_eq!(current.props[0], (P, CanonicalScalar::Int(7)));
-                                assert_eq!(current.props[1], (Q, CanonicalScalar::Int(9)));
+                                assert_eq!(current.props[0], (P, CanonicalScalar::Int(7).into()));
+                                assert_eq!(current.props[1], (Q, CanonicalScalar::Int(9).into()));
                                 assert_eq!(&current.props[2..], &original.props[1..]);
                             }
                         }
@@ -428,7 +428,7 @@ fn vertex_query_late_refusals_rollback_and_limit_zero_does_not_skip_actions() {
             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
             for original in &before.1 {
                 let current = db.vertex(original.vid).unwrap().unwrap();
-                assert_eq!(current.props[1], (Q, CanonicalScalar::Int(9)));
+                assert_eq!(current.props[1], (Q, CanonicalScalar::Int(9).into()));
                 assert_eq!(&current.props[2..], &original.props[1..]);
             }
             // The creation branch reads its own new property through the same

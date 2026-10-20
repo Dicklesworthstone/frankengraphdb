@@ -9,13 +9,14 @@ use fgdb_gql::{
     PreparedGraphMutationText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
-type Logical = Vec<(VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Logical = Vec<(VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -57,7 +58,7 @@ fn logical(rows: &[VertexRow]) -> Logical {
         .map(|row| (row.vid, row.props.clone()))
         .collect()
 }
-fn value(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+fn value(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
     row.props
         .iter()
         .find(|(property, _)| *property == key)
@@ -97,11 +98,11 @@ fn frozen_arithmetic_and_walk_counters_publish_once_and_preserve_pinned_history(
         let rows = txn.vertices(&db).unwrap();
         assert_eq!(
             value(rows.iter().find(|row| row.vid == VId(1)).unwrap(), P),
-            Some(&CanonicalScalar::Int(21))
+            Some(&CanonicalScalar::Int(21).into())
         );
         assert_eq!(
             value(rows.iter().find(|row| row.vid == VId(2)).unwrap(), P),
-            Some(&CanonicalScalar::Int(13))
+            Some(&CanonicalScalar::Int(13).into())
         );
         txn.execute_graph_mutation_governed(
             &mut db,
@@ -118,8 +119,8 @@ fn frozen_arithmetic_and_walk_counters_publish_once_and_preserve_pinned_history(
         let rows = txn.vertices(&db).unwrap();
         for (id, expected) in [(1, 23), (2, 15), (3, 2), (4, 2)] {
             let row = rows.iter().find(|row| row.vid == VId(id)).unwrap();
-            assert_eq!(value(row, P), Some(&CanonicalScalar::Int(expected)));
-            assert_eq!(value(row, Q), Some(&CanonicalScalar::Int(2)));
+            assert_eq!(value(row, P), Some(&CanonicalScalar::Int(expected).into()));
+            assert_eq!(value(row, Q), Some(&CanonicalScalar::Int(2).into()));
         }
         let expected = logical(&rows);
         assert_eq!(db.frontier().unwrap(), basis);

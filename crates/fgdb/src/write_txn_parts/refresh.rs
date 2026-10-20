@@ -134,10 +134,8 @@ impl WriteTxn {
         // Repeated savepoints of the same prefix must continue sharing one value.
         // All copies and allocations precede the final cancellation boundary.
         let (prepared, saved_prepared) = {
-            let mut refreshed: Vec<(
-                std::sync::Arc<PreparedWrite>,
-                std::sync::Arc<PreparedWrite>,
-            )> = Vec::with_capacity(self.savepoints.len() + 1);
+            let mut refreshed: Vec<(std::sync::Arc<PreparedWrite>, std::sync::Arc<PreparedWrite>)> =
+                Vec::with_capacity(self.savepoints.len() + 1);
             let mut at_frontier = |original: &std::sync::Arc<PreparedWrite>| {
                 if let Some((_, next)) = refreshed
                     .iter()
@@ -148,7 +146,10 @@ impl WriteTxn {
                 let mut next = original.as_ref().clone();
                 next.basis = frontier;
                 let next = std::sync::Arc::new(next);
-                refreshed.push((std::sync::Arc::clone(original), std::sync::Arc::clone(&next)));
+                refreshed.push((
+                    std::sync::Arc::clone(original),
+                    std::sync::Arc::clone(&next),
+                ));
                 next
             };
             checkpoint()?;
@@ -224,7 +225,7 @@ mod snapshot_refresh_tests {
             let original = txn.basis();
             assert_eq!(
                 txn.vertex(&database, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             database.write(&cx, set_vertex(6, 60)).await.unwrap();
             let frontier = database.frontier().unwrap();
@@ -243,11 +244,11 @@ mod snapshot_refresh_tests {
             assert_eq!(txcx.outstanding_obligations(), 1);
             assert_eq!(
                 immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert_eq!(
                 txn.vertex(&database, VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60)
+                CanonicalScalar::Int(60).into()
             );
             txn.write(&mut database, set_vertex(1, 11)).unwrap();
             assert_eq!(
@@ -257,11 +258,11 @@ mod snapshot_refresh_tests {
             let recovered = database.recover_authoritatively(&cx).await.unwrap();
             assert_eq!(
                 recovered.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(11)
+                CanonicalScalar::Int(11).into()
             );
             assert_eq!(
                 recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60)
+                CanonicalScalar::Int(60).into()
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -327,7 +328,7 @@ mod snapshot_refresh_tests {
             assert_eq!(txn.basis(), frontier);
             assert_eq!(
                 txn.vertex(&database, VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             let mut suffix = WriteBatch::new(RelationId(4));
             suffix.add_edge(EId(22), VId(20), VId(3), vec![]);
@@ -343,11 +344,11 @@ mod snapshot_refresh_tests {
             );
             assert_eq!(
                 database.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert_eq!(
                 database.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(60)
+                CanonicalScalar::Int(60).into()
             );
             assert_eq!(database.frontier().unwrap(), CommitSeq(frontier.0 + 1));
         });
@@ -466,7 +467,7 @@ mod snapshot_refresh_tests {
             ));
             assert_eq!(
                 database.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -698,19 +699,19 @@ mod snapshot_refresh_tests {
                     assert_eq!(database.state(), state);
                     assert_eq!(
                         immutable.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(10)
+                        CanonicalScalar::Int(10).into()
                     );
                     txn.abort();
                     let recovered = database.recover_authoritatively(&cx).await.unwrap();
                     assert_eq!(
                         recovered.vertex(VId(3)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(10),
+                        CanonicalScalar::Int(10).into(),
                         "refresh must not publish staged writes"
                     );
                     if failure.is_some() {
                         assert_eq!(
                             recovered.vertex(VId(6)).unwrap().unwrap().props[0].1,
-                            CanonicalScalar::Int(60)
+                            CanonicalScalar::Int(60).into()
                         );
                     }
                     assert_eq!(txcx.outstanding_obligations(), 0);

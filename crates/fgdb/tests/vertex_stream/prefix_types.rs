@@ -83,7 +83,7 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
                 .filter(|row| {
                     row.props.iter().any(|(key, value)| {
                         *key == KEY
-                            && matches!(value, CanonicalScalar::Text(value)
+                            && matches!(value.as_scalar(), Some(CanonicalScalar::Text(value))
                         if value.as_str().starts_with(spelling))
                     })
                 })

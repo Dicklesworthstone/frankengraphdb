@@ -93,7 +93,7 @@ fn oracle(db: &Database<MemVfs>, cut: CommitSeq, direction: GlaDirection) -> Vec
             row.props
                 .into_iter()
                 .find(|(key, _)| *key == P)
-                .map(|(_, v)| v)
+                .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
                 .unwrap_or(CanonicalScalar::Null),
         )
     };
@@ -107,7 +107,7 @@ fn oracle(db: &Database<MemVfs>, cut: CommitSeq, direction: GlaDirection) -> Vec
             edge.props
                 .into_iter()
                 .find(|(key, _)| *key == P)
-                .map(|(_, v)| v)
+                .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
                 .unwrap_or(CanonicalScalar::Null),
         );
         let ends = match direction {

@@ -20,7 +20,7 @@ const HIDDEN: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
 
 struct Source {
-    rows: Vec<Vec<(PropertyKeyId, CanonicalScalar)>>,
+    rows: Vec<Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)>>,
     position: usize,
     fault: Option<usize>,
     drops: Arc<AtomicUsize>,
@@ -33,9 +33,9 @@ impl Source {
                 .map(|value| {
                     let mut row = Vec::new();
                     if let Some(value) = value {
-                        row.push((P, CanonicalScalar::Int(*value)));
+                        row.push((P, CanonicalScalar::Int(*value).into()));
                     }
-                    row.push((HIDDEN, CanonicalScalar::Bool(true)));
+                    row.push((HIDDEN, CanonicalScalar::Bool(true).into()));
                     row
                 })
                 .collect(),
@@ -407,7 +407,7 @@ fn late_projection_source_and_domain_errors_fuse_before_any_final_result() {
         });
         let query = prepare_query(edge, "RETURN SUM(p) AS total LIMIT 0");
         let mut source = Source::new(&[Some(1), Some(2)]);
-        source.rows[1][0].1 = CanonicalScalar::Bool(true);
+        source.rows[1][0].1 = CanonicalScalar::Bool(true).into();
         with_input!(&query, source, wide(), || Ok::<_, usize>(()), |cursor| {
             assert!(cursor.next_input().unwrap().is_some());
             assert!(matches!(

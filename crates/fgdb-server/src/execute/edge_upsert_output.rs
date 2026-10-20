@@ -252,8 +252,11 @@ mod tests {
                 assert_eq!(
                     guard.edge(edge).unwrap().unwrap().props,
                     vec![
-                        (P, CanonicalScalar::Int(expected)),
-                        (SECRET, CanonicalScalar::ucs_basic_text("private").unwrap()),
+                        (P, CanonicalScalar::Int(expected).into()),
+                        (
+                            SECRET,
+                            CanonicalScalar::ucs_basic_text("private").unwrap().into(),
+                        ),
                     ]
                 );
             }
@@ -331,7 +334,7 @@ mod tests {
                         .unwrap()
                         .unwrap()
                         .props
-                        .contains(&(P, CanonicalScalar::Int(expected)))
+                        .contains(&(P, CanonicalScalar::Int(expected).into()))
                 );
             }
             drop(guard);

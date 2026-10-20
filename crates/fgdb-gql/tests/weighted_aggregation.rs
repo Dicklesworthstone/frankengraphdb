@@ -7,7 +7,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Edge = (VId, RelationId, VId);
@@ -291,7 +291,7 @@ fn group_accumulation_overflow_is_checked_after_exact_per_binding_weights() {
 fn property_sources_and_unused_node_scan_edges_keep_the_ordinary_contract() {
     let query = prepare("MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n");
     let edges = [(VId(0), RelationId(1), VId(1)); 2];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let mut calls = 0;
     let result = query.execute_governed(
         2,

@@ -167,8 +167,8 @@ fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates
             assert_eq!(
                 vertex.props,
                 [
-                    (ID, CanonicalScalar::Int(id as i64)),
-                    (P, CanonicalScalar::Int(10))
+                    (ID, CanonicalScalar::Int(id as i64).into()),
+                    (P, CanonicalScalar::Int(10).into())
                 ]
             );
         }
@@ -223,8 +223,8 @@ fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates
             assert_eq!(
                 db.vertex(VId(id)).unwrap().unwrap().props,
                 [
-                    (ID, CanonicalScalar::Int(key)),
-                    (P, CanonicalScalar::Int(value))
+                    (ID, CanonicalScalar::Int(key).into()),
+                    (P, CanonicalScalar::Int(value).into())
                 ]
             );
         }
@@ -370,9 +370,12 @@ fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_togeth
             assert_eq!(
                 db.vertex(VId(id)).unwrap().unwrap().props,
                 [
-                    (ID, CanonicalScalar::Int(key)),
-                    (P, CanonicalScalar::Int(p)),
-                    (NAME, CanonicalScalar::ucs_basic_text("changed").unwrap()),
+                    (ID, CanonicalScalar::Int(key).into()),
+                    (P, CanonicalScalar::Int(p).into()),
+                    (
+                        NAME,
+                        CanonicalScalar::ucs_basic_text("changed").unwrap().into()
+                    ),
                 ]
             );
         }
@@ -381,8 +384,8 @@ fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_togeth
             assert_eq!(
                 db.edge(EId(id)).unwrap().unwrap().props,
                 [
-                    (ID, CanonicalScalar::Int(key)),
-                    (P, CanonicalScalar::Int(p)),
+                    (ID, CanonicalScalar::Int(key).into()),
+                    (P, CanonicalScalar::Int(p).into()),
                 ]
             );
         }
@@ -436,11 +439,17 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
         assert_eq!(input.canonical_bytes(), frozen);
         assert_eq!(
             txn.vertex(&db, VId(u128::MAX)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(2))]
+            vec![
+                (ID, CanonicalScalar::Int(2).into()),
+                (P, CanonicalScalar::Int(2).into())
+            ]
         );
         assert_eq!(
             txn.vertex(&db, VId(u128::MAX - 1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(1))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(1).into())
+            ]
         );
 
         let matrix = args(vec![
@@ -487,9 +496,9 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
             assert_eq!(
                 txn.vertex(&db, VId(vertex)).unwrap().unwrap().props,
                 vec![
-                    (ID, CanonicalScalar::Int(id)),
-                    (P, CanonicalScalar::Int(3)),
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap())
+                    (ID, CanonicalScalar::Int(id).into()),
+                    (P, CanonicalScalar::Int(3).into()),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into())
                 ]
             );
         }
@@ -512,9 +521,9 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
             assert_eq!(
                 db.vertex(VId(vertex)).unwrap().unwrap().props,
                 vec![
-                    (ID, CanonicalScalar::Int(id)),
-                    (P, CanonicalScalar::Int(3)),
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap())
+                    (ID, CanonicalScalar::Int(id).into()),
+                    (P, CanonicalScalar::Int(3).into()),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into())
                 ]
             );
         }
@@ -569,11 +578,17 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
         assert_eq!(
             txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(77))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(77).into())
+            ]
         );
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(10).into())
+            ]
         );
         assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         txn.finish(&mut db, &commit).await.unwrap();
@@ -604,7 +619,10 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(77))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(77).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
         let valid = args(vec![int(4), int(5)]).with_int64("target", 1).unwrap();
@@ -633,7 +651,10 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         ));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(20))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(20).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -922,8 +943,14 @@ fn scalar_batches_share_creation_and_effect_budgets_and_keep_issued_identities_c
         assert_eq!(
             properties,
             vec![
-                vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(1))],
-                vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(1))],
+                vec![
+                    (ID, CanonicalScalar::Int(1).into()),
+                    (P, CanonicalScalar::Int(1).into())
+                ],
+                vec![
+                    (ID, CanonicalScalar::Int(2).into()),
+                    (P, CanonicalScalar::Int(1).into())
+                ],
             ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -989,7 +1016,10 @@ fn large_shared_prefix_survives_nested_unwind_failure_refresh_and_savepoint_roll
         assert_eq!(issued.load(Ordering::Relaxed), 1);
         assert_eq!(
             txn.vertex(&db, VId(9000)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(4)), (P, CanonicalScalar::Int(2))]
+            vec![
+                (ID, CanonicalScalar::Int(4).into()),
+                (P, CanonicalScalar::Int(2).into())
+            ]
         );
         let completed_digest = txn.staged_effect_digest().unwrap();
         let failure = txn
@@ -1019,11 +1049,14 @@ fn large_shared_prefix_survives_nested_unwind_failure_refresh_and_savepoint_roll
         assert!(txn.vertex(&db, VId(9000)).unwrap().is_none());
         assert_eq!(
             txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(10).into())
+            ]
         );
         assert_eq!(
             txn.vertex(&db, VId(1000)).unwrap().unwrap().props,
-            vec![(NAME, payload)]
+            vec![(NAME, payload.into())]
         );
         assert_eq!(
             txn.finish(&mut db, &commit).await.unwrap(),
@@ -1035,7 +1068,10 @@ fn large_shared_prefix_survives_nested_unwind_failure_refresh_and_savepoint_roll
         assert!(db.vertex(VId(9000)).unwrap().is_none());
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(21))]
+            vec![
+                (ID, CanonicalScalar::Int(2).into()),
+                (P, CanonicalScalar::Int(21).into())
+            ]
         );
         assert_eq!(db.delta_since(refreshed).unwrap().count(), 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -1125,7 +1161,10 @@ fn failed_unwind_and_savepoint_rollback_retain_noop_preparation_conflicts() {
                 assert_eq!(db.vertices().unwrap().len(), 130);
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+                    vec![
+                        (ID, CanonicalScalar::Int(1).into()),
+                        (P, CanonicalScalar::Int(10).into())
+                    ]
                 );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);

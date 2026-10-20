@@ -23,7 +23,8 @@ use fgdb_delta_types::{
 };
 use fgdb_types::{
     BranchId, CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime,
-    CanonicalScalar, CanonicalTimestamp, EId, GraphId, ObjectId, TzdbResolver, VId,
+    CanonicalPropertyValue, CanonicalScalar, CanonicalTimestamp, EId, GraphId, ObjectId,
+    TzdbResolver, VId,
 };
 
 fn oid(seed: u8) -> ObjectId {
@@ -48,8 +49,8 @@ fn every_family_populated() -> Vec<DeltaRow> {
             birth_ordinal: 3,
             labels: vec![LabelId(1), LabelId(9)],
             props: vec![
-                (PropertyKeyId(2), CanonicalScalar::Int(-5)),
-                (PropertyKeyId(4), CanonicalScalar::Bool(true)),
+                (PropertyKeyId(2), CanonicalScalar::Int(-5).into()),
+                (PropertyKeyId(4), CanonicalScalar::Bool(true).into()),
             ],
             valid_time: Some(period(100, Some(200))),
         },
@@ -60,7 +61,7 @@ fn every_family_populated() -> Vec<DeltaRow> {
             relation: RelationId(3),
             dst: VId(8),
             canonical_key: Some(CanonicalScalar::Int(42)),
-            props: vec![(PropertyKeyId(5), CanonicalScalar::Null)],
+            props: vec![(PropertyKeyId(5), CanonicalScalar::Null.into())],
             valid_time: Some(period(-9, None)),
         },
         DeltaRow::DeleteVertex {
@@ -81,8 +82,8 @@ fn every_family_populated() -> Vec<DeltaRow> {
         DeltaRow::Property {
             elem: ElementId::Vertex(VId(15)),
             property: PropertyKeyId(7),
-            before: Some(CanonicalScalar::Int(1)),
-            after: Some(CanonicalScalar::Int(2)),
+            before: Some(CanonicalScalar::Int(1).into()),
+            after: Some(CanonicalScalar::Int(2).into()),
         },
         DeltaRow::ValidTime {
             elem: ElementId::Edge(EId(16)),
@@ -163,8 +164,8 @@ fn embedded_collection_rows(first: u64, second: u64) -> [(&'static str, DeltaRow
                 birth_ordinal: 2,
                 labels: vec![],
                 props: vec![
-                    (PropertyKeyId(first), CanonicalScalar::Null),
-                    (PropertyKeyId(second), CanonicalScalar::Null),
+                    (PropertyKeyId(first), CanonicalScalar::Null.into()),
+                    (PropertyKeyId(second), CanonicalScalar::Null.into()),
                 ],
                 valid_time: None,
             },
@@ -179,8 +180,8 @@ fn embedded_collection_rows(first: u64, second: u64) -> [(&'static str, DeltaRow
                 dst: VId(2),
                 canonical_key: None,
                 props: vec![
-                    (PropertyKeyId(first), CanonicalScalar::Null),
-                    (PropertyKeyId(second), CanonicalScalar::Null),
+                    (PropertyKeyId(first), CanonicalScalar::Null.into()),
+                    (PropertyKeyId(second), CanonicalScalar::Null.into()),
                 ],
                 valid_time: None,
             },
@@ -285,7 +286,7 @@ fn zoned_timestamp_template_round_trips_through_resolver() {
         vid: VId(21),
         birth_ordinal: 5,
         labels: vec![LabelId(3)],
-        props: vec![(PropertyKeyId(6), zoned.clone())],
+        props: vec![(PropertyKeyId(6), zoned.clone().into())],
         valid_time: None,
     };
     let template =
@@ -298,7 +299,7 @@ fn zoned_timestamp_template_round_trips_through_resolver() {
     let DeltaRow::CreateVertex { props, .. } = &decoded.coordinate_entries()[0].rows[0] else {
         panic!("row shape changed");
     };
-    assert_eq!(props[0].1, zoned);
+    assert_eq!(props[0].1, CanonicalPropertyValue::Scalar(zoned));
 
     // Without a resolver the same bytes stay unreadable, typed.
     assert_eq!(
@@ -409,7 +410,7 @@ fn every_field_of_every_row_changes_the_encoding() {
         }),
         ("props.value", |r| {
             if let DeltaRow::CreateVertex { props, .. } = r {
-                props[0].1 = CanonicalScalar::Int(-6);
+                props[0].1 = CanonicalScalar::Int(-6).into();
             }
         }),
         ("valid_time", |r| {
@@ -464,7 +465,7 @@ fn field_variants_of_every_arm() -> Vec<DeltaRow> {
             relation: RelationId(3),
             dst: VId(99), // dst
             canonical_key: Some(CanonicalScalar::Int(42)),
-            props: vec![(PropertyKeyId(5), CanonicalScalar::Null)],
+            props: vec![(PropertyKeyId(5), CanonicalScalar::Null.into())],
             valid_time: Some(period(-9, None)),
         },
         DeltaRow::CreateEdge {
@@ -474,7 +475,7 @@ fn field_variants_of_every_arm() -> Vec<DeltaRow> {
             relation: RelationId(3),
             dst: VId(8),
             canonical_key: None, // canonical_key
-            props: vec![(PropertyKeyId(5), CanonicalScalar::Null)],
+            props: vec![(PropertyKeyId(5), CanonicalScalar::Null.into())],
             valid_time: Some(period(-9, None)),
         },
         DeltaRow::DeleteVertex {
@@ -495,8 +496,8 @@ fn field_variants_of_every_arm() -> Vec<DeltaRow> {
         DeltaRow::Property {
             elem: ElementId::Edge(EId(15)), // element KIND, same ordinal
             property: PropertyKeyId(7),
-            before: Some(CanonicalScalar::Int(1)),
-            after: Some(CanonicalScalar::Int(2)),
+            before: Some(CanonicalScalar::Int(1).into()),
+            after: Some(CanonicalScalar::Int(2).into()),
         },
         DeltaRow::ValidTime {
             elem: ElementId::Edge(EId(16)),
@@ -954,7 +955,7 @@ fn a_profile_2_value_in_any_position_and_only_one_makes_the_template_v2() {
             vid: VId(40),
             birth_ordinal: 1,
             labels: vec![],
-            props: vec![(PropertyKeyId(2), CanonicalScalar::Date(date))],
+            props: vec![(PropertyKeyId(2), CanonicalScalar::Date(date).into())],
             valid_time: None,
         },
         DeltaRow::CreateEdge {
@@ -973,14 +974,15 @@ fn a_profile_2_value_in_any_position_and_only_one_makes_the_template_v2() {
             elem: ElementId::Vertex(VId(42)),
             property: PropertyKeyId(2),
             before: None,
-            after: Some(CanonicalScalar::Duration(
-                CanonicalDuration::new(1, 2, 3).expect("a duration"),
-            )),
+            after: Some(
+                CanonicalScalar::Duration(CanonicalDuration::new(1, 2, 3).expect("a duration"))
+                    .into(),
+            ),
         },
         DeltaRow::Property {
             elem: ElementId::Vertex(VId(43)),
             property: PropertyKeyId(2),
-            before: Some(CanonicalScalar::LocalTime(time)),
+            before: Some(CanonicalScalar::LocalTime(time).into()),
             after: None,
         },
     ];

@@ -20,7 +20,7 @@ use fgdb_strata::decode_block;
 use fgdb_strata::root::RootError;
 use fgdb_strata::writer::{BlockWriter, WriteError};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 const GRAPH: GraphId = GraphId(1);
@@ -43,7 +43,7 @@ fn create_with_props(
     eid: u128,
     src: u128,
     dst: u128,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 ) -> DeltaRow {
     DeltaRow::CreateEdge {
         eid: EId(eid),
@@ -511,7 +511,7 @@ fn non_adjacency_rows_produce_no_entries() {
             elem: ElementId::Vertex(VId(1)),
             property: PropertyKeyId(100),
             before: None,
-            after: Some(CanonicalScalar::Int(1)),
+            after: Some(CanonicalScalar::Int(1).into()),
         },
     ] {
         w.apply(keys(), CommitSeq(1), &row).expect("folds");
@@ -756,7 +756,7 @@ fn create_vertex_row(vid: u128, ordinal: u64) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: ordinal,
         labels: vec![LabelId(3), LabelId(5)],
-        props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))],
+        props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815).into())],
         valid_time: None,
     }
 }
@@ -940,13 +940,13 @@ fn a_same_commit_edge_update_after_the_entry_ceiling_restates_the_live_row() {
             elem: ElementId::Edge(EId(1)),
             property: key,
             before: None,
-            after: Some(CanonicalScalar::Int(9)),
+            after: Some(CanonicalScalar::Int(9).into()),
         },
     )
     .expect("same-seq update of a sealed creation must restate, not refuse");
     assert_eq!(
         w.live_edge_row(EId(1)).expect("still live"),
-        vec![(key, CanonicalScalar::Int(9))]
+        vec![(key, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(9)))]
     );
     let (root, blocks, _) = w
         .publish(keys(), seq)
@@ -975,13 +975,13 @@ fn a_same_commit_vertex_update_after_the_patch_ceiling_restates_the_live_row() {
             elem: ElementId::Vertex(VId(1)),
             property: key,
             before: None,
-            after: Some(CanonicalScalar::Int(4)),
+            after: Some(CanonicalScalar::Int(4).into()),
         },
     )
     .expect("same-seq update of a sealed vertex creation must restate, not refuse");
     assert_eq!(
         w.live_vertex_row(VId(1)).expect("still live").props,
-        vec![(key, CanonicalScalar::Int(4))]
+        vec![(key, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(4)))]
     );
     let (root, _, patches) = w
         .publish(keys(), seq)
@@ -1080,7 +1080,12 @@ fn a_same_commit_propertied_family_past_the_patch_row_ceiling_publishes() {
         w.apply(
             keys(),
             seq,
-            &create_with_props(n as u128, 1, 2, vec![(key, CanonicalScalar::Int(n as i64))]),
+            &create_with_props(
+                n as u128,
+                1,
+                2,
+                vec![(key, CanonicalScalar::Int(n as i64).into())],
+            ),
         )
         .expect("creates up to and past the property-patch ceiling");
     }
@@ -1164,7 +1169,7 @@ fn a_same_commit_delete_after_explicit_seal_and_restatement_is_refused() {
             elem: ElementId::Edge(EId(10)),
             property: PropertyKeyId(7),
             before: None,
-            after: Some(CanonicalScalar::Int(9)),
+            after: Some(CanonicalScalar::Int(9).into()),
         },
     )
     .expect("restates the already-sealed same-seq creation");
@@ -1210,7 +1215,7 @@ fn a_same_commit_vertex_delete_after_explicit_seal_and_restatement_is_refused() 
             elem: ElementId::Vertex(VId(1)),
             property: PropertyKeyId(3),
             before: None,
-            after: Some(CanonicalScalar::Int(4)),
+            after: Some(CanonicalScalar::Int(4).into()),
         },
     )
     .expect("restates the already-sealed same-seq vertex");

@@ -41,7 +41,7 @@ use crate::{
     encode_block_with_properties, validate_entry,
 };
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::CanonicalPropertyValue;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,7 +115,7 @@ enum VertexContentUpdate {
     },
     Property {
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
 }
 
@@ -1288,7 +1288,7 @@ impl BlockWriter {
         eid: EId,
         seq: CommitSeq,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     ) -> Result<(), WriteError> {
         let current = self
             .live
@@ -1818,7 +1818,7 @@ mod tests {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(7),
                 before: None,
-                after: Some(CanonicalScalar::Int(4)),
+                after: Some(CanonicalScalar::Int(4).into()),
             },
         );
         assert_eq!(
@@ -2363,7 +2363,7 @@ mod tests {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(7),
                 before: None,
-                after: Some(CanonicalScalar::Int(4)),
+                after: Some(CanonicalScalar::Int(4).into()),
             }],
             vec![DeltaRow::DeleteVertex {
                 vid: VId(3),

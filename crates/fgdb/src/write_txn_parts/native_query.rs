@@ -444,7 +444,7 @@ mod engine_write_tests {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(copies[0]).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(8))]
+                vec![(P, CanonicalScalar::Int(8).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -627,7 +627,7 @@ mod engine_write_tests {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(ids[0]).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(9))]
+                vec![(P, CanonicalScalar::Int(9).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

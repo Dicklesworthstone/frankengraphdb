@@ -2,7 +2,9 @@ use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, VId,
+};
 
 fn okay<T>(result: Result<T, Failure>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
@@ -74,7 +76,7 @@ fn ordered_steps_see_the_overlay_and_publish_one_commit() {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].props,
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))]
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())]
         );
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
@@ -151,11 +153,11 @@ fn hybrid_reads_compose_with_staged_writes_and_commit_only_after_output_admissio
                 let vertices = db.vertices_at(CommitSeq(1)).unwrap();
                 assert_eq!(vertices.len(), 2);
                 let updated = CanonicalScalar::ucs_basic_text("graph memory updated").unwrap();
-                assert!(
-                    vertices
-                        .iter()
-                        .all(|vertex| vertex.props.contains(&(PropertyKeyId(2), updated.clone())))
-                );
+                assert!(vertices.iter().all(|vertex| {
+                    vertex
+                        .props
+                        .contains(&(PropertyKeyId(2), updated.clone().into()))
+                }));
             }
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
         }
@@ -268,7 +270,7 @@ fn filtered_hybrid_transaction_rows_follow_savepoints_and_atomic_delivery() {
             assert!(
                 selected
                     .props
-                    .contains(&(PropertyKeyId(1), CanonicalScalar::Int(expected)))
+                    .contains(&(PropertyKeyId(1), CanonicalScalar::Int(expected).into()))
             );
             assert_eq!(contexts.outstanding_obligations(), 0);
         }
@@ -432,7 +434,9 @@ fn each_step_binds_its_own_parameters_without_text_interpolation() {
         let rows = db.vertices_at(db.frontier().unwrap()).unwrap();
         assert_eq!(
             rows[0].props[0].1,
-            CanonicalScalar::ucs_basic_text("semi; 'quote'\nnext").unwrap()
+            CanonicalScalar::ucs_basic_text("semi; 'quote'\nnext")
+                .unwrap()
+                .into()
         );
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
@@ -580,7 +584,7 @@ fn committed_values(db: &Database<impl Vfs + Clone>) -> Vec<i64> {
         .unwrap()
         .into_iter()
         .map(|row| match &row.props[0].1 {
-            CanonicalScalar::Int(value) => *value,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => *value,
             other => panic!("unexpected property {other:?}"),
         })
         .collect();

@@ -5,13 +5,17 @@
 //! All results have canonical positive zero. No native floating arithmetic, libm, FMA,
 //! allocation, or ambient rounding mode is used by the kernel. Non-finite
 //! operands, overflow and division by zero are explicit refusals. This is not
-//! the complete STRICT_PORTABLE numeric profile or a transcendental library.
+//! the complete STRICT_PORTABLE numeric profile.
 //!
 //! [`ExactBinary64Sum`] is the aggregate counterpart: it accumulates binary64
 //! and integer inputs exactly and rounds once, so SUM and AVG are the
 //! correctly rounded exact sum and mean whatever order the inputs arrive in.
+//! The `transcendental` child builds pinned exp, ln, log10 and trigonometric
+//! kernels from these operations alone.
 
 use crate::CanonicalF64;
+
+mod transcendental;
 
 const SIGN: u64 = 1 << 63;
 const FRACTION: u64 = (1 << 52) - 1;

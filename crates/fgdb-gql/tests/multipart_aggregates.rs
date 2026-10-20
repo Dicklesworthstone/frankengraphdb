@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphPipelineAggregateTextErrorKind, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
     PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,7 +47,7 @@ fn run(
     policy: GqlQueryPolicy,
     checkpoint: &mut impl FnMut() -> Result<(), usize>,
 ) -> Result<GqlQueryExecution<GraphAggregateRow>, Fault> {
-    let values = SCORES.map(CanonicalScalar::Int);
+    let values = SCORES.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
     query.execute_governed(
         policy,

@@ -30,7 +30,11 @@ fn values(input: &[GraphValue]) -> PreparedGraphSet {
 }
 fn encode_rows(rows: impl IntoIterator<Item = Vec<GraphValue>>) -> Vec<Vec<u8>> {
     rows.into_iter()
-        .map(|row| GraphValueRow::from_owned_values(row).canonical_bytes().unwrap())
+        .map(|row| {
+            GraphValueRow::from_owned_values(row)
+                .canonical_bytes()
+                .unwrap()
+        })
         .collect()
 }
 fn encode_values(values: &[GraphValue]) -> Vec<Vec<u8>> {
@@ -87,7 +91,11 @@ fn relational_numeric_order_keeps_typed_ties_in_both_directions_and_null_placeme
             for nulls_first in [false, true] {
                 let mut expected = Vec::new();
                 for at in 0..groups.len() {
-                    let at = if descending { groups.len() - 1 - at } else { at };
+                    let at = if descending {
+                        groups.len() - 1 - at
+                    } else {
+                        at
+                    };
                     expected.extend(groups[at].iter().cloned());
                 }
                 if nulls_first {
@@ -97,7 +105,11 @@ fn relational_numeric_order_keeps_typed_ties_in_both_directions_and_null_placeme
                 }
                 let query = original
                     .clone()
-                    .with_order_by(&[GraphValueOrder { column: 0, descending, nulls_first }])
+                    .with_order_by(&[GraphValueOrder {
+                        column: 0,
+                        descending,
+                        nulls_first,
+                    }])
                     .unwrap();
                 let encoded = encode_values(&expected);
                 let actual = execute(&query, 2, &mut view, &cx, policy(100), 100, WORK)
@@ -112,7 +124,12 @@ fn relational_numeric_order_keeps_typed_ties_in_both_directions_and_null_placeme
                             .await
                             .unwrap()
                             .0,
-                        encoded.iter().skip(offset as usize).take(count as usize).cloned().collect::<Vec<_>>()
+                        encoded
+                            .iter()
+                            .skip(offset as usize)
+                            .take(count as usize)
+                            .cloned()
+                            .collect::<Vec<_>>()
                     );
                 }
                 assert_eq!(pool.used(), baseline);
@@ -131,26 +148,46 @@ fn relational_numeric_ties_obey_later_keys_and_child_pages_before_outer_reorderi
         let pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
         let input = [
-            [int(7), int(20)], [float(7.0), int(10)], [decimal(7), int(15)],
-            [int(6), int(99)], [float(7.0), int(20)], [int(7), int(20)],
+            [int(7), int(20)],
+            [float(7.0), int(10)],
+            [decimal(7), int(15)],
+            [int(6), int(99)],
+            [float(7.0), int(20)],
+            [int(7), int(20)],
         ];
         let expected = [
-            [int(6), int(99)], [float(7.0), int(10)], [decimal(7), int(15)],
-            [int(7), int(20)], [int(7), int(20)], [float(7.0), int(20)],
+            [int(6), int(99)],
+            [float(7.0), int(10)],
+            [decimal(7), int(15)],
+            [int(7), int(20)],
+            [int(7), int(20)],
+            [float(7.0), int(20)],
         ];
         let query = pair_input(&input)
             .with_order_by(&[GraphValueOrder::ascending(0), GraphValueOrder::ascending(1)])
             .unwrap();
         assert_eq!(
-            execute(&query, 2, &mut view, &cx, policy(6), 100, WORK).await.unwrap().0,
+            execute(&query, 2, &mut view, &cx, policy(6), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_rows(expected.iter().map(|row| row.to_vec()))
         );
-        let outer = query.with_page(1, Some(3)).nested().unwrap()
-            .with_order_by(&[GraphValueOrder::descending(1)]).unwrap();
+        let outer = query
+            .with_page(1, Some(3))
+            .nested()
+            .unwrap()
+            .with_order_by(&[GraphValueOrder::descending(1)])
+            .unwrap();
         assert_eq!(
-            execute(&outer, 2, &mut view, &cx, policy(3), 100, WORK).await.unwrap().0,
+            execute(&outer, 2, &mut view, &cx, policy(3), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_rows([
-                vec![int(7), int(20)], vec![decimal(7), int(15)], vec![float(7.0), int(10)],
+                vec![int(7), int(20)],
+                vec![decimal(7), int(15)],
+                vec![float(7.0), int(10)],
             ])
         );
     });
@@ -172,17 +209,28 @@ fn relational_distinct_keeps_numeric_representations_and_implicit_canonical_orde
             )
             .unwrap();
         assert_eq!(
-            execute(&distinct, 2, &mut view, &cx, policy(5), 100, WORK).await.unwrap().0,
+            execute(&distinct, 2, &mut view, &cx, policy(5), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_values(&[null(), int(7), int(9), float(1.0), float(7.0)])
         );
-        let ordered = distinct.with_order_by(&[GraphValueOrder::ascending(0)]).unwrap();
+        let ordered = distinct
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap();
         assert_eq!(
-            execute(&ordered, 2, &mut view, &cx, policy(5), 100, WORK).await.unwrap().0,
+            execute(&ordered, 2, &mut view, &cx, policy(5), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_values(&[float(1.0), int(7), float(7.0), int(9), null()])
         );
         let page = ordered.with_page(1, Some(2));
         assert_eq!(
-            execute(&page, 2, &mut view, &cx, policy(2), 100, WORK).await.unwrap().0,
+            execute(&page, 2, &mut view, &cx, policy(2), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_values(&[int(7), float(7.0)])
         );
     });
@@ -202,19 +250,30 @@ fn relational_composite_order_uses_map_size_and_one_identity_list_family() {
             GraphValue::map(vec![]).unwrap(),
             GraphValue::map(vec![("z".into(), int(1))]).unwrap(),
             GraphValue::map(vec![("a".into(), int(0)), ("b".into(), int(0))]).unwrap(),
-            GraphValue::Vertex(VId(2)), GraphValue::Edge(EId(3)),
+            GraphValue::Vertex(VId(2)),
+            GraphValue::Edge(EId(3)),
             list(vec![]),
             GraphValue::Vertices(vec![VId(1)].into_boxed_slice()),
             list(vec![GraphValue::Vertex(VId(1))]),
-            list(vec![text.clone()]), list(vec![int(1)]), list(vec![float(1.0)]),
+            list(vec![text.clone()]),
+            list(vec![int(1)]),
+            list(vec![float(1.0)]),
             list(vec![null()]),
             GraphValue::Path(fgdb_gql::algebra::GraphPath::new(VId(0), Box::new([]))),
-            text, GraphValue::Scalar(CanonicalScalar::Bool(true)), int(2), null(),
+            text,
+            GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            int(2),
+            null(),
         ];
         let input: Vec<_> = expected.iter().rev().cloned().collect();
-        let query = values(&input).with_order_by(&[GraphValueOrder::ascending(0)]).unwrap();
+        let query = values(&input)
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap();
         assert_eq!(
-            execute(&query, 2, &mut view, &cx, policy(100), 100, WORK).await.unwrap().0,
+            execute(&query, 2, &mut view, &cx, policy(100), 100, WORK)
+                .await
+                .unwrap()
+                .0,
             encode_values(&expected)
         );
     });
@@ -233,14 +292,24 @@ fn relational_order_replays_exact_budgets_and_refunds_refusals() {
         let query = values(&[int(8), float(0.5), int(1), float(1.0), decimal(1), null()])
             .with_order_by(&[GraphValueOrder::ascending(0)])
             .unwrap();
-        let measured = checked_execution(&query, &mut view, &cx, policy(100), WORK).await.unwrap();
-        assert_eq!(measured.0, encode_values(&[float(0.5), int(1), decimal(1), float(1.0), int(8), null()]));
+        let measured = checked_execution(&query, &mut view, &cx, policy(100), WORK)
+            .await
+            .unwrap();
+        assert_eq!(
+            measured.0,
+            encode_values(&[float(0.5), int(1), decimal(1), float(1.0), int(8), null()])
+        );
         let exact = GqlQueryPolicy::new(
-            measured.1.snapshot_records, measured.1.result_rows,
-            measured.2.work_units, measured.2.scratch_entries,
+            measured.1.snapshot_records,
+            measured.1.result_rows,
+            measured.2.work_units,
+            measured.2.scratch_entries,
         );
         assert_eq!(
-            checked_execution(&query, &mut view, &cx, exact, measured.3).await.unwrap().0,
+            checked_execution(&query, &mut view, &cx, exact, measured.3)
+                .await
+                .unwrap()
+                .0,
             measured.0
         );
         for dimension in 0..3 {
@@ -252,9 +321,12 @@ fn relational_order_replays_exact_budgets_and_refunds_refusals() {
                 _ => work -= 1,
             }
             let error = checked_execution(&query, &mut view, &cx, allowance, work)
-                .await.expect_err("an ordering refusal must not publish a page or retry typed order");
+                .await
+                .expect_err("an ordering refusal must not publish a page or retry typed order");
             if dimension == 2 {
-                assert!(matches!(error, NativeSpoolError::SortWorkLimit { limit, .. } if limit == work));
+                assert!(
+                    matches!(error, NativeSpoolError::SortWorkLimit { limit, .. } if limit == work)
+                );
             } else {
                 assert!(matches!(error, NativeSpoolError::BufferedExecute(error)
                     if matches!(*error, GqlQueryError::Evaluator(_))));
@@ -262,7 +334,10 @@ fn relational_order_replays_exact_budgets_and_refunds_refusals() {
             assert_eq!(pool.used(), baseline);
         }
         assert_eq!(
-            checked_execution(&query, &mut view, &cx, exact, measured.3).await.unwrap().0,
+            checked_execution(&query, &mut view, &cx, exact, measured.3)
+                .await
+                .unwrap()
+                .0,
             measured.0
         );
     });
@@ -271,25 +346,52 @@ fn relational_order_replays_exact_budgets_and_refunds_refusals() {
 
 #[test]
 fn relational_graph_history_orders_computed_mixed_numbers_at_the_requested_cut() {
-    let ((), report) = run_async_under_lab(0xc01d_3156, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query();
-        let vfs = fixture(&contexts.commit()).await;
-        let pool = MemoryPool::new(32_000_000, 0).unwrap();
-        let mut view = view(&contexts.commit(), &vfs, &pool).await;
-        let query = PreparedGraphSetText::prepare(
+    let ((), report) =
+        run_async_under_lab(0xc01d_3156, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let vfs = fixture(&contexts.commit()).await;
+            let pool = MemoryPool::new(32_000_000, 0).unwrap();
+            let mut view = view(&contexts.commit(), &vfs, &pool).await;
+            let query = PreparedGraphSetText::prepare(
             "MATCH (a)-[r:R]->(b) WITH r.p AS v UNWIND [v, v / 2.0] AS key RETURN key ORDER BY key",
             resolve,
         ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
-        for (cut, expected) in [
-            (1, vec![float(3.5), float(4.0), float(4.5), float(5.0), int(7), int(8), int(9), int(10)]),
-            (2, vec![float(4.0), float(4.5), float(5.0), int(8), float(8.5), int(9), int(10), int(17)]),
-        ] {
-            let measured = execute(&query, cut, &mut view, &cx, policy(8), 100, WORK).await.unwrap();
-            assert_eq!(measured.0, encode_values(&expected));
-            assert!(measured.1.snapshot_records > 0);
-        }
-    });
+            for (cut, expected) in [
+                (
+                    1,
+                    vec![
+                        float(3.5),
+                        float(4.0),
+                        float(4.5),
+                        float(5.0),
+                        int(7),
+                        int(8),
+                        int(9),
+                        int(10),
+                    ],
+                ),
+                (
+                    2,
+                    vec![
+                        float(4.0),
+                        float(4.5),
+                        float(5.0),
+                        int(8),
+                        float(8.5),
+                        int(9),
+                        int(10),
+                        int(17),
+                    ],
+                ),
+            ] {
+                let measured = execute(&query, cut, &mut view, &cx, policy(8), 100, WORK)
+                    .await
+                    .unwrap();
+                assert_eq!(measured.0, encode_values(&expected));
+                assert!(measured.1.snapshot_records > 0);
+            }
+        });
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
@@ -318,11 +420,21 @@ mod scan_tails {
             .await
             .unwrap();
         let data = [
-            (int(7), 20), (float(7.0), 10), (decimal(7), 15), (int(6), 99),
-            (float(7.0), 20), (int(7), 20), (float(-2.0), 40), (null(), 50),
-            (int(9_007_199_254_740_993), 90), (float(9_007_199_254_740_992.0), 80),
+            (int(7), 20),
+            (float(7.0), 10),
+            (decimal(7), 15),
+            (int(6), 99),
+            (float(7.0), 20),
+            (int(7), 20),
+            (float(-2.0), 40),
+            (null(), 50),
+            (int(9_007_199_254_740_993), 90),
+            (float(9_007_199_254_740_992.0), 80),
             (GraphValue::Scalar(CanonicalScalar::Bool(false)), 70),
-            (GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap()), 60),
+            (
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap()),
+                60,
+            ),
         ];
         let mut batch = WriteBatch::new(RelationId(1));
         for (at, (key, tie)) in data.iter().enumerate() {
@@ -337,7 +449,9 @@ mod scan_tails {
         }
         for (at, (key, tie)) in data.iter().enumerate() {
             batch.add_edge(
-                EId(at as u128 + 1), VId(1), VId(1),
+                EId(at as u128 + 1),
+                VId(1),
+                VId(1),
                 vec![
                     (PropertyKeyId(1), key.as_scalar().unwrap().clone()),
                     (PropertyKeyId(2), CanonicalScalar::Int(*tie)),
@@ -369,27 +483,55 @@ mod scan_tails {
     ) -> Result<ScanResult> {
         let params = GqlParameters::new();
         let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
-        assert!(matches!(
-            &prepared,
-            PreparedNativeRead::Pattern(_) | PreparedNativeRead::TemporalPattern(_)
-        ), "this regression must execute the direct scan tail");
+        assert!(
+            matches!(
+                &prepared,
+                PreparedNativeRead::Pattern(_) | PreparedNativeRead::TemporalPattern(_)
+            ),
+            "this regression must execute the direct scan tail"
+        );
         let pool = MemoryPool::new(2_000_000, 0).unwrap();
         let (mut scratch, _) = file(cx, &pool).await;
         let (mut destination, _) = file(cx, &pool).await;
         let (mut auxiliary, _) = file(cx, &pool).await;
         let result = if cold {
-            prepared.prepare_buffered_order(&params).unwrap()
+            prepared
+                .prepare_buffered_order(&params)
+                .unwrap()
                 .spool_in_view(
-                    buffered, cx, allowance, &mut scratch, &mut destination, &mut auxiliary,
-                    2, 64, 2, 128, 127, 8192, inputs, work,
+                    buffered,
+                    cx,
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    2,
+                    64,
+                    2,
+                    128,
+                    127,
+                    8192,
+                    inputs,
+                    work,
                 )
                 .await
         } else {
-            prepared.spool_ordered_in_view(
-                embedded, cx, &params, allowance, &mut scratch, &mut destination,
-                2, 128, 127, 8192, inputs, work,
-            )
-            .await
+            prepared
+                .spool_ordered_in_view(
+                    embedded,
+                    cx,
+                    &params,
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    2,
+                    128,
+                    127,
+                    8192,
+                    inputs,
+                    work,
+                )
+                .await
         };
         let result = match result {
             Ok((spool, work)) => Ok(ScanResult {
@@ -401,24 +543,34 @@ mod scan_tails {
             }),
             Err(error) => Err(error),
         };
-        assert_eq!(pool.used(), 0, "direct scan success/refusal must refund scratch ownership");
+        assert_eq!(
+            pool.used(),
+            0,
+            "direct scan success/refusal must refund scratch ownership"
+        );
         result
     }
 
-    const SOURCES: [(&str, &str); 2] = [
-        ("MATCH (n)", "n"),
-        ("MATCH (a)-[r:R]->(b)", "r"),
-    ];
+    const SOURCES: [(&str, &str); 2] = [("MATCH (n)", "n"), ("MATCH (a)-[r:R]->(b)", "r")];
 
     fn ordered_groups() -> Vec<Vec<Vec<GraphValue>>> {
         vec![
-            vec![vec![GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap()), int(60)]],
-            vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(false)), int(70)]],
+            vec![vec![
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap()),
+                int(60),
+            ]],
+            vec![vec![
+                GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                int(70),
+            ]],
             vec![vec![float(-2.0), int(40)]],
             vec![vec![int(6), int(99)]],
             vec![
-                vec![float(7.0), int(10)], vec![decimal(7), int(15)],
-                vec![int(7), int(20)], vec![int(7), int(20)], vec![float(7.0), int(20)],
+                vec![float(7.0), int(10)],
+                vec![decimal(7), int(15)],
+                vec![int(7), int(20)],
+                vec![int(7), int(20)],
+                vec![float(7.0), int(20)],
             ],
             vec![vec![float(9_007_199_254_740_992.0), int(80)]],
             vec![vec![int(9_007_199_254_740_993), int(90)]],
@@ -440,7 +592,9 @@ mod scan_tails {
                     for descending in [false, true] {
                         for nulls_first in [false, true] {
                             let mut groups = ordered_groups();
-                            if descending { groups.reverse(); }
+                            if descending {
+                                groups.reverse();
+                            }
                             let mut expected: Vec<_> = groups.into_iter().flatten().collect();
                             if nulls_first {
                                 expected.insert(0, vec![null(), int(50)]);
@@ -453,8 +607,17 @@ mod scan_tails {
                                 "{source} RETURN {variable}.p AS key,{variable}.q AS tie ORDER BY key {direction} NULLS {nulls},tie"
                             );
                             let result = run_scan(
-                                &text, &embedded, &mut buffered, &cx, cold, policy(12), 12, WORK,
-                            ).await.unwrap();
+                                &text,
+                                &embedded,
+                                &mut buffered,
+                                &cx,
+                                cold,
+                                policy(12),
+                                12,
+                                WORK,
+                            )
+                            .await
+                            .unwrap();
                             assert_eq!(result.rows, encode_rows(expected), "{text} cold={cold}");
                             assert_eq!(result.snapshot, CommitSeq(1));
                             assert_eq!(result.stats.result_rows, 12);
@@ -479,16 +642,23 @@ mod scan_tails {
             let mut buffered = view(&c.commit(), &vfs, &pool).await;
             for cold in [false, true] {
                 for (source, variable) in SOURCES {
-                    for (direction, ties) in [
-                        ("ASC", [70, 40, 99, 10]),
-                        ("DESC", [80, 10, 15, 20]),
-                    ] {
+                    for (direction, ties) in [("ASC", [70, 40, 99, 10]), ("DESC", [80, 10, 15, 20])]
+                    {
                         let text = format!(
                             "{source} RETURN {variable}.q AS tie ORDER BY {variable}.p {direction},tie SKIP 1 LIMIT 4"
                         );
                         let result = run_scan(
-                            &text, &embedded, &mut buffered, &cx, cold, policy(4), 12, WORK,
-                        ).await.unwrap();
+                            &text,
+                            &embedded,
+                            &mut buffered,
+                            &cx,
+                            cold,
+                            policy(4),
+                            12,
+                            WORK,
+                        )
+                        .await
+                        .unwrap();
                         assert_eq!(result.rows, encode_values(&ties.map(int)));
                         assert_eq!(result.stats.result_rows, 4);
                     }
@@ -510,13 +680,28 @@ mod scan_tails {
             let text_value = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap());
             let boolean = GraphValue::Scalar(CanonicalScalar::Bool(false));
             let canonical = vec![
-                null(), boolean.clone(), int(6), int(7), int(9_007_199_254_740_993),
-                decimal(7), float(-2.0), float(7.0), float(9_007_199_254_740_992.0),
+                null(),
+                boolean.clone(),
+                int(6),
+                int(7),
+                int(9_007_199_254_740_993),
+                decimal(7),
+                float(-2.0),
+                float(7.0),
+                float(9_007_199_254_740_992.0),
                 text_value.clone(),
             ];
             let language = vec![
-                null(), text_value, boolean, float(-2.0), int(6), int(7), decimal(7),
-                float(7.0), float(9_007_199_254_740_992.0), int(9_007_199_254_740_993),
+                null(),
+                text_value,
+                boolean,
+                float(-2.0),
+                int(6),
+                int(7),
+                decimal(7),
+                float(7.0),
+                float(9_007_199_254_740_992.0),
+                int(9_007_199_254_740_993),
             ];
             for cold in [false, true] {
                 for (source, variable) in SOURCES {
@@ -526,8 +711,17 @@ mod scan_tails {
                     ] {
                         let text = format!("{source} RETURN DISTINCT {variable}.p AS key{tail}");
                         let result = run_scan(
-                            &text, &embedded, &mut buffered, &cx, cold, policy(10), 12, WORK,
-                        ).await.unwrap();
+                            &text,
+                            &embedded,
+                            &mut buffered,
+                            &cx,
+                            cold,
+                            policy(10),
+                            12,
+                            WORK,
+                        )
+                        .await
+                        .unwrap();
                         assert_eq!(result.rows, encode_values(expected));
                         assert_eq!(result.stats.result_rows, 10);
                     }
@@ -556,17 +750,34 @@ mod scan_tails {
             for (source, variable) in SOURCES {
                 let tail = format!("RETURN {variable}.q AS tie ORDER BY {variable}.p,tie");
                 let held = run_scan(
-                    &format!("{source} {tail}"), &pinned, &mut buffered, &cx,
-                    false, policy(12), 12, WORK,
-                ).await.unwrap();
+                    &format!("{source} {tail}"),
+                    &pinned,
+                    &mut buffered,
+                    &cx,
+                    false,
+                    policy(12),
+                    12,
+                    WORK,
+                )
+                .await
+                .unwrap();
                 assert_eq!(held.snapshot, CommitSeq(1));
                 assert_eq!(held.rows, encode_values(&old.map(int)));
                 for cold in [false, true] {
                     for (cut, expected) in [(1, old), (2, new)] {
                         let text = format!("{source} FOR SYSTEM_TIME AS OF SEQ {cut} {tail}");
                         let result = run_scan(
-                            &text, &latest, &mut buffered, &cx, cold, policy(12), 12, WORK,
-                        ).await.unwrap();
+                            &text,
+                            &latest,
+                            &mut buffered,
+                            &cx,
+                            cold,
+                            policy(12),
+                            12,
+                            WORK,
+                        )
+                        .await
+                        .unwrap();
                         assert_eq!(result.snapshot, CommitSeq(cut));
                         assert_eq!(result.rows, encode_values(&expected.map(int)));
                     }
@@ -589,16 +800,39 @@ mod scan_tails {
             for cold in [false, true] {
                 let text = "MATCH (n) RETURN n.q AS tie ORDER BY n.p,tie SKIP 1 LIMIT 4";
                 let measured = run_scan(
-                    text, &embedded, &mut buffered, &cx, cold, policy(4), 12, WORK,
-                ).await.unwrap();
-                assert_eq!(measured.rows, encode_values(&[int(70), int(40), int(99), int(10)]));
+                    text,
+                    &embedded,
+                    &mut buffered,
+                    &cx,
+                    cold,
+                    policy(4),
+                    12,
+                    WORK,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    measured.rows,
+                    encode_values(&[int(70), int(40), int(99), int(10)])
+                );
                 let exact = GqlQueryPolicy::new(
-                    measured.stats.snapshot_records, measured.stats.result_rows,
-                    measured.evaluator.work_units, measured.evaluator.scratch_entries,
+                    measured.stats.snapshot_records,
+                    measured.stats.result_rows,
+                    measured.evaluator.work_units,
+                    measured.evaluator.scratch_entries,
                 );
                 let replay = run_scan(
-                    text, &embedded, &mut buffered, &cx, cold, exact, 12, measured.work,
-                ).await.unwrap();
+                    text,
+                    &embedded,
+                    &mut buffered,
+                    &cx,
+                    cold,
+                    exact,
+                    12,
+                    measured.work,
+                )
+                .await
+                .unwrap();
                 assert_eq!(replay.rows, measured.rows);
                 assert_eq!(replay.work, measured.work);
                 for dimension in 0..3 {
@@ -610,21 +844,55 @@ mod scan_tails {
                         _ => work -= 1,
                     }
                     let result = run_scan(
-                        text, &embedded, &mut buffered, &cx, cold, allowance, 12, work,
-                    ).await;
+                        text,
+                        &embedded,
+                        &mut buffered,
+                        &cx,
+                        cold,
+                        allowance,
+                        12,
+                        work,
+                    )
+                    .await;
                     assert!(result.is_err(), "refusal cannot retry canonical order");
                     if dimension == 2 {
-                        assert!(matches!(result, Err(NativeSpoolError::SortWorkLimit { limit, .. }) if limit == work));
+                        assert!(
+                            matches!(result, Err(NativeSpoolError::SortWorkLimit { limit, .. }) if limit == work)
+                        );
                     }
                     assert_eq!(pool.used(), baseline);
                 }
                 let empty = "MATCH (n) RETURN n.q AS tie ORDER BY n.p,tie LIMIT 0";
-                assert!(run_scan(
-                    empty, &embedded, &mut buffered, &cx, cold, policy(0), 11, WORK,
-                ).await.is_err());
-                assert!(run_scan(
-                    empty, &embedded, &mut buffered, &cx, cold, policy(0), 12, WORK,
-                ).await.unwrap().rows.is_empty());
+                assert!(
+                    run_scan(
+                        empty,
+                        &embedded,
+                        &mut buffered,
+                        &cx,
+                        cold,
+                        policy(0),
+                        11,
+                        WORK,
+                    )
+                    .await
+                    .is_err()
+                );
+                assert!(
+                    run_scan(
+                        empty,
+                        &embedded,
+                        &mut buffered,
+                        &cx,
+                        cold,
+                        policy(0),
+                        12,
+                        WORK,
+                    )
+                    .await
+                    .unwrap()
+                    .rows
+                    .is_empty()
+                );
                 assert_eq!(pool.used(), baseline);
             }
         });

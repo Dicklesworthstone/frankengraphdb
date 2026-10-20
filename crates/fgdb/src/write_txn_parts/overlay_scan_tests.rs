@@ -3,7 +3,9 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
@@ -152,7 +154,7 @@ fn canonical_sparse_rows_match_bulk_effects_and_conflict_witnesses() {
         assert!(db.edge(EId(4)).unwrap().is_none() && db.edge(EId(5)).unwrap().is_none());
         assert_eq!(
             db.edge(EId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(20))]
+            vec![(P, CanonicalScalar::Int(20).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -185,7 +187,7 @@ fn unchanged_payloads_are_borrowed_and_vertex_only_reads_do_not_build_edges() {
                     .unwrap();
                     if row.vid == VId(2) {
                         assert!(!std::ptr::eq(row, basis));
-                        assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11))]);
+                        assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11).into())]);
                     } else {
                         assert!(std::ptr::eq(row, basis), "unchanged payload was copied");
                         borrowed += 1;
@@ -503,7 +505,7 @@ fn sparse_success_and_refusal_preserve_earlier_negative_and_expansion_witnesses(
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10))]
+            vec![(P, CanonicalScalar::Int(10).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

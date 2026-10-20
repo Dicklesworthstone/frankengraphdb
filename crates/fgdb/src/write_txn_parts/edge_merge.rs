@@ -172,8 +172,10 @@ impl EdgeMergeOutput for fgdb_gql::GraphWriteStepReceipt {
 
 /// RETURN cells after relationship MERGE (fgdb-at06q): one row per selected
 /// row and edge its endpoint pair resolved to, in selection then identity
-/// order. `property` reads one final-state field of the edge or an endpoint;
-/// a scoped host masks a hidden key there, before any storage read.
+/// order. `property` reads one final-state stored field of the edge or an
+/// endpoint; a scoped host masks a hidden key there, before any storage
+/// read. A stored List or Map is the query value it holds (fgdb-k3nub); one
+/// beyond the query value bounds is a data exception, never truncated.
 fn edge_merge_query_rows<E, C>(
     query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
     selected: &[fgdb_gql::algebra::GraphValueRow],
@@ -182,11 +184,22 @@ fn edge_merge_query_rows<E, C>(
     mut property: impl FnMut(
         ElementId,
         fgdb_delta_types::PropertyKeyId,
-    ) -> Result<fgdb_gql::algebra::GraphValue, E>,
+    ) -> Result<Option<CanonicalPropertyValue>, E>,
 ) -> Result<Vec<Vec<fgdb_gql::algebra::GraphValue>>, fgdb_gql::GqlQueryError<E, C>> {
     use fgdb_gql::GqlQueryError;
     use fgdb_gql::GraphEdgeMergeBinding;
     use fgdb_gql::algebra::GraphValue;
+    let mut read = |element, key| -> Result<GraphValue, GqlQueryError<E, C>> {
+        match property(element, key).map_err(GqlQueryError::Source)? {
+            None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
+            Some(value) => GraphValue::from_property_value(&value).ok_or(GqlQueryError::Data(
+                fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                },
+            )),
+        }
+    };
     let (source_column, destination_column) = (
         query.merge().source_column(),
         query.merge().destination_column(),
@@ -215,12 +228,9 @@ fn edge_merge_query_rows<E, C>(
                     GraphEdgeMergeBinding::Endpoint { start } => {
                         GraphValue::Vertex(endpoint(start))
                     }
-                    GraphEdgeMergeBinding::Property(key) => {
-                        property(ElementId::Edge(edge), key).map_err(GqlQueryError::Source)?
-                    }
+                    GraphEdgeMergeBinding::Property(key) => read(ElementId::Edge(edge), key)?,
                     GraphEdgeMergeBinding::EndpointProperty { start, key } => {
-                        property(ElementId::Vertex(endpoint(start)), key)
-                            .map_err(GqlQueryError::Source)?
+                        read(ElementId::Vertex(endpoint(start)), key)?
                     }
                 });
             }
@@ -380,11 +390,13 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             for _ in merge.properties() {
                 event(Some(GlaExecutionEvent::Work))?;
             }
+            // MERGE map values are scalars, so a stored List or Map never
+            // equals one: it reads as no scalar and the edge does not match.
             let stored = |key| {
                 edge.props
                     .binary_search_by_key(&key, |(candidate, _)| *candidate)
                     .ok()
-                    .map(|at| &edge.props[at].1)
+                    .and_then(|at| edge.props[at].1.as_scalar())
             };
             if !merge.matches_properties(stored) {
                 continue;
@@ -610,15 +622,15 @@ impl WriteTxn {
         self.execute_graph_edge_merge_query_governed(database, cx, query, policy, allocate)
     }
 
-    /// One final-state property of a MERGE RETURN element, read through the
-    /// governed point projection and witnessed. A missing element or field
-    /// reads NULL.
+    /// One final-state stored property of a MERGE RETURN element, read
+    /// through the governed point projection and witnessed. A missing element
+    /// or field is None.
     fn merge_return_property<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         element: ElementId,
         key: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<fgdb_gql::algebra::GraphValue, WriteTxnError> {
+    ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
         let field = PointReadField::Property(key);
         let projected = self.point_projection_with_control(
             database,
@@ -627,9 +639,9 @@ impl WriteTxn {
             &mut |_| Ok::<(), WriteTxnError>(()),
             &|error| error,
         )?;
-        let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+        let value = projected.property.cloned();
         self.point_reads.borrow_mut().record(element, field);
-        Ok(fgdb_gql::algebra::GraphValue::Scalar(value))
+        Ok(value)
     }
 
     fn execute_graph_edge_merge_output_governed<Output: EdgeMergeOutput, V: Vfs + Clone, A>(
@@ -800,7 +812,7 @@ mod edge_merge_return_atomic_tests {
             assert!(db.edge(EId(101)).unwrap().is_none());
             assert_eq!(
                 db.edge(EId(102)).unwrap().unwrap().props,
-                vec![(property, CanonicalScalar::Int(7))]
+                vec![(property, CanonicalScalar::Int(7).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

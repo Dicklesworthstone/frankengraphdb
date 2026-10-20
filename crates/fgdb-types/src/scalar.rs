@@ -571,7 +571,7 @@ impl CanonicalScalar {
         Self::decode_inner_mode(bytes, resolver, false)
     }
 
-    fn decode_inner_mode(
+    pub(crate) fn decode_inner_mode(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
         allow_stored_zoned: bool,
@@ -962,19 +962,17 @@ fn decode_timestamp_scalar(
                 ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
             })?;
             match resolver {
-                Some(resolver) => {
-                    CanonicalTimestamp::zoned(instant, offset, &zone, tzdb_oid, resolver).map_err(
-                        |error| {
-                            ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
-                        },
-                    )?
-                }
+                Some(resolver) => CanonicalTimestamp::zoned(
+                    instant, offset, &zone, tzdb_oid, resolver,
+                )
+                .map_err(|error| {
+                    ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
+                })?,
                 None if allow_stored_zoned => {
-                    CanonicalTimestamp::from_stored_zoned(instant, offset, &zone, tzdb_oid).map_err(
-                        |error| {
+                    CanonicalTimestamp::from_stored_zoned(instant, offset, &zone, tzdb_oid)
+                        .map_err(|error| {
                             ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
-                        },
-                    )?
+                        })?
                 }
                 None => {
                     return Err(ScalarDecodeError::Timestamp(

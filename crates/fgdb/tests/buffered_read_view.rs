@@ -202,7 +202,7 @@ fn buffered_reads_match_resident_history_and_stay_on_their_root_through_eviction
                 .unwrap()
                 .unwrap()
                 .props,
-            [(PROPERTY, CanonicalScalar::Int(1))]
+            [(PROPERTY, CanonicalScalar::Int(1).into())]
         );
         assert_eq!(
             view.edge_at(&cx, EId(101), CommitSeq(1))
@@ -210,7 +210,7 @@ fn buffered_reads_match_resident_history_and_stay_on_their_root_through_eviction
                 .unwrap()
                 .unwrap()
                 .props,
-            [(PROPERTY, CanonicalScalar::Int(7))]
+            [(PROPERTY, CanonicalScalar::Int(7).into())]
         );
         assert!(view.vertex(&cx, VId(3)).await.unwrap().is_none());
         assert!(view.edge(&cx, EId(102)).await.unwrap().is_none());
@@ -235,11 +235,11 @@ fn buffered_reads_match_resident_history_and_stay_on_their_root_through_eviction
         writer.compact(&commit).await.unwrap();
         drop(writer);
         let answer = view.vertex(&cx, VId(1)).await.unwrap().unwrap();
-        assert_eq!(answer.props, [(PROPERTY, CanonicalScalar::Int(11))]);
+        assert_eq!(answer.props, [(PROPERTY, CanonicalScalar::Int(11).into())]);
         assert_eq!(view.frontier(), CommitSeq(3));
         drop(view);
         assert!(pool.used() > 0, "a retained answer keeps its own charge");
-        assert_eq!(answer.props, [(PROPERTY, CanonicalScalar::Int(11))]);
+        assert_eq!(answer.props, [(PROPERTY, CanonicalScalar::Int(11).into())]);
         drop(answer);
         assert_eq!(
             pool.used(),
@@ -407,7 +407,7 @@ fn a_lagging_checkpoint_requires_explicit_recovery_before_buffered_open() {
         .unwrap();
         assert_eq!(view.frontier(), CommitSeq(2));
         let vertex = view.vertex(&cx, VId(2)).await.unwrap().unwrap();
-        assert_eq!(vertex.props, [(PROPERTY, CanonicalScalar::Int(9))]);
+        assert_eq!(vertex.props, [(PROPERTY, CanonicalScalar::Int(9).into())]);
         drop(vertex);
         drop(view);
         assert_eq!(pool.used(), 0);

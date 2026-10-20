@@ -152,18 +152,21 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
         for (source, edge, destination, value) in created {
             assert_eq!(
                 db.vertex(source).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(value))]
+                vec![(P, CanonicalScalar::Int(value).into())]
             );
             assert_eq!(
                 db.vertex(destination).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(value * 2))]
+                vec![(P, CanonicalScalar::Int(value * 2).into())]
             );
             let created = db.edge(edge).unwrap().unwrap();
             assert_eq!(
                 (created.entry.src, created.entry.dst),
                 (source, destination)
             );
-            assert_eq!(created.props, vec![(P, CanonicalScalar::Int(value + 10))]);
+            assert_eq!(
+                created.props,
+                vec![(P, CanonicalScalar::Int(value + 10).into())]
+            );
         }
         db.compact(&commit).await.unwrap();
         drop(db);
@@ -179,7 +182,7 @@ fn returned_occurrence_bindings_commit_once_and_survive_compaction_and_reopen() 
             let destination = row.values()[2].as_vertex().unwrap();
             assert_eq!(
                 db.vertex(source).unwrap().unwrap().props[0].1,
-                row.values()[3].as_scalar().unwrap().clone()
+                row.values()[3].as_scalar().unwrap().clone().into()
             );
             assert_eq!(db.edge(edge).unwrap().unwrap().entry.dst, destination);
         }
@@ -385,7 +388,7 @@ fn return_expression_and_final_row_budget_failures_preserve_the_outer_prefix() {
             assert!(transaction.vertex(&db, VId(110)).unwrap().is_none());
             assert_eq!(
                 transaction.vertex(&db, VId(99)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(99))]
+                vec![(P, CanonicalScalar::Int(99).into())]
             );
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());

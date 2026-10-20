@@ -49,7 +49,8 @@ fn leaf(label: &str) -> PreparedGraphSet {
     .into()
 }
 fn query(kind: RowJoinKind, keyed: bool) -> PreparedGraphSet {
-    let types = [GraphSetColumnType::Scalar; 2];
+    // `n.k` and `n.p` are property columns, which are Stored (fgdb-kr8j1).
+    let types = [GraphSetColumnType::Stored; 2];
     let spec = if keyed {
         RowJoinSpec::new(&types, &types, &[(0, 0)])
     } else {

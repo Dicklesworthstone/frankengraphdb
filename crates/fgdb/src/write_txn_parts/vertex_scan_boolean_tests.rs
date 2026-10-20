@@ -505,7 +505,7 @@ fn a_later_label_never_hides_an_earlier_boolean_data_error() {
         let database = fixture(&cx).await;
         let query = boolean_plan("MATCH (n:L) WHERE 1 / n.p > 0 RETURN n");
         let mut row = database.vertex(VId(3)).unwrap().unwrap();
-        row.props = vec![(P, CanonicalScalar::Int(0))];
+        row.props = vec![(P, CanonicalScalar::Int(0).into())];
         let mut scan = VertexScanRead {
             selections: VertexScanRead::predicates(query.plan()).unwrap().to_vec(),
             complete: false,

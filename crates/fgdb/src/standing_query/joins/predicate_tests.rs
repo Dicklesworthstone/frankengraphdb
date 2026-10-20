@@ -62,7 +62,8 @@ fn vertex(batch: &mut WriteBatch, id: u128, label: u64, key: i64, payload: i64) 
     );
 }
 fn spec(keyed: bool, kind: RowJoinKind) -> RowJoinSpec {
-    let types = [GraphSetColumnType::Scalar; 2];
+    // `n.k` and `n.p` are property columns, which are Stored (fgdb-kr8j1).
+    let types = [GraphSetColumnType::Stored; 2];
     let spec = if keyed {
         RowJoinSpec::new(&types, &types, &[(0, 0)])
     } else {
@@ -348,7 +349,7 @@ fn complete_schema_and_owner_checks_precede_empty_results_and_never_append_faile
         let (left, right) = sources(&mut db, &cx);
         let before = db.standing_queries.len();
         for side in 0..2 {
-            let mut types = [[GraphSetColumnType::Scalar; 2]; 2];
+            let mut types = [[GraphSetColumnType::Stored; 2]; 2];
             types[side][1] = GraphSetColumnType::Any;
             let definition = RowJoinSpec::cross(&types[0], &types[1])
                 .unwrap()

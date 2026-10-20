@@ -65,7 +65,7 @@ fn scoped_element_property<Clock: FnMut() -> u64>(
     failure: &RefCell<Option<QueryError>>,
     element: ElementId,
     key: PropertyKeyId,
-) -> Result<Option<CanonicalScalar>, GqlError> {
+) -> Result<Option<fgdb_types::CanonicalPropertyValue>, GqlError> {
     // This source-error carrier is private to the governed call below. Its
     // checkpoint or final boundary restores the retained QueryError, including
     // cancellation, before work settlement or any result can escape.
@@ -79,7 +79,7 @@ fn scoped_element_property<Clock: FnMut() -> u64>(
     if failure.borrow().is_some() {
         return Err(interrupted_source());
     }
-    let result: Result<Option<CanonicalScalar>, QueryError> = (|| {
+    let result: Result<Option<fgdb_types::CanonicalPropertyValue>, QueryError> = (|| {
         if !scope.allows_property(key) {
             return Ok(None);
         }

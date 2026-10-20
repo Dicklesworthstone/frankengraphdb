@@ -8,7 +8,8 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(7);
@@ -82,12 +83,12 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
 fn plain(rows: &[GraphValueRow]) -> Vec<Vec<GraphValue>> {
     rows.iter().map(|row| row.values().to_vec()).collect()
 }
-fn property(props: &[(PropertyKeyId, CanonicalScalar)]) -> GraphValue {
+fn property(props: &[(PropertyKeyId, CanonicalPropertyValue)]) -> GraphValue {
     GraphValue::Scalar(
         props
             .iter()
             .find(|(key, _)| *key == P)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
             .unwrap_or(CanonicalScalar::Null),
     )
 }

@@ -6,7 +6,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -43,7 +43,7 @@ fn run(
     GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
-    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
     query.execute_governed(
         policy,
@@ -413,15 +413,14 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
             .map(|(value, vid)| scalar_vertex(value, vid))
             .to_vec()
     );
-    // Ordered theta comparison is now admitted (multipart_theta_reads); non-top-level
-    // OR / NOT equality or inside an OPTIONAL scope that hides imported columns still refuses.
-    assert!(
-        PreparedGraphSetText::prepare(
-            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q",
-            symbols,
-        )
-        .is_ok()
+    // A comparison that is not equality filters the same imported product:
+    // every vertex below the maximum 3.
+    assert_eq!(
+        execute("MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q ORDER BY q"),
+        [1, 2, 3].map(|id| vertices(&[id])).to_vec()
     );
+    // Not a top-level AND conjunct, or inside a scope that hides the
+    // imported columns: refused before any catalog call, as before.
     for text in [
         "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m OR q.p = 1 RETURN q",
         "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE NOT q.p = m RETURN q",
@@ -473,12 +472,16 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
     );
     // Relationship identity needs identified edges: multipart_optional_reads
     // a_top_level_where_identity_correlates_a_carried_relationship.
-    // `a <> b` is now admitted as a theta join (multipart_theta_reads); non-top-level
-    // OR / NOT equality still refuses before any catalog call.
-    assert!(
-        PreparedGraphSetText::prepare("MATCH (a) WITH a MATCH (b) WHERE a <> b RETURN b", symbols)
-            .is_ok()
+    // Inequality filters the carried product: each of the four vertices is
+    // every other carried vertex's b, three times.
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) WHERE a <> b RETURN b ORDER BY b"),
+        [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+            .map(|id| vertices(&[id]))
+            .to_vec()
     );
+    // Not a top-level AND conjunct: refused before any catalog call, as for
+    // the property form.
     for text in [
         "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
         "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",

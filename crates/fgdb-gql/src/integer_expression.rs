@@ -44,7 +44,8 @@ pub enum GraphIntegerBinary {
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
 /// selector once, and selects the first nonnull equality. Conditions use eager
 /// three-valued Boolean evaluation; unselected CASE arms are not executed.
-/// A one-operand numeric function with a binary64 result (openCypher).
+/// A one-operand numeric function (openCypher). Every result is binary64
+/// except sign's Int.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphNumericFunction {
     ToFloat,
@@ -53,6 +54,27 @@ pub enum GraphNumericFunction {
     /// Nearest integral value, exact half ties toward positive infinity.
     Round,
     Sqrt,
+    /// e^x, natural and base-10 logarithms, and the trigonometric functions
+    /// in radians: fgdb-types' pinned kernels, the same bits on every target.
+    Exp,
+    Log,
+    Log10,
+    Sin,
+    Cos,
+    Tan,
+    /// 1 / tan(x).
+    Cot,
+    Asin,
+    Acos,
+    Atan,
+    /// Radians to degrees and back, one multiplication by the binary64
+    /// nearest 180/pi or pi/180.
+    Degrees,
+    Radians,
+    /// (1 - cos(x)) / 2.
+    Haversin,
+    /// -1, 0 or 1 as an Int.
+    Sign,
 }
 
 impl GraphNumericFunction {
@@ -63,7 +85,53 @@ impl GraphNumericFunction {
             Self::Ceil => 2,
             Self::Round => 3,
             Self::Sqrt => 4,
+            Self::Exp => 5,
+            Self::Log => 6,
+            Self::Log10 => 7,
+            Self::Sin => 8,
+            Self::Cos => 9,
+            Self::Tan => 10,
+            Self::Cot => 11,
+            Self::Asin => 12,
+            Self::Acos => 13,
+            Self::Atan => 14,
+            Self::Degrees => 15,
+            Self::Radians => 16,
+            Self::Haversin => 17,
+            Self::Sign => 18,
         }
+    }
+
+    /// The function a name spells, case-insensitively. Out of line, with a
+    /// static table: the scalar parser's unary level repeats once per nested
+    /// parenthesis and must not widen.
+    #[inline(never)]
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        static NAMES: [(&str, GraphNumericFunction); 19] = [
+            ("TOFLOAT", GraphNumericFunction::ToFloat),
+            ("FLOOR", GraphNumericFunction::Floor),
+            ("CEIL", GraphNumericFunction::Ceil),
+            ("ROUND", GraphNumericFunction::Round),
+            ("SQRT", GraphNumericFunction::Sqrt),
+            ("EXP", GraphNumericFunction::Exp),
+            ("LOG", GraphNumericFunction::Log),
+            ("LOG10", GraphNumericFunction::Log10),
+            ("SIN", GraphNumericFunction::Sin),
+            ("COS", GraphNumericFunction::Cos),
+            ("TAN", GraphNumericFunction::Tan),
+            ("COT", GraphNumericFunction::Cot),
+            ("ASIN", GraphNumericFunction::Asin),
+            ("ACOS", GraphNumericFunction::Acos),
+            ("ATAN", GraphNumericFunction::Atan),
+            ("DEGREES", GraphNumericFunction::Degrees),
+            ("RADIANS", GraphNumericFunction::Radians),
+            ("HAVERSIN", GraphNumericFunction::Haversin),
+            ("SIGN", GraphNumericFunction::Sign),
+        ];
+        NAMES
+            .iter()
+            .find(|(spelling, _)| name.eq_ignore_ascii_case(spelling))
+            .map(|&(_, function)| function)
     }
 }
 
@@ -102,7 +170,10 @@ pub enum GraphIntegerOp {
     /// openCypher `base ^ exponent`: always a float, NULL when either operand
     /// is. The exponent must be integral; see `power` for exactness.
     Power,
-    /// openCypher toFloat, floor, ceil, round and sqrt over a number.
+    /// openCypher `atan2(y, x)`: the angle of the point (x, y), a float in
+    /// (-pi, pi]; NULL when either operand is. The pinned kernel's.
+    Atan2,
+    /// An openCypher one-operand numeric function over a number.
     Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
     /// compiled once, at preparation (fgdb regex profile 1).
@@ -209,6 +280,7 @@ impl GraphIntegerOp {
             Self::ToInteger => bytes.push(31),
             Self::ToBoolean => bytes.push(37),
             Self::Power => bytes.push(38),
+            Self::Atan2 => bytes.push(39),
             Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
@@ -263,6 +335,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::ToInteger => f.write_str("ToInteger"),
             Self::ToBoolean => f.write_str("ToBoolean"),
             Self::Power => f.write_str("Power"),
+            Self::Atan2 => f.write_str("Atan2"),
             Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
@@ -330,16 +403,46 @@ pub enum GraphIntegerErrorKind {
     TemporalConstruction,
     /// A field a temporal value does not have, such as `d.hour` of a date.
     TemporalField,
+    /// A stored List or Map property exceeds the query value bounds
+    /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`), so no complete
+    /// query value can hold it (fgdb-k3nub). It is never truncated.
+    StoredValueBounds,
+    /// A stored List or Map property reached an operator that reads only
+    /// scalars, such as a numeric aggregate or a path weight (fgdb-k3nub).
+    /// Refused, never read as NULL: NULL would silently change the answer.
+    StoredCollection,
 }
 impl GraphIntegerErrorKind {
-    /// An arithmetic data exception (GQL class 22: division by zero, numeric
-    /// overflow) that every statement family raises, a WHERE predicate
-    /// included. The other kinds are a value that does not fit its operator.
+    /// A data exception that every statement family raises, a WHERE predicate
+    /// included: division by zero, numeric overflow (GQL class 22), and a
+    /// stored value too large to read whole or read by a scalar-only
+    /// operator. The other kinds are a value that does not fit its operator.
     /// A Boolean predicate reads those as UNKNOWN, so a property holding
     /// mixed types never escapes as a query error.
     #[must_use]
     pub const fn is_arithmetic_exception(self) -> bool {
-        matches!(self, Self::DivisionByZero | Self::Overflow)
+        matches!(
+            self,
+            Self::DivisionByZero
+                | Self::Overflow
+                | Self::StoredValueBounds
+                | Self::StoredCollection
+        )
+    }
+}
+
+/// The scalar a scalar-only operator reads from a stored property value
+/// (fgdb-k3nub): absent stays absent, a scalar is itself, and a List or Map
+/// raises `StoredCollection` instead of reading as NULL.
+pub(crate) fn stored_scalar(
+    value: Option<&fgdb_types::CanonicalPropertyValue>,
+) -> Result<Option<&CanonicalScalar>, GraphIntegerError> {
+    match value {
+        None => Ok(None),
+        Some(value) => value.as_scalar().map(Some).ok_or(GraphIntegerError {
+            instruction: 0,
+            kind: GraphIntegerErrorKind::StoredCollection,
+        }),
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,6 +589,7 @@ enum Instruction {
     ToInteger,
     ToBoolean,
     Power,
+    Atan2,
     Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
@@ -894,6 +998,14 @@ impl GraphIntegerExpression {
                     let result = power(base, &exponent).map_err(failure)?;
                     *base = result.into();
                 }
+                Instruction::Atan2 => {
+                    let x = stack.pop().expect("validated atan2 x operand");
+                    let y = stack.last_mut().expect("validated atan2 y operand");
+                    control(GlaExecutionEvent::Work)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    let result = atan2(y, &x).map_err(failure)?;
+                    *y = result.into();
+                }
                 Instruction::Numeric(function) => {
                     let value = stack.last_mut().expect("validated numeric operand");
                     let result = numeric(value, *function, at, control)?;
@@ -1169,6 +1281,7 @@ impl GraphIntegerExpression {
                 Instruction::ToInteger => bytes.push(28),
                 Instruction::ToBoolean => bytes.push(37),
                 Instruction::Power => bytes.push(38),
+                Instruction::Atan2 => bytes.push(39),
                 Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
@@ -1332,6 +1445,57 @@ fn power(
         })?;
     }
     Ok(CanonicalScalar::Float(result))
+}
+
+/// A numeric cell as the nearest binary64: counts, integers and exact
+/// averages round once; a float is itself. None for NULL.
+fn binary64(
+    cell: &ExpressionCell<'_>,
+) -> Result<Option<fgdb_types::CanonicalF64>, GraphIntegerErrorKind> {
+    use fgdb_types::ExactBinary64Sum;
+    let integer = |value: i128| {
+        let mut exact = ExactBinary64Sum::new();
+        exact.add_integer(value);
+        exact.sum()
+    };
+    Ok(Some(match cell {
+        ExpressionCell::Count(value) => integer(i128::from(*value)),
+        ExpressionCell::Integer(value) => integer(*value),
+        ExpressionCell::Average(average) => {
+            let mut exact = ExactBinary64Sum::new();
+            exact.add_integer(average.numerator());
+            exact
+                .mean(average.denominator())
+                .ok_or(GraphIntegerErrorKind::IncompatibleOperands)?
+        }
+        ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
+            CanonicalScalar::Null => return Ok(None),
+            CanonicalScalar::Int(value) => integer(i128::from(*value)),
+            CanonicalScalar::Float(value) => *value,
+            _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
+        },
+    }))
+}
+
+/// A pinned kernel's refusal: a pole divides by zero, a finite argument whose
+/// result leaves binary64 overflows, as the arithmetic kernel reports them.
+fn kernel_error(error: fgdb_types::FloatArithmeticError) -> GraphIntegerErrorKind {
+    match error {
+        fgdb_types::FloatArithmeticError::DivisionByZero => GraphIntegerErrorKind::DivisionByZero,
+        fgdb_types::FloatArithmeticError::Overflow
+        | fgdb_types::FloatArithmeticError::NonFinite => GraphIntegerErrorKind::Overflow,
+    }
+}
+
+/// openCypher atan2(y, x) by the pinned kernel; NULL when either is NULL.
+fn atan2(
+    y: &ExpressionCell<'_>,
+    x: &ExpressionCell<'_>,
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    let (Some(y), Some(x)) = (binary64(y)?, binary64(x)?) else {
+        return Ok(CanonicalScalar::Null);
+    };
+    y.atan2(x).map(CanonicalScalar::Float).map_err(kernel_error)
 }
 
 /// openCypher toBoolean (TCK TypeConversion1): NULL stays NULL, a Boolean is
@@ -1507,11 +1671,14 @@ fn float_text(value: fgdb_types::CanonicalF64) -> String {
     }
 }
 
-/// toFloat, floor, ceil, round and sqrt. Integers (counts and exact averages
+/// The one-operand numeric functions. Integers (counts and exact averages
 /// too) become the nearest binary64 first; numeric text is toFloat's alone.
-/// Finite values use the integer-only binary64 kernel, rounding once; NaN
-/// and the infinities pass through as IEEE 754 defines (sqrt of a negative
-/// is NaN). NULL is NULL.
+/// Finite values use the integer-only binary64 kernel, rounding once, and
+/// exp, log, log10 and the trigonometric functions its pinned kernels. NaN
+/// and the infinities follow IEEE 754; an argument outside a function's real
+/// domain is NaN (sqrt or log of a negative, asin(2)); a pole (log 0, cot 0)
+/// is DivisionByZero and a finite overflow (exp 710) Overflow, as arithmetic
+/// reports them. NULL is NULL.
 fn numeric<E>(
     cell: &ExpressionCell<'_>,
     function: GraphNumericFunction,
@@ -1556,9 +1723,32 @@ fn numeric<E>(
     };
     control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
     let finite = value.get().is_finite();
+    let kernel = |result: Result<CanonicalF64, fgdb_types::FloatArithmeticError>| {
+        result.map_err(|error| failure(kernel_error(error)))
+    };
+    let one = CanonicalF64::from_i64_rounded(1);
     let result = match function {
+        GraphNumericFunction::Sign => {
+            // NaN has no sign and is 0, as Java's (long) Math.signum(NaN).
+            let value = value.get();
+            return Ok(CanonicalScalar::Int(if value > 0.0 {
+                1
+            } else if value < 0.0 {
+                -1
+            } else {
+                0
+            }));
+        }
         GraphNumericFunction::ToFloat => value,
-        _ if !finite && function != GraphNumericFunction::Sqrt => value,
+        GraphNumericFunction::Floor
+        | GraphNumericFunction::Ceil
+        | GraphNumericFunction::Round
+        | GraphNumericFunction::Degrees
+        | GraphNumericFunction::Radians
+            if !finite =>
+        {
+            value
+        }
         GraphNumericFunction::Floor => value.checked_floor().map_err(|_| incompatible())?,
         GraphNumericFunction::Ceil => value.checked_ceil().map_err(|_| incompatible())?,
         GraphNumericFunction::Round => value.checked_round().map_err(|_| incompatible())?,
@@ -1568,6 +1758,41 @@ fn numeric<E>(
             Err(_) if value.get() == f64::INFINITY => value,
             Err(_) => CanonicalF64::new(f64::NAN),
         },
+        GraphNumericFunction::Exp => kernel(value.exp())?,
+        GraphNumericFunction::Log => kernel(value.ln())?,
+        GraphNumericFunction::Log10 => kernel(value.log10())?,
+        GraphNumericFunction::Sin => kernel(value.sin())?,
+        GraphNumericFunction::Cos => kernel(value.cos())?,
+        GraphNumericFunction::Tan => kernel(value.tan())?,
+        GraphNumericFunction::Asin => kernel(value.asin())?,
+        GraphNumericFunction::Acos => kernel(value.acos())?,
+        GraphNumericFunction::Atan => kernel(value.atan())?,
+        GraphNumericFunction::Cot => {
+            // cot(0) is a pole, as 1 / 0 is; a NaN tangent stays NaN.
+            let tangent = kernel(value.tan())?;
+            if tangent.get().is_nan() {
+                tangent
+            } else {
+                kernel(one.checked_div(tangent))?
+            }
+        }
+        // Java's toDegrees and toRadians: one multiplication by the binary64
+        // nearest 180/pi (0x404CA5DC1A63C1F8) or pi/180 (0x3F91DF46A2529D39).
+        GraphNumericFunction::Degrees => {
+            kernel(value.checked_mul(CanonicalF64::new(f64::from_bits(0x404C_A5DC_1A63_C1F8))))?
+        }
+        GraphNumericFunction::Radians => {
+            kernel(value.checked_mul(CanonicalF64::new(f64::from_bits(0x3F91_DF46_A252_9D39))))?
+        }
+        GraphNumericFunction::Haversin => {
+            let cosine = kernel(value.cos())?;
+            if cosine.get().is_nan() {
+                cosine
+            } else {
+                let two = CanonicalF64::from_i64_rounded(2);
+                kernel(one.checked_sub(cosine).and_then(|gap| gap.checked_div(two)))?
+            }
+        }
     };
     Ok(CanonicalScalar::Float(result))
 }

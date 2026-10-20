@@ -4,7 +4,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphSymbol,
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 type Edge = (VId, RelationId, VId);
@@ -337,7 +337,7 @@ fn property_projection_keeps_each_fallible_occurrence_on_the_original_path() {
         (VId(1), RelationId(2), VId(2)),
         (VId(2), RelationId(3), VId(1)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut calls = 0;
     let result = query.execute_governed(
         4,

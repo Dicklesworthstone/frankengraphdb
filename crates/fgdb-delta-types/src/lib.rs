@@ -34,11 +34,14 @@ mod index;
 pub mod zset;
 mod zweight;
 
-use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId,
+    VId,
+};
 
 pub use canonical::{
-    CanonicalError, DELTA_FORMAT_V1, DELTA_FORMAT_V2, canonicalize, delta_format_for,
-    is_supported_delta_format,
+    CanonicalError, DELTA_FORMAT_V1, DELTA_FORMAT_V2, DELTA_FORMAT_V3, canonicalize,
+    delta_format_for, is_supported_delta_format,
 };
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use fold::fold_target_disjoint;
@@ -97,7 +100,8 @@ pub enum DeltaRow {
         vid: VId,
         birth_ordinal: u64,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Stored property values: scalars, Lists and Maps (fgdb-k3nub).
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         valid_time: Option<ValidTimePeriod>,
     },
     /// Create-family: an edge with endpoints, relation, optional canonical key.
@@ -108,7 +112,7 @@ pub enum DeltaRow {
         relation: RelationId,
         dst: VId,
         canonical_key: Option<CanonicalScalar>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         valid_time: Option<ValidTimePeriod>,
     },
     /// Delete-family: vertex retirement with its complete cascade
@@ -132,8 +136,8 @@ pub enum DeltaRow {
     Property {
         elem: ElementId,
         property: PropertyKeyId,
-        before: Option<CanonicalScalar>,
-        after: Option<CanonicalScalar>,
+        before: Option<CanonicalPropertyValue>,
+        after: Option<CanonicalPropertyValue>,
     },
     /// Valid-time-family: period transition under a named contract.
     ValidTime {
@@ -583,7 +587,7 @@ mod tests {
                 vid: VId(1),
                 birth_ordinal: 1,
                 labels: vec![LabelId(1)],
-                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1815))],
+                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1815).into())],
                 valid_time: None,
             },
             DeltaRow::CreateEdge {
@@ -620,7 +624,8 @@ mod tests {
                 before: None,
                 after: Some(
                     CanonicalScalar::ucs_basic_text("Ada")
-                        .expect("small UCS_BASIC fixture is canonical"),
+                        .expect("small UCS_BASIC fixture is canonical")
+                        .into(),
                 ),
             },
             DeltaRow::ValidTime {

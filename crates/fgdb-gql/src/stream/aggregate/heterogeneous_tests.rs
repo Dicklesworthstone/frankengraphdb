@@ -79,7 +79,7 @@ fn mixed_native_domain_triples_agree_with_frozen_language_order_in_both_directio
 }
 
 struct Source {
-    rows: Vec<(VId, Vec<(PropertyKeyId, CanonicalScalar)>)>,
+    rows: Vec<(VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>,
     at: usize,
 }
 impl Source {
@@ -95,7 +95,12 @@ impl Source {
                         u128::try_from(at).unwrap()
                     };
                     let properties = index
-                        .map(|index| vec![(INDEX, CanonicalScalar::Int(index))])
+                        .map(|index| {
+                            vec![(
+                                INDEX,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(index)),
+                            )]
+                        })
                         .unwrap_or_default();
                     (VId(id), properties)
                 })

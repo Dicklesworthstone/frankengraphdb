@@ -12,7 +12,8 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -84,7 +85,9 @@ fn oracle(
             .props
             .iter()
             .find_map(|(key, value)| match value {
-                CanonicalScalar::Int(value) if *key == RANK => Some(*value),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == RANK => {
+                    Some(*value)
+                }
                 _ => None,
             });
         rows.push((rank, source.vid, destination.vid));

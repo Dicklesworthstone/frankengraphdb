@@ -20,7 +20,37 @@ impl Drop for ProjectionReadAttempt<'_> {
     }
 }
 
+/// Admit a stored value before it is copied: a scalar's payload units, and for
+/// a List or Map one scratch entry per element plus every key's and nested
+/// value's payload (fgdb-k3nub).
 fn point_payload_admission<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    use crate::gql_exec::source::SourceEvent::ScratchEntry;
+    use fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => point_scalar_payload_admission(scalar, control),
+        CanonicalPropertyValue::List(list) => list.values().iter().try_for_each(|value| {
+            control(ScratchEntry)?;
+            point_payload_admission(value, &mut *control)
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+            control(ScratchEntry)?;
+            for _ in 0..entry
+                .key()
+                .as_str()
+                .len()
+                .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+            {
+                control(ScratchEntry)?;
+            }
+            point_payload_admission(entry.value(), &mut *control)
+        }),
+    }
+}
+
+fn point_scalar_payload_admission<E>(
     value: &CanonicalScalar,
     control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -77,7 +107,7 @@ impl WriteTxn {
         failure: &std::cell::RefCell<Option<Box<asupersync::error::Error>>>,
         element: ElementId,
         property: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalScalar>, WriteTxnError> {
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError> {
         if let Some(error) = failure.borrow().as_ref() {
             return Err(WriteTxnError::Interrupted(error.clone()));
         }
@@ -141,8 +171,10 @@ impl WriteTxn {
         vertex: VId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
-    {
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<Option<CanonicalPropertyValue>>,
+        TxnGqlError<WriteTxnError>,
+    > {
         cx.with_restriction(|| {
             self.point_governed_with_checkpoint(
                 database,
@@ -165,8 +197,10 @@ impl WriteTxn {
         edge: EId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
-    {
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<Option<CanonicalPropertyValue>>,
+        TxnGqlError<WriteTxnError>,
+    > {
         cx.with_restriction(|| {
             self.point_governed_with_checkpoint(
                 database,

@@ -498,7 +498,7 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     vertices.push(vertex);
                 }
                 let mut batch = WriteBatch::new(insertion.relation());
-                batch.create_vertex(vertex, labels, properties);
+                batch.create_vertex_values(vertex, labels, properties);
                 batch
             }
             GraphInsertIntent::Edge {
@@ -512,7 +512,7 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     edges.push(edge);
                 }
                 let mut batch = WriteBatch::new(relation);
-                batch.add_edge(edge, source, destination, properties);
+                batch.add_edge_values(edge, source, destination, properties);
                 batch
             }
         };
@@ -644,7 +644,7 @@ impl<V: Vfs + Clone> Database<V> {
                             unreachable!("validated vertex MERGE contains no edge creation")
                         };
                         let mut batch = WriteBatch::new(merge.relation());
-                        batch.create_vertex(vertex, labels, properties);
+                        batch.create_vertex_values(vertex, labels, properties);
                         for row in batch.rows {
                             stage(
                                 workspace.transaction(),

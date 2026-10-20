@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSetOperation as Op, GraphSetProjection, GraphSetQuantifier as Q, GraphSetValue,
     MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
@@ -50,13 +50,24 @@ fn run(
     checkpoint: impl FnMut() -> Result<(), usize>,
 ) -> ResultRows {
     let checkpoint = RefCell::new(checkpoint);
+    let stored = |values: &[CanonicalScalar]| -> Vec<CanonicalPropertyValue> {
+        values
+            .iter()
+            .map(|value| CanonicalPropertyValue::from(value.clone()))
+            .collect()
+    };
+    let (left, right) = (stored(left), stored(right));
     query.execute_governed(
         policy,
         |pattern, allowance| {
             let ValueProjection::Property { key, .. } = pattern.value_columns()[0] else {
                 panic!("scalar fixture")
             };
-            let values = if key == PropertyKeyId(1) { left } else { right };
+            let values = if key == PropertyKeyId(1) {
+                &left
+            } else {
+                &right
+            };
             pattern.plan().execute_governed_with_properties(
                 values.len() as u64,
                 (0..values.len()).map(|at| VId(at as u128)),
@@ -206,7 +217,7 @@ fn open_columns_compose_with_graph_scalars_without_changing_typed_bag_equality()
             }
         }
     }
-    assert_eq!(concrete.column_types(), &[GraphSetColumnType::Scalar]);
+    assert_eq!(concrete.column_types(), &[GraphSetColumnType::Stored]);
     assert_eq!(open.column_types(), &[GraphSetColumnType::Any]);
 }
 
@@ -680,6 +691,8 @@ fn tuple_identity_is_not_independent_column_membership() {
     };
     let left = [[Int(1), Int(2)], [Int(2), Int(1)], [Int(1), Int(2)]];
     let right = [[Int(1), Int(1)], [Int(2), Int(2)], [Int(1), Int(2)]];
+    let left = left.map(|row| row.map(CanonicalPropertyValue::from));
+    let right = right.map(|row| row.map(CanonicalPropertyValue::from));
     for (operation, expected) in [
         (Op::Intersect, vec![vec![Int(1), Int(2)]]),
         (Op::Except, vec![vec![Int(2), Int(1)]]),

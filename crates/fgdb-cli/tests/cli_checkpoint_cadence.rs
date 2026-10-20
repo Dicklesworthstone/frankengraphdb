@@ -11,7 +11,8 @@ use fgdb::{BulkLoadCheckpoint, Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_protocol::json::{Json, parse_json};
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,14 +25,14 @@ const CHUNKS: usize = 9;
 const K: PropertyKeyId = PropertyKeyId(1);
 const P: PropertyKeyId = PropertyKeyId(2);
 
-type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type Edges = BTreeMap<
     String,
     (
         String,
         String,
         RelationId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ),
 >;
 
@@ -150,8 +151,8 @@ fn expected() -> (Vertices, Edges) {
                 (
                     vec![LabelId(1)],
                     vec![
-                        (K, CanonicalScalar::Int(n)),
-                        (P, CanonicalScalar::Int(n * 7)),
+                        (K, CanonicalScalar::Int(n).into()),
+                        (P, CanonicalScalar::Int(n * 7).into()),
                     ],
                 ),
             )
@@ -166,8 +167,8 @@ fn expected() -> (Vertices, Edges) {
                     format!("v{}", (n * 2 + 1) % 3),
                     RelationId(if n % 2 == 0 { 1 } else { 2 }),
                     vec![
-                        (K, CanonicalScalar::Int(100 + n)),
-                        (P, CanonicalScalar::Int(-1 - n)),
+                        (K, CanonicalScalar::Int(100 + n).into()),
+                        (P, CanonicalScalar::Int(-1 - n).into()),
                     ],
                 ),
             )
@@ -300,8 +301,8 @@ impl Fixture {
             };
             // The fixture's independent K property identifies each source
             // row. Do not reuse production issue-order replay to recover IDs.
-            let ordinal = |props: &[(PropertyKeyId, CanonicalScalar)]| {
-                let (_, CanonicalScalar::Int(value)) =
+            let ordinal = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+                let (_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) =
                     props.iter().find(|(key, _)| *key == K).unwrap()
                 else {
                     panic!("fixture ordinal")
@@ -316,8 +317,8 @@ impl Fixture {
                         assert_eq!(
                             row.props,
                             [
-                                (K, CanonicalScalar::Int(999)),
-                                (P, CanonicalScalar::Int(777))
+                                (K, CanonicalScalar::Int(999).into()),
+                                (P, CanonicalScalar::Int(777).into())
                             ]
                         );
                         continue;
@@ -424,8 +425,8 @@ impl Fixture {
                     assert_eq!(
                         row.props,
                         [
-                            (K, CanonicalScalar::Int(999)),
-                            (P, CanonicalScalar::Int(777))
+                            (K, CanonicalScalar::Int(999).into()),
+                            (P, CanonicalScalar::Int(777).into())
                         ]
                     );
                     sentinel += 1;
@@ -669,8 +670,8 @@ fn wrong_matched_endpoint_in_recovered_history_cannot_replace_or_acknowledge_a_r
                         destination: wrong,
                         relation: RelationId(1),
                         props: vec![
-                            (K, CanonicalScalar::Int(100)),
-                            (P, CanonicalScalar::Int(-1)),
+                            (K, CanonicalScalar::Int(100).into()),
+                            (P, CanonicalScalar::Int(-1).into()),
                         ],
                     })],
                     fgdb::BulkLoadPolicy::new(CHUNK, RelationId(1)),

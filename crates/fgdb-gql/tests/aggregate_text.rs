@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphAggregateTextSlot, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -316,7 +316,7 @@ fn summaries_match_independent_oriented_edge_enumeration_and_paginate_groups() {
         (VId(2), RelationId(1), VId(1)),
         (VId(2), RelationId(1), VId(2)),
     ];
-    let high = CanonicalScalar::Int(i64::MAX);
+    let high = CanonicalPropertyValue::from(CanonicalScalar::Int(i64::MAX));
     for mask in 0..16 {
         let mut edges: Vec<_> = universe
             .iter()
@@ -545,7 +545,7 @@ fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() 
         (VId(1), RelationId(1), VId(2)),
         (VId(1), RelationId(1), VId(2)),
     ];
-    let amount = CanonicalScalar::Int(7);
+    let amount = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut events = 0;
     let full = t
         .execute_governed(
@@ -609,7 +609,7 @@ fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() 
         )),
         Err(GqlQueryError::Evaluator(_))
     ));
-    let noninteger = CanonicalScalar::Bool(true);
+    let noninteger = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     assert!(matches!(
         t.execute_governed(
             2,
@@ -726,11 +726,11 @@ fn implicit_computed_keys_do_not_duplicate_parameter_occurrences_or_resolve_on_b
 
 #[test]
 fn implicit_property_groups_merge_missing_and_null_and_preserve_native_sum_semantics() {
-    let properties = BTreeMap::from([
-        (VId(1), CanonicalScalar::Null),
-        (VId(3), CanonicalScalar::Int(7)),
-        (VId(4), CanonicalScalar::Int(7)),
-        (VId(5), CanonicalScalar::Int(9)),
+    let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+        (VId(1), CanonicalScalar::Null.into()),
+        (VId(3), CanonicalScalar::Int(7).into()),
+        (VId(4), CanonicalScalar::Int(7).into()),
+        (VId(5), CanonicalScalar::Int(9).into()),
     ]);
     let result = prepare(
         "MATCH (a) RETURN a.n AS key,COUNT(*) AS rows,COUNT(a.n) AS present, \
@@ -998,7 +998,12 @@ fn list_and_map_arguments_aggregate_as_whole_values() {
     // contributes [NULL, NULL] and {bucket: NULL}: a list or map holding NULL
     // is itself not NULL, so COUNT counts it, unlike COUNT(a.n).
     let properties: BTreeMap<_, _> = (1..=12)
-        .map(|n| (VId(n), CanonicalScalar::Int(n as i64)))
+        .map(|n| {
+            (
+                VId(n),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(n as i64)),
+            )
+        })
         .collect();
     let run = |text: &str, high: u128| {
         prepare(text).execute_governed(

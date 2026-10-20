@@ -297,11 +297,11 @@ pub fn shape_result(shape: &str, config: &str, metrics: &[(&str, u128)]) {
 }
 
 pub fn edge_weight(record: &fgdb::EdgeRecord) -> Result<i64, String> {
-    for (property, scalar) in &record.props {
+    for (property, value) in &record.props {
         if *property == WEIGHT {
-            return match scalar {
-                CanonicalScalar::Int(value) => Ok(*value),
-                other => Err(format!("edge weight is not an Int: {other:?}")),
+            return match value.as_scalar() {
+                Some(CanonicalScalar::Int(weight)) => Ok(*weight),
+                _ => Err(format!("edge weight is not an Int: {value:?}")),
             };
         }
     }
@@ -585,7 +585,7 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
         rows.push(BulkRow::Vertex(BulkVertex {
             key: key.clone(),
             labels: vec![LabelId(2)],
-            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64).into())],
         }));
     }
     for index in 0..EDGES {
@@ -594,7 +594,7 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
             source: vertex_keys[rng.below(VERTICES)].clone().into(),
             destination: vertex_keys[rng.below(VERTICES)].clone().into(),
             relation: if index % 2 == 0 { KNOWS } else { RelationId(2) },
-            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64).into())],
         }));
     }
     let dir = scratch("bulk-load");
@@ -1067,10 +1067,10 @@ async fn load_gql_fixture(
             key: k.to_string(),
             labels: vec![PERSON],
             props: vec![
-                (K_KEY, CanonicalScalar::Int(key)),
-                (NAME, CanonicalScalar::Int(name)),
-                (TEAM, CanonicalScalar::Int(team)),
-                (AGE, CanonicalScalar::Int(age)),
+                (K_KEY, CanonicalScalar::Int(key).into()),
+                (NAME, CanonicalScalar::Int(name).into()),
+                (TEAM, CanonicalScalar::Int(team).into()),
+                (AGE, CanonicalScalar::Int(age).into()),
             ],
         })
     });

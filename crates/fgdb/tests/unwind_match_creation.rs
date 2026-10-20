@@ -158,7 +158,13 @@ fn bulk_endpoint_factors_share_one_admission_below_the_cartesian_work_bound() {
                 (edge.entry.src, edge.entry.dst),
                 (vertex(source), vertex(destination)),
             );
-            assert_eq!(edge.props, vec![(Q, CanonicalScalar::Int(weight))]);
+            assert_eq!(
+                edge.props,
+                vec![(
+                    Q,
+                    fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(weight))
+                )]
+            );
         }
         assert!(db.edges().unwrap().is_empty());
         transaction
@@ -298,7 +304,10 @@ fn map_parameter_edge_import_is_one_atomic_statement_over_staged_wide_endpoints(
             .unwrap()
             .into_iter()
             .map(|edge| {
-                let [(key, CanonicalScalar::Int(weight))] = edge.props.as_slice() else {
+                let [
+                    (key, fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight))),
+                ] = edge.props.as_slice()
+                else {
                     panic!("one imported scalar weight")
                 };
                 assert_eq!(*key, Q);
@@ -386,12 +395,15 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
             let destination = engine_vertex(destination);
             let stored = db.edge(engine_edge(edge)).unwrap().unwrap();
             assert_eq!((stored.entry.src, stored.entry.dst), (source, destination));
-            assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(key + 10))]);
+            assert_eq!(
+                stored.props,
+                vec![(P, CanonicalScalar::Int(key + 10).into())]
+            );
             assert_eq!(
                 db.vertex(destination).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(key + 100)),
-                    (Q, CanonicalScalar::Int((key + 100) * 2)),
+                    (P, CanonicalScalar::Int(key + 100).into()),
+                    (Q, CanonicalScalar::Int((key + 100) * 2).into()),
                 ]
             );
         }

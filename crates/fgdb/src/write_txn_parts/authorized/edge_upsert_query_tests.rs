@@ -167,9 +167,9 @@ fn projected_branches_read_final_state_and_hidden_payloads_never_enter_return() 
                 }
                 matched_cost = Some(costs);
             }
-            let mut expected_props = vec![(P, CanonicalScalar::Int(expected))];
+            let mut expected_props = vec![(P, CanonicalScalar::Int(expected).into())];
             if let Some(secret) = secret {
-                expected_props.push((SECRET, secret));
+                expected_props.push((SECRET, secret.into()));
             }
             assert_eq!(
                 db.edge(outcome.edge().unwrap()).unwrap().unwrap().props,

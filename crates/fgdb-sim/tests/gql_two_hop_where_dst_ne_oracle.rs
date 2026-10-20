@@ -21,7 +21,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
@@ -39,7 +39,7 @@ fn reference_far_ends_with_k_not_one(graph: &ReferenceGraph) -> Vec<VId> {
             .filter(|(_, edge)| edge.relation == S && edge.src == first.dst)
         {
             let far_end_kept = graph.vertex(second.dst).is_some_and(
-                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))) if *v != 1),
             );
             if far_end_kept {
                 rows.push(second.dst);

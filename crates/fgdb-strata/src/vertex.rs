@@ -33,8 +33,8 @@ use std::sync::Arc;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
-    CanonicalScalar, CanonicalScalarResolver, CommitSeq, ScalarDecodeError, ScalarEncodeError,
-    ScalarProfileVersion, VId,
+    CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarResolver,
+    CommitSeq, ScalarDecodeError, ScalarEncodeError, ScalarProfileVersion, VId,
 };
 
 /// `FGSV` — FrankenGraph Strata Vertex patch.
@@ -57,18 +57,71 @@ pub const VERTEX_PATCH_FORMAT_V2: u16 = 2;
 /// value ([`vertex_patch_format_for`]), so every other patch keeps its V2
 /// bytes and identity, and an older reader refuses V3 by name.
 pub const VERTEX_PATCH_FORMAT_V3: u16 = 3;
+/// V3 plus List and Map property values (fgdb-k3nub), encoded as
+/// [`CanonicalPropertyValue`] bytes whose scalars keep their scalar bytes.
+/// Exact, as V3 is: a patch is V4 if and only if a row holds a collection, so
+/// every scalar-only patch keeps its V2 or V3 bytes and identity.
+pub const VERTEX_PATCH_FORMAT_V4: u16 = 4;
 
 /// The one format `rows` may be written in.
 pub fn vertex_patch_format_for(rows: &[VertexRow]) -> u16 {
-    let profile = ScalarProfileVersion::required_for_all(
+    let values = || {
         rows.iter()
-            .flat_map(|row| row.props.iter().map(|(_, value)| value)),
-    );
+            .flat_map(|row| row.props.iter().map(|(_, value)| value))
+    };
+    if values().any(CanonicalPropertyValue::is_collection) {
+        return VERTEX_PATCH_FORMAT_V4;
+    }
+    let profile = values()
+        .map(CanonicalPropertyValue::required_scalar_profile)
+        .max()
+        .unwrap_or(ScalarProfileVersion::V1);
     if profile > ScalarProfileVersion::V1 {
         VERTEX_PATCH_FORMAT_V3
     } else {
         VERTEX_PATCH_FORMAT_V2
     }
+}
+
+/// One property value's patch bytes. A scalar is its scalar encoding, with
+/// the scalar error; a collection is its [`CanonicalPropertyValue`] encoding.
+pub(crate) fn encode_property_value(
+    at: usize,
+    value: &CanonicalPropertyValue,
+) -> Result<Vec<u8>, VertexPatchError> {
+    match value.as_scalar() {
+        Some(scalar) => scalar
+            .encode()
+            .map_err(|error| VertexPatchError::ScalarEncode { at, error }),
+        None => value
+            .encode()
+            .map_err(|error| VertexPatchError::PropertyValue { at, error }),
+    }
+}
+
+/// Decode one property value: a List or Map tag through
+/// [`CanonicalPropertyValue::decode`], every other value exactly as the
+/// scalar decoder reads it.
+fn decode_property_value(
+    at: usize,
+    encoded: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<CanonicalPropertyValue, VertexPatchError> {
+    if CanonicalPropertyValue::is_collection_encoding(encoded) {
+        return match resolver {
+            Some(resolver) => CanonicalPropertyValue::decode_with_resolver(encoded, resolver),
+            None => CanonicalPropertyValue::decode_stored(encoded),
+        }
+        .map_err(|error| VertexPatchError::PropertyValue { at, error });
+    }
+    // This is the closed graph-value decoder; no JWT or signature state exists here.
+    // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
+    match resolver {
+        Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
+        None => CanonicalScalar::decode_stored(encoded),
+    }
+    .map(CanonicalPropertyValue::Scalar)
+    .map_err(|error| VertexPatchError::ScalarDecode { at, error })
 }
 
 /// Durable object kind for a Tier-D vertex row patch — part of the §5.1
@@ -108,8 +161,9 @@ pub struct VertexRow {
     pub retired_at: Option<CommitSeq>,
     /// Strictly ascending label memberships at creation.
     pub labels: Vec<LabelId>,
-    /// Strictly ascending by key; values are canonical scalars.
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    /// Strictly ascending by key; values are canonical scalars, Lists and
+    /// Maps (fgdb-k3nub).
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 impl VertexRow {
@@ -183,8 +237,8 @@ pub enum VertexPatchError {
     /// A format version this build does not implement.
     UnsupportedFormat { format: u16 },
     /// A supported format that is not the one the rows require
-    /// ([`vertex_patch_format_for`]): V2 over a profile-2 value, or V3 over
-    /// rows V2 encodes.
+    /// ([`vertex_patch_format_for`]): V2 over a profile-2 value, V3 over rows
+    /// V2 encodes, V2 or V3 over a collection, or V4 over scalar-only rows.
     FormatMismatch { format: u16, required: u16 },
     /// The bytes end before the declared rows do.
     Truncated { at: usize },
@@ -226,6 +280,11 @@ pub enum VertexPatchError {
     ScalarEncode { at: usize, error: ScalarEncodeError },
     /// A property value's bytes refused canonical decoding.
     ScalarDecode { at: usize, error: ScalarDecodeError },
+    /// A List or Map property value refused canonical encoding or decoding.
+    PropertyValue {
+        at: usize,
+        error: CanonicalPropertyValueError,
+    },
     /// The bytes are well-formed and WRONG — not the patch that was asked
     /// for. Kept distinct exactly as in `BlockError::IdentityMismatch`.
     IdentityMismatch {
@@ -305,6 +364,9 @@ impl core::fmt::Display for VertexPatchError {
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
             }
+            Self::PropertyValue { at, error } => {
+                write!(f, "row {at} collection property value: {error}")
+            }
             Self::IdentityMismatch { expected, actual } => {
                 write!(f, "bytes are {actual:?}, not the requested {expected:?}")
             }
@@ -335,7 +397,7 @@ pub(crate) fn validate_patch_row(at: usize, row: &VertexRow) -> Result<(), Verte
 fn validate_content(
     at: usize,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), VertexPatchError> {
     if labels.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(VertexPatchError::NonCanonicalLabels { at });
@@ -352,7 +414,7 @@ fn validate_content(
 /// This resource limit does not narrow the canonical scalar or patch format.
 pub fn admit_row_content(
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), VertexPatchError> {
     validate_content(0, labels, props)?;
     let mut content = Vec::new();
@@ -371,7 +433,7 @@ pub fn admit_row_content(
 fn encode_content(
     at: usize,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
     out: &mut Vec<u8>,
 ) -> Result<(), VertexPatchError> {
     let label_count =
@@ -383,11 +445,9 @@ fn encode_content(
     let prop_count = u32::try_from(props.len()).expect("prop count bounded by canonical admission");
     out.extend_from_slice(&prop_count.to_le_bytes());
     for (key, value) in props {
-        let encoded = value
-            .encode()
-            .map_err(|error| VertexPatchError::ScalarEncode { at, error })?;
+        let encoded = encode_property_value(at, value)?;
         out.extend_from_slice(&key.0.to_le_bytes());
-        let len = u32::try_from(encoded.len()).expect("scalar profile bounds its encoding");
+        let len = u32::try_from(encoded.len()).expect("value bounds limit its encoding");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(&encoded);
     }
@@ -560,7 +620,10 @@ pub(crate) fn decode_patch_inner(
         return Err(VertexPatchError::NotAVertexPatch);
     }
     let format = cursor.u16()?;
-    if !matches!(format, VERTEX_PATCH_FORMAT_V2 | VERTEX_PATCH_FORMAT_V3) {
+    if !matches!(
+        format,
+        VERTEX_PATCH_FORMAT_V2 | VERTEX_PATCH_FORMAT_V3 | VERTEX_PATCH_FORMAT_V4
+    ) {
         return Err(VertexPatchError::UnsupportedFormat { format });
     }
     let declared = cursor.u32()?;
@@ -585,14 +648,7 @@ pub(crate) fn decode_patch_inner(
             let key = PropertyKeyId(cursor.u64()?);
             let len = cursor.u32()? as usize;
             let encoded = cursor.take_slice(len)?;
-            // This is the closed graph-value decoder; no JWT or signature state exists here.
-            // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
-            let value = match resolver {
-                Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
-                None => CanonicalScalar::decode_stored(encoded),
-            }
-            .map_err(|error| VertexPatchError::ScalarDecode { at, error })?;
-            props.push((key, value));
+            props.push((key, decode_property_value(at, encoded, resolver)?));
         }
         let row = VertexRow {
             vid,
@@ -611,7 +667,7 @@ pub(crate) fn decode_patch_inner(
             extra: bytes.len() - cursor.at,
         });
     }
-    // The scalar decoder admits every tag this build knows under either
+    // The value decoder admits every tag this build knows under every
     // header, so the header is checked against what the rows hold.
     let required = vertex_patch_format_for(&rows);
     if format != required {
@@ -759,11 +815,13 @@ mod shared_rows_tests {
                 props: vec![
                     (
                         PropertyKeyId(3),
-                        CanonicalScalar::bytes(vec![0x5a; 1024]).unwrap(),
+                        CanonicalScalar::bytes(vec![0x5a; 1024]).unwrap().into(),
                     ),
                     (
                         PropertyKeyId(8),
-                        CanonicalScalar::ucs_basic_text("shared history").unwrap(),
+                        CanonicalScalar::ucs_basic_text("shared history")
+                            .unwrap()
+                            .into(),
                     ),
                 ],
             },
@@ -773,7 +831,7 @@ mod shared_rows_tests {
                 created_at: CommitSeq(5),
                 retired_at: None,
                 labels: vec![LabelId(9)],
-                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(42))],
+                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(42).into())],
             },
         ]
     }
@@ -824,7 +882,7 @@ mod shared_rows_tests {
         assert_ne!(owned[0].labels.as_ptr(), sibling[0].labels.as_ptr());
         assert_ne!(owned[0].props.as_ptr(), sibling[0].props.as_ptr());
         owned[0].labels.clear();
-        owned[0].props[0].1 = CanonicalScalar::Int(-1);
+        owned[0].props[0].1 = CanonicalScalar::Int(-1).into();
         assert_eq!(&*sibling, expected.as_slice());
     }
 }

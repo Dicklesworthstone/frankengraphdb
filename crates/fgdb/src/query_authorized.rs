@@ -65,7 +65,7 @@ type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;
 type Edge<'a> = (
     (EId, VId, RelationId, VId),
-    &'a [(PropertyKeyId, CanonicalScalar)],
+    &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
 );
 
 // The sole live permit spans source admission, evaluation and final delivery.
@@ -1055,7 +1055,7 @@ impl<'a> Tables<'a> {
         vid: VId,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&'a CanonicalScalar> {
+    ) -> Option<&'a fgdb_types::CanonicalPropertyValue> {
         Self::row_property(self.vertex(vid), key, scope)
     }
     /// `property` through `vertex_after`, for a vertex-only scan.
@@ -1066,7 +1066,7 @@ impl<'a> Tables<'a> {
         vid: VId,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&'a CanonicalScalar> {
+    ) -> Option<&'a fgdb_types::CanonicalPropertyValue> {
         Self::row_property(self.vertex_after(last, vid), key, scope)
     }
     fn row_matches(
@@ -1093,7 +1093,7 @@ impl<'a> Tables<'a> {
         row: Option<&'r VertexRow>,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&'r CanonicalScalar> {
+    ) -> Option<&'r fgdb_types::CanonicalPropertyValue> {
         if !scope.allows_property(key) {
             return None;
         }
@@ -1108,7 +1108,7 @@ impl<'a> Tables<'a> {
         eid: EId,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&CanonicalScalar> {
+    ) -> Option<&fgdb_types::CanonicalPropertyValue> {
         if !scope.allows_property(key) {
             return None;
         }

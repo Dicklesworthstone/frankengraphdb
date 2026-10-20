@@ -21,15 +21,15 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_reference::intents::{
     Intent, MismatchPolicy, Outcome, Statement, StatementFailure, evaluate,
 };
-use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, ObjectId, VId};
 
 const REL: RelationId = RelationId(1);
 const LABEL: LabelId = LabelId(10);
 const NAME: PropertyKeyId = PropertyKeyId(100);
 const RANK: PropertyKeyId = PropertyKeyId(101);
 
-fn text(v: &str) -> CanonicalScalar {
-    CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(v).expect("bounded"))
+fn text(v: &str) -> CanonicalPropertyValue {
+    CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(v).expect("bounded")).into()
 }
 
 fn vtx(vid: u128) -> ElementId {
@@ -77,7 +77,7 @@ fn set_rank(value: i64) -> Intent {
     Intent::SetProp {
         elem: vtx(1),
         name: RANK,
-        value: CanonicalScalar::Int(value),
+        value: CanonicalScalar::Int(value).into(),
     }
 }
 
@@ -313,7 +313,7 @@ fn a_statement_error_discards_only_its_own_statement() {
                 .filter_map(|row| match row {
                     DeltaRow::Property {
                         property,
-                        after: Some(CanonicalScalar::Int(v)),
+                        after: Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))),
                         ..
                     } if *property == RANK => Some(*v),
                     _ => None,
@@ -567,7 +567,12 @@ fn delete_before_version(row: &DeltaRow) -> Option<ObjectId> {
 }
 
 /// The `(before, after)` images of a `Property` row.
-fn property_images(row: &DeltaRow) -> Option<(&Option<CanonicalScalar>, &Option<CanonicalScalar>)> {
+fn property_images(
+    row: &DeltaRow,
+) -> Option<(
+    &Option<CanonicalPropertyValue>,
+    &Option<CanonicalPropertyValue>,
+)> {
     match row {
         DeltaRow::Property { before, after, .. } => Some((before, after)),
         _ => None,
@@ -1042,7 +1047,7 @@ fn identical_duplicate_properties_are_collapsed() {
 
 /// The property list of a create row, or `None` for any other row. An accessor so
 /// the law above asserts via `expect` rather than an `assert!(false, ..)` arm.
-fn create_props(row: &DeltaRow) -> Option<&Vec<(PropertyKeyId, CanonicalScalar)>> {
+fn create_props(row: &DeltaRow) -> Option<&Vec<(PropertyKeyId, CanonicalPropertyValue)>> {
     match row {
         DeltaRow::CreateVertex { props, .. } | DeltaRow::CreateEdge { props, .. } => Some(props),
         _ => None,
@@ -1067,8 +1072,8 @@ fn a_conflicting_duplicate_kills_only_its_own_statement() {
                 vid: VId(2),
                 labels: vec![LABEL],
                 props: vec![
-                    (RANK, CanonicalScalar::Int(1)),
-                    (RANK, CanonicalScalar::Int(2)),
+                    (RANK, CanonicalScalar::Int(1).into()),
+                    (RANK, CanonicalScalar::Int(2).into()),
                 ],
             }]),
             Statement::new(vec![Intent::CreateVertex {
@@ -1090,8 +1095,14 @@ fn a_conflicting_duplicate_kills_only_its_own_statement() {
 fn conflicting_duplicates_are_refused_on_edge_intents_too() {
     let basis = graph(vec![vertex(1, "ada"), vertex(2, "grace")]);
     let forward_props = vec![
-        (RANK, CanonicalScalar::Int(1)),
-        (RANK, CanonicalScalar::Int(2)),
+        (
+            RANK,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+        ),
+        (
+            RANK,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+        ),
     ];
     let reversed_props = forward_props.iter().cloned().rev().collect::<Vec<_>>();
     for (forward_intent, reversed_intent) in [

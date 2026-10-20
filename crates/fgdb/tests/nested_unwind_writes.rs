@@ -127,15 +127,20 @@ fn nested_bulk_upserts_and_match_updates_publish_once_and_survive_reopen() {
             found,
             vec![
                 vec![
-                    (ID, CanonicalScalar::Int(1)),
+                    (ID, CanonicalScalar::Int(1).into()),
                     (
                         NAME,
-                        CanonicalScalar::ucs_basic_text("updated\n'quote'; $aa").unwrap()
+                        CanonicalScalar::ucs_basic_text("updated\n'quote'; $aa")
+                            .unwrap()
+                            .into()
                     )
                 ],
                 vec![
-                    (ID, CanonicalScalar::Int(2)),
-                    (NAME, CanonicalScalar::ucs_basic_text("second").unwrap())
+                    (ID, CanonicalScalar::Int(2).into()),
+                    (
+                        NAME,
+                        CanonicalScalar::ucs_basic_text("second").unwrap().into()
+                    )
                 ],
             ]
         );

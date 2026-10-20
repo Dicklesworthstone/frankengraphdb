@@ -13,7 +13,7 @@ use std::sync::{
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Edge = (VId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Edge = (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 #[derive(Clone)]
 struct Source {
     edges: BTreeMap<EId, Edge>,
@@ -123,7 +123,7 @@ fn source(mask: usize) -> Source {
                         ids[a],
                         ids[b],
                         p.into_iter()
-                            .map(|p| (P, CanonicalScalar::Int(p)))
+                            .map(|p| (P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(p))))
                             .collect(),
                     ),
                 )
@@ -240,7 +240,9 @@ fn oracle(
 ) -> Vec<GraphAggregateRow> {
     let mut oriented = Vec::new();
     for (&id, (a, b, p)) in &s.edges {
-        let value = p.first().map(|(_, p)| GraphValue::Scalar(p.clone()));
+        let value = p
+            .first()
+            .map(|(_, p)| GraphValue::Scalar(p.as_scalar().unwrap().clone()));
         let (a, b) = if dir == 1 { (*b, *a) } else { (*a, *b) };
         oriented.push((id, a, b, value.clone()));
         if dir == 2 && a != b {
@@ -358,20 +360,29 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
     // A directed root's edge identity alone proves its order and uniqueness
     // (67506bf7), so a collection of the edge itself streams and equals the
     // batch answer.
-    let edges = prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(r) AS values");
-    let s = source(31);
-    let expected = batch(&edges, &s);
-    assert_eq!(
-        EdgeAggregateCursor::new(
-            s,
-            EdgeAggregatePlan::compile(&edges).unwrap(),
-            wide(),
-            || Ok::<_, ()>(())
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap(),
-        expected
-    );
+    // A single collected column with no earlier input column is also a
+    // proved canonical collection (24425ee7): sorting the retained endpoint
+    // values reproduces the batch child order, so it streams too.
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r) AS values",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values",
+    ] {
+        let edges = prepare(text);
+        let s = source(31);
+        let expected = batch(&edges, &s);
+        assert_eq!(
+            EdgeAggregateCursor::new(
+                s,
+                EdgeAggregatePlan::compile(&edges).unwrap(),
+                wide(),
+                || Ok::<_, ()>(())
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(a) AS starts,COLLECT(r) AS edges",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(b) AS ends,COLLECT(r.p) AS values",
@@ -442,7 +453,9 @@ fn property_collections(s: &Source, direction: usize, grouped: bool) -> Vec<Grap
                 Vec::new()
             };
             let values = groups.entry(key).or_default();
-            if let Some((_, CanonicalScalar::Int(value))) = properties.first() {
+            if let Some((_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))) =
+                properties.first()
+            {
                 values.push(*value);
             }
         }

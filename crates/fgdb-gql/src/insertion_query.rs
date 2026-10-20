@@ -204,13 +204,13 @@ impl PreparedGraphInsertQuery {
                     (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Vertex)
                 }
                 GraphInsertBinding::VertexProperty { vertex, .. } => {
-                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Scalar)
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Stored)
                 }
                 GraphInsertBinding::CreatedEdge(edge) => {
                     (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Edge)
                 }
                 GraphInsertBinding::EdgeProperty { edge, .. } => {
-                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Scalar)
+                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Stored)
                 }
                 GraphInsertBinding::VertexProperties(vertex) => {
                     (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Any)

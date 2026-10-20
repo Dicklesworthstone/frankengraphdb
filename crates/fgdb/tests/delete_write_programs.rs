@@ -101,7 +101,7 @@ fn delete_sees_earlier_creation_and_later_creation_sees_the_deletion() {
         assert!(db.vertex(VId(1)).unwrap().is_none());
         assert_eq!(
             db.vertex(VId(3)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2))]
+            vec![(P, CanonicalScalar::Int(2).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -150,7 +150,7 @@ fn attached_target_refuses_all_steps_preserves_outer_prefix_and_retains_witnesse
         assert_eq!(txn.staged_effect_digest().unwrap(), before);
         assert_eq!(
             txn.vertex(&db, VId(3)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(3))]
+            vec![(P, CanonicalScalar::Int(3).into())]
         );
         assert!(txn.edge(&db, EId(10)).unwrap().is_some());
         assert!(txn.vertex(&db, VId(99)).unwrap().is_some());
@@ -246,7 +246,7 @@ fn updates_and_deletes_share_the_effect_quota_and_late_refusal_rolls_back_update
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1))]
+            vec![(P, CanonicalScalar::Int(1).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

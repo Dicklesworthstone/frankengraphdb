@@ -147,7 +147,9 @@ fn scalar(value: &CanonicalScalar) -> Cell {
 fn property(graph: &ReferenceGraph, id: Option<VId>, key: PropertyKeyId) -> Cell {
     id.and_then(|id| graph.vertex(id))
         .and_then(|v| v.props.get(&key))
-        .map_or(Cell::Null, scalar)
+        .map_or(Cell::Null, |value| {
+            scalar(value.as_scalar().expect("generated values are scalars"))
+        })
 }
 fn optional_rows(graph: &ReferenceGraph, floor: Option<i128>) -> Vec<Scope> {
     let mut rows = Vec::new();
@@ -318,7 +320,7 @@ fn check_families(db: &Database<MemVfs>, cx: &QueryCx, graph: &ReferenceGraph, s
     assert!(!graph.vertex(VId(105)).unwrap().props.contains_key(&VALUE));
     assert_eq!(
         graph.vertex(VId(106)).unwrap().props.get(&VALUE),
-        Some(&CanonicalScalar::Null)
+        Some(&CanonicalScalar::Null.into())
     );
     for floor in [None, Some(0), Some(1000)] {
         let scopes = optional_rows(graph, floor);

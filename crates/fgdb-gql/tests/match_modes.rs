@@ -6,17 +6,17 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
     PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
 const VERTICES: [VId; 4] = [VId(1), VId(2), VId(3), VId(4)];
-const NUMBERS: [CanonicalScalar; 4] = [
-    CanonicalScalar::Int(1),
-    CanonicalScalar::Int(2),
-    CanonicalScalar::Int(3),
-    CanonicalScalar::Int(4),
+const NUMBERS: [CanonicalPropertyValue; 4] = [
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(3)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(4)),
 ];
 type Edge = (EId, VId, RelationId, VId);
 

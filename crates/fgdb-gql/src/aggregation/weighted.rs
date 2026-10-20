@@ -229,7 +229,7 @@ fn visit_vertex_scan<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -368,7 +368,7 @@ fn visit_single_scan<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -541,7 +541,7 @@ fn visit_positioned_single_scan<'a, E, C, T, A, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -1173,7 +1173,10 @@ fn visit_reach_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -1662,7 +1665,7 @@ fn visit_chain_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -2021,7 +2024,10 @@ pub(super) fn visit_bindings<'a, 'g, E, C, T, A, F, R, M, P>(
 where
     A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -2278,6 +2284,17 @@ mod tests {
     use super::*;
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
 
+    /// A scalar property map as the stored values a property reader returns
+    /// (fgdb-k3nub).
+    fn stored<const N: usize>(
+        entries: [(VId, CanonicalScalar); N],
+    ) -> BTreeMap<VId, CanonicalPropertyValue> {
+        entries
+            .into_iter()
+            .map(|(vid, value)| (vid, value.into()))
+            .collect()
+    }
+
     fn query(text: &str) -> PreparedGraphAggregate {
         PreparedGraphAggregateText::prepare(text, |kind, _| match kind {
             GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(1))),
@@ -2325,8 +2342,8 @@ mod tests {
         let relations = [RelationId(1), RelationId(2)];
         let graph = PositionedGraph::new(&vertices, &relations, &edges).unwrap();
         let triples: Vec<_> = graph.triples().collect();
-        let values: Vec<CanonicalScalar> = (0..width)
-            .map(|at| CanonicalScalar::Int(i64::from(at % 7)))
+        let values: Vec<CanonicalPropertyValue> = (0..width)
+            .map(|at| CanonicalScalar::Int(i64::from(at % 7)).into())
             .collect();
         let passes = |vid: VId| vid.0 % 3 != 1;
         let value = |vid: VId| {
@@ -2563,7 +2580,7 @@ mod tests {
             .collect();
         assert!(simple.len() < parallel.len());
         for edges in [&parallel, &simple] {
-            let properties = BTreeMap::from([
+            let properties = stored([
                 (VId(0), CanonicalScalar::Int(7)),
                 (VId(1), CanonicalScalar::Null),
                 (VId(2), CanonicalScalar::Int(7)),
@@ -2634,7 +2651,7 @@ mod tests {
             })
             .collect();
         let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
-        let properties = BTreeMap::from([
+        let properties = stored([
             (VId(0), CanonicalScalar::Int(7)),
             (VId(2), CanonicalScalar::Int(7)),
             (VId(3), CanonicalScalar::Int(7)),
@@ -2703,11 +2720,11 @@ mod tests {
 
     #[test]
     fn property_groups_equal_ordinary_bags_for_nulls_parallel_edges_and_directions() {
-        let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
+        let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
         ]);
         let edges = [
             (VId(0), RelationId(1), VId(1)),
@@ -2783,7 +2800,7 @@ mod tests {
             [VId(0), VId(1)],
             edges,
             |_, _| Ok::<_, &str>(true),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("property source failed"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("property source failed"),
             policy,
             || Ok::<_, ()>(()),
         );
@@ -2793,7 +2810,7 @@ mod tests {
                 "property source failed"
             )))
         ));
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let mut events = 0;
         aggregate
             .execute_governed(
@@ -2839,7 +2856,7 @@ mod tests {
         let policy = GqlQueryPolicy::new(256, 1, 100_000, 10_000);
         let run = |aggregate: &PreparedGraphAggregate,
                    source: &[(VId, RelationId, VId)],
-                   value: &CanonicalScalar| {
+                   value: &CanonicalPropertyValue| {
             aggregate.execute_governed(
                 source.len() as u64,
                 [VId(0)],
@@ -2856,7 +2873,7 @@ mod tests {
         };
         let rejected = query(&format!("MATCH {pattern} WHERE a.n=0 RETURN COUNT(*) AS n"));
         assert!(eligible(&rejected));
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         assert_eq!(
             run(&rejected, &edges, &value).unwrap().value,
             run(&rejected, &[], &value).unwrap().value
@@ -2868,7 +2885,7 @@ mod tests {
                 GraphAggregateError::ArithmeticOverflow { aggregate: 0 }
             ))
         ));
-        let null = CanonicalScalar::Null;
+        let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
         assert_eq!(
             run(&counted, &edges, &null).unwrap().value,
             run(&counted, &[], &null).unwrap().value
@@ -2891,7 +2908,7 @@ mod tests {
         admitted: &[VId],
         edges: &[(EId, VId, RelationId, VId)],
         labelled: &BTreeSet<VId>,
-        properties: &BTreeMap<VId, CanonicalScalar>,
+        properties: &BTreeMap<VId, CanonicalPropertyValue>,
     ) -> crate::GqlQueryExecution<GraphAggregateRow> {
         aggregate
             .execute_governed_with_element_maps(
@@ -2950,12 +2967,12 @@ mod tests {
         for (eid, (src, dst)) in [(1, 4), (3, 4), (4, 5)].into_iter().enumerate() {
             edges.push((EId(100 + eid as u128), VId(src), RelationId(1), VId(dst)));
         }
-        let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
-            (VId(5), CanonicalScalar::Int(9)),
+        let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
+            (VId(5), CanonicalScalar::Int(9).into()),
         ]);
         let mut checked = 0;
         for mode in ["", "REPEATABLE ELEMENTS "] {
@@ -3156,9 +3173,12 @@ mod tests {
             let mut properties = BTreeMap::new();
             for &id in &ids {
                 if let Some(value) = [Some(0), Some(1), Some(2), None][random(4) as usize] {
-                    properties.insert(id, CanonicalScalar::Int(value));
+                    properties.insert(
+                        id,
+                        CanonicalPropertyValue::from(CanonicalScalar::Int(value)),
+                    );
                 } else if random(2) == 0 {
-                    properties.insert(id, CanonicalScalar::Null);
+                    properties.insert(id, CanonicalScalar::Null.into());
                 }
             }
             let pick = |random: &mut dyn FnMut(u64) -> u64| ids[random(count) as usize];
@@ -3256,7 +3276,7 @@ mod tests {
             edges.push((EId(200 + eid as u128), VId(src), RelationId(2), VId(dst)));
         }
         edges.push((EId(300), VId(4), RelationId(1), VId(5)));
-        let properties = BTreeMap::from([
+        let properties = stored([
             (VId(0), CanonicalScalar::Int(7)),
             (VId(1), CanonicalScalar::Null),
             (VId(2), CanonicalScalar::Int(7)),
@@ -3389,8 +3409,8 @@ mod tests {
             Visit(Vec<Option<VId>>),
         }
         let labelled = |vid: VId| !vid.0.is_multiple_of(3);
-        let value = CanonicalScalar::Int(7);
-        let other = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
+        let other = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let property_of = |vid: VId| {
             if vid.0.is_multiple_of(2) {
                 &value
@@ -3497,7 +3517,7 @@ mod tests {
         edges.push((EId(402), VId(1), RelationId(2), VId(5)));
         edges.push((EId(403), VId(0), RelationId(2), VId(1)));
         let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
-        let properties = BTreeMap::from([
+        let properties = stored([
             (VId(0), CanonicalScalar::Int(7)),
             (VId(2), CanonicalScalar::Int(7)),
             (VId(3), CanonicalScalar::Int(7)),
@@ -3574,7 +3594,7 @@ mod tests {
             .into_iter()
             .map(|(_, source, relation, destination)| (source, relation, destination))
             .collect();
-        let value = CanonicalScalar::Int(7);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
         let execute = |aggregate: &PreparedGraphAggregate, fail_at: Option<usize>| {
             let mut reads = 0;
@@ -3629,7 +3649,7 @@ mod tests {
             let aggregate = query(text);
             assert!(single_scan(&aggregate).is_some(), "{text}");
             let mut tested = Vec::new();
-            let value = CanonicalScalar::Int(7);
+            let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
             aggregate
                 .execute_governed(
                     edges.len() as u64,
@@ -3719,7 +3739,7 @@ mod tests {
         edges.push((EId(402), VId(1), RelationId(1), VId(5)));
         // Vertices 4 and 5 lack the label; 1 and 5 lack n = 7.
         let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
-        let properties = BTreeMap::from([
+        let properties = stored([
             (VId(0), CanonicalScalar::Int(7)),
             (VId(2), CanonicalScalar::Int(7)),
             (VId(3), CanonicalScalar::Int(7)),

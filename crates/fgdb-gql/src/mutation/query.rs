@@ -129,11 +129,10 @@ impl PreparedGraphMutationQuery {
                 } => (matches!(
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
-                ) && matches!(
-                    columns.get(current),
-                    Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
-                ))
-                .then_some(GraphSetColumnType::Scalar),
+                ) && columns
+                    .get(current)
+                    .is_some_and(|kind| kind.is_scalar_like() || *kind == GraphSetColumnType::Any))
+                .then_some(GraphSetColumnType::Stored),
                 GraphMutationBinding::Properties { target, current } => (matches!(
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)

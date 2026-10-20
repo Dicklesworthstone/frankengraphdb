@@ -244,7 +244,7 @@ fn computed_keys_and_reordered_columns_are_not_source_positions_or_preprojection
         ],
     );
     let mut s = source(3);
-    s.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Int(-5))];
+    s.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Int(-5).into())];
     let batch = eager(&q, &s);
     let mut cursor = run(&q, s, wide());
     let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
@@ -357,7 +357,7 @@ fn predicates_and_probes_precede_projection_but_late_expression_errors_abort_all
     ] {
         let q = prepare(text);
         let mut s = source(63);
-        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Int(0))];
+        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Int(0).into())];
         let batch = eager(&q, &s);
         assert_eq!(
             run(&q, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(),
@@ -367,7 +367,7 @@ fn predicates_and_probes_precede_projection_but_late_expression_errors_abort_all
     for value in [CanonicalScalar::Int(i64::MAX), CanonicalScalar::Bool(true)] {
         let q = prepare("MATCH (a)-[r:R]->(b) RETURN b, SUM(r.p+1) AS total GROUP BY b");
         let mut s = source(63);
-        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, value)];
+        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, value.into())];
         let dropped = s.drops.clone();
         let mut cursor = run(&q, s, wide());
         assert!(matches!(
@@ -509,7 +509,7 @@ fn thousands_of_projected_occurrences_need_one_output_row_not_an_input_result_ba
                 VId(0),
                 R,
                 VId(1),
-                vec![(P, CanonicalScalar::Int(i64::MAX - 1))],
+                vec![(P, CanonicalScalar::Int(i64::MAX - 1).into())],
             ),
         );
     }

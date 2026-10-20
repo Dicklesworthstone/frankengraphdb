@@ -213,8 +213,8 @@ fn query_returns_canonical_new_values_with_masked_fields_and_one_reopenable_comm
         assert_eq!(
             db.edge(EId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(2)),
-                (SECRET, CanonicalScalar::Int(99))
+                (P, CanonicalScalar::Int(2).into()),
+                (SECRET, CanonicalScalar::Int(99).into())
             ]
         );
         let state = (db.vertices().unwrap(), db.edges().unwrap());

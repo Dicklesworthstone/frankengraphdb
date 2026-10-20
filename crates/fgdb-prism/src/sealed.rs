@@ -779,7 +779,7 @@ mod tests {
     use crate::{FnxWeightSpec, MissingWeightPolicy};
     use fgdb_delta_types::{PropertyKeyId, RelationId};
     use fgdb_strata::AdjacencyEntry;
-    use fgdb_types::CanonicalScalar;
+    use fgdb_types::{CanonicalList, CanonicalPropertyValue, CanonicalScalar};
 
     fn config() -> SealedProjectionSpec {
         SealedProjectionSpec {
@@ -813,13 +813,13 @@ mod tests {
 
     #[test]
     fn selected_properties_use_exact_numeric_resolution() {
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(17))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(17).into())];
         let edge = SealedEdge {
             entry: entry(VId(u128::MAX)),
             properties: &properties,
         };
         assert_eq!(selected_weight(true, &config(), &edge).unwrap(), Some(17.0));
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(i64::MAX))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(i64::MAX).into())];
         let edge = SealedEdge {
             entry: entry(VId(2)),
             properties: &properties,
@@ -828,6 +828,21 @@ mod tests {
             selected_weight(true, &config(), &edge),
             Err(SealedProjectionError::Weight {
                 reason: FnxWeightError::InexactInteger,
+                ..
+            })
+        ));
+        // A stored List is present but not numeric, even when it holds one
+        // integer (fgdb-k3nub): it is refused, never unwrapped or read as absent.
+        let list = CanonicalList::try_new(vec![CanonicalScalar::Int(17).into()]).unwrap();
+        let properties = [(PropertyKeyId(2), CanonicalPropertyValue::List(list))];
+        let edge = SealedEdge {
+            entry: entry(VId(2)),
+            properties: &properties,
+        };
+        assert!(matches!(
+            selected_weight(true, &config(), &edge),
+            Err(SealedProjectionError::Weight {
+                reason: FnxWeightError::NotNumeric,
                 ..
             })
         ));
@@ -892,7 +907,7 @@ mod tests {
 
     #[test]
     fn forbidden_weight_properties_are_absent_before_numeric_observation() {
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Bool(true))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Bool(true).into())];
         let edge = SealedEdge {
             entry: entry(VId(2)),
             properties: &properties,

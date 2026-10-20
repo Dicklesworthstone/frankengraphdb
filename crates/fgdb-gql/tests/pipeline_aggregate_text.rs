@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetQuantifier, GraphSetTextErrorKind, GraphSetValue, GraphSymbol,
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphPipelineAggregateText, PreparedGraphSet,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeSet;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -36,13 +36,18 @@ fn run(
     input: &[CanonicalScalar],
     policy: GqlQueryPolicy,
 ) -> GqlQueryExecution<GraphAggregateRow> {
+    let stored: Vec<_> = input
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     query
         .execute_governed(
             input.len() as u64,
             (0..input.len()).map(|at| VId(at as u128)),
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, key| Ok((key == P).then(|| &input[vid.0 as usize])),
+            |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
             policy,
             || Ok::<_, ()>(()),
         )
@@ -400,6 +405,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         "MATCH (n) WITH n.p AS x WHERE x <> 0 WITH CASE WHEN x > 0 THEN 10/x ELSE 0 END AS y RETURN SUM(y) AS total",
     );
     let input = [-1, 0, 2, 5].map(CanonicalScalar::Int);
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     assert_eq!(
         run(&bound, &input, wide()).value[0].values()[0].as_integer(),
         Some(7)
@@ -410,7 +416,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         (0..4).map(VId),
         [],
         |_, _| Ok::<_, ()>(true),
-        |vid, _| Ok(Some(&input[vid.0 as usize])),
+        |vid, _| Ok(Some(&stored[vid.0 as usize])),
         wide(),
         || Ok::<_, ()>(()),
     );
@@ -425,7 +431,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         [VId(0)],
         [],
         |_, _| Ok(true),
-        |_, _| Err::<Option<&CanonicalScalar>, _>("unreadable input"),
+        |_, _| Err::<Option<&CanonicalPropertyValue>, _>("unreadable input"),
         wide(),
         || Ok::<_, ()>(()),
     );
@@ -436,7 +442,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         )))
     ));
     let non_integer = query("MATCH (n) WITH n.p AS x RETURN SUM(x) AS total LIMIT 0");
-    let bad_value = CanonicalScalar::Bool(true);
+    let bad_value = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     assert!(matches!(
         non_integer.execute_governed(
             1,
@@ -459,6 +465,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
         "MATCH (n) WITH n.p AS x WHERE x > 0 RETURN x AS key,SUM(x+1) AS n HAVING n > 0 ORDER BY key DESC",
     );
     let input = [1, 1, 2].map(CanonicalScalar::Int);
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     let mut calls = 0;
     let measured = bound
         .execute_governed(
@@ -466,7 +473,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 calls += 1;
@@ -498,7 +505,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
                     [VId(0), VId(1), VId(2)],
                     [],
                     |_, _| Ok::<_, ()>(true),
-                    |vid, _| Ok(Some(&input[vid.0 as usize])),
+                    |vid, _| Ok(Some(&stored[vid.0 as usize])),
                     GqlQueryPolicy::new(cap[0], cap[1], cap[2], cap[3]),
                     || Ok::<_, ()>(())
                 )
@@ -512,7 +519,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 at += 1;
@@ -706,7 +713,7 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
         "MATCH (n) WITH n.p AS x RETURN 10/x AS key,COUNT(*) AS rows LIMIT 0",
     ] {
         let bound = query(text);
-        let zero = CanonicalScalar::Int(0);
+        let zero = CanonicalPropertyValue::from(CanonicalScalar::Int(0));
         assert!(matches!(
             bound.execute_governed(
                 1,

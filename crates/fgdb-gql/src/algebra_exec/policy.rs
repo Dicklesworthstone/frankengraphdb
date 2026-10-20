@@ -11,7 +11,7 @@ use crate::{
     GqlExecutionBudget, GqlExecutionStats,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GqlQueryPolicy {
@@ -62,8 +62,9 @@ pub enum GqlQueryError<E, C> {
     IdentifiedEdgesRequired,
     /// A predicate's scalar expression raised an arithmetic data exception
     /// (GQL class 22: division by zero, numeric overflow; see
-    /// `GraphIntegerErrorKind::is_arithmetic_exception`). It never reads as
-    /// UNKNOWN or a filtered row.
+    /// `GraphIntegerErrorKind::is_arithmetic_exception`), or met a stored List
+    /// or Map operand its scalar program cannot read (NonScalar). It never
+    /// reads as UNKNOWN or a filtered row.
     Data(crate::GraphIntegerError),
 }
 
@@ -413,7 +414,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
@@ -444,8 +445,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
@@ -485,8 +486,11 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut edge_property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
@@ -529,8 +533,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
@@ -558,7 +562,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {

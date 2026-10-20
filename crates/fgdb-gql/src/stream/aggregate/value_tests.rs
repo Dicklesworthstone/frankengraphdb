@@ -514,7 +514,7 @@ mod float_admission {
 
     struct Source {
         next: u128,
-        properties: [(PropertyKeyId, CanonicalScalar); 1],
+        properties: [(PropertyKeyId, fgdb_types::CanonicalPropertyValue); 1],
         drops: Arc<AtomicUsize>,
     }
     impl Source {
@@ -527,7 +527,8 @@ mod float_admission {
                         CanonicalScalar::Float(CanonicalF64::new(4.0))
                     } else {
                         CanonicalScalar::Int(4)
-                    },
+                    }
+                    .into(),
                 )],
                 drops: Arc::new(AtomicUsize::new(0)),
             }

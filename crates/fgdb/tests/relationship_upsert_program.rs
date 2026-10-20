@@ -106,7 +106,7 @@ async fn database(commit: &CommitCx, repeated: bool, existing: bool) -> Database
 fn assert_edge(db: &Database<MemVfs>, edge: EId, p: i64) {
     assert_eq!(
         db.edge(edge).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(p))]
+        vec![(P, CanonicalScalar::Int(p).into())]
     );
 }
 

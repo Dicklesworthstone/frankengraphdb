@@ -482,7 +482,10 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        VertexScanSourceError<QueryError, C>,
+    > {
         let Some(row) = self.admitted_vertex(vid, control)? else {
             return Ok(None); // Missing vertex is NOT a present vertex with SQL NULL.
         };
@@ -648,7 +651,10 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeExpansionSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeExpansionSourceError<QueryError, C>,
+    > {
         let Some(edge) = self.admitted_probe_edge(eid, control)? else {
             return Ok(None);
         };

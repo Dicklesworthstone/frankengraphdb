@@ -150,8 +150,8 @@ fn create_match_simultaneous_assignments_and_trailing_set_survive_reopen() {
             assert_eq!(
                 edge.props,
                 vec![
-                    (P, CanonicalScalar::Int(expected[0])),
-                    (Q, CanonicalScalar::Int(expected[1]))
+                    (P, CanonicalScalar::Int(expected[0]).into()),
+                    (Q, CanonicalScalar::Int(expected[1]).into())
                 ]
             );
         }
@@ -165,7 +165,10 @@ fn create_match_simultaneous_assignments_and_trailing_set_survive_reopen() {
             .unwrap();
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(21)), (Q, CanonicalScalar::Int(11))]
+            vec![
+                (P, CanonicalScalar::Int(21).into()),
+                (Q, CanonicalScalar::Int(11).into())
+            ]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -208,7 +211,7 @@ fn late_expression_failure_restores_the_outer_workspace_prefix() {
         assert!(txn.edge(&db, EId(10)).unwrap().is_none());
         assert_eq!(
             txn.vertex_property(&db, VId(1), Q).unwrap(),
-            Some(CanonicalScalar::Int(77))
+            Some(CanonicalScalar::Int(77).into())
         );
         assert_eq!(db.frontier().unwrap(), before);
         txn.abort();
@@ -272,7 +275,7 @@ fn no_input_skips_all_clauses_and_unselected_match_failures_stay_lazy() {
         .unwrap();
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(5))]
+            vec![(P, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

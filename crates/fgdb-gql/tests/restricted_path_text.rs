@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphWalkBounds, PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -40,7 +40,12 @@ fn execute<C>(
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), C>> {
     let properties = vertices
         .iter()
-        .map(|v| (*v, CanonicalScalar::Int(v.0 as i64)))
+        .map(|v| {
+            (
+                *v,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v.0 as i64)),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     pattern.plan().execute_governed_with_identified_properties(
         (vertices.len() + edges.len()) as u64,
@@ -417,7 +422,7 @@ fn aggregate_row_pipeline_and_write_script_consumers_keep_path_multiplicity() {
                 vertices,
                 edges,
                 |_, _| Ok::<_, ()>(true),
-                |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
+                |_, _| Ok::<Option<&CanonicalPropertyValue>, ()>(None),
                 wide(),
                 || Ok::<_, ()>(()),
             )
@@ -464,7 +469,7 @@ fn zero_result_limit_does_not_mask_fallible_endpoint_property_reads() {
             [VId(1), VId(2)],
             [(EId(1), VId(1), R, VId(2))],
             |_, _| Ok::<_, &str>(true),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("endpoint read"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("endpoint read"),
             wide(),
             || Ok::<_, ()>(()),
         );

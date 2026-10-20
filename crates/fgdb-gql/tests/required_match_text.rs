@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -52,7 +52,12 @@ fn evaluate(text: &str, vertices: &[VId], edges: &[Edge]) -> Vec<GraphValueRow> 
         .unwrap();
     let values = vertices
         .iter()
-        .map(|vid| (*vid, CanonicalScalar::Int(vid.0 as i64)))
+        .map(|vid| {
+            (
+                *vid,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(vid.0 as i64)),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     pattern
         .plan()
@@ -254,7 +259,7 @@ fn aggregation_consumes_the_completed_join_bag_not_optional_prefix_rows() {
                 (VId(2), S, VId(3)),
             ],
             |_, _| Ok::<_, ()>(true),
-            |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
+            |_, _| Ok::<Option<&CanonicalPropertyValue>, ()>(None),
             wide(),
             || Ok::<_, ()>(()),
         )

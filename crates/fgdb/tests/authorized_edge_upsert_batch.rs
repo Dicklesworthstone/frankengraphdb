@@ -165,6 +165,9 @@ fn p(db: &Database<MemVfs>, edge: EId) -> CanonicalScalar {
         .find(|(key, _)| *key == P)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 
 #[test]
@@ -246,6 +249,7 @@ fn duplicate_inputs_keep_parallel_full_identities_final_values_and_hidden_fields
                     CanonicalText::new_ucs_basic(&"private payload".repeat(HIDDEN_PAYLOAD_REPEATS))
                         .unwrap()
                 )
+                .into()
             );
         }
         assert_eq!(p(&db, EId(92)), CanonicalScalar::Int(100));
@@ -661,7 +665,7 @@ fn zero_final_rows_keep_creations_and_empty_match_does_not_invent_effects() {
             .filter(|edge| edge.entry.relation == R)
             .collect::<Vec<_>>();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].props, vec![(P, CanonicalScalar::Int(8))]);
+        assert_eq!(created[0].props, vec![(P, CanonicalScalar::Int(8).into())]);
         let query = prepared(
             "MATCH (a:Visible),(b:Visible) WHERE a.p < 0 \
              MERGE (a)-[r:R]->(b) ON CREATE SET r.p=99 RETURN r",

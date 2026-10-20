@@ -5,7 +5,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateRow, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,7 +123,9 @@ fn oriented_multigraph_pages_match_independent_complete_group_enumeration() {
                     .collect();
                 let scalars: Vec<_> = raw
                     .iter()
-                    .map(|value| value.map(CanonicalScalar::Int))
+                    .map(|value| {
+                        value.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)))
+                    })
                     .collect();
                 let mut groups: BTreeMap<VId, Vec<Option<i64>>> = BTreeMap::new();
                 for &(src, _, dst) in &edges {
@@ -186,7 +188,7 @@ fn grouped_payloads_are_copied_only_for_the_final_page_and_all_source_rows_are_r
     let edges: Vec<_> = (0..16).map(|id| (VId(id), R, VId(id + 100))).collect();
     let small = CanonicalScalar::bytes(Vec::new()).unwrap();
     let large = CanonicalScalar::bytes(vec![7; 8192]).unwrap();
-    let run = |value: &CanonicalScalar| {
+    let run = |value: &CanonicalPropertyValue| {
         let mut edge_reads = 0;
         let mut property_reads = 0;
         let result = query
@@ -209,8 +211,8 @@ fn grouped_payloads_are_copied_only_for_the_final_page_and_all_source_rows_are_r
         assert_eq!(property_reads, 16);
         result
     };
-    let a = run(&small);
-    let b = run(&large);
+    let a = run(&CanonicalPropertyValue::from(small));
+    let b = run(&CanonicalPropertyValue::from(large.clone()));
     assert_eq!(
         b.evaluator.scratch_entries - a.evaluator.scratch_entries,
         2 * 8192 / 64
@@ -235,7 +237,9 @@ fn all_four_limits_and_every_public_execution_checkpoint_remain_enforced() {
         "MATCH (a)-[:R]->(b) RETURN a,AVG(DISTINCT b.p) AS mean,COUNT(DISTINCT b.p) AS kinds \
         GROUP BY a HAVING mean IS NOT NULL ORDER BY mean DESC SKIP 1 LIMIT 2",
     );
-    let values: Vec<_> = (0..=4).map(CanonicalScalar::Int).collect();
+    let values: Vec<_> = (0..=4)
+        .map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)))
+        .collect();
     let edges: Vec<_> = (0..4)
         .flat_map(|id| {
             [
@@ -327,7 +331,8 @@ fn optional_and_existential_scopes_complete_before_the_root_is_retired() {
         CanonicalScalar::Int(2),
         CanonicalScalar::Int(8),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let property = |vid: VId| match vid.0 {
         20 => Some(&values[0]),
         21 => Some(&values[1]),
@@ -395,8 +400,8 @@ fn optional_and_existential_scopes_complete_before_the_root_is_retired() {
 
 #[test]
 fn unproven_input_order_and_nontrivial_output_distinct_keep_general_grouping() {
-    let low = CanonicalScalar::Int(3);
-    let high = CanonicalScalar::Int(7);
+    let low = CanonicalPropertyValue::from(CanonicalScalar::Int(3));
+    let high = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let node =
         prepare("MATCH (a) RETURN a,COUNT(*) AS n,AVG(a.p) AS mean GROUP BY a ORDER BY a LIMIT 5");
     let result = node

@@ -15,7 +15,8 @@ use fgdb_gql::{
     PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -138,8 +139,8 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Summary> {
                 .find(|(key, _)| *key == P)
                 .map(|(_, value)| value);
             let value = match value {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(CanonicalScalar::Int(value)) => Some(*value),
+                None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+                Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => Some(*value),
                 _ => panic!("noninteger in oracle fixture"),
             };
             groups.entry(first.entry.src).or_default().push(value);

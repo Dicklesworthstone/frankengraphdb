@@ -21,7 +21,6 @@ use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 use fgdb_delta_types::{ElementId, PropertyKeyId};
-use fgdb_types::CanonicalScalar;
 
 mod relational_join;
 mod selected_cross;
@@ -38,7 +37,7 @@ pub use relational_join::SpillSetJoinPlan;
 /// Original source errors pass through without conversion to NULL.
 pub trait AsyncSpillElementSource: Send {
     type Error: Send;
-    type Property: std::borrow::Borrow<CanonicalScalar> + Send;
+    type Property: std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> + Send;
 
     fn element_property(
         &mut self,

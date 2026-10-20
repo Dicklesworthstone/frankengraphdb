@@ -190,14 +190,25 @@ impl PreparedGraphAggregate {
                             names[0].as_str(),
                             names[1].as_str(),
                         ]))?;
-                    let prefix = identities.len();
-                    let mut projection: Vec<_> = names
-                        .into_iter()
-                        .zip(identities)
-                        .map(|(name, column)| {
-                            GraphSetProjection::new(name, GraphSetValue::Column(column))
-                        })
-                        .collect();
+                    // Identity columns the input already leads with, in scan
+                    // order, are the occurrence proof in place: no private copy
+                    // widens the row past the bound (fgdb-fjemc).
+                    let leading = identities
+                        .iter()
+                        .enumerate()
+                        .all(|(at, &column)| at == column);
+                    let prefix = if leading { 0 } else { identities.len() };
+                    let mut projection: Vec<_> = if leading {
+                        Vec::new()
+                    } else {
+                        names
+                            .into_iter()
+                            .zip(identities)
+                            .map(|(name, column)| {
+                                GraphSetProjection::new(name, GraphSetValue::Column(column))
+                            })
+                            .collect()
+                    };
                     projection.extend(self.input.columns().iter().enumerate().map(
                         |(column, name)| {
                             GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
@@ -249,7 +260,7 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,

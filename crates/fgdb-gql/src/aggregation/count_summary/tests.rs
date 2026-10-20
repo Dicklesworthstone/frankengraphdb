@@ -60,7 +60,7 @@ fn count_summary_keeps_external_element_reads_and_the_complete_control_transcrip
                 assert_eq!(key, PropertyKeyId(1));
                 reads.push(element);
                 match element {
-                    ElementId::Vertex(VId(u128::MAX)) => Ok(Some(CanonicalScalar::Int(33))),
+                    ElementId::Vertex(VId(u128::MAX)) => Ok(Some(CanonicalScalar::Int(33).into())),
                     ElementId::Edge(EId(u128::MAX)) if fail => Err("late element read"),
                     ElementId::Edge(EId(u128::MAX)) => Ok(None),
                     _ => panic!("only supplied output identities are read"),
@@ -77,7 +77,7 @@ fn count_summary_keeps_external_element_reads_and_the_complete_control_transcrip
                     (0..size).map(|at| VId(at as u128)),
                     [],
                     |_, _| -> Result<bool, &'static str> { panic!("filterless input") },
-                    |_, _| -> Result<Option<&CanonicalScalar>, &'static str> {
+                    |_, _| -> Result<Option<&fgdb_types::CanonicalPropertyValue>, &'static str> {
                         panic!("output properties must not use the input column reader")
                     },
                     elements,
@@ -217,7 +217,7 @@ fn run<const RUNS: bool>(
             vertices.iter().copied(),
             edges.iter().copied(),
             |_, _| -> Result<bool, ()> { panic!("filterless input tested a vertex") },
-            |_, _| -> Result<Option<&CanonicalScalar>, ()> {
+            |_, _| -> Result<Option<&fgdb_types::CanonicalPropertyValue>, ()> {
                 panic!("COUNT(*) read an input property")
             },
             policy,

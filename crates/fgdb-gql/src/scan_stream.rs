@@ -517,8 +517,8 @@ mod sort_tail_tests {
         use crate::GraphSetQuantifier;
         for width in [1, 2, crate::algebra::MAX_PATTERN_VERTICES] {
             for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
-                let implicit = ScanSortTail::for_relation(width, vec![], quantifier, 2, Some(0))
-                    .unwrap();
+                let implicit =
+                    ScanSortTail::for_relation(width, vec![], quantifier, 2, Some(0)).unwrap();
                 let explicit = ScanSortTail::for_relation(
                     width,
                     implicit.order().to_vec(),
@@ -537,7 +537,10 @@ mod sort_tail_tests {
         }
         for keys in [
             vec![GraphValueOrder::ascending(2)],
-            vec![GraphValueOrder::ascending(0), GraphValueOrder::descending(0)],
+            vec![
+                GraphValueOrder::ascending(0),
+                GraphValueOrder::descending(0),
+            ],
         ] {
             assert!(
                 ScanSortTail::for_relation(2, keys, GraphSetQuantifier::All, 0, Some(0)).is_none()

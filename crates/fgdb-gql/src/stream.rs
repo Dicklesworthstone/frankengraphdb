@@ -24,7 +24,7 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
@@ -391,7 +391,8 @@ fn seek<'a, T, K: Ord, E>(
 #[derive(Clone, Copy)]
 pub struct VertexScanRow<'a> {
     pub labels: &'a [LabelId],
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 impl core::fmt::Debug for VertexScanRow<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -485,7 +486,8 @@ pub trait VertexScanSource {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, VertexScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.vertex(vid, control)? else {
             return Ok(None);
         };
@@ -569,7 +571,7 @@ pub trait VertexScanSource {
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<
-        Option<Option<&'a CanonicalScalar>>,
+        Option<Option<&'a CanonicalPropertyValue>>,
         crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>,
     > {
         let Some(row) = self.probe_edge(eid, control)? else {

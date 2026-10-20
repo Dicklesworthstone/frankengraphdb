@@ -297,7 +297,10 @@ pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],

@@ -46,7 +46,12 @@ impl VertexMergeOutput for fgdb_gql::GraphVertexMergeOutcome {
     const UNIQUE: bool = true;
 
     fn matched(matches: std::collections::BTreeSet<VId>) -> Self {
-        Self::Matched(matches.into_iter().next().expect("one admitted MERGE target"))
+        Self::Matched(
+            matches
+                .into_iter()
+                .next()
+                .expect("one admitted MERGE target"),
+        )
     }
 
     fn created(vertex: VId) -> Self {
@@ -361,15 +366,21 @@ fn stage_vertex_merge_creation<V: Vfs + Clone, A>(
         else {
             unreachable!("validated vertex MERGE contains no edge creation")
         };
-        batch.create_vertex(vertex, labels, properties);
+        batch.create_vertex_values(vertex, labels, properties);
     }
     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let staged = if transaction.staged.iter().all(|batch| batch.relation == relation) {
+    let staged = if transaction
+        .staged
+        .iter()
+        .all(|batch| batch.relation == relation)
+    {
         transaction.write(database, batch)
     } else {
         transaction.write_atomic(database, vec![batch])
     };
     staged.map(|_| ()).map_err(|error| {
-        GqlQueryError::Source(GraphVertexMergeError::Creation(GraphInsertError::Source(error)))
+        GqlQueryError::Source(GraphVertexMergeError::Creation(GraphInsertError::Source(
+            error,
+        )))
     })
 }
