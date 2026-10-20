@@ -7,6 +7,55 @@ use crate::{
     FNX_METER_RUN, FnxAlgorithm, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView,
 };
 
+/// One completed pull level under [`BfsDecisionCard`]'s deterministic policy.
+/// Bounds and observations count graph visits, not CPU instructions or time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BfsPullDecision {
+    pub depth: usize,
+    pub frontier_vertices: usize,
+    pub frontier_arcs: usize,
+    pub unseen_incoming_arcs: usize,
+    pub vertices: usize,
+    /// Guaranteed visits avoided compared with scanning this frontier's arcs.
+    pub benefit_lower: usize,
+    /// Maximum visits avoided: even an empty pull scans all vertex candidates.
+    pub benefit_upper: usize,
+    pub candidate_visits: usize,
+    pub incoming_visits: usize,
+}
+
+/// Replayable, answer-preserving physical BFS decisions. Version 1 selects
+/// pull only when `frontier_arcs / 2 > vertices + unseen_incoming_arcs` and all
+/// projected vertices fit the result allowance. Every other level uses the
+/// pinned top-down fallback. Only actual pull levels need records: the source
+/// digest, projection, source/cutoff, and this formula reconstruct the omitted
+/// push levels. There is no clock, randomness, learned estimate, or mutable
+/// policy state. A choice lasts exactly one level; conversion needs no bitmap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BfsDecisionCard {
+    pub policy_version: u16,
+    pub fallback: &'static str,
+    pub dwell_levels: usize,
+    pub pull_cost_multiplier: usize,
+    pub pulls: Vec<BfsPullDecision>,
+}
+
+pub(crate) struct TraversalOutput {
+    pub output: KernelOutput,
+    pub bfs_decision_card: Option<BfsDecisionCard>,
+    pub workspace_bytes: Option<usize>,
+}
+
+impl TraversalOutput {
+    fn without_bfs(output: KernelOutput) -> Self {
+        Self {
+            output,
+            bfs_decision_card: None,
+            workspace_bytes: None,
+        }
+    }
+}
+
 fn witness(algorithm: &str) -> ComplexityWitness {
     ComplexityWitness {
         algorithm: algorithm.to_owned(),
@@ -189,17 +238,23 @@ pub(crate) fn run<C>(
     algorithm: FnxAlgorithm,
     row_limit: usize,
     checkpoint: &mut impl FnxMeter<C>,
-) -> Result<KernelOutput, FnxExecutionError<C>> {
+) -> Result<TraversalOutput, FnxExecutionError<C>> {
     match algorithm {
         FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
             let source = graph
                 .vertex_ordinal(source)
                 .ok_or(FnxExecutionError::UnknownSource(source))?;
-            bfs(graph, source, cutoff, row_limit, checkpoint)
+            bounded_bfs(graph, source, cutoff, row_limit, checkpoint)
         }
-        FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
-        FnxAlgorithm::WeaklyConnectedComponents => components(graph, true, checkpoint),
-        FnxAlgorithm::StronglyConnectedComponents => strongly_connected(graph, checkpoint),
+        FnxAlgorithm::ConnectedComponents => {
+            components(graph, false, checkpoint).map(TraversalOutput::without_bfs)
+        }
+        FnxAlgorithm::WeaklyConnectedComponents => {
+            components(graph, true, checkpoint).map(TraversalOutput::without_bfs)
+        }
+        FnxAlgorithm::StronglyConnectedComponents => {
+            strongly_connected(graph, checkpoint).map(TraversalOutput::without_bfs)
+        }
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
         | FnxAlgorithm::Triangles
@@ -208,6 +263,211 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::DirectedClusteringCoefficient
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
+}
+
+/// A pull is paid for by outgoing arcs that this frontier will never scan:
+/// its entire candidate pass and incoming probes cost at most n + unseen_in.
+/// Frontiers are disjoint, so replacing a push only below that bound preserves
+/// the existing n + m traversal-work admission. The factor-two margin avoids
+/// switching for a merely equal bound and pays for degree bookkeeping. This
+/// is a visit-count guarantee; locality and control costs still need timing.
+fn bounded_bfs<C>(
+    graph: &SnapshotGraphView,
+    source: usize,
+    cutoff: Option<usize>,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<TraversalOutput, FnxExecutionError<C>> {
+    let n = graph.node_count();
+    let out_offsets = graph.outgoing_offsets();
+    let arcs = *out_offsets
+        .last()
+        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+    // A pull cannot satisfy the bound in this sparse case. A tight row
+    // allowance must also retain the predecessor's discovery/refusal order:
+    // batch charging may not hide a row refusal behind a later work refusal.
+    if row_limit < n || arcs / 2 <= n {
+        let output = bfs(graph, source, cutoff, row_limit, checkpoint)?;
+        return Ok(TraversalOutput {
+            output,
+            bfs_decision_card: None,
+            workspace_bytes: None,
+        });
+    }
+    admit("result rows", 1, row_limit)?;
+    let (in_offsets, incoming) = graph.incoming_face();
+    let mut unseen_in = incoming
+        .len()
+        .checked_sub(in_offsets[source + 1] - in_offsets[source])
+        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+    let mut distances = reserve(n)?;
+    let mut queue = reserve(n)?;
+    while distances.len() < n {
+        let count = FNX_METER_RUN.min(n - distances.len());
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        distances.resize(distances.len() + count, None);
+    }
+    distances[source] = Some(0usize);
+    queue.push(source);
+    let mut pulls = Vec::new();
+    let mut head = 0;
+    let mut witness = witness("single_source_shortest_path_length_bfs");
+    witness.queue_peak = 1;
+    while head < queue.len() {
+        let frontier_end = queue.len();
+        let frontier_vertices = frontier_end - head;
+        let depth = distances[queue[head]].ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let mut frontier_arcs = 0usize;
+        // Charge these vertices once, before observing their degrees. Result
+        // rows cannot refuse in this kernel, so precharging the frontier does
+        // not overtake an earlier per-discovery error. No second degree array
+        // or per-arc direction test is needed.
+        for run in queue[head..frontier_end].chunks(FNX_METER_RUN) {
+            checkpoint
+                .units(run.len())
+                .map_err(FnxExecutionError::Cancelled)?;
+            for &vertex in run {
+                frontier_arcs = frontier_arcs
+                    .checked_add(out_offsets[vertex + 1] - out_offsets[vertex])
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+            }
+            witness.nodes_touched = witness
+                .nodes_touched
+                .checked_add(run.len())
+                .ok_or(FnxExecutionError::SizeOverflow)?;
+        }
+        if cutoff.is_some_and(|cutoff| depth >= cutoff) {
+            break;
+        }
+        let next_depth = depth
+            .checked_add(1)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        let pull_bound = n
+            .checked_add(unseen_in)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        if frontier_arcs / 2 > pull_bound {
+            // Record only completed choices; any refusal drops all scratch
+            // and evidence with the result. Capacity is included in the peak
+            // workspace returned below, alongside both traversal vectors.
+            pulls
+                .try_reserve(1)
+                .map_err(|_| FnxExecutionError::AllocationFailed)?;
+            let mut decision = BfsPullDecision {
+                depth,
+                frontier_vertices,
+                frontier_arcs,
+                unseen_incoming_arcs: unseen_in,
+                vertices: n,
+                benefit_lower: frontier_arcs - pull_bound,
+                benefit_upper: frontier_arcs - n,
+                candidate_visits: 0,
+                incoming_visits: 0,
+            };
+            head = frontier_end;
+            for vertex in 0..n {
+                checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                increment(&mut witness.nodes_touched)?;
+                increment(&mut decision.candidate_visits)?;
+                if distances[vertex].is_some() {
+                    continue;
+                }
+                let row = &incoming[in_offsets[vertex]..in_offsets[vertex + 1]];
+                for run in row.chunks(FNX_METER_RUN) {
+                    checkpoint
+                        .units(run.len())
+                        .map_err(FnxExecutionError::Cancelled)?;
+                    let mut reached = false;
+                    // Examine the complete charged run, even after a match.
+                    // Short-circuiting here would claim unvisited arcs. Stop
+                    // between runs, with at most 63 extra probes after a hit.
+                    for &predecessor in run {
+                        reached |= distances[predecessor] == Some(depth);
+                    }
+                    witness.edges_scanned = witness
+                        .edges_scanned
+                        .checked_add(run.len())
+                        .ok_or(FnxExecutionError::SizeOverflow)?;
+                    decision.incoming_visits = decision
+                        .incoming_visits
+                        .checked_add(run.len())
+                        .ok_or(FnxExecutionError::SizeOverflow)?;
+                    if reached {
+                        distances[vertex] = Some(next_depth);
+                        queue.push(vertex);
+                        unseen_in = unseen_in
+                            .checked_sub(in_offsets[vertex + 1] - in_offsets[vertex])
+                            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                        witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                        break;
+                    }
+                }
+            }
+            pulls.push(decision);
+        } else {
+            while head < frontier_end {
+                let vertex = queue[head];
+                head += 1;
+                let neighbors = graph
+                    .neighbors_indices(vertex)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                for run in neighbors.chunks(FNX_METER_RUN) {
+                    checkpoint
+                        .units(run.len())
+                        .map_err(FnxExecutionError::Cancelled)?;
+                    for &neighbor in run {
+                        increment(&mut witness.edges_scanned)?;
+                        if distances[neighbor].is_none() {
+                            distances[neighbor] = Some(next_depth);
+                            queue.push(neighbor);
+                            unseen_in = unseen_in
+                                .checked_sub(in_offsets[neighbor + 1] - in_offsets[neighbor])
+                                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                            witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let workspace_bytes = distances
+        .capacity()
+        .checked_mul(std::mem::size_of::<Option<usize>>())
+        .and_then(|bytes| {
+            queue
+                .capacity()
+                .checked_mul(std::mem::size_of::<usize>())
+                .and_then(|queue| bytes.checked_add(queue))
+        })
+        .and_then(|bytes| {
+            pulls
+                .capacity()
+                .checked_mul(std::mem::size_of::<BfsPullDecision>())
+                .and_then(|decisions| bytes.checked_add(decisions))
+        })
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    let bfs_decision_card = if pulls.is_empty() {
+        None
+    } else {
+        witness.algorithm = "single_source_shortest_path_length_bounded_pull_v1".to_owned();
+        Some(BfsDecisionCard {
+            policy_version: 1,
+            fallback: "top_down",
+            dwell_levels: 1,
+            pull_cost_multiplier: 2,
+            pulls,
+        })
+    };
+    Ok(TraversalOutput {
+        output: KernelOutput {
+            values: KernelValues::Distances(distances),
+            row_count: queue.len(),
+            witness,
+        },
+        bfs_decision_card,
+        workspace_bytes: Some(workspace_bytes),
+    })
 }
 
 fn bfs<C>(
@@ -688,6 +948,354 @@ mod tests {
         .unwrap()
     }
 
+    fn distance_values(output: &KernelOutput) -> &[Option<usize>] {
+        let KernelValues::Distances(values) = &output.values else {
+            panic!("BFS produces distances");
+        };
+        values
+    }
+
+    /// Independent all-pairs min-plus oracle built from the raw input, not
+    /// either projected CSR face or the optimized frontier representation.
+    fn distance_oracle(
+        n: usize,
+        edges: &[(usize, usize)],
+        direction: Directedness,
+        source: usize,
+        cutoff: Option<usize>,
+    ) -> Vec<Option<usize>> {
+        let mut paths = vec![usize::MAX; n * n];
+        for vertex in 0..n {
+            paths[vertex * n + vertex] = 0;
+        }
+        for &(source, target) in edges {
+            if source == target {
+                continue;
+            }
+            if direction != Directedness::Reversed {
+                paths[source * n + target] = 1;
+            }
+            if direction != Directedness::Directed {
+                paths[target * n + source] = 1;
+            }
+        }
+        for via in 0..n {
+            for from in 0..n {
+                for to in 0..n {
+                    if let Some(distance) = paths[from * n + via].checked_add(paths[via * n + to]) {
+                        paths[from * n + to] = paths[from * n + to].min(distance);
+                    }
+                }
+            }
+        }
+        paths[source * n..(source + 1) * n]
+            .iter()
+            .map(|&distance| {
+                (distance != usize::MAX && cutoff.is_none_or(|cutoff| distance <= cutoff))
+                    .then_some(distance)
+            })
+            .collect()
+    }
+
+    fn dense_bfs_fixture(width: usize) -> (usize, Vec<(usize, usize)>) {
+        let mut edges = Vec::new();
+        for vertex in 1..=width {
+            edges.push((0, vertex));
+            for target in 1..=width {
+                edges.push((vertex, target));
+            }
+            edges.push((vertex, width + 1));
+        }
+        // A tail requires another level after the pull; newly found vertices
+        // must never act as members of the current frontier. The final two
+        // vertices are unreachable, including an isolated self-loop.
+        edges.extend([
+            (width + 1, width + 2),
+            (width + 2, width + 2),
+            (width + 4, width + 4),
+            (0, 1),
+        ]);
+        (width + 5, edges)
+    }
+
+    fn layered_bfs_fixture(first: usize, second: usize) -> (usize, Vec<(usize, usize)>) {
+        let tail = first + second + 1;
+        let mut edges = Vec::new();
+        for vertex in 1..=first {
+            edges.push((0, vertex));
+            for target in 1..=first {
+                edges.push((vertex, target));
+            }
+        }
+        for vertex in first + 1..tail {
+            edges.push((1, vertex));
+            for target in first + 1..tail {
+                edges.push((vertex, target));
+            }
+        }
+        edges.extend([(first + 1, tail), (tail, tail), (tail + 1, tail + 1)]);
+        (tail + 2, edges)
+    }
+
+    #[test]
+    fn bounded_pull_matches_independent_distances_and_keeps_linear_work() {
+        let (n, edges) = dense_bfs_fixture(FNX_METER_RUN + 3);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(n, &edges, direction);
+            let source = if direction == Directedness::Reversed {
+                n - 3
+            } else {
+                0
+            };
+            let arcs = *view.outgoing_offsets().last().unwrap();
+            for cutoff in [None, Some(0), Some(1), Some(2), Some(3), Some(usize::MAX)] {
+                let expected = distance_oracle(n, &edges, direction, source, cutoff);
+                let mut meter = Meter::default();
+                let actual = bounded_bfs(&view, source, cutoff, n, &mut meter).unwrap();
+                assert_eq!(distance_values(&actual.output), expected);
+                assert_eq!(actual.output.row_count, expected.iter().flatten().count());
+                assert_eq!(
+                    meter.units,
+                    n + actual.output.witness.nodes_touched + actual.output.witness.edges_scanned
+                );
+                assert!(
+                    actual.output.witness.nodes_touched + actual.output.witness.edges_scanned
+                        <= n + arcs
+                );
+                assert!(actual.output.witness.queue_peak <= n);
+                if cutoff.is_none() {
+                    let card = actual.bfs_decision_card.as_ref().expect("dense pull");
+                    assert_eq!(card.policy_version, 1);
+                    assert_eq!(card.fallback, "top_down");
+                    assert_eq!(card.dwell_levels, 1);
+                    assert_eq!(card.pull_cost_multiplier, 2);
+                    assert!(!card.pulls.is_empty());
+                    let mut previous_depth = None;
+                    for pull in &card.pulls {
+                        assert!(previous_depth.is_none_or(|previous| previous < pull.depth));
+                        previous_depth = Some(pull.depth);
+                        assert_eq!(pull.vertices, n);
+                        assert_eq!(pull.candidate_visits, n);
+                        assert!(pull.incoming_visits <= pull.unseen_incoming_arcs);
+                        assert!(pull.frontier_arcs / 2 > n + pull.unseen_incoming_arcs);
+                        let avoided =
+                            pull.frontier_arcs - pull.candidate_visits - pull.incoming_visits;
+                        assert!((pull.benefit_lower..=pull.benefit_upper).contains(&avoided));
+                    }
+                    assert!(actual.output.witness.edges_scanned < arcs / 4);
+                    let vector_bytes =
+                        n * (std::mem::size_of::<Option<usize>>() + std::mem::size_of::<usize>());
+                    assert_eq!(
+                        actual.workspace_bytes.unwrap(),
+                        vector_bytes
+                            + card.pulls.capacity() * std::mem::size_of::<BfsPullDecision>()
+                    );
+                    assert_eq!(
+                        actual.output.witness.algorithm,
+                        "single_source_shortest_path_length_bounded_pull_v1"
+                    );
+                }
+            }
+            // Full-width VIds still flow through the production CALL output;
+            // only temporary traversal positions use usize ordinals.
+            let call = crate::FnxCallSpec::single_source_shortest_path_length(
+                view.vertex_id(source).unwrap(),
+                None,
+            );
+            let limits = crate::FnxExecutionLimits {
+                max_iterations: 0,
+                max_result_rows: n,
+                max_estimated_work: n + arcs,
+            };
+            let result = call.execute(&view, limits, || Ok::<(), usize>(())).unwrap();
+            assert!(
+                result
+                    .rows
+                    .windows(2)
+                    .all(|rows| match (&rows[0][0], &rows[1][0]) {
+                        (crate::FnxValue::Vertex(left), crate::FnxValue::Vertex(right)) =>
+                            left < right,
+                        _ => false,
+                    })
+            );
+            assert!(result.rows.iter().all(|row| match row[0] {
+                crate::FnxValue::Vertex(vertex) => vertex.0 & u64::MAX as u128 == 17,
+                _ => false,
+            }));
+            assert_eq!(result.certificate.estimated_work, n + arcs);
+            assert!(matches!(
+                call.execute(
+                    &view,
+                    crate::FnxExecutionLimits {
+                        max_estimated_work: n + arcs - 1,
+                        ..limits
+                    },
+                    || Ok::<(), usize>(())
+                ),
+                Err(FnxExecutionError::LimitExceeded {
+                    resource: "estimated work",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn bounded_pull_preserves_every_cancellation_ordinal() {
+        let (n, edges) = dense_bfs_fixture(FNX_METER_RUN + 1);
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let view = graph(n, &edges, direction);
+            let source = if direction == Directedness::Reversed {
+                n - 3
+            } else {
+                0
+            };
+            for cutoff in [None, Some(1), Some(2)] {
+                let mut total = Meter::default();
+                let complete = bounded_bfs(&view, source, cutoff, n, &mut total).unwrap();
+                for stop in 1..=total.units + 1 {
+                    let mut scalar = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let expected = bounded_bfs(&view, source, cutoff, n, &mut || scalar.unit());
+                    let mut bulk = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let actual = bounded_bfs(&view, source, cutoff, n, &mut bulk);
+                    assert_eq!(scalar.units, bulk.units);
+                    assert_eq!(scalar.stopped, bulk.stopped);
+                    if stop <= total.units {
+                        assert!(
+                            matches!(expected, Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                        );
+                        assert!(
+                            matches!(actual, Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                        );
+                    } else {
+                        let expected = expected.unwrap();
+                        let actual = actual.unwrap();
+                        assert_eq!(actual.bfs_decision_card, expected.bfs_decision_card);
+                        assert_eq!(actual.bfs_decision_card, complete.bfs_decision_card);
+                        same(Ok(actual.output), Ok(expected.output));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_pull_levels_keep_new_discoveries_out_of_the_current_frontier() {
+        // The first clique pays for pulling into the second, whose internal
+        // arcs in turn pay for a second pull into the tail. Both decisions
+        // must use their own depth and remaining incoming volume. Incoming
+        // rows also contain newly discovered vertices from the same level.
+        let first = 48;
+        let second = 21;
+        let tail = first + second + 1;
+        let (n, edges) = layered_bfs_fixture(first, second);
+        let view = graph(n, &edges, Directedness::Directed);
+        let mut meter = Meter::default();
+        let actual = bounded_bfs(&view, 0, None, n, &mut meter).unwrap();
+        assert_eq!(
+            distance_values(&actual.output),
+            distance_oracle(n, &edges, Directedness::Directed, 0, None)
+        );
+        let card = actual.bfs_decision_card.unwrap();
+        assert_eq!(card.pulls.len(), 2);
+        assert_eq!(card.pulls[0].depth, 1);
+        assert_eq!(card.pulls[0].frontier_vertices, first);
+        assert_eq!(card.pulls[1].depth, 2);
+        assert_eq!(card.pulls[1].frontier_vertices, second);
+        assert_eq!(card.pulls[1].unseen_incoming_arcs, 3);
+        assert_eq!(distance_values(&actual.output)[tail], Some(3));
+        assert_eq!(distance_values(&actual.output)[tail + 1], None);
+        assert_eq!(actual.output.witness.nodes_touched, n - 1 + 2 * n);
+        assert_eq!(
+            meter.units,
+            n + actual.output.witness.nodes_touched + actual.output.witness.edges_scanned
+        );
+        assert!(
+            actual.output.witness.nodes_touched + actual.output.witness.edges_scanned
+                <= n + view.outgoing_offsets().last().unwrap()
+        );
+    }
+
+    #[test]
+    fn tight_rows_keep_the_top_down_refusal_prefix_on_dense_graphs() {
+        let (n, edges) = dense_bfs_fixture(8);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(n, &edges, direction);
+            for source in [0, n - 3, n - 2] {
+                for cutoff in [None, Some(0), Some(1), Some(2)] {
+                    for row_limit in 0..n {
+                        let mut scalar = Meter::default();
+                        let expected =
+                            incumbent(&view, source, cutoff, row_limit, &mut || scalar.unit());
+                        let mut actual_meter = Meter::default();
+                        let actual =
+                            bounded_bfs(&view, source, cutoff, row_limit, &mut actual_meter).map(
+                                |result| {
+                                    assert!(result.bfs_decision_card.is_none());
+                                    result.output
+                                },
+                            );
+                        same(actual, expected);
+                        assert_eq!(actual_meter.units, scalar.units);
+                        for stop in 1..=scalar.units + 1 {
+                            let mut scalar = Meter {
+                                stop: Some(stop),
+                                ..Meter::default()
+                            };
+                            let expected =
+                                incumbent(&view, source, cutoff, row_limit, &mut || scalar.unit());
+                            let mut bulk = Meter {
+                                stop: Some(stop),
+                                ..Meter::default()
+                            };
+                            let actual = bounded_bfs(&view, source, cutoff, row_limit, &mut bulk)
+                                .map(|result| result.output);
+                            same(actual, expected);
+                            assert_eq!(bulk.units, scalar.units);
+                            assert_eq!(bulk.stopped, scalar.stopped);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_graphs_retain_the_original_kernel_and_workspace() {
+        let n = 2 * FNX_METER_RUN + 7;
+        for edges in [
+            Vec::new(),
+            (1..n).map(|vertex| (vertex - 1, vertex)).collect(),
+            (1..n).map(|vertex| (0, vertex)).collect(),
+        ] {
+            for direction in [Directedness::Directed, Directedness::Undirected] {
+                let view = graph(n, &edges, direction);
+                let mut old = Meter::default();
+                let expected = bfs(&view, 0, None, n, &mut old);
+                let mut new = Meter::default();
+                let actual = bounded_bfs(&view, 0, None, n, &mut new).unwrap();
+                assert!(actual.bfs_decision_card.is_none());
+                assert!(actual.workspace_bytes.is_none());
+                assert_eq!(new.units, old.units);
+                same(Ok(actual.output), expected);
+            }
+        }
+    }
+
     /// Exact scalar predecessor, retained only as a differential and paired
     /// measurement control. Production never selects this implementation.
     fn incumbent<C>(
@@ -1035,6 +1643,99 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Paired direction-switch comparison against the actual batched push
+    /// fallback, including allocation, metering, evidence and cleanup. Graph
+    /// projection, CALL admission, certificates and database I/O are excluded.
+    /// Sparse and cutoff cases expose fallback overhead alongside dense gains.
+    #[test]
+    #[ignore = "paired bounded-pull BFS measurement; run optimized with --nocapture"]
+    fn bounded_bfs_paired_push_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        #[derive(Default)]
+        struct Work(usize);
+        impl FnxMeter<usize> for Work {
+            fn poll(&mut self) -> Result<(), usize> {
+                Ok(())
+            }
+            fn unit(&mut self) -> Result<(), usize> {
+                self.units(1)
+            }
+            fn units(&mut self, count: usize) -> Result<(), usize> {
+                self.0 = black_box(self.0 + count);
+                Ok(())
+            }
+        }
+        fn measure(view: &SnapshotGraphView, cutoff: Option<usize>, adaptive: bool) -> u128 {
+            let start = Instant::now();
+            for _ in 0..64 {
+                let mut work = Work::default();
+                let output = if adaptive {
+                    black_box(
+                        bounded_bfs(black_box(view), 0, cutoff, view.node_count(), &mut work)
+                            .unwrap(),
+                    )
+                    .output
+                } else {
+                    bfs(black_box(view), 0, cutoff, view.node_count(), &mut work).unwrap()
+                };
+                black_box((output, work.0));
+            }
+            start.elapsed().as_nanos()
+        }
+        for shape in ["road", "hub", "dense", "dense_cutoff", "layered"] {
+            let (n, edges, cutoff) = match shape {
+                "road" => (8193, (1..8193).map(|v| (v - 1, v)).collect(), None),
+                "hub" => (
+                    8193,
+                    (1..8193).flat_map(|v| [(0, v), (v, 0)]).collect(),
+                    None,
+                ),
+                "dense" | "dense_cutoff" => {
+                    let (n, edges) = dense_bfs_fixture(512);
+                    (n, edges, (shape == "dense_cutoff").then_some(1))
+                }
+                "layered" => {
+                    let (n, edges) = layered_bfs_fixture(256, 96);
+                    (n, edges, None)
+                }
+                _ => unreachable!(),
+            };
+            let view = graph(n, &edges, Directedness::Directed);
+            let mut prior_work = Work::default();
+            let prior = bfs(&view, 0, cutoff, n, &mut prior_work).unwrap();
+            let mut current_work = Work::default();
+            let current = bounded_bfs(&view, 0, cutoff, n, &mut current_work).unwrap();
+            assert_eq!(distance_values(&prior), distance_values(&current.output));
+            let arcs = *view.outgoing_offsets().last().unwrap();
+            assert!(
+                current.output.witness.nodes_touched + current.output.witness.edges_scanned
+                    <= n + arcs
+            );
+            let pulls = current
+                .bfs_decision_card
+                .as_ref()
+                .map_or(0, |card| card.pulls.len());
+            assert_eq!(pulls > 0, shape == "dense" || shape == "layered");
+            let (mut prior_ns, mut current_ns) = (Vec::new(), Vec::new());
+            for sample in 0..15 {
+                let (prior, current) = if sample % 2 == 0 {
+                    (measure(&view, cutoff, false), measure(&view, cutoff, true))
+                } else {
+                    let current = measure(&view, cutoff, true);
+                    (measure(&view, cutoff, false), current)
+                };
+                prior_ns.push(prior);
+                current_ns.push(current);
+            }
+            println!(
+                "{{\"scope\":\"decoded_bfs_kernel_including_allocation_metering_evidence_cleanup\",\"shape\":\"{shape}\",\"vertices\":{n},\"arcs\":{arcs},\"pulls\":{pulls},\"repetitions_per_sample\":64,\"incumbent_ns\":{prior_ns:?},\"bounded_ns\":{current_ns:?},\"incumbent_units\":{},\"bounded_units\":{},\"empirical_gate_activated\":false}}",
+                prior_work.0, current_work.0
+            );
         }
     }
 

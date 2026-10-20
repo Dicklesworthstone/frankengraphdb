@@ -2,7 +2,7 @@
 //! constructed, including for a hub row. The decoded implementation remains
 //! an independent differential oracle, not a hidden fallback.
 
-use crate::execute::{KernelOutput, KernelValues};
+use crate::execute::{KernelOutput, KernelValues, hash_bfs_decision_card, hash_result_value};
 use crate::sealed_control::Control;
 use crate::{
     AdapterPath, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
@@ -875,24 +875,7 @@ impl EncodedRows {
                 (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
-            match value {
-                FnxValue::Vertex(vertex) => {
-                    result_hash.update(&[0]);
-                    result_hash.update(&vertex.0.to_le_bytes());
-                }
-                FnxValue::Score(score) => {
-                    result_hash.update(&[1]);
-                    result_hash.update(&score.to_bits().to_le_bytes());
-                }
-                FnxValue::Integer(value) => {
-                    result_hash.update(&[2]);
-                    result_hash.update(&value.to_le_bytes());
-                }
-                FnxValue::Float(value) => {
-                    result_hash.update(&[3]);
-                    result_hash.update(&value.to_bits().to_le_bytes());
-                }
-            }
+            hash_result_value(result_hash, value);
             row.push(value);
         }
         self.rows.push(row);
@@ -945,7 +928,7 @@ fn finish_encoded(
             .push_str("; plus O(p * H * log(1+H)) incoming locator work, p = graph passes");
     }
     let mut hash = Hasher::new();
-    hash.update(b"fgdb:prism:call-certificate:v3");
+    hash.update(b"fgdb:prism:call-certificate:v4");
     hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
     hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
     hash_text(&mut hash, kernel);
@@ -969,6 +952,7 @@ fn finish_encoded(
     }
     hash_text(&mut hash, &witness.algorithm);
     hash_text(&mut hash, &witness.complexity_claim);
+    hash_bfs_decision_card(&mut hash, None, checkpoint)?;
     checkpoint()?;
     Ok(FnxResult {
         columns,
@@ -989,6 +973,7 @@ fn finish_encoded(
             input_edges: graph.input_edge_count(),
             estimated_work,
             kernel_workspace_bytes: workspace,
+            bfs_decision_card: None,
             witness,
             digest: hash.finalize(),
         },
@@ -1004,6 +989,7 @@ fn source_digest() -> Digest {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
         for source in [
+            include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
             include_str!("sealed_core.rs"),
