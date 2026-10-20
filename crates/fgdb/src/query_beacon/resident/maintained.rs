@@ -303,10 +303,7 @@ impl Registry {
         options: &Options,
         query: GraphHybridQuery<'_>,
     ) -> Option<PinnedIndex> {
-        if self.is_empty()
-            || query.is_graph_only()
-            || options.config_for_graph(query).is_err()
-        {
+        if self.is_empty() || query.is_graph_only() || options.config_for_graph(query).is_err() {
             return None;
         }
         let vector_mode = (query.retrieval.profile.vector_weight() != 0
@@ -314,13 +311,7 @@ impl Registry {
             .then_some(query.retrieval.vector_mode);
         let text_needed =
             query.retrieval.profile.text_weight() != 0 && query.retrieval.text_candidates > 0;
-        self.find_matching(
-            at,
-            options,
-            vector_mode,
-            text_needed,
-            query.graph_enabled(),
-        )
+        self.find_matching(at, options, vector_mode, text_needed, query.graph_enabled())
     }
 
     fn find_matching(

@@ -424,9 +424,7 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
         Err(EdgeAggregateBuildError::Scan(_))
     ));
     assert!(matches!(
-        EdgeAggregatePlan::compile(&prepare(
-            "MATCH (a)-[:R]->(b) RETURN COLLECT(b) AS values"
-        )),
+        EdgeAggregatePlan::compile(&prepare("MATCH (a)-[:R]->(b) RETURN COLLECT(b) AS values")),
         Err(EdgeAggregateBuildError::Scan(_))
     ));
 }

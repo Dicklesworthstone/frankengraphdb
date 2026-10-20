@@ -600,8 +600,14 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
 
         // Before registration, Database::query must scan all 64 vertices and fails `tight`.
         assert!(
-            db.query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
-                .is_err()
+            db.query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                tight
+            )
+            .is_err()
         );
 
         let handle = db
@@ -612,8 +618,14 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
         // while the un-cached EmbeddedReadView still requires the full scan and fails `tight`.
         let view = db.read_session().unwrap();
         assert!(
-            view.query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
-                .is_err()
+            view.query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                tight
+            )
+            .is_err()
         );
         let expected_two_lane = view
             .query(
@@ -625,7 +637,13 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
             )
             .unwrap();
         let actual_two_lane = db
-            .query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+            .query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                tight,
+            )
             .unwrap();
         assert_eq!(actual_two_lane, expected_two_lane);
 
@@ -666,7 +684,13 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
             )
             .unwrap();
         let actual_after = db
-            .query(&cx, statement_two_lane, &GqlParameters::new(), symbols, tight)
+            .query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                tight,
+            )
             .unwrap();
         assert_eq!(actual_after, expected_after);
         assert_ne!(actual_after, actual_two_lane);

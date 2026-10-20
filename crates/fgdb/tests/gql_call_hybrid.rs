@@ -351,9 +351,7 @@ fn every_lane_combination_equals_the_library_search() {
                 GqlParameters::new()
             };
             let text = format!("CALL hybrid.search({arguments}) {OUTPUTS}");
-            let (columns, raw) = rows(
-                db.query(cx, &text, &parameters, symbols, policy()).unwrap(),
-            );
+            let (columns, raw) = rows(db.query(cx, &text, &parameters, symbols, policy()).unwrap());
             assert_eq!(raw, want_ranked, "rank order without ORDER BY: {arguments}");
             let (columns, actual) = ordered((columns, raw));
             assert_eq!(

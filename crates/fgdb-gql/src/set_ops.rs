@@ -667,10 +667,9 @@ impl PreparedGraphSet {
             // Procedure rows are canonically sorted on arrival, like a pattern,
             // unless the procedure itself defines a ranked output order (`hybrid.*`).
             SetNode::ProcedureCall(call) => call.preserves_row_order(),
-            SetNode::Pattern(_)
-            | SetNode::Owned
-            | SetNode::Aggregate(_)
-            | SetNode::Join { .. } => false,
+            SetNode::Pattern(_) | SetNode::Owned | SetNode::Aggregate(_) | SetNode::Join { .. } => {
+                false
+            }
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
