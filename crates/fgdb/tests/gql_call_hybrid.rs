@@ -627,8 +627,14 @@ fn malformed_calls_refuse_with_typed_reasons() {
             query("CALL hybrid.search(text => 'x', text_property => 2) YIELD node RETURN node")
                 .is_err()
         );
-        // Prism keeps its positional signatures.
-        let prism = query("CALL fnx.pagerank(alpha => 0.85) YIELD node, score RETURN node, score")
+        // Prism binds its registered parameter names since b5919753: a named
+        // alpha is the positional one, and an unknown name is still a typed
+        // Bind refusal.
+        assert_eq!(
+            query("CALL fnx.pagerank(alpha => 0.85) YIELD node, score RETURN node, score").unwrap(),
+            query("CALL fnx.pagerank(0.85) YIELD node, score RETURN node, score").unwrap()
+        );
+        let prism = query("CALL fnx.pagerank(beta => 0.85) YIELD node, score RETURN node, score")
             .unwrap_err();
         assert!(
             matches!(

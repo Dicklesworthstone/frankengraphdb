@@ -401,7 +401,8 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
             assert!(
                 error
                     .to_string()
-                    .contains("demand graph access requires a graph-only read")
+                    .contains("demand graph access requires a graph-only read"),
+                "{error}"
             );
             let error = txn
                 .query(
@@ -416,7 +417,8 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
             assert!(
                 error
                     .to_string()
-                    .contains("demand graph access requires a graph-only read")
+                    .contains("demand graph access requires a graph-only read"),
+                "{error}"
             );
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), basis);

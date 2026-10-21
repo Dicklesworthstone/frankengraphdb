@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 14] = [
+const CALLS: [(&str, &str, &str, bool); 16] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -78,6 +78,11 @@ const CALLS: [(&str, &str, &str, bool); 14] = [
     ("betweenness_centrality", "", "score", true),
     ("eigenvector_centrality", "", "score", true),
     ("core_number", "", "core", true),
+    // Graphalytics label propagation needs its positional max_iter (fgdb-prism
+    // 2d9273c9); Any-kind procedures read the default directed projection, and
+    // the fixture has no reciprocal pair, so in+out incidences equal neighbors.
+    ("cdlp", "3", "component", false),
+    ("directed_clustering_coefficient", "", "score", false),
 ];
 
 /// The whole graph spelled out field by field, independent of
