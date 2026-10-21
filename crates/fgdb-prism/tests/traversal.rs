@@ -119,6 +119,178 @@ impl FnxMeter<usize> for &mut ComponentMeter {
 }
 
 #[test]
+fn component_pull_public_calls_keep_labels_limits_and_every_refusal() {
+    let n = 35;
+    let vertices: Vec<_> = (0..n).map(|i| VId((i as u128) << 96 | 23)).collect();
+    let mut pairs = Vec::new();
+    for a in 2..31 {
+        for b in 2..31 {
+            if a != b {
+                pairs.push((a, b));
+            }
+        }
+    }
+    pairs.extend([(31, 30), (30, 32), (33, 34), (2, 2), (31, 30)]);
+    let edges: Vec<_> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, &(a, b))| ProjectionEdge {
+            eid: EId((i as u128) << 80 | 37),
+            source: vertices[a],
+            target: vertices[b],
+            weight: -3.0,
+        })
+        .collect();
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(&vertices, &edges, direction);
+        let call = if direction == Directedness::Undirected {
+            FnxCallSpec::connected_components()
+        } else {
+            FnxCallSpec::weakly_connected_components()
+        };
+        let mut complete = ComponentMeter::default();
+        let result = call.execute(&view, limits(), &mut complete).unwrap();
+        let expected: BTreeMap<_, _> = vertices
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                (
+                    id,
+                    vertices[if i < 2 {
+                        i
+                    } else if i < 33 {
+                        2
+                    } else {
+                        33
+                    }],
+                )
+            })
+            .collect();
+        assert_eq!(labels(result.clone()), expected);
+        let certificate = &result.certificate;
+        let card = certificate
+            .component_decision_card
+            .as_ref()
+            .expect("dense pull");
+        assert!(certificate.bfs_decision_card.is_none());
+        assert_eq!(card.fallback, "component_bfs");
+        assert!(card.pulls.iter().any(|pull| pull.root == 2));
+        let witness = &certificate.witness;
+        assert!(witness.nodes_touched + witness.edges_scanned <= certificate.estimated_work);
+        assert_eq!(
+            complete.observed,
+            4 * n + witness.nodes_touched + witness.edges_scanned + 3 + card.pulls.len()
+        );
+        assert!(
+            certificate.kernel_workspace_bytes
+                >= 2 * n * size_of::<usize>()
+                    + card.pulls.capacity() * size_of::<ComponentPullDecision>()
+        );
+
+        // Reconstruct the entire public certificate independently of either
+        // streaming card helper, including the absent BFS and present CC tags.
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u128).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
+        let mut bytes = b"fgdb:prism:call-certificate:v5".to_vec();
+        bytes.extend_from_slice(&certificate.registry_version.to_le_bytes());
+        bytes.extend_from_slice(certificate.implementation_revision.as_bytes());
+        text(&mut bytes, certificate.execution_kernel);
+        bytes.extend_from_slice(&certificate.kernel_source_digest.0);
+        text(&mut bytes, certificate.numeric_profile);
+        bytes.extend_from_slice(&certificate.projection_digest.0);
+        bytes.extend_from_slice(&certificate.call_digest.0);
+        bytes.extend_from_slice(&certificate.result_digest.0);
+        text(&mut bytes, certificate.adapter.as_str());
+        for number in [
+            certificate.vertices,
+            certificate.edges,
+            certificate.input_edges,
+            certificate.estimated_work,
+            certificate.kernel_workspace_bytes,
+            witness.nodes_touched,
+            witness.edges_scanned,
+            witness.queue_peak,
+        ] {
+            bytes.extend_from_slice(&(number as u128).to_le_bytes());
+        }
+        text(&mut bytes, &witness.algorithm);
+        text(&mut bytes, &witness.complexity_claim);
+        bytes.extend_from_slice(&[0, 1]);
+        bytes.extend_from_slice(&card.policy_version.to_le_bytes());
+        text(&mut bytes, card.fallback);
+        for number in [
+            card.dwell_frontiers,
+            card.pull_cost_multiplier,
+            card.pulls.len(),
+        ] {
+            bytes.extend_from_slice(&(number as u128).to_le_bytes());
+        }
+        for pull in &card.pulls {
+            for number in [
+                pull.root,
+                pull.frontier_vertices,
+                pull.frontier_incidences,
+                pull.unseen_incidences,
+                pull.vertices,
+                pull.benefit_lower,
+                pull.benefit_upper,
+                pull.candidate_visits,
+                pull.incidence_visits,
+            ] {
+                bytes.extend_from_slice(&(number as u128).to_le_bytes());
+            }
+        }
+        assert_eq!(certificate.digest, fgdb_crypto::hash(&bytes));
+        let exact = FnxExecutionLimits {
+            max_result_rows: n,
+            max_estimated_work: certificate.estimated_work,
+            ..limits()
+        };
+        assert_eq!(
+            call.execute(&view, exact, || Ok::<(), usize>(())).unwrap(),
+            result
+        );
+        for limited in [
+            FnxExecutionLimits {
+                max_result_rows: n - 1,
+                ..exact
+            },
+            FnxExecutionLimits {
+                max_estimated_work: exact.max_estimated_work - 1,
+                ..exact
+            },
+        ] {
+            assert!(matches!(
+                call.execute(&view, limited, || Ok::<(), usize>(())),
+                Err(FnxExecutionError::LimitExceeded { .. })
+            ));
+        }
+        for stop in 1..=complete.observed {
+            let mut bulk = ComponentMeter {
+                stop: Some(stop),
+                ..ComponentMeter::default()
+            };
+            assert!(
+                matches!(call.execute(&view, exact, &mut bulk), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+            );
+            assert_eq!(bulk.observed, stop);
+            let mut observed = 0;
+            assert!(matches!(call.execute(&view, exact, || {
+                observed += 1;
+                if observed == stop { Err(stop) } else { Ok(()) }
+            }), Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert_eq!(observed, stop);
+        }
+    }
+}
+
+#[test]
 fn bfs_runs_preserve_distances_witnesses_and_every_work_refusal() {
     // A hub followed by another level exercises full runs, remainders, loops,
     // duplicate incidences, and a wide frontier whose rows mostly revisit

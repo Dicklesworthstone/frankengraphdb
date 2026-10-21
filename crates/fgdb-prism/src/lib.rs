@@ -62,7 +62,9 @@ pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
 pub use shortest_path::{
     DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,
 };
-pub use traversal::{BfsDecisionCard, BfsPullDecision};
+pub use traversal::{
+    BfsDecisionCard, BfsPullDecision, ComponentDecisionCard, ComponentPullDecision,
+};
 
 pub use fnx_algorithms::GraphView;
 pub use projection::{

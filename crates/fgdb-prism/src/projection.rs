@@ -205,6 +205,11 @@ struct Projection {
     // visit ordinal preserves Dijkstra's cancellation/error precedence while
     // avoiding another immutable weight scan on every source query.
     first_negative_weight_visit: Option<usize>,
+    // Exact immutable maxima, derived while degree buffers still contain
+    // counts. Weak traversal inspects both faces, including a shared
+    // undirected face twice; no per-CALL degree scan is needed for its bound.
+    max_out_degree: usize,
+    max_weak_degree: usize,
     edges: usize,
     input_edges: usize,
     workspace_bytes: usize,
@@ -705,8 +710,13 @@ impl SnapshotGraphView {
         let out_len = *out_offsets.last().expect("initial zero");
         debug_assert_eq!(out_len, arcs);
         let mut out_next = out_counts;
-        for (next, &end) in out_next.iter_mut().zip(&out_offsets[1..]) {
+        let mut max_out_degree = 0;
+        let mut max_weak_degree = 0;
+        for (vertex, (next, &end)) in out_next.iter_mut().zip(&out_offsets[1..]).enumerate() {
             poll(&mut checkpoint)?;
+            max_out_degree = max_out_degree.max(*next);
+            let incoming = if directed { in_counts[vertex] } else { *next };
+            max_weak_degree = max_weak_degree.max(add(*next, incoming)?);
             *next = end;
         }
         let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
@@ -793,6 +803,8 @@ impl SnapshotGraphView {
             incoming,
             weights,
             first_negative_weight_visit,
+            max_out_degree,
+            max_weak_degree,
             edges: kept,
             input_edges: e,
             workspace_bytes: bytes,
@@ -825,6 +837,13 @@ impl SnapshotGraphView {
     }
     pub(crate) fn first_negative_weight_visit(&self) -> Option<usize> {
         self.0.first_negative_weight_visit
+    }
+    pub(crate) fn component_degree_bound(&self, weak: bool) -> usize {
+        if weak {
+            self.0.max_weak_degree
+        } else {
+            self.0.max_out_degree
+        }
     }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes

@@ -539,6 +539,14 @@ fn database_sample(
                     .to_string(),
             ),
             ("correctness", "pending-live-GAPBS-comparison".to_owned()),
+            (
+                "component_pull_frontiers",
+                certificate
+                    .component_decision_card
+                    .as_ref()
+                    .map_or(0, |card| card.pulls.len())
+                    .to_string(),
+            ),
         ],
     )?;
     if let Some(card) = &certificate.bfs_decision_card {
@@ -567,6 +575,33 @@ fn database_sample(
                     ("benefit_upper", pull.benefit_upper.to_string()),
                     ("candidate_visits", pull.candidate_visits.to_string()),
                     ("incoming_visits", pull.incoming_visits.to_string()),
+                ],
+            )?;
+        }
+    }
+    if let Some(card) = &certificate.component_decision_card {
+        for pull in &card.pulls {
+            emit(
+                log,
+                "component_pull_decision",
+                &[
+                    ("sample", prefix.to_owned()),
+                    ("policy_version", card.policy_version.to_string()),
+                    ("fallback", card.fallback.to_owned()),
+                    ("dwell_frontiers", card.dwell_frontiers.to_string()),
+                    (
+                        "pull_cost_multiplier",
+                        card.pull_cost_multiplier.to_string(),
+                    ),
+                    ("root", pull.root.to_string()),
+                    ("frontier_vertices", pull.frontier_vertices.to_string()),
+                    ("frontier_incidences", pull.frontier_incidences.to_string()),
+                    ("unseen_incidences", pull.unseen_incidences.to_string()),
+                    ("vertices", pull.vertices.to_string()),
+                    ("benefit_lower", pull.benefit_lower.to_string()),
+                    ("benefit_upper", pull.benefit_upper.to_string()),
+                    ("candidate_visits", pull.candidate_visits.to_string()),
+                    ("incidence_visits", pull.incidence_visits.to_string()),
                 ],
             )?;
         }
@@ -998,8 +1033,25 @@ int main(int argc, char** argv) {
     pvector<NodeID> result = algorithm == "bfs" ? DOBFS(graph, source) : Afforest(graph);
     const uint64_t kernel_ns = ns(start);
     if (argc == 7) {
-      if (algorithm != "bfs" || std::string(argv[6]) != "corrupt") throw std::runtime_error("invalid negative control");
-      result[source] = -1;
+      if (std::string(argv[6]) != "corrupt") throw std::runtime_error("invalid negative control");
+      if (algorithm == "bfs") {
+        result[source] = -1;
+      } else {
+        bool corrupted = false;
+        for (NodeID u = 0; u < population && !corrupted; ++u) {
+          for (NodeID v : graph.out_neigh(u)) {
+            if (u == v) continue;
+            result[u] = population;
+            corrupted = true;
+            break;
+          }
+        }
+        if (!corrupted && population > 1) {
+          std::fill(result.begin(), result.end(), 0);
+        } else if (!corrupted) {
+          throw std::runtime_error("negative control needs an edge or two vertices");
+        }
+      }
     }
     start = Clock::now();
     bool verified = algorithm == "bfs" ? BFSVerifier(graph, source, result) : CCVerifier(graph, result);

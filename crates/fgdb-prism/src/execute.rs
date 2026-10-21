@@ -4,9 +4,9 @@
 //! executed the computation.
 
 use crate::{
-    AdapterPath, BfsDecisionCard, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION,
-    FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView, SnapshotBinding,
-    SnapshotGraphView,
+    AdapterPath, BfsDecisionCard, ComponentDecisionCard, FNX_IMPLEMENTATION_REVISION,
+    FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView,
+    SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
@@ -207,13 +207,16 @@ pub struct FnxCertificate {
     pub estimated_work: usize,
     /// Peak vector backing bytes for the kernel, excluding the existing
     /// projection, output rows and allocator overhead. Includes temporary
-    /// kernel indexes, normalized weights and BFS decision evidence; PageRank
-    /// and adaptive BFS record their reserved capacities at the allocation peak.
+    /// kernel indexes, normalized weights and traversal decision evidence;
+    /// adaptive traversals record reserved capacities at the allocation peak.
     pub kernel_workspace_bytes: usize,
     /// Replayable physical direction choices when decoded BFS completes a
     /// pull level. Absent when no pull was executed, including other kernels
     /// and compressed-row execution.
     pub bfs_decision_card: Option<BfsDecisionCard>,
+    /// Replayable physical choices when decoded CC/WCC completes a pull.
+    /// Absent for ordinary component BFS and compressed-row execution.
+    pub component_decision_card: Option<ComponentDecisionCard>,
     /// The foundation schema, populated from actual completed kernel passes.
     /// Admission, projection and result-conversion work are not loop counters.
     pub witness: ComplexityWitness,
@@ -1057,6 +1060,7 @@ impl FnxCallSpec {
             }
         };
         let mut bfs_decision_card = None;
+        let mut component_decision_card = None;
         let output = match algorithm {
             FnxAlgorithm::PageRank(options) => {
                 let (scores, witness, workspace_bytes) =
@@ -1123,6 +1127,7 @@ impl FnxCallSpec {
                     kernel_workspace_bytes = bytes;
                 }
                 bfs_decision_card = traversal.bfs_decision_card;
+                component_decision_card = traversal.component_decision_card;
                 traversal.output
             }
         };
@@ -1151,7 +1156,7 @@ impl FnxCallSpec {
         let witness = output.witness;
         let kernel_source_digest = kernel_source_digest();
         let mut hash = Hasher::new();
-        hash.update(b"fgdb:prism:call-certificate:v4");
+        hash.update(b"fgdb:prism:call-certificate:v5");
         hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
         hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
         hash_text(&mut hash, signature.execution_kernel);
@@ -1180,6 +1185,10 @@ impl FnxCallSpec {
             checkpoint.unit()
         })
         .map_err(FnxExecutionError::Cancelled)?;
+        hash_component_decision_card(&mut hash, component_decision_card.as_ref(), &mut || {
+            checkpoint.unit()
+        })
+        .map_err(FnxExecutionError::Cancelled)?;
         let certificate = FnxCertificate {
             registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
             implementation_revision: FNX_IMPLEMENTATION_REVISION,
@@ -1197,6 +1206,7 @@ impl FnxCallSpec {
             estimated_work,
             kernel_workspace_bytes,
             bfs_decision_card,
+            component_decision_card,
             witness,
             digest: hash.finalize(),
         };
@@ -1217,7 +1227,7 @@ fn hash_text(hash: &mut Hasher, text: &str) {
     hash.update(text.as_bytes());
 }
 
-/// The v4 certificate binds the optional policy and every ordered, completed
+/// The certificate binds the optional policy and every ordered, completed
 /// pull decision. Like row conversion, evidence encoding has a checkpoint for
 /// each bounded record; absent evidence adds no work units.
 pub(crate) fn hash_bfs_decision_card<C>(
@@ -1251,6 +1261,46 @@ pub(crate) fn hash_bfs_decision_card<C>(
             decision.benefit_upper,
             decision.candidate_visits,
             decision.incoming_visits,
+        ] {
+            hash.update(&(number as u128).to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// The v5 certificate appends connectivity choices after the BFS policy.
+/// Absence costs no logical units; each completed record has one checkpoint.
+pub(crate) fn hash_component_decision_card<C>(
+    hash: &mut Hasher,
+    card: Option<&ComponentDecisionCard>,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), C> {
+    let Some(card) = card else {
+        hash.update(&[0]);
+        return Ok(());
+    };
+    hash.update(&[1]);
+    hash.update(&card.policy_version.to_le_bytes());
+    hash_text(hash, card.fallback);
+    for number in [
+        card.dwell_frontiers,
+        card.pull_cost_multiplier,
+        card.pulls.len(),
+    ] {
+        hash.update(&(number as u128).to_le_bytes());
+    }
+    for decision in &card.pulls {
+        checkpoint()?;
+        for number in [
+            decision.root,
+            decision.frontier_vertices,
+            decision.frontier_incidences,
+            decision.unseen_incidences,
+            decision.vertices,
+            decision.benefit_lower,
+            decision.benefit_upper,
+            decision.candidate_visits,
+            decision.incidence_visits,
         ] {
             hash.update(&(number as u128).to_le_bytes());
         }
@@ -1448,6 +1498,59 @@ mod tests {
     }
 
     #[test]
+    fn component_decision_cards_bind_ordered_fields_and_checkpoint_each_record() {
+        let card = ComponentDecisionCard {
+            policy_version: 0x0102,
+            fallback: "component_bfs",
+            dwell_frontiers: 3,
+            pull_cost_multiplier: 4,
+            pulls: vec![crate::ComponentPullDecision {
+                root: 5,
+                frontier_vertices: 6,
+                frontier_incidences: 7,
+                unseen_incidences: 8,
+                vertices: 9,
+                benefit_lower: 10,
+                benefit_upper: 11,
+                candidate_visits: 12,
+                incidence_visits: usize::MAX,
+            }],
+        };
+        let mut transcript = vec![1, 2, 1];
+        transcript.extend_from_slice(&13_u128.to_le_bytes());
+        transcript.extend_from_slice(b"component_bfs");
+        for number in [3_u128, 4, 1] {
+            transcript.extend_from_slice(&number.to_le_bytes());
+        }
+        let header = transcript.len();
+        for number in 5_u128..=12 {
+            transcript.extend_from_slice(&number.to_le_bytes());
+        }
+        transcript.extend_from_slice(&(usize::MAX as u128).to_le_bytes());
+        for refuse in [false, true] {
+            let mut actual = Hasher::new();
+            let mut calls = 0;
+            let result = hash_component_decision_card(&mut actual, Some(&card), &mut || {
+                calls += 1;
+                if refuse { Err("stop") } else { Ok(()) }
+            });
+            let mut expected = Hasher::new();
+            expected.update(&transcript[..if refuse { header } else { transcript.len() }]);
+            assert_eq!(actual.finalize(), expected.finalize());
+            assert_eq!(result, if refuse { Err("stop") } else { Ok(()) });
+            assert_eq!(calls, 1);
+        }
+        let mut actual = Hasher::new();
+        hash_component_decision_card(&mut actual, None, &mut || -> Result<(), Infallible> {
+            panic!("absent evidence adds no checkpoint")
+        })
+        .unwrap();
+        let mut expected = Hasher::new();
+        expected.update(&[0]);
+        assert_eq!(actual.finalize(), expected.finalize());
+    }
+
+    #[test]
     fn public_bfs_certificates_bind_decisions_and_measured_evidence_workspace() {
         let n = 16;
         let vertices: Vec<_> = (0..n).map(|i| VId((1 << 113) + i as u128)).collect();
@@ -1546,9 +1649,11 @@ mod tests {
                 assert!(certificate.bfs_decision_card.is_none());
                 evidence.push(0);
             }
-            // Reconstruct the entire v4 envelope independently; this detects
+            assert!(certificate.component_decision_card.is_none());
+            evidence.push(0);
+            // Reconstruct the entire v5 envelope independently; this detects
             // dropped propagation or a card omitted from the public digest.
-            let mut transcript = b"fgdb:prism:call-certificate:v4".to_vec();
+            let mut transcript = b"fgdb:prism:call-certificate:v5".to_vec();
             transcript.extend_from_slice(&certificate.registry_version.to_le_bytes());
             transcript.extend_from_slice(certificate.implementation_revision.as_bytes());
             text(&mut transcript, certificate.execution_kernel);

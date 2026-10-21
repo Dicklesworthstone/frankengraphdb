@@ -40,9 +40,39 @@ pub struct BfsDecisionCard {
     pub pulls: Vec<BfsPullDecision>,
 }
 
+/// One completed connectivity pull. Incidences include both CSR faces for
+/// weak components and only the symmetric outgoing face for undirected CC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentPullDecision {
+    pub root: usize,
+    pub frontier_vertices: usize,
+    pub frontier_incidences: usize,
+    pub unseen_incidences: usize,
+    pub vertices: usize,
+    pub benefit_lower: usize,
+    pub benefit_upper: usize,
+    pub candidate_visits: usize,
+    pub incidence_visits: usize,
+}
+
+/// Answer-preserving physical connectivity choices. Version 1 uses pull only
+/// when `frontier_incidences / 2 > vertices + unseen_incidences`; all other
+/// frontiers retain the pinned component-BFS fallback. The immutable graph,
+/// ascending roots, and policy reconstruct every unrecorded push frontier.
+/// A choice lasts one frontier and requires no second graph or bitmap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentDecisionCard {
+    pub policy_version: u16,
+    pub fallback: &'static str,
+    pub dwell_frontiers: usize,
+    pub pull_cost_multiplier: usize,
+    pub pulls: Vec<ComponentPullDecision>,
+}
+
 pub(crate) struct TraversalOutput {
     pub output: KernelOutput,
     pub bfs_decision_card: Option<BfsDecisionCard>,
+    pub component_decision_card: Option<ComponentDecisionCard>,
     pub workspace_bytes: Option<usize>,
 }
 
@@ -51,6 +81,7 @@ impl TraversalOutput {
         Self {
             output,
             bfs_decision_card: None,
+            component_decision_card: None,
             workspace_bytes: None,
         }
     }
@@ -246,12 +277,8 @@ pub(crate) fn run<C>(
                 .ok_or(FnxExecutionError::UnknownSource(source))?;
             bounded_bfs(graph, source, cutoff, row_limit, checkpoint)
         }
-        FnxAlgorithm::ConnectedComponents => {
-            components(graph, false, checkpoint).map(TraversalOutput::without_bfs)
-        }
-        FnxAlgorithm::WeaklyConnectedComponents => {
-            components(graph, true, checkpoint).map(TraversalOutput::without_bfs)
-        }
+        FnxAlgorithm::ConnectedComponents => bounded_components(graph, false, checkpoint),
+        FnxAlgorithm::WeaklyConnectedComponents => bounded_components(graph, true, checkpoint),
         FnxAlgorithm::StronglyConnectedComponents => {
             strongly_connected(graph, checkpoint).map(TraversalOutput::without_bfs)
         }
@@ -291,6 +318,7 @@ fn bounded_bfs<C>(
         return Ok(TraversalOutput {
             output,
             bfs_decision_card: None,
+            component_decision_card: None,
             workspace_bytes: None,
         });
     }
@@ -466,6 +494,7 @@ fn bounded_bfs<C>(
             witness,
         },
         bfs_decision_card,
+        component_decision_card: None,
         workspace_bytes: Some(workspace_bytes),
     })
 }
@@ -551,6 +580,247 @@ fn bfs<C>(
         values: KernelValues::Distances(distances),
         row_count: queue.len(),
         witness,
+    })
+}
+
+/// Replace a disjoint frontier's push scan only when a complete pull costs
+/// less than half as many graph visits. Retiring each frontier's degree sum
+/// gives the exact unseen incidence bound. A pull examines at most all
+/// vertices plus those incidences, so total visits remain within the original
+/// `n + incidences` admission bound. Unlike BFS distances, connectivity permits
+/// same-pass propagation: any vertex bearing this root proves membership.
+fn bounded_components<C>(
+    graph: &SnapshotGraphView,
+    weak: bool,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<TraversalOutput, FnxExecutionError<C>> {
+    let n = graph.node_count();
+    let out_offsets = graph.outgoing_offsets();
+    let (in_offsets, incoming) = graph.incoming_face();
+    let arcs = *out_offsets
+        .last()
+        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+    let incidences = arcs
+        .checked_mul(if weak { 2 } else { 1 })
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    // A pull can never satisfy its visit bound in this sparse case. Retain
+    // the original execution and exact charging/refusal order without any
+    // per-frontier bookkeeping.
+    if incidences / 2 <= n {
+        return components(graph, weak, checkpoint).map(TraversalOutput::without_bfs);
+    }
+    let degree = |vertex: usize| {
+        (out_offsets[vertex + 1] - out_offsets[vertex]).checked_add(if weak {
+            in_offsets[vertex + 1] - in_offsets[vertex]
+        } else {
+            0
+        })
+    };
+    let maximum_degree = graph.component_degree_bound(weak);
+    let mut labels = reserve(n)?;
+    let mut queue = reserve(n)?;
+    while labels.len() < n {
+        let count = FNX_METER_RUN.min(n - labels.len());
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        labels.resize(labels.len() + count, usize::MAX);
+    }
+    // All discovered, unprocessed vertices form the next frozen frontier.
+    // Subtract its degree sum once to obtain the exact unseen incidence sum;
+    // discovery itself needs neither random degree loads nor counter updates.
+    let mut unprocessed_incidences = incidences;
+    let mut pulls = Vec::new();
+    let mut witness = witness(if weak {
+        "weakly_connected_components_bfs"
+    } else {
+        "connected_components_bfs"
+    });
+    for root in 0..n {
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        if labels[root] != usize::MAX {
+            continue;
+        }
+        queue.clear();
+        labels[root] = root;
+        queue.push(root);
+        witness.queue_peak = witness.queue_peak.max(1);
+        let mut head = 0;
+        while head < queue.len() {
+            let frontier_end = queue.len();
+            let frontier_vertices = frontier_end - head;
+            // This immutable upper bound proves a narrow frontier cannot
+            // select pull, regardless of unseen degrees. Saturation remains
+            // a conservative upper bound if the product does not fit.
+            let may_pull = frontier_vertices.saturating_mul(maximum_degree) / 2 > n;
+            let mut frontier_incidences = 0usize;
+            for run in queue[head..frontier_end].chunks(FNX_METER_RUN) {
+                checkpoint
+                    .units(run.len())
+                    .map_err(FnxExecutionError::Cancelled)?;
+                if may_pull {
+                    for &vertex in run {
+                        frontier_incidences = frontier_incidences
+                            .checked_add(degree(vertex).ok_or(FnxExecutionError::SizeOverflow)?)
+                            .ok_or(FnxExecutionError::SizeOverflow)?;
+                    }
+                }
+                witness.nodes_touched = witness
+                    .nodes_touched
+                    .checked_add(run.len())
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+            }
+            let unseen = unprocessed_incidences
+                .checked_sub(frontier_incidences)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            let pull_bound = n
+                .checked_add(unseen)
+                .ok_or(FnxExecutionError::SizeOverflow)?;
+            let edges_before = witness.edges_scanned;
+            if may_pull && frontier_incidences / 2 > pull_bound {
+                pulls
+                    .try_reserve(1)
+                    .map_err(|_| FnxExecutionError::AllocationFailed)?;
+                let mut decision = ComponentPullDecision {
+                    root,
+                    frontier_vertices,
+                    frontier_incidences,
+                    unseen_incidences: unseen,
+                    vertices: n,
+                    benefit_lower: frontier_incidences - pull_bound,
+                    benefit_upper: frontier_incidences - n,
+                    candidate_visits: 0,
+                    incidence_visits: 0,
+                };
+                head = frontier_end;
+                for vertex in 0..n {
+                    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                    increment(&mut witness.nodes_touched)?;
+                    increment(&mut decision.candidate_visits)?;
+                    if labels[vertex] != usize::MAX {
+                        continue;
+                    }
+                    let outgoing = graph
+                        .neighbors_indices(vertex)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                    let incoming = if weak {
+                        &incoming[in_offsets[vertex]..in_offsets[vertex + 1]]
+                    } else {
+                        &[]
+                    };
+                    let mut reached = false;
+                    for row in [outgoing, incoming] {
+                        for run in row.chunks(FNX_METER_RUN) {
+                            checkpoint
+                                .units(run.len())
+                                .map_err(FnxExecutionError::Cancelled)?;
+                            // Every charged incidence is inspected. Short-circuit
+                            // only between bounded runs, never inside a run.
+                            for &neighbor in run {
+                                reached |= labels[neighbor] == root;
+                            }
+                            witness.edges_scanned = witness
+                                .edges_scanned
+                                .checked_add(run.len())
+                                .ok_or(FnxExecutionError::SizeOverflow)?;
+                            decision.incidence_visits = decision
+                                .incidence_visits
+                                .checked_add(run.len())
+                                .ok_or(FnxExecutionError::SizeOverflow)?;
+                            if reached {
+                                break;
+                            }
+                        }
+                        if reached {
+                            break;
+                        }
+                    }
+                    if reached {
+                        labels[vertex] = root;
+                        queue.push(vertex);
+                        witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                    }
+                }
+                pulls.push(decision);
+            } else {
+                while head < frontier_end {
+                    let vertex = queue[head];
+                    head += 1;
+                    let outgoing = graph
+                        .neighbors_indices(vertex)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                    let incoming = if weak {
+                        &incoming[in_offsets[vertex]..in_offsets[vertex + 1]]
+                    } else {
+                        &[]
+                    };
+                    for row in [outgoing, incoming] {
+                        for run in row.chunks(FNX_METER_RUN) {
+                            checkpoint
+                                .units(run.len())
+                                .map_err(FnxExecutionError::Cancelled)?;
+                            for &neighbor in run {
+                                increment(&mut witness.edges_scanned)?;
+                                if labels[neighbor] == usize::MAX {
+                                    labels[neighbor] = root;
+                                    queue.push(neighbor);
+                                    witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // A push already counted every incidence of this frontier in its
+            // witness. Reuse that delta when the upper bound skipped degrees;
+            // a pull instead retires the exact degree sum it replaced.
+            let retired = if may_pull {
+                frontier_incidences
+            } else {
+                witness.edges_scanned - edges_before
+            };
+            unprocessed_incidences = unprocessed_incidences
+                .checked_sub(retired)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        }
+    }
+    let workspace_bytes = labels
+        .capacity()
+        .checked_add(queue.capacity())
+        .and_then(|words| words.checked_mul(std::mem::size_of::<usize>()))
+        .and_then(|bytes| {
+            pulls
+                .capacity()
+                .checked_mul(std::mem::size_of::<ComponentPullDecision>())
+                .and_then(|decisions| bytes.checked_add(decisions))
+        })
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    let component_decision_card = if pulls.is_empty() {
+        None
+    } else {
+        witness.algorithm = if weak {
+            "weakly_connected_components_bounded_pull_v1"
+        } else {
+            "connected_components_bounded_pull_v1"
+        }
+        .to_owned();
+        Some(ComponentDecisionCard {
+            policy_version: 1,
+            fallback: "component_bfs",
+            dwell_frontiers: 1,
+            pull_cost_multiplier: 2,
+            pulls,
+        })
+    };
+    Ok(TraversalOutput {
+        output: KernelOutput {
+            values: KernelValues::Components(labels),
+            row_count: n,
+            witness,
+        },
+        bfs_decision_card: None,
+        component_decision_card,
+        workspace_bytes: Some(workspace_bytes),
     })
 }
 
@@ -946,6 +1216,222 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn component_values(output: &KernelOutput) -> &[usize] {
+        let KernelValues::Components(values) = &output.values else {
+            panic!("components produce labels");
+        };
+        values
+    }
+
+    // Independent fixed-point oracle over raw input pairs, without CSR,
+    // frontier queues or direction switching. Reversal leaves weak labels
+    // unchanged; duplicates and self-loops cannot change connectivity.
+    fn component_oracle(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut labels: Vec<_> = (0..n).collect();
+        loop {
+            let mut changed = false;
+            for &(a, b) in edges {
+                let minimum = labels[a].min(labels[b]);
+                changed |= labels[a] != minimum || labels[b] != minimum;
+                labels[a] = minimum;
+                labels[b] = minimum;
+            }
+            if !changed {
+                return labels;
+            }
+        }
+    }
+
+    #[test]
+    fn component_pull_matches_raw_closure_within_original_visit_bound() {
+        let mut pull_count = 0;
+        for n in [0, 1, 2, 3, 5, 17, 33] {
+            for seed in 0..32_u64 {
+                let mut state = seed + 1;
+                let mut edges = Vec::new();
+                for source in 0..n {
+                    for target in 0..n {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        if state >> 60 < seed % 16 && (seed % 3 != 0 || source % 3 == target % 3) {
+                            edges.push((source, target));
+                            if state % 7 == 0 {
+                                edges.push((source, target));
+                            }
+                        }
+                    }
+                }
+                let expected = component_oracle(n, &edges);
+                for direction in [
+                    Directedness::Directed,
+                    Directedness::Reversed,
+                    Directedness::Undirected,
+                ] {
+                    let view = graph(n, &edges, direction);
+                    let weak = direction != Directedness::Undirected;
+                    let mut meter = Meter::default();
+                    let actual = bounded_components(&view, weak, &mut meter).unwrap();
+                    assert_eq!(
+                        component_values(&actual.output),
+                        &expected,
+                        "n={n} seed={seed} {direction:?}"
+                    );
+                    let incumbent = components(&view, weak, &mut || Ok::<(), usize>(())).unwrap();
+                    assert_eq!(
+                        component_values(&actual.output),
+                        component_values(&incumbent)
+                    );
+                    let incidences = view.outgoing_offsets()[n] * if weak { 2 } else { 1 };
+                    let witness = &actual.output.witness;
+                    assert!(witness.nodes_touched + witness.edges_scanned <= n + incidences);
+                    assert_eq!(
+                        meter.units,
+                        2 * n + witness.nodes_touched + witness.edges_scanned
+                    );
+                    assert!(actual.bfs_decision_card.is_none());
+                    if let Some(card) = &actual.component_decision_card {
+                        assert_eq!(
+                            (
+                                card.policy_version,
+                                card.fallback,
+                                card.dwell_frontiers,
+                                card.pull_cost_multiplier
+                            ),
+                            (1, "component_bfs", 1, 2)
+                        );
+                        let mut candidates = 0;
+                        for pull in &card.pulls {
+                            pull_count += 1;
+                            assert_eq!(pull.candidate_visits, n);
+                            assert!(pull.incidence_visits <= pull.unseen_incidences);
+                            let bound = n + pull.unseen_incidences;
+                            assert!(pull.frontier_incidences / 2 > bound);
+                            assert_eq!(pull.benefit_lower, pull.frontier_incidences - bound);
+                            assert_eq!(pull.benefit_upper, pull.frontier_incidences - n);
+                            candidates += pull.candidate_visits;
+                        }
+                        assert_eq!(witness.nodes_touched, n + candidates);
+                        assert!(
+                            actual.workspace_bytes.unwrap()
+                                >= 2 * n * size_of::<usize>()
+                                    + card.pulls.capacity() * size_of::<ComponentPullDecision>()
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            pull_count > 50,
+            "the corpus must execute dense pull choices"
+        );
+    }
+
+    #[test]
+    fn low_density_components_keep_original_workspace_witness_and_charging() {
+        let n = 513;
+        let mut edges = Vec::new();
+        for vertex in 1..257 {
+            edges.extend([(vertex - 1, vertex), (vertex, vertex - 1)]);
+        }
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(n, &edges, direction);
+            let weak = direction != Directedness::Undirected;
+            let mut old = Meter::default();
+            let expected = components(&view, weak, &mut old).unwrap();
+            let mut meter = Meter::default();
+            let actual = bounded_components(&view, weak, &mut meter).unwrap();
+            assert_eq!(
+                component_values(&actual.output),
+                component_values(&expected)
+            );
+            assert_eq!(actual.output.witness, expected.witness);
+            assert_eq!((meter.units, meter.calls), (old.units, old.calls));
+            assert!(actual.component_decision_card.is_none());
+            assert!(actual.workspace_bytes.is_none());
+            for stop in 1..=old.units {
+                let mut old = Meter {
+                    stop: Some(stop),
+                    ..Meter::default()
+                };
+                let mut meter = Meter {
+                    stop: Some(stop),
+                    ..Meter::default()
+                };
+                assert!(
+                    matches!(components(&view, weak, &mut old), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                );
+                assert!(
+                    matches!(bounded_components(&view, weak, &mut meter), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                );
+                assert_eq!((meter.units, meter.calls), (old.units, old.calls));
+            }
+        }
+    }
+
+    #[test]
+    fn component_pull_handles_both_directed_faces_and_late_connectors() {
+        let n = 77;
+        let mut edges = Vec::new();
+        for a in 4..69 {
+            for b in 4..69 {
+                if a != b {
+                    edges.push((a, b));
+                }
+            }
+        }
+        // Some links lead toward the reached component, some away from it.
+        // A descending chain cannot be completely followed in a single pull.
+        edges.extend([
+            (69, 68),
+            (70, 69),
+            (71, 70),
+            (68, 72),
+            (72, 73),
+            (75, 76),
+            (4, 4),
+            (69, 68),
+        ]);
+        let expected = component_oracle(n, &edges);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(n, &edges, direction);
+            let weak = direction != Directedness::Undirected;
+            let mut complete = Meter::default();
+            let actual = bounded_components(&view, weak, &mut complete).unwrap();
+            assert_eq!(component_values(&actual.output), &expected);
+            let card = actual.component_decision_card.as_ref().expect("dense pull");
+            assert!(
+                card.pulls
+                    .iter()
+                    .any(|pull| pull.root == 4 && pull.incidence_visits > 0)
+            );
+            for stop in 1..=complete.units {
+                let mut bulk = Meter {
+                    stop: Some(stop),
+                    ..Meter::default()
+                };
+                assert!(
+                    matches!(bounded_components(&view, weak, &mut bulk), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                );
+                assert_eq!(bulk.units, stop);
+                let mut scalar = Meter {
+                    stop: Some(stop),
+                    ..Meter::default()
+                };
+                assert!(
+                    matches!(bounded_components(&view, weak, &mut || scalar.unit()), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                );
+                assert_eq!(scalar.units, stop);
+            }
+        }
     }
 
     fn distance_values(output: &KernelOutput) -> &[Option<usize>] {
