@@ -313,17 +313,6 @@ impl GraphUnwindWriteText {
                 }
             }
         }
-        // No statement feeds its own MATCH here. A lone vertex update whose
-        // assignments are bound constants may then stage once (fgdb-2l3pt);
-        // the program recheck refuses a right-hand side that reads the row.
-        let freeze_constant_vertex_updates = rows.len() > 1
-            && !freeze_vertex_update_input
-            && matches!(
-                prepared.statements(),
-                [crate::GraphWriteTemplateStatement::Mutation(mutation)]
-                    if mutation.is_vertex_update_only()
-            );
-
         // The admitted definition callback saw the ordinary native template.
         // Only private batch provenance changes now: binding reads its typed
         // program, not script slices. The sole span starts in the unchanged
@@ -364,12 +353,10 @@ impl GraphUnwindWriteText {
             bound
                 .freeze_vertex_update_input()
                 .ok_or_else(|| GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }.into())
-        } else if freeze_constant_vertex_updates {
-            Ok(bound.with_frozen_constant_vertex_updates())
         } else {
-            // Distinct-key upsert batches stage once instead of re-walking
-            // every earlier row per row (fgdb-2l3pt); others stay sequential.
-            Ok(bound.with_frozen_vertex_upserts())
+            // The batch binder already staged distinct-key upserts and
+            // constant updates once where that keeps the answer (fgdb-2l3pt).
+            Ok(bound)
         }
     }
 }

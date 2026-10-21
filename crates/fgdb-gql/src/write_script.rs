@@ -374,23 +374,6 @@ impl BoundGraphWriteScriptBatch {
         self.program.freeze_vertex_update_input().then_some(self)
     }
 
-    /// Mark an eligible vertex-upsert batch for single-preparation execution
-    /// (PreparedGraphWriteProgram::freezes_vertex_upsert_input). An ineligible
-    /// batch is returned unchanged and runs sequentially.
-    pub(crate) fn with_frozen_vertex_upserts(mut self) -> Self {
-        self.program.freeze_vertex_upsert_input();
-        self
-    }
-
-    /// Mark an eligible constant vertex-update batch for single-preparation
-    /// execution (PreparedGraphWriteProgram::freeze_constant_vertex_update_input).
-    /// The caller has proved that no assignment feeds the statement's MATCH.
-    /// An ineligible batch is returned unchanged and runs sequentially.
-    pub(crate) fn with_frozen_constant_vertex_updates(mut self) -> Self {
-        self.program.freeze_constant_vertex_update_input();
-        self
-    }
-
     #[must_use]
     pub fn program(&self) -> &PreparedGraphWriteProgram {
         &self.program
@@ -571,8 +554,19 @@ impl PreparedGraphWriteScript {
             })?;
             statements.extend(program.into_statements().into_vec());
         }
-        let program = PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
-            .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        let mut program =
+            PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
+                .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        // Physical choices with the sequential answer (fgdb-2l3pt), for every
+        // batch binder: UNWIND, `--rows` and CSV import alike. Each program
+        // check re-proves its profile; this one supplies the template-level
+        // fact that a lone vertex update feeds nothing its own MATCH reads.
+        if matches!(self.statements(), [GraphWriteTemplateStatement::Mutation(mutation)]
+            if mutation.is_vertex_update_only() && !mutation.feeds_own_match())
+        {
+            program.freeze_constant_vertex_update_input();
+        }
+        program.freeze_vertex_upsert_input();
         let batch = BoundGraphWriteScriptBatch {
             program,
             argument_sets: arguments.len(),
@@ -590,7 +584,7 @@ impl PreparedGraphWriteScript {
 mod controlled_binding_tests {
     use super::*;
     use crate::{GraphSymbol, GraphSymbolKind};
-    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
     fn script() -> PreparedGraphWriteScript {
         PreparedGraphWriteScript::prepare(
@@ -800,5 +794,63 @@ mod controlled_binding_tests {
                 .canonical_bytes(),
             baseline
         );
+    }
+
+    #[test]
+    fn every_batch_binder_stages_distinct_upserts_and_constant_updates_once() {
+        // fgdb-2l3pt: `--rows` and CSV batches bind here as UNWIND does, so
+        // their distinct-key upserts and constant updates stage once too.
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        };
+        let rows = |ids: &[i64]| -> Vec<GqlParameters> {
+            ids.iter()
+                .map(|id| {
+                    GqlParameters::new()
+                        .with_int64("id", *id)
+                        .unwrap()
+                        .with_int64("p", id * 10)
+                        .unwrap()
+                })
+                .collect()
+        };
+        let bind = |text: &str, ids: &[i64]| {
+            PreparedGraphWriteScript::prepare(text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameter_sets(&rows(ids))
+                .unwrap()
+        };
+        let upsert = "MERGE (n:Entity {id: $id}) SET n.p = $p";
+        let update = "MATCH (n:Entity {id: $id}) SET n.p = $p";
+        assert!(
+            bind(upsert, &[1, 2, 3])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            !bind(upsert, &[1, 1])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            bind(update, &[1, 2, 1])
+                .program()
+                .freezes_vertex_update_input()
+        );
+        for (text, ids) in [
+            (upsert, &[1][..]),
+            (update, &[1][..]),
+            // The right-hand side reads the target.
+            ("MATCH (n:Entity {id: $id}) SET n.p = n.p + $p", &[1, 2][..]),
+            // The assignment feeds the MATCH: a batch keeps sequential rows.
+            ("MATCH (n:Entity) WHERE n.p = $id SET n.p = $p", &[1, 2][..]),
+        ] {
+            let program = bind(text, ids);
+            assert!(!program.program().freezes_vertex_update_input(), "{text}");
+            assert!(!program.program().freezes_vertex_upsert_input(), "{text}");
+        }
     }
 }
