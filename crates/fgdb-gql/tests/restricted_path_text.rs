@@ -315,7 +315,6 @@ fn parameter_binding_and_per_clause_modes_do_not_reparse_or_reresolve() {
 #[test]
 fn unsupported_compound_unbounded_and_shortest_restrictions_refuse_before_catalog() {
     for text in [
-        "MATCH ANY SHORTEST (a)-[:R*]->(b) RETURN b",
         // A reversed GQL interval is a syntax error (Cypher's `*2..1` is empty).
         "MATCH SIMPLE (a)-[:R]->{2,1}(b) RETURN b",
         "MATCH ACYCLIC (a)-[:R*1025]->(b) RETURN b LIMIT 0",

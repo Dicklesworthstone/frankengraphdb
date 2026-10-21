@@ -200,7 +200,6 @@ fn malformed_any_selectors_and_compound_paths_refuse_before_catalog_access() {
         "MATCH ANY ALL SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ANY SHORTEST WALK (a) RETURN a",
         "MATCH ANY SHORTEST WALK (a)-[:R]->(b) RETURN a",
-        "MATCH ANY SHORTEST WALK (a)-[:R*1..]->(b) RETURN a",
         "MATCH ANY SHORTEST WALK (a)-[:R*$hops]->(b) RETURN a",
         "MATCH ANY SHORTEST WALK (a)-[:R*1..1025]->(b) RETURN a LIMIT 0",
         "MATCH ANY SHORTEST WALK (a)-[:R*1..3]->(b)-[:S]->(c) RETURN a LIMIT 0",
@@ -310,7 +309,8 @@ fn single_path_selector_spellings_have_the_same_public_compiled_plan() {
 
 /// openCypher's shortestPath(...) and allShortestPaths(...) (fgdb-20foe) are
 /// the GQL ANY SHORTEST and ALL SHORTEST selectors: the same compiled plan,
-/// byte for byte, with or without a path binding, in any letter case.
+/// byte for byte, with or without a path binding, in any letter case, and
+/// with or without an upper hop bound (`*`, `*k..`).
 #[test]
 fn opencypher_shortest_path_functions_compile_to_the_gql_selectors() {
     for (function, selector) in [
@@ -321,6 +321,8 @@ fn opencypher_shortest_path_functions_compile_to_the_gql_selectors() {
         for (pattern, tail) in [
             ("(a)-[:R*1..3]->(b)", "RETURN ALL a,b"),
             ("(a)<-[:R*0..2]-(b)", "WHERE a.p = 1 RETURN ALL a,b"),
+            ("(a)-[:R*]->(b)", "RETURN ALL a,b"),
+            ("(a)-[:R*0..]-(b)", "WHERE a.p = 1 RETURN ALL a,b"),
         ] {
             for binding in ["", "p = "] {
                 let expected = prepare(&format!("MATCH {binding}{selector} {pattern} {tail}"));
@@ -333,7 +335,7 @@ fn opencypher_shortest_path_functions_compile_to_the_gql_selectors() {
     for text in [
         "MATCH p = shortestPath((a)-[:R*1..3]->(b) RETURN a",
         "MATCH p = shortestPath((a)-[:R]->(b)) RETURN a",
-        "MATCH p = shortestPath((a)-[:R*]->(b)) RETURN a",
+        "MATCH p = shortestPath((a)-[:R*]->(b), (c)) RETURN a",
         "MATCH p = shortestPath((a)-[:R*1..3]->(b), (c)) RETURN a",
         "MATCH p = shortestPath((a)-[:R*1..3]->(b)-[:R*1..2]->(c)) RETURN a",
         "MATCH p = shortestPath ANY SHORTEST (a)-[:R*1..3]->(b) RETURN a",

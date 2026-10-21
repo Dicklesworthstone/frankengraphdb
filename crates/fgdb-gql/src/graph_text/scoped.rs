@@ -887,7 +887,7 @@ impl<'a> Parser<'a> {
         } else if restricted {
             "one finite quantified ACYCLIC or SIMPLE atom"
         } else {
-            "one bounded atom in shortest WALK"
+            "one quantified atom in shortest WALK"
         };
         let first_edge = self.syntax.edges.len();
         loop {
@@ -969,7 +969,7 @@ impl<'a> Parser<'a> {
                     return Err(error(
                         bound_at,
                         GraphPatternTextErrorKind::Expected(
-                            "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE or DIFFERENT EDGES for an unbounded quantifier",
+                            "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES for an unbounded quantifier",
                         ),
                     ));
                 }
@@ -979,7 +979,7 @@ impl<'a> Parser<'a> {
                         GraphPatternTextErrorKind::Expected(if restricted {
                             expected_atom
                         } else {
-                            "finite quantified atom in shortest WALK"
+                            "a quantified atom in shortest WALK"
                         }),
                     ));
                 }

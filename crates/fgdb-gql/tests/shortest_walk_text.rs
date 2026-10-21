@@ -232,8 +232,6 @@ fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() 
         "MATCH ALL SHORTEST TRAIL (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R]->(b) RETURN a",
-        "MATCH ALL SHORTEST WALK (a)-[:R*]->(b) RETURN a",
-        "MATCH ALL SHORTEST WALK (a)-[:R*1..]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*$hops]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..1025]->(b) RETURN a LIMIT 0",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..3]->(b)-[:R]->(c) RETURN a LIMIT 0",

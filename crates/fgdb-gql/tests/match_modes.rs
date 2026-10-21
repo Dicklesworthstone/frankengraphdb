@@ -348,8 +348,9 @@ fn explicit_and_implicit_modes_have_stable_distinct_plan_identities() {
 /// cycle, and matches exactly what a written bound as long as the longest
 /// admitted path matches (openCypher Match5 [1], [2], [16]-[18], Pattern1
 /// [7]). A starved budget is the typed evaluator refusal, never a truncated
-/// result. WALK under REPEATABLE ELEMENTS and the shortest selectors still
-/// need an upper bound, refused before any catalog call.
+/// result. WALK under REPEATABLE ELEMENTS still needs an upper bound, refused
+/// before any catalog call; the shortest selectors end too (fgdb-20foe, the
+/// next law).
 #[test]
 fn unbounded_quantifiers_end_by_their_repetition_rule() {
     // 1 -> 2 -> 3 -> 1: no trail is longer than three edges and no acyclic
@@ -423,8 +424,6 @@ fn unbounded_quantifiers_end_by_their_repetition_rule() {
     for refused in [
         "MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN b",
         "MATCH REPEATABLE ELEMENTS (a)-[:R]->{2,}(b) RETURN b",
-        "MATCH ANY SHORTEST (a)-[:R*]->(b) RETURN b",
-        "MATCH ALL SHORTEST (a)-[:R*2..]->(b) RETURN b",
         "MATCH (n) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (n)-[:R*]->() } RETURN n",
     ] {
         let mut calls = 0;
@@ -436,6 +435,109 @@ fn unbounded_quantifiers_end_by_their_repetition_rule() {
         assert!(refused_text.is_err(), "{refused}");
         assert_eq!(calls, 0, "{refused}");
     }
+}
+
+/// ALL and ANY SHORTEST, and openCypher's shortestPath, without an upper
+/// hop bound (fgdb-20foe): no shortest walk revisits a vertex, so the search
+/// ends once a layer reaches no new vertex, also over a cycle and a
+/// self-loop. Each answers the endpoints a hand count of the fixture gives
+/// and exactly what a written bound past every vertex answers; a target the
+/// source cannot reach has no row, and a starved budget is the typed
+/// evaluator refusal.
+#[test]
+fn unbounded_shortest_selectors_end_when_no_layer_reaches_a_new_vertex() {
+    // 1 -> 2 -> 3 -> 1 with a self-loop on 2; vertex 4 has no edge. Directed
+    // from 1: 2 at one hop, 3 at two, 1 back at three. From two hops on (a
+    // trail): 2 over its self-loop and 3 at two, 1 at three. Undirected: 2
+    // and 3 at one hop, 1 back at three over either way round.
+    let edges = [
+        (EId(11), VId(1), R, VId(2)),
+        (EId(12), VId(2), R, VId(3)),
+        (EId(13), VId(3), R, VId(1)),
+        (EId(14), VId(2), R, VId(2)),
+    ];
+    let endpoints = |text: &str| {
+        let mut ends: Vec<u128> = run(text, &edges)
+            .iter()
+            .map(|row| match row.get(0) {
+                Some(GraphValue::Vertex(vid)) => vid.0,
+                other => panic!("{text}: {other:?}"),
+            })
+            .collect();
+        ends.sort_unstable();
+        ends
+    };
+    for (open, closed, expected) in [
+        (
+            "MATCH ANY SHORTEST (a:A)-[:R*]->(b) RETURN b",
+            "MATCH ANY SHORTEST (a:A)-[:R*1..9]->(b) RETURN b",
+            &[1_u128, 2, 3][..],
+        ),
+        (
+            "MATCH ALL SHORTEST (a:A)-[:R]->{1,}(b) RETURN b",
+            "MATCH ALL SHORTEST (a:A)-[:R]->{1,9}(b) RETURN b",
+            &[1, 2, 3],
+        ),
+        // A captured path takes the path cursors, not the endpoint ones.
+        (
+            "MATCH p = ANY SHORTEST (a:A)-[:R*]->(b) RETURN b, p",
+            "MATCH p = ANY SHORTEST (a:A)-[:R*1..9]->(b) RETURN b, p",
+            &[1, 2, 3],
+        ),
+        (
+            "MATCH p = ALL SHORTEST (a:A)-[:R]->{1,}(b) RETURN b, p",
+            "MATCH p = ALL SHORTEST (a:A)-[:R]->{1,9}(b) RETURN b, p",
+            &[1, 2, 3],
+        ),
+        (
+            "MATCH ALL SHORTEST (a:A)-[:R*2..]->(b) RETURN b",
+            "MATCH ALL SHORTEST (a:A)-[:R*2..9]->(b) RETURN b",
+            &[1, 2, 3],
+        ),
+        (
+            "MATCH ANY SHORTEST (a:A)-[:R]->{0,}(b) RETURN b",
+            "MATCH ANY SHORTEST (a:A)-[:R]->{0,9}(b) RETURN b",
+            &[1, 2, 3],
+        ),
+        (
+            "MATCH p = shortestPath((a:A)-[:R*]-(b)) RETURN b",
+            "MATCH p = shortestPath((a:A)-[:R*1..9]-(b)) RETURN b",
+            &[1, 2, 3],
+        ),
+        (
+            "MATCH p = allShortestPaths((a:A)-[:R*]-(b)) RETURN b",
+            "MATCH p = allShortestPaths((a:A)-[:R*1..9]-(b)) RETURN b",
+            &[1, 1, 2, 3],
+        ),
+        (
+            "MATCH ANY SHORTEST (a:A)-[:R*]->(b {p: 4}) RETURN b",
+            "MATCH ANY SHORTEST (a:A)-[:R*1..9]->(b {p: 4}) RETURN b",
+            &[],
+        ),
+        (
+            "MATCH ALL SHORTEST (a {p: 4})-[:R*]-(b) RETURN b",
+            "MATCH ALL SHORTEST (a {p: 4})-[:R*1..9]-(b) RETURN b",
+            &[],
+        ),
+    ] {
+        assert_eq!(endpoints(open), expected, "{open}");
+        assert_eq!(run(open, &edges), run(closed, &edges), "{open}");
+    }
+    let starved = bind("MATCH ANY SHORTEST (a:A)-[:R*]-(b) RETURN b")
+        .plan()
+        .execute_governed_with_identified_properties(
+            (VERTICES.len() + edges.len()) as u64,
+            VERTICES,
+            edges.iter().copied(),
+            matches,
+            |vid, key| Ok((key == P).then_some(&NUMBERS[vid.0 as usize - 1])),
+            GqlQueryPolicy::new(10_000, 10_000, 3, 4_000_000),
+            || Ok::<_, ()>(()),
+        );
+    assert!(matches!(
+        starved,
+        Err(fgdb_gql::GqlQueryError::Evaluator(_))
+    ));
 }
 
 /// openCypher's reversed variable-length interval (`*2..1`, `*1..0`, `*..0`;

@@ -244,6 +244,214 @@ fn a_bound_shortest_walk_returns_what_the_forward_closure_returns() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Every trail from `source` over the R edges (each edge at most once) of at
+/// most `limit` hops, as its endpoint and its edges' `w` in order, along
+/// `arrow`: `->`, `<-` or `-` (either way; a self-loop once).
+fn trails(
+    source: u128,
+    edges: &[(u128, u128, RelationId)],
+    arrow: &str,
+    limit: usize,
+) -> Vec<(u128, Vec<i64>)> {
+    let mut found = Vec::new();
+    let mut todo = vec![(source, Vec::<usize>::new())];
+    while let Some((at, used)) = todo.pop() {
+        found.push((at, used.iter().map(|&edge| edge as i64 + 1).collect()));
+        if used.len() == limit {
+            continue;
+        }
+        for (edge, &(src, dst, relation)) in edges.iter().enumerate() {
+            if relation != R || used.contains(&edge) {
+                continue;
+            }
+            let next = match arrow {
+                "->" => (src == at).then_some(dst),
+                "<-" => (dst == at).then_some(src),
+                _ if src == at => Some(dst),
+                _ => (dst == at).then_some(src),
+            };
+            if let Some(next) = next {
+                let mut longer = used.clone();
+                longer.push(edge);
+                todo.push((next, longer));
+            }
+        }
+    }
+    found
+}
+
+/// One row of `RETURN b.p AS t, [e IN relationships(p) | e.w] AS es,
+/// path_length(p) AS l`.
+fn walk_row(row: &[QueryValue]) -> (i64, Vec<i64>, i64) {
+    use fgdb_gql::algebra::GraphValue;
+    let int = |value: &GraphValue| match value {
+        GraphValue::Scalar(CanonicalScalar::Int(n)) => *n,
+        other => panic!("not an integer: {other:?}"),
+    };
+    match row {
+        [
+            QueryValue::Value(t),
+            QueryValue::Value(GraphValue::List(es)),
+            QueryValue::Value(l),
+        ] => (int(t), es.iter().map(int).collect(), int(l)),
+        other => panic!("not a walk row: {other:?}"),
+    }
+}
+
+/// fgdb-20foe: ANY and ALL SHORTEST without an upper hop bound (`{k,}`, and
+/// openCypher's `*` in shortestPath) end, and return exactly what the same
+/// query returns under a bound past every vertex: over random multigraphs
+/// with self-loops, parallel edges and cycles, both directions and either,
+/// a bound or a free target, and minima 0, 1 and 2. An independent
+/// enumeration of every trail decides each endpoint's shortest length and,
+/// for ALL, its shortest walks. A target the source cannot reach has no
+/// row, and a starved work budget refuses typed rather than answering short.
+#[test]
+fn an_unbounded_shortest_walk_returns_what_a_bound_past_every_vertex_returns() {
+    let ((), report) = run_async_under_lab(0x5ec0_6113, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut state = 0x20f0_e5ec_0000_0001_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let vertices: Vec<(u128, i64, i64)> = (0..VERTICES)
+            .map(|vid| (vid, vid as i64, vid as i64))
+            .collect();
+        let (mut compared, mut walks, mut empty) = (0, 0, 0);
+        for _ in 0..12 {
+            let edges: Vec<(u128, u128, RelationId)> = (0..random(16))
+                .map(|_| {
+                    (
+                        u128::from(random(VERTICES as u64)),
+                        u128::from(random(VERTICES as u64)),
+                        R,
+                    )
+                })
+                .collect();
+            let db = database(&commit, &vertices, &edges).await;
+            for _ in 0..2 {
+                let source = random(VERTICES as u64);
+                let target = random(VERTICES as u64);
+                for (selector, all) in [("ANY SHORTEST", false), ("ALL SHORTEST", true)] {
+                    for minimum in [0, 1, 2] {
+                        // No shortest walk is longer than max(minimum, 1) +
+                        // |V| - 1 hops; the written bound passes that.
+                        let past = minimum + VERTICES as usize + 2;
+                        let limit = minimum.max(1) + VERTICES as usize - 1;
+                        for (arrow, gql) in [("->", "-[:R]->"), ("<-", "<-[:R]-"), ("-", "-[:R]-")]
+                        {
+                            for bound_target in [true, false] {
+                                let end = if bound_target {
+                                    format!("(b {{p: {target}}})")
+                                } else {
+                                    "(b)".to_owned()
+                                };
+                                let text = |bounds: &str| {
+                                    format!(
+                                        "MATCH p = {selector} (a {{p: {source}}}){gql}{bounds}{end} \
+                                         RETURN b.p AS t, [e IN relationships(p) | e.w] AS es, \
+                                         path_length(p) AS l"
+                                    )
+                                };
+                                let open = text(&format!("{{{minimum},}}"));
+                                let closed = text(&format!("{{{minimum},{past}}}"));
+                                let mut got: Vec<_> = rows(&db, &cx, &open, 1_000_000)
+                                    .unwrap_or_else(|| panic!("{open}"))
+                                    .iter()
+                                    .map(|row| walk_row(row.as_slice()))
+                                    .collect();
+                                let mut want: Vec<_> = rows(&db, &cx, &closed, 1_000_000)
+                                    .unwrap()
+                                    .iter()
+                                    .map(|row| walk_row(row.as_slice()))
+                                    .collect();
+                                got.sort();
+                                want.sort();
+                                assert_eq!(got, want, "{open}\n{edges:?}");
+                                // The trail oracle: each endpoint's least
+                                // length of at least `minimum` hops.
+                                let mut oracle = trails(u128::from(source), &edges, arrow, limit);
+                                oracle.retain(|(end, steps)| {
+                                    steps.len() >= minimum
+                                        && (!bound_target || *end == u128::from(target))
+                                });
+                                let mut least = std::collections::BTreeMap::new();
+                                for (end, steps) in &oracle {
+                                    let length = least.entry(*end).or_insert(steps.len());
+                                    *length = (*length).min(steps.len());
+                                }
+                                let mut shortest: Vec<(i64, Vec<i64>, i64)> = (oracle.iter())
+                                    .filter(|(end, steps)| least[end] == steps.len())
+                                    .map(|(end, steps)| {
+                                        (*end as i64, steps.clone(), steps.len() as i64)
+                                    })
+                                    .collect();
+                                shortest.sort();
+                                shortest.dedup();
+                                let mut lengths: Vec<(i64, i64)> =
+                                    got.iter().map(|&(t, _, l)| (t, l)).collect();
+                                lengths.dedup();
+                                let expected: Vec<(i64, i64)> = (least.iter())
+                                    .map(|(&end, &length)| (end as i64, length as i64))
+                                    .collect();
+                                assert_eq!(lengths, expected, "{open}\n{edges:?}");
+                                if all {
+                                    let mut distinct = got.clone();
+                                    distinct.dedup();
+                                    assert_eq!(distinct, shortest, "{open}\n{edges:?}");
+                                } else {
+                                    assert!(
+                                        got.iter().all(|walk| shortest.contains(walk)),
+                                        "{open}\n{edges:?}"
+                                    );
+                                }
+                                if got.is_empty() {
+                                    empty += 1;
+                                } else {
+                                    walks += 1;
+                                }
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 12 * 2 * 2 * 3 * 3 * 2);
+        assert!(walks > 100 && empty > 50, "{walks} {empty}");
+        // A cycle 0 -> 1 -> 2 -> 0 with 3 apart: openCypher's shortestPath
+        // over `*` finds 2 at two hops; 3 is unreachable, so no row; and a
+        // budget too small for the search refuses instead of answering.
+        let cycle = [(0, 1, R), (1, 2, R), (2, 0, R)];
+        let db = database(&commit, &vertices, &cycle).await;
+        let shortest = |to: u128| {
+            format!(
+                "MATCH p = shortestPath((a {{p: 0}})-[:R*]->(b {{p: {to}}})) \
+                 RETURN b.p AS t, [e IN relationships(p) | e.w] AS es, path_length(p) AS l"
+            )
+        };
+        let found: Vec<_> = (rows(&db, &cx, &shortest(2), 1_000_000).unwrap().iter())
+            .map(|row| walk_row(row.as_slice()))
+            .collect();
+        assert_eq!(found, vec![(2, vec![1, 2], 2)]);
+        assert_eq!(rows(&db, &cx, &shortest(3), 1_000_000), Some(vec![]));
+        let starved = db.query(
+            &cx,
+            &shortest(2),
+            &GqlParameters::new(),
+            symbols,
+            GqlQueryPolicy::new(1_000_000, 100_000, 5, 10_000_000),
+        );
+        assert!(starved.is_err(), "{starved:?}");
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A hub with 2,000 leaves; leaf 1 heads a chain of eight more vertices to
 /// the target, nine hops from the hub, and vertex 9,999 has no edge.
 #[test]

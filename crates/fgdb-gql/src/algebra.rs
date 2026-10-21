@@ -195,14 +195,19 @@ pub enum GraphWalkSearch {
 impl GraphWalkSearch {
     /// Whether an atom with no upper hop bound still ends: TRAIL reuses no
     /// edge and ACYCLIC or SIMPLE no vertex, and an ALL atom under DIFFERENT
-    /// EDGES runs as a trail. A WALK that may repeat edges, or a shortest
-    /// selector, could revisit a cycle forever.
+    /// EDGES runs as a trail. A shortest selector settles each endpoint at
+    /// its first admissible depth, and no shortest walk revisits a vertex
+    /// after its first `max(minimum, 1)` hops (cutting that cycle out would
+    /// be shorter), so its breadth-first layers end once a layer reaches no
+    /// new vertex (fgdb-20foe). Only a WALK that may repeat edges and selects
+    /// every walk could revisit a cycle forever.
     #[must_use]
     pub fn ends_unbounded(self, mode: GraphMatchMode) -> bool {
         match self {
-            Self::Trail | Self::Acyclic | Self::Simple => true,
+            Self::Trail | Self::Acyclic | Self::Simple | Self::AllShortest | Self::AnyShortest => {
+                true
+            }
             Self::All => mode == GraphMatchMode::DifferentEdges,
-            Self::AllShortest | Self::AnyShortest => false,
         }
     }
 }

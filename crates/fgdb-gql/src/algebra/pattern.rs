@@ -56,7 +56,7 @@ pub enum PatternBuildError {
     RequiresValueProjection,
     InvalidPathCapture,
     /// A quantified atom with no upper hop bound whose repetition rule does
-    /// not end it: a WALK that may repeat edges, or a shortest selector.
+    /// not end it: a WALK that may repeat edges and selects every walk.
     UnboundedWalk,
     LimitExceeded {
         dimension: PatternLimitDimension,
@@ -84,7 +84,7 @@ impl core::fmt::Display for PatternBuildError {
                 "binding property comparisons, path captures and relationship uniqueness require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
-            Self::UnboundedWalk => f.write_str("an unbounded quantified atom requires TRAIL, ACYCLIC, SIMPLE or DIFFERENT EDGES"),
+            Self::UnboundedWalk => f.write_str("an unbounded quantified atom requires TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES"),
             Self::LimitExceeded {
                 dimension,
                 limit,
@@ -938,6 +938,8 @@ impl GraphPatternBuilder {
     /// The existing breadth-first cursor executes the atom under the same
     /// work/scratch controls, slot mapping and snapshot admission as WALK.
     /// Capturing this atom additionally exposes its selected traversal as a path.
+    /// Unbounded bounds are admitted: the search ends once its layers reach
+    /// no new vertex (GraphWalkSearch::ends_unbounded, fgdb-20foe).
     pub fn shortest_walk(
         &mut self,
         source: &str,
@@ -955,7 +957,7 @@ impl GraphPatternBuilder {
     }
 
     /// Add an ANY SHORTEST WALK atom: one endpoint occurrence per pair within
-    /// the finite interval. Equal-depth prefixes coalesce before expansion, so
+    /// the interval, bounded or not. Equal-depth prefixes coalesce before expansion, so
     /// this does not enumerate every tied route before deduplicating output.
     /// Each incoming binding occurrence executes independently. Endpoint
     /// predicates, scopes and outer multiplicities retain their ordinary laws.
