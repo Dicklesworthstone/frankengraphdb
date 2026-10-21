@@ -831,14 +831,25 @@ mod controlled_binding_tests {
                 .program()
                 .freezes_vertex_upsert_input()
         );
-        // A plain MERGE freezes on the same distinct keys.
+        // A plain MERGE freezes on the same distinct keys. It reads no $p,
+        // and a batch refuses an argument its statement does not declare.
+        let bind_ids = |text: &str, ids: &[i64]| {
+            let sets: Vec<GqlParameters> = ids
+                .iter()
+                .map(|id| GqlParameters::new().with_int64("id", *id).unwrap())
+                .collect();
+            PreparedGraphWriteScript::prepare(text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameter_sets(&sets)
+                .unwrap()
+        };
         assert!(
-            bind("MERGE (n:Entity {id: $id})", &[1, 2, 3])
+            bind_ids("MERGE (n:Entity {id: $id})", &[1, 2, 3])
                 .program()
                 .freezes_vertex_upsert_input()
         );
         assert!(
-            !bind("MERGE (n:Entity {id: $id})", &[1, 2, 1])
+            !bind_ids("MERGE (n:Entity {id: $id})", &[1, 2, 1])
                 .program()
                 .freezes_vertex_upsert_input()
         );
