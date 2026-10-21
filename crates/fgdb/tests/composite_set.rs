@@ -265,7 +265,7 @@ fn limit_zero_cannot_hide_a_non_scalar_assignment_or_publish_its_prefix() {
                 txn,
                 query,
                 commit,
-                "MATCH (n:Person) SET n.q = 999, n.d = [[n.p]][0] RETURN n.q AS q LIMIT 0",
+                "MATCH (n:Person) SET n.q = 999, n.d = [{value:n.p}][0] RETURN n.q AS q LIMIT 0",
                 &GqlParameters::new(),
                 symbols,
                 R,

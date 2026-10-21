@@ -68,6 +68,12 @@ impl WriteTxn {
                                 batch.set_vertex_property_value(vertex, key, value);
                                 vertex
                             }
+                            GraphMutationIntent::StoredProperty {
+                                target: ElementId::Vertex(vertex), key, value,
+                            } => {
+                                batch.set_vertex_property_value(vertex, key, Some(value));
+                                vertex
+                            }
                             GraphMutationIntent::Label {
                                 vertex,
                                 label,

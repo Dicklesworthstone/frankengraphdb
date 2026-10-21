@@ -403,11 +403,22 @@ At `d064e8c2` (`origin/main` after these pushes and one more stream commit), `ca
     - a public cursor type was reachable but not nameable, and the workspace denies `unnameable_types`;
     - its tests copied the two test defects fixed an hour earlier.
   - **At `d9ce976b`:** `00b3e152`'s new test needed `Debug` on a crate-private error type.
+  - **At `b75ef707` (22:19):** its new test passed a resolver struct where `PreparedGraphText::prepare` takes a closure.
 - **Fixed on main:**
   - `78827885`: rustls-webpki 0.103.16 clears RUSTSEC-2026-0382 (R2). `dependency_policy_e2e` exits 0 on css. TLS laws pass: `fgdb-server` tls 2/0, `fgdb-cli` remote 29/0.
   - `13881c8f`, `4b3d7e0b`, `4dc99bbd` and `a74ce364` restore compile and clippy. At `d9ce976b` plus all six commits, `cargo check --workspace --all-targets --all-features` and workspace clippy (`-D warnings`) exit 0.
   - `808b0ffe` registers the new CLI doc. `registry-check lint` and `all` pass, and lint fails without it.
-- **Red laws now visible, because their targets compile:** `fgdb-gql` `compound_stored_aggregates` passes 4 and fails 3. The `92e83e49` feature ("admit stored properties in compound numeric write aggregates") fails its own laws with `GraphIntegerError { kind: IncompatibleOperands }`. That is recorded on `.20`, which the commit cites, and left for its owner.
+  - `eaef0191` uses `prepare_with_resolver` there. At `b75ef707` plus it and `1cbd6836`, check and clippy exit 0.
+  - `1cbd6836` fixes the `compound_stored_aggregates` laws (7/0). Details under the next bullet.
+- **`compound_stored_aggregates`, root-caused:** it went 4/3 to 7/0 at `1cbd6836`, with no engine change.
+  - The three failures were never about stored properties. Each took AVG over integers.
+  - This engine's AVG of integers is an exact rational, which write-group row conversion refuses (`set_ops/aggregate/rows.rs:73-80`). Read-side `WITH avg(x)` refuses the same way, and existing laws pin it (`write_return_aggregates.rs:350`, `with_aggregate/tests.rs:225`).
+  - The laws assumed openCypher's float average. They now run the AVG checks over binary64 and pin the integer refusal at its exact column.
+  - A stale law that `92e83e49` contradicted (`write_return_aggregates.rs:427`) is repaired.
+  - **Owner decision:** should integer AVG evaluate to a float, as openCypher's does? It is the same family as `v6ku6` and `e26tv`, and it affects TCK aggregation scenarios.
+- **Red laws now visible, because their targets compile:**
+  - `list_property_mutations` (`b75ef707`) passes 5 and fails 1. `UNWIND [1,2] AS key MATCH (n:Item {q:key}) SET n.q=n.p` is refused at prepare ("CREATE or INSERT after WITH/UNWIND/MATCH"). Left for its owner.
+  - At `bf4aeba2`, `fgdb-gql --tests` passes 2772 and fails 3: two in `computed_return_text`, and `spill_set` `async_elements`.
 - **Passing:**
   - `query_fed_writes`, `vertex_merge_scripts_all`, `vertex_merge_no_return`, `with_mutation_metadata`: 27/0;
   - lib `query_write_autocommit_tests`: 5/0;
@@ -418,7 +429,7 @@ At `d064e8c2` (`origin/main` after these pushes and one more stream commit), `ca
   - rustfmt: 539 hunks at `9f843afd`, all from the stream. The edits follow each file's unformatted local style.
   - the 22 `fgdb` lib failures, which the integration session is working through (`.20`);
   - the four CLI contract failures (not re-run).
-- **The pattern:** four times in five hours, a never-compiled commit broke compile for every writer. Each fix took one or two lines. This is the cost the 2026-09-22 staging rule exists to remove (`kqglu`, `.5`).
+- **The pattern:** five times between 18:14 and 22:19, a never-compiled commit broke compile for every writer. Each fix took one or two lines. This is the cost the 2026-09-22 staging rule exists to remove (`kqglu`, `.5`).
 - **Handoff channel:** Agent Mail on the Mac reported health `red` (its latest full integrity check failed) and listed no agents for this project, so it cannot carry the handoff. The bead specs follow as an appendix instead, with the landing command.
 - **Gate portability (R11, partly done):** the Mac's cargo-deny 0.20 moved `--config` to the top level, and 0.19 (css) rejects that form, so the dependency-policy controls failed on a usage error on the Mac. Fixed at `a1302335`: the gate now asks the binary which form it takes, and runs 6/0 on both hosts. The `/proc` liveness probe and the proof-lane traps remain.
 
@@ -1050,14 +1061,19 @@ Evening follow-up, 2026-10-20 (css, local cargo, debug=0; every tree rebuilt wit
   - Each later batch broke it again:
     - 9f843afd added 2 errors, 3 lints and an unregistered doc;
     - 0b93a580 broke the fgdb lib itself (unnameable_types on the new NativeSpoolDifference);
-    - 00b3e152 needed Debug on ProjectionFailure.
+    - 00b3e152 needed Debug on ProjectionFailure;
+    - b75ef707's new test passed a resolver where PreparedGraphText::prepare takes a closure.
 - Fixed on main:
   - 78827885: rustls-webpki 0.103.16 clears RUSTSEC-2026-0382. dependency_policy_e2e exits 0, fgdb-server tls 2/0, fgdb-cli remote 29/0.
-  - 13881c8f, 4b3d7e0b, 4dc99bbd and a74ce364 restore compile and clippy. At d9ce976b plus all six commits, `cargo check --all-targets --all-features` and workspace clippy -D warnings exit 0.
+  - 13881c8f, 4b3d7e0b, 4dc99bbd, a74ce364 and eaef0191 restore compile and clippy. At b75ef707 plus the last two, `cargo check --all-targets --all-features` and workspace clippy -D warnings exit 0.
   - 808b0ffe registers crates/fgdb-cli/QUERY_FED_WRITES.md. registry-check lint and all pass, and lint fails without it (unclaimed_prose).
+- compound_stored_aggregates was 4 passed, 3 failed. 1cbd6836 makes it 7/0.
+  - The three failures were AVG over integers. The engine yields an exact rational there, and write-group row conversion refuses it (set_ops/aggregate/rows.rs:73-80). Read WITH does the same, pinned by existing laws.
+  - 1cbd6836 aligns the laws with that refusal and pins it. It also repairs write_return_aggregates.rs:427, which 92e83e49 contradicted.
+  - OWNER DECISION: should integer AVG in compound expressions (and WITH) evaluate as openCypher floats? Today it refuses.
 - Red laws you can see now that the targets compile:
-  - fgdb-gql compound_stored_aggregates is 4 passed, 3 failed. That is the 92e83e49 feature, which cites this bead.
-  - SUM/AVG over stored properties inside a compound RETURN/WITH fails with GraphIntegerError IncompatibleOperands.
+  - list_property_mutations (b75ef707) is 5 passed, 1 failed. `UNWIND [1,2] AS key MATCH (n:Item {q:key}) SET n.q=n.p` is refused at prepare: "CREATE or INSERT after WITH/UNWIND/MATCH".
+  - At bf4aeba2, fgdb-gql --tests is 2772 passed, 3 failed: computed_return_text 2, and spill_set async_elements 1.
 - Passing:
   - query_fed_writes, vertex_merge_scripts_all, vertex_merge_no_return, with_mutation_metadata: 27/0;
   - lib query_write_autocommit_tests: 5/0;
