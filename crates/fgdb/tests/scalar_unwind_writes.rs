@@ -1708,10 +1708,18 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
         };
         let int_value = |value: i64| Some(CanonicalScalar::Int(value).into());
         // `SET n += row` writes the key with its own value and p, as
-        // `SET n.p = row.p` does, and stays on the single staging.
-        for statement in [
-            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
-            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+        // `SET n.p = row.p` does, and stays on the single staging. A plain
+        // MERGE (no SET) stages once as well, writing no p.
+        for (statement, sets_p) in [
+            (
+                "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
+                true,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+                true,
+            ),
+            ("UNWIND $rows AS row MERGE (n:Entity {id: row.id})", false),
         ] {
             let mut records = Vec::new();
             for rows in [1000_i64, 2000, 4000] {
@@ -1778,7 +1786,12 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
                     else {
                         panic!("every vertex has an integer id")
                     };
-                    assert_eq!(value(vertex, P), int_value(id * 10), "id {id}");
+                    let expected = match (sets_p, id % 2 == 0) {
+                        (true, _) => int_value(id * 10),
+                        (false, true) => int_value(-1),
+                        (false, false) => None,
+                    };
+                    assert_eq!(value(vertex, P), expected, "{statement}: id {id}");
                     if id % 2 == 0 {
                         assert_eq!(vertex.vid, VId(1_000_000 + id as u128));
                     }
@@ -1820,6 +1833,35 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
         assert_eq!(vertices.len(), 1);
         assert_eq!(value(&vertices[0], P), int_value(2));
         assert_eq!(issued.load(Ordering::Relaxed), 1);
+
+        // So does a plain MERGE: the third row matches the first's vertex.
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let issued = AtomicU64::new(0);
+        txn.query_write(
+            &mut db,
+            &cx,
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
+            &args(vec![
+                object(vec![("id", int(5))]),
+                object(vec![("id", int(6))]),
+                object(vec![("id", int(5))]),
+            ]),
+            symbols,
+            R,
+            policy(100, 10),
+            |request| {
+                let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                Ok::<_, Infallible>(match request.request {
+                    GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                    GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                })
+            },
+        )
+        .unwrap();
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(issued.load(Ordering::Relaxed), 2);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
