@@ -293,12 +293,30 @@ fn execute_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
     pattern: &PreparedGraphPattern<Row>,
     as_of: CommitSeq,
     policy: fgdb_gql::GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<GqlError, C>> {
+    execute_seeded_pattern_at(reader, pattern, None, as_of, policy, checkpoint)
+}
+
+/// [`execute_pattern_at`] for a pattern whose one vertex root a leading bag
+/// binds by identity (fgdb-2acff): with `seeds`, a single-root plan admits
+/// only those roots by point lookup. Other shapes, and a reader without a
+/// borrowed snapshot, admit as before; their rows are a superset the set
+/// executor's identity join narrows, exactly as for the unseeded leaf.
+fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
+    reader: &R,
+    pattern: &PreparedGraphPattern<Row>,
+    seeds: Option<&[VId]>,
+    as_of: CommitSeq,
+    policy: fgdb_gql::GqlQueryPolicy,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<GqlError, C>> {
     checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
-    AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
+    let mut admitted = AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
         .map_err(GqlError::Read)
-        .map_err(fgdb_gql::GqlQueryError::Source)?
+        .map_err(fgdb_gql::GqlQueryError::Source)?;
+    admitted.seeds = seeds.map(Box::from);
+    admitted
         .execute_governed(policy, checkpoint)
         .map_err(|error| error.map_source(GqlError::Read))
 }
@@ -314,6 +332,8 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized, Row = VId> {
     logical: GlaPlan<Row>,
     snapshot: Option<&'a Snapshot>,
     borrowed: Option<source::BorrowedTables<'a>>,
+    /// Root identities a leading bag binds (fgdb-2acff); see admit_seeded.
+    seeds: Option<Box<[VId]>>,
     vertices: BTreeMap<VId, VertexRow>,
     edges: Vec<EdgeRecord>,
     snapshot_records: u64,
@@ -370,6 +390,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             logical,
             snapshot,
             borrowed: None,
+            seeds: None,
             vertices,
             edges,
             snapshot_records: count,
@@ -385,7 +406,16 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         if self.borrowed.is_none()
             && let Some(snapshot) = self.snapshot
         {
-            let tables = source::admit(snapshot, &self.logical, self.as_of, control)?;
+            let seeded = match self.seeds.as_deref() {
+                Some(seeds) => {
+                    source::admit_seeded(snapshot, &self.logical, self.as_of, seeds, control)?
+                }
+                None => None,
+            };
+            let tables = match seeded {
+                Some(tables) => tables,
+                None => source::admit(snapshot, &self.logical, self.as_of, control)?,
+            };
             self.snapshot_records = tables.snapshot_records;
             self.borrowed = Some(tables);
         }

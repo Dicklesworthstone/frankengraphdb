@@ -277,12 +277,22 @@ impl<V: Vfs + Clone> Database<V> {
         // A CALL stage runs in Prism at this same snapshot, so its rows and
         // every pattern leaf read one generation.
         cx.with_restriction(|| {
-            query.execute_governed_with_elements(
+            query.execute_governed_with_seeded_elements(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
                         cx.checkpoint()
                     })
+                },
+                |pattern, seeds, allowance| {
+                    Some(crate::gql_exec::execute_seeded_pattern_at(
+                        self,
+                        pattern,
+                        Some(seeds),
+                        as_of,
+                        allowance,
+                        || cx.checkpoint(),
+                    ))
                 },
                 |call, arguments, remaining| {
                     if crate::query::is_hybrid(call) {
@@ -344,12 +354,22 @@ impl EmbeddedReadView {
             )))
         })?;
         cx.with_restriction(|| {
-            query.execute_governed_with_elements(
+            query.execute_governed_with_seeded_elements(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
                         cx.checkpoint()
                     })
+                },
+                |pattern, seeds, allowance| {
+                    Some(crate::gql_exec::execute_seeded_pattern_at(
+                        self,
+                        pattern,
+                        Some(seeds),
+                        as_of,
+                        allowance,
+                        || cx.checkpoint(),
+                    ))
                 },
                 |call, arguments, remaining| {
                     if crate::query::is_hybrid(call) {

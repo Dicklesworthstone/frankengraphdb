@@ -4192,6 +4192,54 @@ fn root_endpoint_roles<Row>(
     Some((*relation, source, destination))
 }
 
+/// A single-root vertex plan restricted to the root identities a leading bag
+/// carries (fgdb-2acff). Each seed is one point lookup charged as one record,
+/// as a bound closure charges each reached vertex; a seed without a visible
+/// row adds no row. Any other shape returns None before charging anything,
+/// and the caller keeps the ordinary admission. The rows are the complete
+/// plan's rows for those roots: the selections still run on each one.
+pub(super) fn admit_seeded<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    seeds: &[VId],
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<BorrowedTables<'a>>, E> {
+    use fgdb_gql::algebra::GlaOperator;
+    let Some((GlaOperator::ScanVertices, rest)) = logical.operators().split_first() else {
+        return Ok(None);
+    };
+    if logical.scans_edges()
+        || logical.reads_edges()
+        || !rest.iter().all(|operator| match operator {
+            GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+            GlaOperator::Project { .. }
+            | GlaOperator::ProjectValues { .. }
+            | GlaOperator::Distinct
+            | GlaOperator::OrderByVertexId
+            | GlaOperator::OrderByValues
+            | GlaOperator::OrderByValueColumns { .. }
+            | GlaOperator::Limit { .. } => true,
+            _ => false,
+        })
+    {
+        return Ok(None);
+    }
+    let mut vertices = Vec::new();
+    for &vid in seeds {
+        control(SourceEvent::SnapshotRecord)?;
+        if let Some(row) = find_vertex(snapshot, vid, as_of, control)? {
+            control(SourceEvent::ScratchEntry)?;
+            vertices.push(row);
+        }
+    }
+    Ok(Some(BorrowedTables {
+        snapshot_records: seeds.len() as u64,
+        vertices,
+        edges: Vec::new(),
+    }))
+}
+
 /// Source selection is shared by scalar and tuple plans. Output columns do
 /// not change what snapshot generation or topology is admitted.
 pub(super) fn admit<'a, E, Row>(

@@ -12,6 +12,7 @@ use crate::algebra::{IntegerComparison, MAX_PATTERN_PREDICATES};
 pub(super) mod factors;
 mod maintained;
 mod range;
+pub(super) mod seeded;
 
 type Key = (usize, usize);
 

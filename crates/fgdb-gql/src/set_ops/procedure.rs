@@ -15,7 +15,7 @@ use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphSetValue,
 };
-use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, VId};
 
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
@@ -270,6 +270,34 @@ pub trait GraphSetSource<E, C> {
         None
     }
 
+    /// Definition-only capability: this host answers `seeded_pattern` for a
+    /// single-root vertex pattern. Inspect no source data and record no read.
+    /// `false` keeps every consumer on the unchanged logical leaf, charging
+    /// nothing for a seed set it never builds.
+    fn supports_seeded_patterns(&self) -> bool {
+        false
+    }
+
+    /// An optional physical restriction of one original graph pattern whose
+    /// one vertex root a leading bag binds by identity (fgdb-2acff): `CALL
+    /// ... YIELD node RETURN node.p`, or a MATCH vertex reusing an UNWIND
+    /// row's vertex. `seeds` holds the leading bag's distinct root identities
+    /// in VId order. Return every row of `pattern` whose root is one of them,
+    /// at the same pinned and authorized cut as `pattern`; other rows of
+    /// `pattern` may also be returned, since the consumer still joins on the
+    /// identity equality. Charge the records actually admitted, not the graph.
+    /// `None` (the default, or a host declining this pattern's shape) MUST
+    /// perform no source work; the consumer then executes the unchanged leaf.
+    /// A returned result, including an error, never falls back or reopens it.
+    fn seeded_pattern(
+        &mut self,
+        _pattern: &PreparedGraphPattern<GraphValueRow>,
+        _seeds: &[VId],
+        _policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        None
+    }
+
     /// `None` means this host executes no procedures. Rows must carry exactly
     /// `call.outputs()` columns, in that order.
     fn procedure(
@@ -330,6 +358,19 @@ impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
         self.source.pattern_factors(request, policy)
     }
 
+    fn supports_seeded_patterns(&self) -> bool {
+        self.source.supports_seeded_patterns()
+    }
+
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.seeded_pattern(pattern, seeds, policy)
+    }
+
     fn procedure(
         &mut self,
         call: &PreparedProcedureCall,
@@ -362,6 +403,15 @@ pub(crate) type DynPatterns<'a, E, C> = dyn FnMut(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a;
+
+/// A caller's seeded pattern callback (fgdb-2acff), erased at the same
+/// boundary. `None` declines the pattern's shape.
+pub(crate) type DynSeeded<'a, E, C> = dyn FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        &[VId],
+        GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>
     + 'a;
 
 /// A caller's procedure callback, erased at the same boundary.
@@ -468,6 +518,17 @@ where
     ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
         self.source.pattern_factors(request, policy)
     }
+    fn supports_seeded_patterns(&self) -> bool {
+        self.source.supports_seeded_patterns()
+    }
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.seeded_pattern(pattern, seeds, policy)
+    }
     fn procedure(
         &mut self,
         call: &PreparedProcedureCall,
@@ -488,6 +549,70 @@ where
     }
 }
 
+/// A source plus the host's seeded single-root pattern reader (fgdb-2acff).
+/// The reader may decline a shape with `None`, keeping the unchanged leaf.
+pub(crate) struct WithSeededPatterns<S, F> {
+    pub(crate) source: S,
+    pub(crate) seeded: F,
+}
+
+impl<E, C, S, F> GraphSetSource<E, C> for WithSeededPatterns<S, F>
+where
+    S: GraphSetSource<E, C>,
+    F: FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        &[VId],
+        GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+    fn supports_pattern_factors(&self) -> bool {
+        self.source.supports_pattern_factors()
+    }
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        self.source.pattern_factors(request, policy)
+    }
+    fn supports_seeded_patterns(&self) -> bool {
+        true
+    }
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        (self.seeded)(pattern, seeds, policy)
+    }
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.source.element_property(element, key)
+    }
+}
+
 /// A source plus the rows of the previous write of the same statement, for a
 /// chained write's input (`CREATE (a) WITH a CREATE (b)`): its relation has
 /// one `SetNode::Owned` leaf, and those rows are already charged.
@@ -504,6 +629,17 @@ impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
         self.source.pattern(pattern, policy)
+    }
+    fn supports_seeded_patterns(&self) -> bool {
+        self.source.supports_seeded_patterns()
+    }
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.seeded_pattern(pattern, seeds, policy)
     }
     fn procedure(
         &mut self,

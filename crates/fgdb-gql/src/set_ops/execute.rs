@@ -244,13 +244,18 @@ where
     let rows = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()
     {
         // Admit and finish both original children once, even if the left bag
-        // is empty. Do not allocate rejected Cartesian candidate rows.
+        // is empty. Do not allocate rejected Cartesian candidate rows. A
+        // seeded right leaf admits only the left bag's root identities.
         let left = run(left, source, meter, operand)?;
         if let Some(rows) = selected_cross::factors::collect(&left, inputs, source, meter, operand)?
         {
             rows
         } else {
-            let right = run(right, source, meter, operand)?;
+            let right =
+                match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+                    Some(rows) => rows,
+                    None => run(right, source, meter, operand)?,
+                };
             let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
             selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
                 meter.event(event)

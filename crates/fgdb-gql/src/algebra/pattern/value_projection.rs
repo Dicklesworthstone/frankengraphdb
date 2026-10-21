@@ -210,6 +210,56 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
+    /// The visible column holding the identity of this pattern's one vertex
+    /// root, when the pattern reads nothing else (fgdb-2acff): one vertex
+    /// scan, its label/property selections, and cells of that same vertex,
+    /// under the canonical unpaged tail. Restricting the root to a set of
+    /// identities then keeps exactly those identities' rows, and skips no
+    /// expression, probe or edge that could raise an error on another root.
+    /// Definition-only, like the factor shape: no allocation or callback.
+    pub(crate) fn seeded_root_column(&self) -> Option<usize> {
+        if self.variable_count != 1 || self.edge_count != 0 {
+            return None;
+        }
+        let [
+            GlaOperator::ScanVertices,
+            body @ ..,
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
+        ] = self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        let body = match body.split_last() {
+            Some((GlaOperator::Distinct, body)) => body,
+            _ => body,
+        };
+        let Some((GlaOperator::ProjectValues { columns }, selections)) = body.split_last() else {
+            return None;
+        };
+        let root = BindingSlot(0);
+        if !selections
+            .iter()
+            .all(|operator| matches!(operator, GlaOperator::Select { slot, .. } if *slot == root))
+            || !columns.iter().all(|column| match column {
+                ValueProjection::Vertex { slot }
+                | ValueProjection::Property { slot, .. }
+                | ValueProjection::Labels { slot }
+                | ValueProjection::Properties { slot } => *slot == root,
+                _ => false,
+            })
+        {
+            return None;
+        }
+        let visible = self.logical.visible_columns.unwrap_or(columns.len());
+        columns[..visible]
+            .iter()
+            .position(|column| matches!(column, ValueProjection::Vertex { slot } if *slot == root))
+    }
+
     /// Prove the native visitation order for a vertex or uncaptured one-edge
     /// source. Vertex scans visit root identities; edge scans visit the ordered
     /// endpoint pair, retaining parallel-edge multiplicity. Predicates and all

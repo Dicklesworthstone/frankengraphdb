@@ -489,7 +489,10 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
             .execute_graph_set_governed(&c.query(), &bound, policy())
             .unwrap();
         assert_eq!(cold.value.len(), 1);
-        assert!(cold.rows.snapshot_records >= 512);
+        // The unregistered CALL admits the 512-vertex corpus it builds over;
+        // the implied MATCH (node) reads only the one returned vertex, by
+        // point lookup (fgdb-2acff), not a second scan of all 512.
+        assert_eq!(cold.rows.snapshot_records, 513);
         let expected = rows(
             db.query(&c.query(), statement, &params, symbols, policy())
                 .unwrap(),
@@ -505,8 +508,11 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
             .execute_graph_set_governed(&c.query(), &bound, policy())
             .unwrap();
         assert_eq!(warm.value, cold.value);
+        // The registered index admits no corpus record. The one record is the
+        // k = 1 returned vertex whose node.x the RETURN reads: no vertex
+        // corpus is revisited (acceptance: O(candidates + k), not O(N)).
         assert_eq!(
-            warm.rows.snapshot_records, 0,
+            warm.rows.snapshot_records, 1,
             "no vertex corpus is revisited"
         );
         assert!(warm.evaluator.work_units < cold.evaluator.work_units);
@@ -541,6 +547,75 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
             warm,
         );
         assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn identity_seeded_call_root_reads_only_the_returned_vertices() {
+    // fgdb-2acff: the implied MATCH (node) of `YIELD node ... RETURN node.x`
+    // admits each returned vertex by point lookup instead of scanning all.
+    let ((), report) = run_async_under_lab(0xbeac_2acf, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+                .await
+                .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..64_i64 {
+            let text = if matches!(id, 5 | 17 | 40) {
+                "needle background"
+            } else {
+                "background"
+            };
+            batch.create_vertex(
+                VId(id as u128),
+                vec![LabelId(1)],
+                vec![
+                    (TEXT, CanonicalScalar::ucs_basic_text(text).unwrap()),
+                    (X, CanonicalScalar::Int(id * 10)),
+                ],
+            );
+        }
+        db.write(&c.commit(), batch).await.unwrap();
+        db.register_beacon_index(
+            &c.query(),
+            &Options::text(TEXT),
+            fgdb_beacon::read::ReadPolicy::default(),
+        )
+        .unwrap();
+        let params = GqlParameters::new();
+        let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            candidates => 3, k => 3) YIELD node RETURN node.x AS x";
+        let crate::PreparedNativeRead::Set(prepared) =
+            crate::PreparedNativeRead::prepare(statement, &params, symbols).unwrap()
+        else {
+            panic!("hybrid CALL must prepare as a relational source");
+        };
+        let bound = prepared.bind_parameters(&params).unwrap();
+        let result = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
+        let mut found: Vec<i64> = result
+            .value
+            .iter()
+            .map(|row| match &row.values()[0] {
+                GraphValue::Scalar(CanonicalScalar::Int(x)) => *x,
+                _ => panic!("node.x is an integer"),
+            })
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, [50, 170, 400]);
+        // The three hits, nothing of the other 61 vertices.
+        assert_eq!(result.rows.snapshot_records, 3);
+        // A two-record allowance cannot admit three hits: the seeded root
+        // still charges each record it reads.
+        let mut tight = policy();
+        tight.rows = fgdb_gql::GqlExecutionBudget::new(2, 100);
+        assert!(
+            db.execute_graph_set_governed(&c.query(), &bound, tight)
+                .is_err()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

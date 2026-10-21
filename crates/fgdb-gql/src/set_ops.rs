@@ -26,7 +26,9 @@ pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub(crate) use procedure::WithOwnedRows;
-pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
+pub(crate) use procedure::{
+    BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource, WithSeededPatterns,
+};
 pub use procedure::{
     GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
     ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
@@ -1008,6 +1010,60 @@ impl PreparedGraphSet {
                 procedures,
             },
             elements,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed_with_elements` plus the host's seeded reader for a
+    /// single-root vertex pattern that a leading bag binds by identity
+    /// (fgdb-2acff). `seeded(pattern, seeds, allowance)` follows
+    /// [`GraphSetSource::seeded_pattern`]: `None` declines the shape and the
+    /// unchanged `patterns` leaf runs. Results equal the unseeded execution;
+    /// only the admitted records and work differ.
+    pub fn execute_governed_with_seeded_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            &[fgdb_delta_types::VId],
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
+        let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
+        let mut source = WithSeededPatterns {
+            source: WithElementReads {
+                source: WithProcedures {
+                    patterns,
+                    procedures,
+                },
+                elements,
+            },
+            seeded,
         };
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
