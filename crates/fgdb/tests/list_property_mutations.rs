@@ -123,7 +123,7 @@ fn prepared_list_expressions_use_the_real_frozen_selection_and_affected_id_recei
     run(async |commit, cx, txcx| {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
         db.write(commit, fixture()).await.unwrap();
-        let selection = PreparedGraphText::prepare("MATCH (n:Item) RETURN n,n.p AS p", Catalog)
+        let selection = PreparedGraphText::prepare_with_resolver("MATCH (n:Item) RETURN n,n.p AS p", Catalog)
             .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
         let mutation = PreparedGraphMutation::prepare(selection, R, vec![GraphMutationAction::SetProperty {
             target: 0, key: Q,
