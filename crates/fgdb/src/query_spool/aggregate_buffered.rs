@@ -647,3 +647,6 @@ impl PreparedBufferedAggregate {
         })
     }
 }
+
+#[path = "aggregate_difference/historical.rs"]
+mod historical;
