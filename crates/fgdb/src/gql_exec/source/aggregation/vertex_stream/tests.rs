@@ -199,8 +199,11 @@ fn terminal_cursors_release_the_last_snapshot_owner_without_waiting_for_cursor_d
                 2 => Some(1),
                 _ => None,
             });
+            // Mode 4 fails on the record allowance. The cursor may charge a
+            // scratch entry before its first record (lazy candidates), so
+            // scratch keeps an allowance and Rows is the first refusal.
             let policy = if mode == 4 {
-                GqlQueryPolicy::new(0, 0, 100, 0)
+                GqlQueryPolicy::new(0, 0, 100, 100)
             } else {
                 wide()
             };
