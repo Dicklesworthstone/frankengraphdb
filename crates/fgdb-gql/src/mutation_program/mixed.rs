@@ -357,6 +357,7 @@ impl GraphWriteProgramStats {
 pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
     frozen_vertex_update_input: bool,
+    frozen_vertex_upsert_input: bool,
 }
 impl core::fmt::Debug for PreparedGraphWriteProgram {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -393,6 +394,7 @@ impl PreparedGraphWriteProgram {
         Ok(Self {
             statements: statements.into_boxed_slice(),
             frozen_vertex_update_input: false,
+            frozen_vertex_upsert_input: false,
         })
     }
     #[must_use]
@@ -419,6 +421,67 @@ impl PreparedGraphWriteProgram {
             return false;
         }
         self.frozen_vertex_update_input = true;
+        true
+    }
+
+    /// Every statement is one vertex upsert of a single template whose MERGE
+    /// keys are pairwise distinct and whose actions write constant values to
+    /// neither a key property nor a key label (fgdb-2l3pt). No row can then
+    /// match a vertex another row creates or changes, so evaluating each MERGE
+    /// against the entry overlay and staging all rows once in input order is
+    /// the sequential program's result. A physical execution choice only: the
+    /// transcript, receipts and every answer equal sequential execution.
+    #[must_use]
+    pub const fn freezes_vertex_upsert_input(&self) -> bool {
+        self.frozen_vertex_upsert_input
+    }
+
+    pub(crate) fn freeze_vertex_upsert_input(&mut self) -> bool {
+        use crate::GraphVertexUpsertAction;
+        if self.statements.len() <= 1 || self.frozen_vertex_update_input {
+            return false;
+        }
+        let mut shape: Option<(
+            Vec<fgdb_delta_types::LabelId>,
+            Vec<fgdb_delta_types::PropertyKeyId>,
+        )> = None;
+        let mut keys = std::collections::BTreeSet::new();
+        for statement in &self.statements {
+            let GraphWriteStatement::VertexUpsert(upsert) = statement else {
+                return false;
+            };
+            let Some(key) = upsert.merge().equality_key() else {
+                return false;
+            };
+            let names: Vec<_> = key.properties.iter().map(|(name, _)| *name).collect();
+            match &shape {
+                Some((labels, properties)) if *labels == key.labels && *properties == names => {}
+                Some(_) => return false,
+                None => shape = Some((key.labels.clone(), names.clone())),
+            }
+            for action in upsert
+                .on_match()
+                .iter()
+                .chain(upsert.on_create())
+                .chain(upsert.after())
+            {
+                let safe = match action {
+                    GraphVertexUpsertAction::SetProperty { key, .. }
+                    | GraphVertexUpsertAction::SetStored { key, .. } => !names.contains(key),
+                    GraphVertexUpsertAction::SetLabel { label, .. } => !key.labels.contains(label),
+                    // Reads the target's own state, which another row's staged
+                    // effects do not change but this row's earlier ones do.
+                    GraphVertexUpsertAction::SetExpression { .. } => false,
+                };
+                if !safe {
+                    return false;
+                }
+            }
+            if !keys.insert(key) {
+                return false;
+            }
+        }
+        self.frozen_vertex_upsert_input = true;
         true
     }
 

@@ -10,8 +10,8 @@
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::insertion::{GraphInsertError, PreparedGraphInsert};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy};
-use fgdb_delta_types::RelationId;
-use fgdb_types::VId;
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalScalar, VId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphVertexMergeBuildError {
@@ -210,6 +210,16 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
     }
 }
 
+/// A vertex MERGE selection's identity key: its labels and property
+/// equalities with canonical value encodings (PreparedGraphVertexMerge::
+/// equality_key). Equal keys may match the same vertices; unequal keys of one
+/// template cannot.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MergeEqualityKey {
+    pub(crate) labels: Vec<LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, Vec<u8>)>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphVertexMerge {
     selection: PreparedGraphPattern<GraphValueRow>,
@@ -280,6 +290,60 @@ impl PreparedGraphVertexMerge {
     #[must_use]
     pub fn creation(&self) -> &PreparedGraphInsert {
         &self.creation
+    }
+
+    /// The selection's identity key when it is nothing but one vertex scan
+    /// under label and non-null property equalities (fgdb-2l3pt): the sorted
+    /// labels, and each property key with its canonical value encoding,
+    /// sorted. Two bound merges of one template whose keys differ in any value
+    /// match disjoint vertex sets, since a vertex holds one value per property
+    /// and canonical encodings are unique per value of one kind. Any other
+    /// operator or predicate (ranges, NULL tests, Boolean selections, edges)
+    /// returns None. Definition-only: no source or callback.
+    pub(crate) fn equality_key(&self) -> Option<MergeEqualityKey> {
+        use crate::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+        let operators = self.selection.plan().operators();
+        let (GlaOperator::ScanVertices, rest) = operators.split_first()? else {
+            return None;
+        };
+        let mut labels = Vec::new();
+        let mut properties = Vec::new();
+        for operator in rest {
+            match operator {
+                GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
+                    for predicate in predicates {
+                        match predicate {
+                            VertexPredicate::HasLabel(label) => labels.push(*label),
+                            VertexPredicate::IntegerProperty {
+                                key,
+                                comparison: IntegerComparison::Equal,
+                                value,
+                            } => {
+                                properties.push((*key, CanonicalScalar::Int(*value).encode().ok()?))
+                            }
+                            VertexPredicate::ScalarProperty { key, predicate }
+                                if predicate.comparison() == IntegerComparison::Equal
+                                    && !matches!(predicate.value(), CanonicalScalar::Null) =>
+                            {
+                                properties.push((*key, predicate.value().encode().ok()?));
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+                GlaOperator::ProjectValues { .. }
+                | GlaOperator::Distinct
+                | GlaOperator::OrderByValues
+                | GlaOperator::Limit { .. } => {}
+                _ => return None,
+            }
+        }
+        if properties.is_empty() {
+            return None;
+        }
+        labels.sort_unstable();
+        properties.sort_unstable();
+        Some(MergeEqualityKey { labels, properties })
     }
 
     #[must_use]

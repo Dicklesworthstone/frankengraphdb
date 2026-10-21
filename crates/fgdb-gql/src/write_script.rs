@@ -374,6 +374,14 @@ impl BoundGraphWriteScriptBatch {
         self.program.freeze_vertex_update_input().then_some(self)
     }
 
+    /// Mark an eligible vertex-upsert batch for single-preparation execution
+    /// (PreparedGraphWriteProgram::freezes_vertex_upsert_input). An ineligible
+    /// batch is returned unchanged and runs sequentially.
+    pub(crate) fn with_frozen_vertex_upserts(mut self) -> Self {
+        self.program.freeze_vertex_upsert_input();
+        self
+    }
+
     #[must_use]
     pub fn program(&self) -> &PreparedGraphWriteProgram {
         &self.program

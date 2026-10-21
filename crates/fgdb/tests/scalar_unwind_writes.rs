@@ -1687,3 +1687,132 @@ fn a_keyed_edge_load_batch_reads_only_its_endpoints() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
+    // fgdb-2l3pt: distinct-key UNWIND upserts are evaluated against the entry
+    // overlay and staged once. Before, each row re-admitted every earlier
+    // row's creation, and the CLI's 100,000-record allowance refused a
+    // 500-row batch at row 447.
+    let ((), report) = run_async_under_lab(0x7363_2a3c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let value = |vertex: &fgdb::VertexRow, key: PropertyKeyId| {
+            vertex
+                .props
+                .iter()
+                .find(|(actual, _)| *actual == key)
+                .map(|(_, value)| value.clone())
+        };
+        let int_value = |value: i64| Some(CanonicalScalar::Int(value).into());
+        let mut records = Vec::new();
+        for rows in [1000_i64, 2000, 4000] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            // Every even id already exists, holding p = -1.
+            let mut seed = WriteBatch::new(R);
+            for id in (0..rows).step_by(2) {
+                seed.create_vertex(
+                    VId(1_000_000 + id as u128),
+                    vec![ENTITY],
+                    vec![
+                        (ID, CanonicalScalar::Int(id)),
+                        (P, CanonicalScalar::Int(-1)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let input = args(
+                (0..rows)
+                    .map(|id| object(vec![("id", int(id)), ("p", int(id * 10))]))
+                    .collect(),
+            );
+            let issued = AtomicU64::new(0);
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
+                    &input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                        3 * rows as u64,
+                        rows as u64,
+                        0,
+                    ),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{rows} rows: {error:?}"));
+            let QueryResult::Write { receipt, .. } = result else {
+                panic!("a RETURN-less write returns its receipt")
+            };
+            assert_eq!(receipt.stats().completed_statements, rows as usize);
+            assert_eq!(receipt.stats().created_vertices, rows as u64 / 2);
+            assert_eq!(issued.load(Ordering::Relaxed), rows as u64 / 2);
+            records.push(receipt.stats().selection.snapshot_records);
+            txn.finish(&mut db, &commit).await.unwrap();
+            // One vertex per id, holding the batch's value; seeded vertices
+            // keep their identity.
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), rows as usize);
+            let mut ids = std::collections::BTreeSet::new();
+            for vertex in &vertices {
+                let Some(fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id))) =
+                    value(vertex, ID)
+                else {
+                    panic!("every vertex has an integer id")
+                };
+                assert_eq!(value(vertex, P), int_value(id * 10), "id {id}");
+                if id % 2 == 0 {
+                    assert_eq!(vertex.vid, VId(1_000_000 + id as u128));
+                }
+                assert!(ids.insert(id), "id {id} merged twice");
+            }
+        }
+        // Each row admits the same bounded records whatever the batch size.
+        assert_eq!(records[1], 2 * records[0], "{records:?}");
+        assert_eq!(records[2], 4 * records[0], "{records:?}");
+
+        // A repeated key keeps the sequential program: the second row matches
+        // the vertex the first created.
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let issued = AtomicU64::new(0);
+        txn.query_write(
+            &mut db,
+            &cx,
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
+            &args(vec![
+                object(vec![("id", int(5)), ("p", int(1))]),
+                object(vec![("id", int(5)), ("p", int(2))]),
+            ]),
+            symbols,
+            R,
+            policy(100, 10),
+            |request| {
+                let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                Ok::<_, Infallible>(match request.request {
+                    GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                    GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                })
+            },
+        )
+        .unwrap();
+        txn.finish(&mut db, &commit).await.unwrap();
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 1);
+        assert_eq!(value(&vertices[0], P), int_value(2));
+        assert_eq!(issued.load(Ordering::Relaxed), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

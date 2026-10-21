@@ -236,6 +236,11 @@ impl WriteTxn {
                 .execute_frozen_vertex_updates_governed(database, cx, program, policy, false)
                 .map(|(stats, _)| stats);
         }
+        if program.freezes_vertex_upsert_input() {
+            return self
+                .execute_frozen_vertex_upserts_governed(database, cx, program, policy, allocate)
+                .map(|(stats, _)| stats);
+        }
         cx.with_restriction(|| {
             let mut workspace = MutationProgramWorkspace::for_write_program(self, program);
             workspace.txn.program_multi_relation = true;
@@ -401,6 +406,11 @@ impl WriteTxn {
         if program.freezes_vertex_update_input() {
             return self
                 .execute_frozen_vertex_updates_governed(database, cx, program, policy, true)
+                .map(|(stats, receipts)| fgdb_gql::GraphWriteProgramReceipt::new(stats, receipts));
+        }
+        if program.freezes_vertex_upsert_input() {
+            return self
+                .execute_frozen_vertex_upserts_governed(database, cx, program, policy, allocate)
                 .map(|(stats, receipts)| fgdb_gql::GraphWriteProgramReceipt::new(stats, receipts));
         }
         cx.with_restriction(|| {

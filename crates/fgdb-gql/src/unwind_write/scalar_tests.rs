@@ -613,3 +613,61 @@ fn scalar_aliases_cannot_capture_graph_bindings_or_intercept_native_create_pipel
         );
     }
 }
+
+#[test]
+fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequential() {
+    // fgdb-2l3pt: a batch whose rows MERGE pairwise distinct keys and write
+    // only key-free constants is staged once; anything a later row's MERGE
+    // could observe keeps the sequential program.
+    let distinct = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(2)), ("p", int(20))]),
+        object(vec![("id", int(3)), ("p", int(30))]),
+    ]);
+    let duplicate = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(1)), ("p", int(20))]),
+    ]);
+    let single = rows(vec![object(vec![("id", int(1)), ("p", int(10))])]);
+    let bind = |tail: &str, input: &GqlParameters| {
+        GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}"))
+            .unwrap()
+            .bind(input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"))
+    };
+    for tail in [
+        "MERGE (n:Entity {id: row.id}) SET n.p = row.p",
+        "MERGE (n:Entity {id: row.id}) ON CREATE SET n.p = row.p ON MATCH SET n.name = 'seen'",
+        "MERGE (n:Entity {id: row.id}) SET n:Other",
+    ] {
+        let bound = bind(tail, &distinct);
+        assert!(bound.program().freezes_vertex_upsert_input(), "{tail}");
+        assert!(!bound.program().freezes_vertex_update_input(), "{tail}");
+        // Two rows with one key: the second must see the first's creation.
+        assert!(
+            !bind(tail, &duplicate)
+                .program()
+                .freezes_vertex_upsert_input(),
+            "{tail}"
+        );
+        assert!(
+            !bind(tail, &single).program().freezes_vertex_upsert_input(),
+            "{tail}"
+        );
+    }
+    for tail in [
+        // Writes a key property, so a later row's MERGE could match it.
+        "MERGE (n:Entity {id: row.id}) SET n.id = row.p",
+        // Writes a key label.
+        "MERGE (n:Entity {id: row.id}) SET n:Entity",
+        // Reads the target's own state.
+        "MERGE (n:Entity {id: row.id}) SET n.p = n.p + 1",
+    ] {
+        assert!(
+            !bind(tail, &distinct)
+                .program()
+                .freezes_vertex_upsert_input(),
+            "{tail}"
+        );
+    }
+}

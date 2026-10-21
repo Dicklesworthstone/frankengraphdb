@@ -348,7 +348,9 @@ impl GraphUnwindWriteText {
                 .freeze_vertex_update_input()
                 .ok_or_else(|| GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }.into())
         } else {
-            Ok(bound)
+            // Distinct-key upsert batches stage once instead of re-walking
+            // every earlier row per row (fgdb-2l3pt); others stay sequential.
+            Ok(bound.with_frozen_vertex_upserts())
         }
     }
 }
