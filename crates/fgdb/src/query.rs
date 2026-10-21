@@ -28,10 +28,10 @@ pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use authorized::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
-    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
-    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
-    AuthorizedSpoolCursor,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 pub(crate) use beacon::procedure::{
     EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,

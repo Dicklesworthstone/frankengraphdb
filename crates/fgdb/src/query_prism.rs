@@ -496,8 +496,16 @@ impl<V: Vfs + Clone> Database<V> {
         memory: FnxMemoryLimits,
         sealing: SealedLimits,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, None)
-            .await
+        // Kept apart from the cooperative path: this future must not contain
+        // the cooperative kernel's (non-Send) future, so a Send-requiring
+        // host such as a lab task can await it.
+        cx.with_restriction_async(async {
+            let graph = self
+                .prepare_fnx_sealed(cx, call, &options, sealing, false)
+                .await?;
+            finish_sealed_read(cx, call, &graph, options, memory)
+        })
+        .await
     }
 
     /// Opt into cooperative compressed BFS/PageRank execution. Binding still
@@ -537,56 +545,53 @@ impl<V: Vfs + Clone> Database<V> {
         sealing: SealedLimits,
         quantum: NonZeroUsize,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, Some(quantum))
-            .await
+        cx.with_restriction_async(async {
+            let graph = self
+                .prepare_fnx_sealed(cx, call, &options, sealing, true)
+                .await?;
+            let result = call
+                .execute_sealed_cooperative(
+                    cx,
+                    &graph,
+                    options.execution_limits,
+                    memory,
+                    quantum,
+                    asupersync::runtime::yield_now::yield_now,
+                )
+                .await
+                .map_err(SealedReadError::Execution)?;
+            Ok(FnxReadResult::bind_selection(result, options.selection))
+        })
+        .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_fnx_sealed_scheduled(
+    /// The pinned-source preparation both sealed paths share: binding checks,
+    /// then the sealed projection. A cooperative call also refuses an
+    /// algorithm without a cooperative kernel before any source access.
+    async fn prepare_fnx_sealed(
         &self,
         cx: &QueryCx,
         call: &FnxCallSpec,
-        options: FnxReadOptions,
-        memory: FnxMemoryLimits,
+        options: &FnxReadOptions,
         sealing: SealedLimits,
-        quantum: Option<NonZeroUsize>,
-    ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
-        cx.with_restriction_async(async {
-            cx.checkpoint().map_err(Error::Cancelled)?;
-            if quantum.is_some() && !call.supports_cooperative_sealed_execution() {
-                return Err(SealedReadError::Execution(
-                    FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(call.algorithm()),
-                ));
-            }
-            supported_sealed_call(call, options.projection.directedness)?;
-            let graph = self
-                .prism_sealed_projection_at(
-                    cx,
-                    options.as_of,
-                    options.selection,
-                    options.projection,
-                    options.projection_limits,
-                    options.source_limits,
-                    sealing,
-                )
-                .await?;
-            if let Some(quantum) = quantum {
-                let result = call
-                    .execute_sealed_cooperative(
-                        cx,
-                        &graph,
-                        options.execution_limits,
-                        memory,
-                        quantum,
-                        asupersync::runtime::yield_now::yield_now,
-                    )
-                    .await
-                    .map_err(SealedReadError::Execution)?;
-                Ok(FnxReadResult::bind_selection(result, options.selection))
-            } else {
-                finish_sealed_read(cx, call, &graph, options, memory)
-            }
-        })
+        cooperative: bool,
+    ) -> Result<fgdb_prism::SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
+        cx.checkpoint().map_err(Error::Cancelled)?;
+        if cooperative && !call.supports_cooperative_sealed_execution() {
+            return Err(SealedReadError::Execution(
+                FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(call.algorithm()),
+            ));
+        }
+        supported_sealed_call(call, options.projection.directedness)?;
+        self.prism_sealed_projection_at(
+            cx,
+            options.as_of,
+            options.selection,
+            options.projection,
+            options.projection_limits,
+            options.source_limits,
+            sealing,
+        )
         .await
     }
 

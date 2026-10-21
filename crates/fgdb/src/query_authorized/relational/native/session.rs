@@ -7,9 +7,10 @@
 #[path = "session/stream.rs"]
 mod stream;
 pub use stream::{
-    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedDifferenceCursor,
+    AuthorizedDifferenceExecution, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
+    AuthorizedRowCursor, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
+    AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 use super::*;

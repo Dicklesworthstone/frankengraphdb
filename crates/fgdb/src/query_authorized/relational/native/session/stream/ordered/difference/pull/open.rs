@@ -41,7 +41,7 @@ where
         params: &GqlParameters,
         before: CommitSeq,
         after: CommitSeq,
-    ) -> Result<AuthorizedDifferenceExecution<'q, B>> {
+    ) -> Result<AuthorizedDifferenceExecution<'q, A>> {
         let Self {
             session,
             scratch,

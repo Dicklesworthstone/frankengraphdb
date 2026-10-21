@@ -13,7 +13,9 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, GraphVertexMergeRowsQueryError, GraphWriteChainError,
     PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const R: RelationId = RelationId(1);
@@ -90,26 +92,25 @@ fn allocate(next: &AtomicU64, request: GraphInsertRequest) -> Result<ElementId, 
 }
 
 fn assert_targets<V: asupersync::fs::Vfs + Clone>(db: &Database<V>, actions: bool, created: VId) {
+    // Stored rows hold property values; spell the expected ones that way.
+    let int = |value: i64| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
     for (id, value) in [
         (VId(1), if actions { 6 } else { 4 }),
         (WIDE, if actions { 9 } else { 7 }),
     ] {
         assert_eq!(
             db.vertex(id).unwrap().unwrap().props,
-            vec![
-                (P, CanonicalScalar::Int(1)),
-                (Q, CanonicalScalar::Int(value))
-            ],
+            vec![(P, int(1)), (Q, int(value))],
         );
     }
     assert_eq!(
         db.vertex(VId(9)).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(99))],
+        vec![(P, int(9)), (Q, int(99))],
     );
     let expected = if actions {
-        vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(10))]
+        vec![(P, int(2)), (Q, int(10))]
     } else {
-        vec![(P, CanonicalScalar::Int(2))]
+        vec![(P, int(2))]
     };
     assert_eq!(db.vertex(created).unwrap().unwrap().props, expected);
 }

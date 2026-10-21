@@ -884,3 +884,4 @@ mod tests;
 
 #[path = "ordered/difference.rs"]
 mod difference;
+pub use difference::{AuthorizedDifferenceCursor, AuthorizedDifferenceExecution};

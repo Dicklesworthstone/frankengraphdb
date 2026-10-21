@@ -160,3 +160,4 @@ mod tests;
 
 #[path = "difference/pull.rs"]
 mod pull;
+pub use pull::{AuthorizedDifferenceCursor, AuthorizedDifferenceExecution};

@@ -5,8 +5,8 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSetBuildError, GraphSetColumnType, GraphSetOperation as Op, GraphSetQuantifier as Quant,
     GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_DEPTH,
-    MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, PreparedGraphAggregateText, PreparedGraphSet,
-    PreparedGraphSetText, PreparedGraphText,
+    MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
+    PreparedGraphAggregateText, PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
 use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
@@ -1082,9 +1082,13 @@ fn statement_wide_limits_and_utf8_prefixes_cannot_be_reset_per_arm() {
     );
     query(&nested);
     assert!(PreparedGraphSetText::prepare(&format!("({nested})"), symbols).is_err());
+    // Each arm alone fits the statement's token budget (about 4400 tokens);
+    // together the arms exceed it, so the budget is not reset per arm.
     let arm = format!("MATCH {}(n) RETURN n", "(n),".repeat(1100));
     assert!(PreparedGraphText::prepare(&arm, symbols).is_ok());
-    let error = PreparedGraphSetText::prepare(&format!("{arm} UNION {arm}"), symbols).unwrap_err();
+    let arms = MAX_GRAPH_TEXT_TOKENS / (4 * 1100) + 1;
+    let union = vec![arm.as_str(); arms].join(" UNION ");
+    let error = PreparedGraphSetText::prepare(&union, symbols).unwrap_err();
     assert!(matches!(
         error.kind,
         GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::TooManyTokens)

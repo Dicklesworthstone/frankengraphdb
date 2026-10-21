@@ -24,8 +24,8 @@ pub use aggregate::{
 #[path = "stream/ordered.rs"]
 mod ordered;
 pub use ordered::{
-    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedSortLimits,
-    AuthorizedSpoolCursor,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is

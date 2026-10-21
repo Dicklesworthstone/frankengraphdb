@@ -283,10 +283,13 @@ fn dropped_in_flight_pull_fuses_delivery_and_preserves_scratch_poisoning() {
             .unwrap();
         let mut cursor = execution.await.unwrap();
         scratch.0.lock().unwrap().pending_read = true;
-        let mut future = Box::pin(cursor.next_change());
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(future.as_mut().poll(&mut task).is_pending());
-        drop(future);
+        // The polled future and its Context (not Send) end before the next
+        // await, so the lab task stays Send.
+        {
+            let mut future = Box::pin(cursor.next_change());
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut task).is_pending());
+        }
         assert_eq!(cursor.state(), ScanState::Failed);
         let reads = scratch.0.lock().unwrap().reads;
         assert!(cursor.next_change().await.unwrap().is_none());
