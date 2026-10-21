@@ -730,10 +730,6 @@ fn invalid_import_values_and_creation_caps_refuse_before_requesting_an_identity(
             ),
             ("UNWIND [1,1] AS x MATCH (a:Source) CREATE (:Copy {p:x})", 3),
             (
-                "UNWIND [1,[2]] AS x MATCH (a:Source) CREATE (:Copy {p:x})",
-                10,
-            ),
-            (
                 "UNWIND [{p:1},2] AS row MATCH (a:Source {p:row.p}) CREATE (:Copy {p:row.p})",
                 10,
             ),
@@ -769,6 +765,40 @@ fn invalid_import_values_and_creation_caps_refuse_before_requesting_an_identity(
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), before);
         }
+        txn.abort();
+        // A list is a stored List property value (fgdb-k3nub), so the mixed
+        // [1, [2]] import is no longer invalid: each of its two rows creates
+        // a Copy per matched Source, four identity requests in all.
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let insertion = PreparedGraphInsertText::prepare(
+            "UNWIND [1,[2]] AS x MATCH (a:Source) CREATE (:Copy {p:x})",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let calls = AtomicUsize::new(0);
+        let _ = txn
+            .execute_graph_insert_governed(
+                &mut db,
+                &contexts.query(),
+                &insertion,
+                GraphInsertPolicy::new(policy(), 10, 10),
+                |request| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(match request {
+                        GraphInsertRequest::Vertex { row, vertex } => {
+                            ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128))
+                        }
+                        GraphInsertRequest::Edge { row, edge } => {
+                            ElementId::Edge(EId(100 + row as u128 * 10 + edge as u128))
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         txn.abort();
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
