@@ -49,6 +49,32 @@ fi
 
 cd "$ROOT" || exit 1
 
+# The controls run cargo-deny against a mutated policy file. cargo-deny 0.20
+# moved `--config` from `check` to the top level, and 0.19 rejects the
+# top-level form, so with either spelling one version fails every control on a
+# usage error instead of on the planted violation. MEASURED 2026-10-20:
+# Homebrew 0.20.2 on macOS lists `--config` only in `cargo deny --help`;
+# 0.19.4 on Linux lists it only in `cargo deny check --help`. Ask the binary.
+# (Captured, not piped into `grep -q`: under pipefail an early grep exit can
+# SIGPIPE cargo-deny and flip the branch.)
+DENY_TOP_HELP="$(cargo deny --help 2>/dev/null)"
+case "$DENY_TOP_HELP" in
+  *--config*)
+    deny_check_with() { # deny_check_with <policy> <check>...
+      local policy="$1"
+      shift
+      cargo deny -L error --locked --config "$policy" check "$@"
+    }
+    ;;
+  *)
+    deny_check_with() {
+      local policy="$1"
+      shift
+      cargo deny -L error --locked check "$@" --config "$policy"
+    }
+    ;;
+esac
+
 # fgdb-950i: the two full-graph scans below predate the scratch root, so they
 # capture their own retained transcripts; classification needs the bytes.
 SCAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-dep-policy-scans.XXXXXX")"
@@ -146,8 +172,7 @@ awk '
 ' "$POLICY" >"$RUN_DIR/deny.license-mutant.toml"
 if [ "$(grep -c 'hash = 0x00000000' "$RUN_DIR/deny.license-mutant.toml")" -ne 1 ]; then
   gate_fail "control: the license-hash mutation did not apply exactly once"
-elif cargo deny -L error --locked check licenses \
-    --config "$RUN_DIR/deny.license-mutant.toml" \
+elif deny_check_with "$RUN_DIR/deny.license-mutant.toml" licenses \
     >"$RUN_DIR/license.stdout" 2>"$RUN_DIR/license.stderr"; then
   gate_fail "control: cargo-deny accepted the planted foundation license mismatch"
 elif grep -q 'unlicensed' "$RUN_DIR/license.stdout" "$RUN_DIR/license.stderr" \
@@ -176,8 +201,7 @@ if cmp -s "$POLICY" "$RUN_DIR/deny.source-mutant.toml" \
     || grep -q '^allow-registry = \["https://github.com/rust-lang/crates.io-index"\]$' \
       "$RUN_DIR/deny.source-mutant.toml"; then
   gate_fail "control: the transitive-source mutation did not apply exactly"
-elif cargo deny -L error --locked check sources \
-    --config "$RUN_DIR/deny.source-mutant.toml" \
+elif deny_check_with "$RUN_DIR/deny.source-mutant.toml" sources \
     >"$RUN_DIR/source.stdout" 2>"$RUN_DIR/source.stderr"; then
   gate_fail "control: cargo-deny accepted the planted unapproved transitive registry source"
 elif grep -q 'source-not-allowed' "$RUN_DIR/source.stdout" \
@@ -211,8 +235,7 @@ awk '
 ' "$POLICY" >"$RUN_DIR/deny.ban-mutant.toml"
 if cmp -s "$POLICY" "$RUN_DIR/deny.ban-mutant.toml"; then
   gate_fail "control: the serde-wrapper mutation did not apply"
-elif cargo deny -L error --locked check bans \
-    --config "$RUN_DIR/deny.ban-mutant.toml" \
+elif deny_check_with "$RUN_DIR/deny.ban-mutant.toml" bans \
     >"$RUN_DIR/ban.stdout" 2>"$RUN_DIR/ban.stderr"; then
   gate_fail "control: cargo-deny accepted serde through asupersync with asupersync removed from its wrappers"
 elif grep -q "crate 'serde = .*' is explicitly banned" "$RUN_DIR/ban.stdout" \
