@@ -64,6 +64,8 @@ fn static_text(root: Option<&ParsedOp>) -> bool {
                 | GraphIntegerOp::Trim
                 | GraphIntegerOp::Substring
                 | GraphIntegerOp::SubstringFrom
+                | GraphIntegerOp::CypherSubstring
+                | GraphIntegerOp::CypherSubstringToEnd
                 | GraphIntegerOp::Left
                 | GraphIntegerOp::Right
                 | GraphIntegerOp::Replace
@@ -1844,15 +1846,22 @@ impl<'a> Parser<'a> {
                     at,
                 );
             }
+            // GQL/SQL SUBSTRING(s FROM start [FOR length]) counts from 1;
+            // the openCypher comma form substring(s, start [, length]) counts
+            // from 0 (fgdb-qkeq2). Without a length, the rest of the text.
             if function.eq_ignore_ascii_case("SUBSTRING") {
                 let sql = self.take_word("FROM")?;
                 if !sql {
                     self.punct(b',', ", or FROM")?;
                 }
                 self.scalar_boolean(columns, depth + 1, program)?;
-                // Without a length (FOR), the rest of the text (fgdb-20foe).
                 if self.take(b')')? {
-                    return emit(program, ParsedOp::Bound(GraphIntegerOp::SubstringFrom), at);
+                    let op = if sql {
+                        GraphIntegerOp::SubstringFrom
+                    } else {
+                        GraphIntegerOp::CypherSubstringToEnd
+                    };
+                    return emit(program, ParsedOp::Bound(op), at);
                 }
                 if sql {
                     self.word("FOR")?;
@@ -1861,7 +1870,12 @@ impl<'a> Parser<'a> {
                 }
                 self.scalar_boolean(columns, depth + 1, program)?;
                 self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Bound(GraphIntegerOp::Substring), at);
+                let op = if sql {
+                    GraphIntegerOp::Substring
+                } else {
+                    GraphIntegerOp::CypherSubstring
+                };
+                return emit(program, ParsedOp::Bound(op), at);
             }
             if function.eq_ignore_ascii_case("ABS") {
                 self.punct(b')', ")")?;
@@ -2617,6 +2631,8 @@ mod float_parameter_tests {
             "$delta AND TRUE",
             "SUBSTRING('abc', $delta, 1)",
             "SUBSTRING('abc', 1, $delta)",
+            "SUBSTRING('abc' FROM $delta FOR 1)",
+            "SUBSTRING('abc' FROM 1 FOR $delta)",
             "FLOOR($delta)",
         ] {
             let mut parser = Parser::new_with_parameter_types(
@@ -2734,6 +2750,8 @@ mod float_parameter_tests {
             "$delta AND TRUE",
             "SUBSTRING('abc', $delta, 1)",
             "SUBSTRING('abc', 1, $delta)",
+            "SUBSTRING('abc' FROM $delta FOR 1)",
+            "SUBSTRING('abc' FROM 1 FOR $delta)",
         ] {
             let mut parser = Parser::new_with_parameter_types(
                 text,

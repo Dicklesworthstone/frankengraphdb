@@ -65,14 +65,115 @@ fn char_length_and_substring_use_unicode_scalars_not_bytes_or_graphemes() {
         scalar("CHAR_LENGTH(n.text)", &input),
         CanonicalScalar::Int(4)
     );
-    assert_eq!(scalar("SUBSTRING(n.text,2,2)", &input), text("🦀a"));
-    assert_eq!(scalar("SUBSTRING(n.text,4,1)", &input), text("\u{301}"));
+    // The comma form counts scalars from 0 (openCypher, fgdb-qkeq2): the
+    // combining accent is the scalar at offset 3.
+    assert_eq!(scalar("SUBSTRING(n.text,2,2)", &input), text("a\u{301}"));
+    assert_eq!(scalar("SUBSTRING(n.text,3,1)", &input), text("\u{301}"));
     assert_eq!(scalar("SUBSTRING(n.text,9,2)", &input), text(""));
     assert_eq!(scalar("SUBSTRING(n.text,2,0)", &input), text(""));
     assert_eq!(
         scalar("SUBSTRING(n.text FROM 2 FOR 2)", &input),
         text("🦀a")
     );
+}
+
+/// fgdb-qkeq2, owner ruling option (a): SUBSTRING splits by spelling. The
+/// openCypher comma form substring(s, start [, length]) counts from 0 and
+/// its length is optional (TCK String1 [1]). GQL/SQL SUBSTRING(s FROM start
+/// [FOR length]) counts from 1. On the same text the two agree exactly when
+/// the FROM start is one more, yet compile to different programs. A
+/// negative start is refused by the comma form, as Neo4j refuses it, and
+/// clamped by the FROM form, as before. Expectations come from Rust's own
+/// scalar iterator, never from the engine.
+#[test]
+fn substring_comma_form_is_zero_based_and_from_form_is_one_based() {
+    let digits = text("0123456789");
+    for (expression, expected) in [
+        // TCK String1 [1] and the bead's own cases.
+        ("substring(n.text, 1)", "123456789"),
+        ("substring(n.text, 1, 3)", "123"),
+        ("substring(n.text, 0, 3)", "012"),
+        ("SubString(n.text, 9)", "9"),
+        ("substring(n.text, 10)", ""),
+        ("SUBSTRING(n.text FROM 1)", "0123456789"),
+        ("SUBSTRING(n.text FROM 1 FOR 3)", "012"),
+        ("SUBSTRING(n.text FROM 2 FOR 3)", "123"),
+        ("SUBSTRING(n.text FROM 11)", ""),
+        // Positions -3..1 of the FROM form hold only position 1.
+        ("SUBSTRING(n.text FROM -3 FOR 5)", "0"),
+        ("SUBSTRING(n.text FROM -1)", "0123456789"),
+    ] {
+        assert_eq!(scalar(expression, &digits), text(expected), "{expression}");
+    }
+    // Five scalars: é, the crab, a, a combining acute accent, b.
+    let unicode = "é🦀a\u{301}b";
+    let input = text(unicode);
+    let oracle = |start: usize, length: usize| {
+        text(&unicode.chars().skip(start).take(length).collect::<String>())
+    };
+    for start in 0..=6 {
+        let rest = oracle(start, usize::MAX);
+        assert_eq!(scalar(&format!("substring(n.text, {start})"), &input), rest);
+        assert_eq!(
+            scalar(&format!("SUBSTRING(n.text FROM {})", start + 1), &input),
+            rest
+        );
+        for length in 0..=6 {
+            let expected = oracle(start, length);
+            assert_eq!(
+                scalar(&format!("substring(n.text, {start}, {length})"), &input),
+                expected,
+                "comma {start} {length}"
+            );
+            assert_eq!(
+                scalar(
+                    &format!("SUBSTRING(n.text FROM {} FOR {length})", start + 1),
+                    &input
+                ),
+                expected,
+                "FROM {start} FOR {length}"
+            );
+        }
+    }
+    for (comma, from) in [
+        ("substring(n.text, 1)", "SUBSTRING(n.text FROM 1)"),
+        ("substring(n.text, 1, 2)", "SUBSTRING(n.text FROM 1 FOR 2)"),
+    ] {
+        assert_ne!(
+            prepare(&format!("MATCH (n) RETURN {comma} AS value")).canonical_bytes(),
+            prepare(&format!("MATCH (n) RETURN {from} AS value")).canonical_bytes(),
+            "{comma}"
+        );
+    }
+    for expression in ["substring(n.text, -1)", "substring(n.text, -1, 3)"] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(
+            matches!(
+                execute(&query, &digits, policy()),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    error: fgdb_gql::GraphIntegerError {
+                        kind: fgdb_gql::GraphIntegerErrorKind::InvalidSubstring,
+                        ..
+                    },
+                    ..
+                }))
+            ),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "substring(NULL, 1)",
+        "substring('a', NULL)",
+        "substring('a', 0, NULL)",
+        "SUBSTRING(NULL FROM 1)",
+        "SUBSTRING('a' FROM NULL FOR 1)",
+    ] {
+        assert_eq!(
+            scalar(expression, &digits),
+            CanonicalScalar::Null,
+            "{expression}"
+        );
+    }
 }
 
 #[test]
@@ -429,13 +530,13 @@ fn size_of_a_text_aggregate_counts_characters_in_the_result_projection() {
     assert!(run(&CanonicalScalar::Int(42)).is_err());
 }
 
-/// fgdb-20foe: openCypher left, right, replace and length(text), and the
-/// two-argument SUBSTRING. Positions count Unicode scalars, as CHAR_LENGTH
-/// and SUBSTRING do. SUBSTRING keeps this engine's 1-based start with or
-/// without a length (openCypher's substring is 0-based: fgdb-qkeq2). NULL in
-/// any argument is NULL and a negative length is InvalidSubstring. Each
-/// filters in WHERE, reads WITH aliases, runs in the aggregate result
-/// projection, and charges the text it reads and builds.
+/// fgdb-20foe: openCypher left, right, replace and length(text), and
+/// substring without a length. Positions count Unicode scalars, as
+/// CHAR_LENGTH does. The comma form of substring counts from 0, the
+/// SUBSTRING ... FROM form from 1 (fgdb-qkeq2). NULL in any argument is
+/// NULL; a negative length, or a negative comma-form start, is
+/// InvalidSubstring. Each filters in WHERE, reads WITH aliases, runs in the
+/// aggregate result projection, and charges the text it reads and builds.
 #[test]
 fn opencypher_left_right_replace_length_and_two_argument_substring() {
     // Five scalars: é, the crab, a, a combining acute accent, b.
@@ -465,29 +566,23 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
         ("length('hello')", CanonicalScalar::Int(5)),
         ("length('') + 1", CanonicalScalar::Int(1)),
         ("length(left(n.text, 3))", CanonicalScalar::Int(3)),
-        ("substring('hello', 2)", text("ello")),
+        ("substring('hello', 2)", text("llo")),
         ("SUBSTRING('hello' FROM 4)", text("lo")),
-        ("substring(n.text, 2)", text("🦀a\u{301}b")),
+        ("substring(n.text, 2)", text("a\u{301}b")),
         ("substring('hello', 0)", text("hello")),
-        ("substring('hello', -3)", text("hello")),
+        ("substring('hello', 5)", text("")),
         ("substring('hello', 9)", text("")),
         // The results are static text: `+` concatenates them.
         ("left(upper(n.text), 1) + right('xyz', 1)", text("Éz")),
-        ("replace('a', 'a', 'b') + substring('xyz', 3)", text("bz")),
+        ("replace('a', 'a', 'b') + substring('xyz', 2)", text("bz")),
     ] {
         assert_eq!(scalar(expression, &input), expected, "{expression}");
     }
-    // length(text) and two-argument SUBSTRING are the existing programs.
-    for (cypher, gql) in [
-        ("length(n.text)", "CHAR_LENGTH(n.text)"),
-        ("substring(n.text, 2)", "SUBSTRING(n.text FROM 2)"),
-    ] {
-        assert_eq!(
-            prepare(&format!("MATCH (n) RETURN {cypher} AS value")).canonical_bytes(),
-            prepare(&format!("MATCH (n) RETURN {gql} AS value")).canonical_bytes(),
-            "{cypher}"
-        );
-    }
+    // length(text) is the CHAR_LENGTH program.
+    assert_eq!(
+        prepare("MATCH (n) RETURN length(n.text) AS value").canonical_bytes(),
+        prepare("MATCH (n) RETURN CHAR_LENGTH(n.text) AS value").canonical_bytes()
+    );
     assert_ne!(
         prepare("MATCH (n) RETURN left(n.text, 2) AS value").canonical_bytes(),
         prepare("MATCH (n) RETURN right(n.text, 2) AS value").canonical_bytes()
@@ -525,7 +620,14 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
             "{expression}"
         );
     }
-    for expression in ["left(n.text, -1)", "right(n.text, -1)"] {
+    for expression in [
+        "left(n.text, -1)",
+        "right(n.text, -1)",
+        // The openCypher comma form refuses a negative start, as Neo4j does.
+        "substring(n.text, -1)",
+        "substring(n.text, -1, 2)",
+        "substring(n.text, 0, -1)",
+    ] {
         let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
         assert!(
             matches!(
@@ -582,7 +684,7 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
             0,
         ),
         (
-            "MATCH (n) WHERE substring(n.text, 5) = 'b' RETURN n.text AS value",
+            "MATCH (n) WHERE substring(n.text, 4) = 'b' RETURN n.text AS value",
             1,
         ),
         (
@@ -600,7 +702,7 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
     }
     let carried = prepare(
         "MATCH (n) WITH n.text AS t RETURN replace(t, 'b', 'B') AS r, length(t) AS c, \
-         right(t, 3) AS tail, substring(t, 4) AS rest",
+         right(t, 3) AS tail, substring(t, 3) AS rest",
     );
     assert_eq!(
         execute(&carried, &input, policy()).unwrap().value[0].values(),
@@ -615,7 +717,7 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
     let stored = CanonicalPropertyValue::from(input.clone());
     let grouped = fgdb_gql::PreparedGraphAggregateText::prepare(
         "MATCH (n) RETURN left(MIN(n.text), 2) AS l, length(MIN(n.text)) AS c, \
-         replace(MAX(n.text), 'b', 'B') AS r, substring(MIN(n.text), 4) AS s",
+         replace(MAX(n.text), 'b', 'B') AS r, substring(MIN(n.text), 3) AS s",
         symbols,
     )
     .unwrap()

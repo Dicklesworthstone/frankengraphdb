@@ -187,10 +187,11 @@ fn every_text_operator_filters_and_projects_committed_properties() {
                 "TRIM(n.t) = 'Alphaβ'",
                 vec![VId(1)],
             ),
+            // The comma form counts from 0 (openCypher, fgdb-qkeq2).
             (
                 "SUBSTRING(n.t,2,3)",
-                vec![text("lph"), text("lph"), text(""), Null, text(""), Null],
-                "SUBSTRING(n.t,2,3) = 'lph'",
+                vec![text("pha"), text("pha"), text(""), Null, text(""), Null],
+                "SUBSTRING(n.t,2,3) = 'pha'",
                 vec![VId(1), VId(2)],
             ),
             (
@@ -234,8 +235,8 @@ fn every_text_operator_filters_and_projects_committed_properties() {
             ),
             (
                 "substring(n.t,3)",
-                vec![text("phaβ"), text("phaβ"), text(""), Null, text(""), Null],
-                "substring(n.t,3) = 'phaβ'",
+                vec![text("haβ"), text("haβ"), text(""), Null, text(""), Null],
+                "substring(n.t,3) = 'haβ'",
                 vec![VId(1), VId(2)],
             ),
             (
@@ -390,7 +391,7 @@ fn unicode_scalar_offsets_case_expansion_and_unicode_whitespace_are_observable()
         batch.create_vertex(VId(3), vec![], vec![(T, text("Iİß"))]);
         db.write(&commit, batch).await.unwrap();
         let scalar = query(
-            "MATCH (n) RETURN n,CHAR_LENGTH(n.t) AS size,SUBSTRING(n.t,2,3) AS middle,SUBSTRING(n.t,20,1) AS beyond,SUBSTRING(n.t,1,0) AS empty ORDER BY n",
+            "MATCH (n) RETURN n,CHAR_LENGTH(n.t) AS size,SUBSTRING(n.t FROM 2 FOR 3) AS middle,SUBSTRING(n.t FROM 20 FOR 1) AS beyond,SUBSTRING(n.t FROM 1 FOR 0) AS empty ORDER BY n",
         );
         assert_eq!(
             cells(
@@ -407,7 +408,8 @@ fn unicode_scalar_offsets_case_expansion_and_unicode_whitespace_are_observable()
         // Locale-independent Unicode mapping, not Turkish locale rules or case
         // folding: I -> i, İ -> i + COMBINING DOT ABOVE, ß -> SS on uppercase.
         // Combining marks count separately from their base scalar, not as one
-        // grapheme; SUBSTRING uses 1-based scalar offsets, not UTF-8 byte offsets.
+        // grapheme; SUBSTRING ... FROM uses 1-based scalar offsets, not UTF-8
+        // byte offsets.
         let casing = query(
             "MATCH (n) RETURN n,UPPER(TRIM(n.t)) AS upper,LOWER(TRIM(n.t)) AS lower ORDER BY n",
         );
@@ -464,7 +466,7 @@ fn temporal_text_predicates_and_projections_use_the_selected_committed_version()
             (
                 first,
                 vec![VId(1)],
-                vec![vec![text("ALPHAΒ:lp"), CanonicalScalar::Int(6)]],
+                vec![vec![text("ALPHAΒ:ph"), CanonicalScalar::Int(6)]],
             ),
             (second, vec![], vec![]),
         ] {
@@ -511,8 +513,8 @@ fn query_selected_text_assignments_are_frozen_staged_and_durably_committed() {
         assert_eq!(result.target_vertices, 2);
         assert_eq!(result.effects, 4);
         let expected = vec![
-            vec![text("ALPHAΒ!"), text("lp")],
-            vec![text("ALPHAΒ!"), text("lp")],
+            vec![text("ALPHAΒ!"), text("ph")],
+            vec![text("ALPHAΒ!"), text("ph")],
             vec![text(""), text("")],
             vec![CanonicalScalar::Null, text("x")],
             vec![text("x"), CanonicalScalar::Null],
@@ -636,10 +638,7 @@ fn opencypher_text_functions_route_through_reads_paths_and_set() {
                 vec![vec![text("hxllo")]],
             ),
             ("RETURN length('abc') AS x", vec![vec![Int(3)]]),
-            (
-                "RETURN substring('hello', 2) AS x",
-                vec![vec![text("ello")]],
-            ),
+            ("RETURN substring('hello', 2) AS x", vec![vec![text("llo")]]),
             (
                 "UNWIND ['ab', 'é🦀b'] AS s RETURN left(s, 1) AS l, length(s) AS n",
                 vec![vec![text("a"), Int(2)], vec![text("é"), Int(3)]],
@@ -682,7 +681,7 @@ fn opencypher_text_functions_route_through_reads_paths_and_set() {
         // SET reads the frozen row: n.u is the original text's tail.
         let mutation = PreparedGraphMutationText::prepare(
             "MATCH (n) WHERE length(n.t) = 5 \
-             SET n.t = left(n.t, 1) + replace(substring(n.t, 2), 'l', 'L'), n.u = right(n.t, 3)",
+             SET n.t = left(n.t, 1) + replace(substring(n.t, 1), 'l', 'L'), n.u = right(n.t, 3)",
             R,
             symbols,
         )

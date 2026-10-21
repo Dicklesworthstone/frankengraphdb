@@ -180,10 +180,19 @@ pub enum GraphIntegerOp {
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
     /// compiled once, at preparation (fgdb regex profile 1).
     Matches(Box<crate::regex::CompiledRegex>),
+    /// GQL/SQL SUBSTRING(text FROM start FOR length): `length` characters
+    /// from the 1-based start. Positions outside the text clamp.
     Substring,
-    /// SUBSTRING(text, start) without a length: every character from the
+    /// SUBSTRING(text FROM start) without FOR: every character from the
     /// 1-based start on, clamped as SUBSTRING clamps (fgdb-20foe).
     SubstringFrom,
+    /// openCypher substring(text, start, length): `length` characters from
+    /// the 0-based start. A negative start or length is InvalidSubstring, as
+    /// in Neo4j; a start past the end is the empty text (fgdb-qkeq2).
+    CypherSubstring,
+    /// openCypher substring(text, start): every character from the 0-based
+    /// start on (fgdb-qkeq2).
+    CypherSubstringToEnd,
     /// openCypher left(text, length) and right(text, length): the first or
     /// last `length` characters (Unicode scalars), or all of a shorter text.
     /// A negative length is InvalidSubstring (fgdb-20foe).
@@ -305,6 +314,8 @@ impl GraphIntegerOp {
             }
             Self::Substring => bytes.push(21),
             Self::SubstringFrom => bytes.push(40),
+            Self::CypherSubstring => bytes.push(44),
+            Self::CypherSubstringToEnd => bytes.push(45),
             Self::Left => bytes.push(41),
             Self::Right => bytes.push(42),
             Self::Replace => bytes.push(43),
@@ -359,6 +370,8 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
             Self::SubstringFrom => f.write_str("SubstringFrom"),
+            Self::CypherSubstring => f.write_str("CypherSubstring"),
+            Self::CypherSubstringToEnd => f.write_str("CypherSubstringToEnd"),
             Self::Left => f.write_str("Left"),
             Self::Right => f.write_str("Right"),
             Self::Replace => f.write_str("Replace"),
@@ -669,6 +682,8 @@ enum Instruction {
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
     SubstringFrom,
+    CypherSubstring,
+    CypherSubstringToEnd,
     Left,
     Right,
     Replace,
@@ -1161,9 +1176,13 @@ impl GraphIntegerExpression {
                     };
                     *left = result.into();
                 }
-                Instruction::Substring | Instruction::SubstringFrom => {
-                    let length = matches!(op, Instruction::Substring)
-                        .then(|| stack.pop().expect("validated substring length"));
+                Instruction::Substring
+                | Instruction::SubstringFrom
+                | Instruction::CypherSubstring
+                | Instruction::CypherSubstringToEnd => {
+                    let length =
+                        matches!(op, Instruction::Substring | Instruction::CypherSubstring)
+                            .then(|| stack.pop().expect("validated substring length"));
                     let start = stack.pop().expect("validated substring start");
                     let value = stack.last_mut().expect("validated substring text");
                     let text = value.text().map_err(failure)?;
@@ -1176,6 +1195,17 @@ impl GraphIntegerExpression {
                     if length.is_some_and(|length| length < 0) {
                         return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
                     }
+                    // openCypher's comma form counts from 0 and refuses a
+                    // negative start, as Neo4j does; SUBSTRING ... FROM counts
+                    // from 1 and clamps (fgdb-qkeq2).
+                    let zero_based = matches!(
+                        op,
+                        Instruction::CypherSubstring | Instruction::CypherSubstringToEnd
+                    );
+                    if zero_based && start.is_some_and(|start| start < 0) {
+                        return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
+                    }
+                    let start = start.map(|start| start.saturating_add(i128::from(zero_based)));
                     let result =
                         if let (Some(text), Some(start), Some(length)) = (text, start, length) {
                             charge_payload(text.len(), false, control)?;
@@ -1444,6 +1474,8 @@ impl GraphIntegerExpression {
                 }
                 Instruction::Substring => bytes.push(21),
                 Instruction::SubstringFrom => bytes.push(40),
+                Instruction::CypherSubstring => bytes.push(44),
+                Instruction::CypherSubstringToEnd => bytes.push(45),
                 Instruction::Left => bytes.push(41),
                 Instruction::Right => bytes.push(42),
                 Instruction::Replace => bytes.push(43),
