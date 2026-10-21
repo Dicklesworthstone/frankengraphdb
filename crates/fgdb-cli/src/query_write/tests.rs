@@ -334,7 +334,13 @@ fn late_wrong_collection_shapes_refuse_atomically_without_a_scalar_fallback() {
             let error = run(&mut db, &contexts, prepared, true, &mut out)
                 .await.expect_err("the later incompatible collection must refuse");
             assert_eq!(error.code, 3, "{}", error.message);
-            assert!(error.message.contains("CollectionValue"), "{}", error.message);
+            // The CLI reports the CollectionValue refusal through Display.
+            let expected = if declaration.ends_with("=list") { "List" } else { "Map" };
+            assert!(
+                error.message.contains(&format!("is not {expected} or null")),
+                "{}",
+                error.message
+            );
             assert!(out.is_empty());
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(db.vertices().unwrap().len(), 1);
