@@ -780,7 +780,6 @@ fn invalid_import_values_and_creation_caps_refuse_before_requesting_an_identity(
 fn invalid_imported_script_scopes_refuse_before_any_statement_catalog_resolution() {
     for tail in [
         "UNWIND [1] AS x MATCH (x) CREATE (:Copy)",
-        "UNWIND [1] AS x MATCH (a:Source) SET a.p=x",
         "UNWIND [1] AS x MATCH (a:Source) MERGE (a)-[:R]->(b)",
         "UNWIND [1] AS x MATCH (a:Source) WHERE a.p=x OR a.p=0 CREATE (:Copy)",
     ] {
@@ -794,4 +793,14 @@ fn invalid_imported_script_scopes_refuse_before_any_statement_catalog_resolution
         assert_eq!(error.statement, Some(1), "{tail}");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{tail}");
     }
+    // UNWIND ... MATCH ... SET compiles as one mutation over the UNWIND+MATCH
+    // relation (baa9d0f6); scalar_unwind_writes'
+    // an_unwind_match_mutation_reads_the_unwound_rows executes it.
+    let script = PreparedGraphWriteScript::prepare(
+        "CREATE (:Source {p:1}); UNWIND [1] AS x MATCH (a:Source) SET a.p=x",
+        R,
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(script.statements().len(), 2);
 }
