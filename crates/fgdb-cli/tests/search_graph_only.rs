@@ -408,7 +408,7 @@ fn graph_only_refuses_invalid_budgets_and_seed_overflow_before_storage_open() {
             "one refusal, no partial rows"
         );
         assert!(diagnostic.starts_with(concat!(
-            "{\"v\":1,\"event\":\"error\",\"class\":\"usage\",",
+            "{\"v\":1,\"event\":\"error\",\"class\":\"usage\",\"code\":\"usage\",",
             "\"diagnostics\":[",
         )));
         assert!(diagnostic.ends_with("]}\n"));

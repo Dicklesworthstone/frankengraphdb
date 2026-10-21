@@ -714,7 +714,52 @@ pub enum GraphSetProjectionError {
 }
 impl core::fmt::Display for GraphSetProjectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph projection definition: {self:?}")
+        match self {
+            Self::Empty => f.write_str("a projection requires at least one column"),
+            Self::TooManyColumns { limit, observed } => {
+                write!(f, "projection has {observed} columns, limit {limit}")
+            }
+            Self::InvalidName { column } => {
+                write!(f, "projection column {column} has an invalid name")
+            }
+            Self::DuplicateName { column } => {
+                write!(
+                    f,
+                    "projection column {column} repeats an earlier column name"
+                )
+            }
+            Self::UnknownInput { column, input } => {
+                write!(f, "projection column {column} reads unknown input {input}")
+            }
+            Self::IntegerInput { column, input } => write!(
+                f,
+                "projection column {column} reads input {input}, which has the wrong type for its expression"
+            ),
+            Self::ListInput { column } => write!(
+                f,
+                "projection column {column} uses a non-scalar value where a scalar is required"
+            ),
+            Self::MapInput { column } => write!(
+                f,
+                "projection column {column} reads a map from a value that is not a map"
+            ),
+            Self::ExpressionBounds { column } => {
+                write!(
+                    f,
+                    "projection column {column} nests too deeply or has too many values"
+                )
+            }
+            Self::InvalidValue { column } => {
+                write!(
+                    f,
+                    "projection column {column} holds a value outside its bounds"
+                )
+            }
+            Self::SetBuild(error) => error.fmt(f),
+            Self::ProcedureNotFirst => {
+                f.write_str("CALL starts a read pipeline; it cannot follow another stage")
+            }
+        }
     }
 }
 impl core::error::Error for GraphSetProjectionError {}

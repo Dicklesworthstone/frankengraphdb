@@ -51,7 +51,18 @@ pub enum GroupBuildError {
 }
 impl core::fmt::Display for GroupBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "native group definition: {self:?}")
+        match self {
+            Self::InputWidth => f.write_str("group input width does not match its definition"),
+            Self::InputSchema { column } => {
+                write!(f, "group input column {column} has an unexpected type")
+            }
+            Self::UnsupportedDefinition => {
+                f.write_str("this grouping definition has no native operator")
+            }
+            Self::UnsupportedAggregate { aggregate } => {
+                write!(f, "aggregate {aggregate} has no native group operator")
+            }
+        }
     }
 }
 impl core::error::Error for GroupBuildError {}

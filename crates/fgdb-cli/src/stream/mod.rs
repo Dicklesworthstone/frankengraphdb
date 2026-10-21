@@ -167,14 +167,13 @@ pub(super) fn summary_line(seq: u64, sent: u64, robot: bool) -> String {
 }
 
 pub(super) fn incomplete(error: Failure, sent: u64) -> Failure {
-    Failure::new(
-        error.code,
-        error.class,
-        format!(
+    Failure {
+        message: format!(
             "stream incomplete after {sent} fully flushed row(s); output may contain a partial final frame: {}",
             error.message,
         ),
-    )
+        ..error
+    }
 }
 
 // Only the physical result row is owned. Repeated keys and aggregates borrow

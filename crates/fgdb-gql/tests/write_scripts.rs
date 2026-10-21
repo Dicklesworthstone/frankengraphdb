@@ -2,11 +2,11 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    GraphWriteProgramTemplateError, GraphWriteScriptErrorKind, GraphWriteStatement,
-    MAX_GRAPH_MUTATION_STATEMENTS, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_WRITE_SCRIPT_BYTES,
-    PreparedGraphInsertText, PreparedGraphMutationText, PreparedGraphWriteProgram,
-    PreparedGraphWriteScript,
+    GqlParameterType, GqlParameters, GqlRefusalClass, GraphPatternTextErrorKind, GraphSymbol,
+    GraphSymbolKind, GraphWriteProgramTemplateError, GraphWriteScriptErrorKind,
+    GraphWriteStatement, MAX_GRAPH_MUTATION_STATEMENTS, MAX_GRAPH_TEXT_BYTES,
+    MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphInsertText, PreparedGraphMutationText,
+    PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
 use std::cell::{Cell, RefCell};
@@ -236,17 +236,64 @@ fn preparation_and_binding_errors_report_original_utf8_script_offsets() {
     let error = script.bind_parameters(&GqlParameters::new()).unwrap_err();
     assert_eq!(error.statement, Some(1));
     assert_eq!(error.offset, text.find('$').unwrap());
+    // The message names the global byte once and the reason, never the
+    // nested program error's Debug rendering or the parameter's name.
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "statement 1, byte {}: missing parameter value",
+            error.offset
+        )
+    );
+    assert_eq!(error.class(), GqlRefusalClass::InvalidValue);
     let bad = "CREATE (n {p:'λ'});\n\u{2003}MATCH (n) SET n.unknown=1";
     let error = PreparedGraphWriteScript::prepare(bad, R, symbols).unwrap_err();
     assert_eq!(error.statement, Some(1));
     assert_eq!(error.offset, bad.find("unknown").unwrap());
+    assert_eq!(
+        error.to_string(),
+        format!("statement 1, byte {}: unknown property name", error.offset)
+    );
+    assert_eq!(error.class(), GqlRefusalClass::NotFound);
     let extra = GqlParameters::new().with_int64("extra", 3).unwrap();
+    let error = script.bind_parameters(&extra).unwrap_err();
     assert!(matches!(
-        script.bind_parameters(&extra).unwrap_err().kind,
+        error.kind,
         GraphWriteScriptErrorKind::Program(GraphWriteProgramTemplateError::Program(
             fgdb_gql::GraphMutationProgramTemplateError::UnexpectedArguments
         ))
     ));
+    assert_eq!(
+        error.to_string(),
+        "byte 0: mutation program received undeclared arguments"
+    );
+    assert_eq!(error.class(), GqlRefusalClass::InvalidValue);
+}
+
+/// R12's example: graph DDL reaches the CREATE parser, which expects a
+/// pattern. The text says so plainly; hosts name the construct first.
+#[test]
+fn write_script_refusals_read_as_messages() {
+    let error = PreparedGraphWriteScript::prepare("CREATE GRAPH social", R, symbols).unwrap_err();
+    assert_eq!(error.to_string(), "statement 0, byte 7: expected \"(\"");
+    assert_eq!(error.class(), GqlRefusalClass::Syntax);
+    let error = PreparedGraphWriteScript::prepare("CREATE (n:Person);;", R, symbols).unwrap_err();
+    assert_eq!(error.to_string(), "statement 1, byte 18: empty statement");
+    assert_eq!(error.class(), GqlRefusalClass::Syntax);
+    // The repeated property is refused when the statement binds.
+    let error = PreparedGraphWriteScript::prepare(
+        "MERGE (n:Person {p:1}) ON MATCH SET n.q=1, n.q=2",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "statement 0, byte 48: ON MATCH sets the same property twice"
+    );
+    assert_eq!(error.class(), GqlRefusalClass::Statement);
 }
 
 #[test]

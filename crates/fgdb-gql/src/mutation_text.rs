@@ -170,13 +170,45 @@ impl From<crate::GraphSetTextError> for GraphMutationTextError {
         }
     }
 }
+impl core::fmt::Display for GraphMutationTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+            Self::IntegerExpression(error) => error.fmt(f),
+            Self::IntegerOperand => f.write_str("expected an integer operand"),
+            Self::IntegerNesting { limit } => {
+                write!(f, "integer expression nests deeper than {limit} levels")
+            }
+            Self::Relation(kind) => kind.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphMutationTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::IntegerOperand => C::Syntax,
+            Self::Build(_)
+            | Self::IntegerExpression(_)
+            | Self::IntegerNesting { .. }
+            | Self::ReturnBuild(_) => C::Statement,
+        }
+    }
+}
+impl GraphMutationTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphMutationTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph mutation text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphMutationTextError {}
@@ -342,13 +374,32 @@ impl From<GraphPatternTextError> for GraphDeleteTextError {
         }
     }
 }
+impl core::fmt::Display for GraphDeleteTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphDeleteTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Build(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphDeleteTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphDeleteTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph DELETE text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphDeleteTextError {}
@@ -519,13 +570,40 @@ impl From<crate::GraphSetTextError> for GraphVertexMergeTextError {
         }
     }
 }
+impl core::fmt::Display for GraphVertexMergeTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::InsertBuild(error) => error.fmt(f),
+            Self::MergeBuild(error) => error.fmt(f),
+            Self::Relation(kind) => kind.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+            Self::Action(kind) => kind.fmt(f),
+        }
+    }
+}
+impl GraphVertexMergeTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::Action(kind) => kind.class(),
+            Self::InsertBuild(_) | Self::MergeBuild(_) | Self::ReturnBuild(_) => {
+                crate::GqlRefusalClass::Statement
+            }
+        }
+    }
+}
+impl GraphVertexMergeTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphVertexMergeTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph vertex MERGE text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphVertexMergeTextError {}
@@ -630,13 +708,35 @@ impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
         }
     }
 }
+impl core::fmt::Display for GraphEdgeMergeTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+            Self::Relation(kind) => kind.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphEdgeMergeTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::Build(_) | Self::ReturnBuild(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphEdgeMergeTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphEdgeMergeTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph relationship MERGE text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphEdgeMergeTextError {}

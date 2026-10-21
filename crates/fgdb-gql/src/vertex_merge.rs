@@ -32,7 +32,25 @@ pub enum GraphVertexMergeBuildError {
 }
 impl core::fmt::Display for GraphVertexMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph vertex MERGE definition: {self:?}")
+        match self {
+            Self::TargetColumn { column } => {
+                write!(f, "MERGE selects column {column}, which is not a vertex")
+            }
+            Self::CreationMustBeStandalone => {
+                f.write_str("the vertex MERGE pattern must not read an input row")
+            }
+            Self::CreationMustContainOneVertex { observed } => write!(
+                f,
+                "a vertex MERGE pattern must create exactly one vertex, not {observed}"
+            ),
+            Self::CreationMustNotContainEdges { observed } => write!(
+                f,
+                "a vertex MERGE pattern must not create relationships ({observed} found)"
+            ),
+            Self::RelationMismatch { .. } => {
+                f.write_str("the MERGE selection and creation use different relation coordinates")
+            }
+        }
     }
 }
 impl core::error::Error for GraphVertexMergeBuildError {}
@@ -691,7 +709,16 @@ pub enum GraphVertexMergeRowsQueryBuildError {
 }
 impl core::fmt::Display for GraphVertexMergeRowsQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "vertex MERGE RETURN definition: {self:?}")
+        match self {
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Binding { binding } => {
+                write!(f, "RETURN binding {binding} names no input column")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for GraphVertexMergeRowsQueryBuildError {}

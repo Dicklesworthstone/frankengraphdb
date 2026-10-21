@@ -23,7 +23,15 @@ pub enum RowWindowBuildError {
 }
 impl core::fmt::Display for RowWindowBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row window definition: {self:?}")
+        match self {
+            Self::InputWidth { observed } => {
+                write!(
+                    f,
+                    "row window input has an inadmissible width of {observed} columns"
+                )
+            }
+            Self::Order(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for RowWindowBuildError {}

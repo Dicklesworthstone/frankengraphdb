@@ -374,7 +374,34 @@ pub enum GraphIntegerBuildError {
 }
 impl core::fmt::Display for GraphIntegerBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "integer expression definition: {self:?}")
+        match self {
+            Self::Empty => f.write_str("empty scalar expression"),
+            Self::TooManyInstructions { limit, observed } => {
+                write!(
+                    f,
+                    "scalar expression has {observed} instructions, limit {limit}"
+                )
+            }
+            Self::MissingOperand { instruction } => {
+                write!(
+                    f,
+                    "scalar expression instruction {instruction} lacks an operand"
+                )
+            }
+            Self::ExtraOperands { remaining } => {
+                write!(f, "scalar expression leaves {remaining} unused operands")
+            }
+            Self::OperandType { instruction } => write!(
+                f,
+                "scalar expression instruction {instruction} has an operand of the wrong type"
+            ),
+            Self::EmptyCase { instruction } => {
+                write!(
+                    f,
+                    "CASE at scalar expression instruction {instruction} has no branch"
+                )
+            }
+        }
     }
 }
 impl core::error::Error for GraphIntegerBuildError {}

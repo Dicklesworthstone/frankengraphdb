@@ -24,7 +24,16 @@ pub enum GraphMutationProgramBuildError {
 }
 impl core::fmt::Display for GraphMutationProgramBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "mutation program definition: {self:?}")
+        match self {
+            Self::Empty => f.write_str("a write program requires at least one statement"),
+            Self::TooManyStatements { limit, observed } => {
+                write!(f, "write program has {observed} statements, limit {limit}")
+            }
+            Self::MixedRelation { statement } => write!(
+                f,
+                "statement {statement} writes a different relation than the program's first statement"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphMutationProgramBuildError {}

@@ -410,13 +410,29 @@ pub enum FnxBindErrorKind {
     DuplicateYield,
     TrailingInput,
 }
+/// Static procedure-signature text only, never a supplied argument value.
+impl core::fmt::Display for FnxBindErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TextTooLong => f.write_str("CALL text is too long"),
+            Self::Expected(item) if item.bytes().any(|byte| byte.is_ascii_alphanumeric()) => {
+                write!(f, "expected {item}")
+            }
+            Self::Expected(item) => write!(f, "expected \"{item}\""),
+            Self::UnknownProcedure => f.write_str("unknown procedure"),
+            Self::MissingParameter => f.write_str("missing parameter value"),
+            Self::MissingArgument(name) => write!(f, "missing argument {name}"),
+            Self::InvalidArgument(reason) => write!(f, "invalid argument: {reason}"),
+            Self::TooManyArguments => f.write_str("too many arguments"),
+            Self::UnknownYield => f.write_str("YIELD names an output the procedure does not have"),
+            Self::DuplicateYield => f.write_str("YIELD repeats an output"),
+            Self::TrailingInput => f.write_str("unexpected text after the CALL"),
+        }
+    }
+}
 impl core::fmt::Display for FnxBindError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "Prism CALL bind error at byte {}: {:?}",
-            self.at, self.kind
-        )
+        write!(f, "CALL at byte {}: {}", self.at, self.kind)
     }
 }
 impl core::error::Error for FnxBindError {}
@@ -440,11 +456,13 @@ pub struct FnxCallError {
 }
 impl core::fmt::Display for FnxCallError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "Prism CALL bind error at {:?}: {:?}",
-            self.site, self.kind
-        )
+        match self.site {
+            FnxCallSite::Call => write!(f, "CALL: {}", self.kind),
+            FnxCallSite::Procedure => write!(f, "CALL procedure: {}", self.kind),
+            FnxCallSite::Arguments => write!(f, "CALL arguments: {}", self.kind),
+            FnxCallSite::Argument(index) => write!(f, "CALL argument {index}: {}", self.kind),
+            FnxCallSite::Yield(index) => write!(f, "CALL YIELD item {index}: {}", self.kind),
+        }
     }
 }
 impl core::error::Error for FnxCallError {}

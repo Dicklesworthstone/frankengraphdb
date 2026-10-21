@@ -26,13 +26,33 @@ pub struct GraphPipelineAggregateTextError {
     pub offset: usize,
     pub kind: GraphPipelineAggregateTextErrorKind,
 }
+impl core::fmt::Display for GraphPipelineAggregateTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Input(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+            Self::Having(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphPipelineAggregateTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Input(kind) => kind.class(),
+            Self::Build(_) | Self::Having(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphPipelineAggregateTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphPipelineAggregateTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "aggregate pipeline at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphPipelineAggregateTextError {

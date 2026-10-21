@@ -22,7 +22,30 @@ pub enum JoinPlanError {
 
 impl core::fmt::Display for JoinPlanError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid FreeJoin plan: {self:?}")
+        f.write_str("invalid FreeJoin plan: ")?;
+        match self {
+            Self::TooManyVariables => write!(f, "more than {MAX_JOIN_VARIABLES} variables"),
+            Self::TooManyRelations => write!(f, "more than {MAX_JOIN_RELATIONS} relations"),
+            Self::DuplicateVariable(variable) => {
+                write!(f, "variable {} appears twice", variable.0)
+            }
+            Self::MissingVariable(variable) => {
+                write!(f, "variable {} is never ordered", variable.0)
+            }
+            Self::UnknownVariable(variable) => {
+                write!(f, "variable {} is not in the plan", variable.0)
+            }
+            Self::EmptyGroup => f.write_str("a node has no variables"),
+            Self::UncoveredGroup(group) => {
+                write!(f, "node {group} is covered by no relation")
+            }
+            Self::RelationCount { expected, actual } => {
+                write!(f, "{actual} relations supplied, {expected} expected")
+            }
+            Self::AttributeOrder { relation } => {
+                write!(f, "relation {relation} attributes are out of plan order")
+            }
+        }
     }
 }
 impl core::error::Error for JoinPlanError {}

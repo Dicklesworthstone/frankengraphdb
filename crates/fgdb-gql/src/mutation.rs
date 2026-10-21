@@ -202,7 +202,42 @@ pub enum GraphMutationBuildError {
 }
 impl core::fmt::Display for GraphMutationBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph mutation definition: {self:?}")
+        match self {
+            Self::RequiresSingleGraphSource => {
+                f.write_str("a mutation requires exactly one graph source")
+            }
+            Self::RelationalInput(error) => error.fmt(f),
+            Self::EmptyActions => {
+                f.write_str("a mutation requires at least one SET, REMOVE or DELETE action")
+            }
+            Self::TooManyActions { limit, observed } => {
+                write!(f, "mutation has {observed} actions, limit {limit}")
+            }
+            Self::TargetColumn { action, column } => write!(
+                f,
+                "mutation action {action} targets column {column}, which is not an element it can change"
+            ),
+            Self::ValueColumn { action, column } => write!(
+                f,
+                "mutation action {action} reads column {column}, which is not an assignable value"
+            ),
+            Self::ValueExpression { action, kind } => {
+                write!(
+                    f,
+                    "mutation action {action} assigns a value that cannot be stored"
+                )?;
+                match kind {
+                    Some(kind) => write!(f, ": {kind}"),
+                    None => Ok(()),
+                }
+            }
+            Self::MixedDeletionAndUpdates => {
+                f.write_str("one statement cannot both delete and update")
+            }
+            Self::MixedDeleteModes => {
+                f.write_str("one statement cannot mix DELETE and DETACH DELETE")
+            }
+        }
     }
 }
 impl core::error::Error for GraphMutationBuildError {}

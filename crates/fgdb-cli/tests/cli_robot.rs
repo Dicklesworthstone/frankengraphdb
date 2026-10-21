@@ -704,10 +704,33 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
             "error" => {
                 terminals += 1;
                 assert_eq!(index, events.len() - 1, "terminal must be last");
-                exact_fields(event, &["v", "event", "class", "diagnostics"]);
+                if event.object().contains_key("offset") {
+                    exact_fields(
+                        event,
+                        &["v", "event", "class", "code", "offset", "diagnostics"],
+                    );
+                    event.get("offset").unsigned();
+                } else {
+                    exact_fields(event, &["v", "event", "class", "code", "diagnostics"]);
+                }
                 let class = event.get("class").string();
                 assert_ne!(class, "success");
                 assert_eq!(code as u64, schema.get("exit_codes").get(class).unsigned());
+                // A closed code set that refines the class.
+                let refusal = event.get("code").string();
+                assert!(
+                    schema
+                        .get("errors")
+                        .get("codes")
+                        .object()
+                        .contains_key(refusal),
+                    "undocumented code {refusal}"
+                );
+                let owner = match refusal {
+                    "usage" | "open" | "io" => refusal,
+                    _ => "query",
+                };
+                assert_eq!(class, owner, "code {refusal} belongs to class {owner}");
                 let diagnostics = event.get("diagnostics").array();
                 assert!(!diagnostics.is_empty(), "error diagnostics are required");
                 for diagnostic in diagnostics {
@@ -1925,6 +1948,364 @@ fn typed_failures_keep_stdout_machine_readable_and_key_material_private() {
         "MATCH (p:Person) RETURN p.name",
     ])
     .failure(4, "open");
+}
+
+/// A Rust `Debug` rendering of a nested error: a CamelCase variant applied to
+/// a payload (`Expected("(")`, `Program(`), a struct-variant body, an
+/// `Option`, or a `kind:` field.
+fn debug_dump(text: &str) -> Option<String> {
+    for marker in ["Program(", " { ", "Some(", "kind:"] {
+        if text.contains(marker) {
+            return Some(marker.to_owned());
+        }
+    }
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            word.push(ch);
+            continue;
+        }
+        if ch == '('
+            && word.starts_with(|c: char| c.is_ascii_uppercase())
+            && word.contains(|c: char| c.is_ascii_lowercase())
+        {
+            return Some(format!("{word}("));
+        }
+        word.clear();
+    }
+    None
+}
+
+/// R12: every refusal reads as a message with a stable code and, when it has
+/// one, the statement byte; never a Rust Debug dump of nested enums.
+#[test]
+fn refusals_carry_a_stable_code_and_a_readable_message() {
+    let db = TestDb::new("refusals");
+    db.create();
+    db.write(&[
+        "INSERT (:Person {name: 'Ada', born: 1815})-[:KNOWS]->(:Person {name: 'Charles', born: 1791})",
+    ]);
+    // (command, flags, statement, exit, code, offset, exact diagnostic)
+    type Case<'a> = (
+        &'a str,
+        &'a [&'a str],
+        &'a str,
+        i32,
+        &'a str,
+        Option<u64>,
+        Option<&'a str>,
+    );
+    let corpus: &[Case] = &[
+        // The 2026-10-20 reality check's table (R12). Pattern comprehension and
+        // a list-valued SET now run, so three of its five still refuse.
+        (
+            "write",
+            &[],
+            "CREATE GRAPH social",
+            3,
+            "unsupported",
+            Some(0),
+            Some("byte 0: CREATE GRAPH is not supported yet (graph DDL)"),
+        ),
+        (
+            "query",
+            &[],
+            "CALL { MATCH (p:Person) RETURN p } RETURN count(p)",
+            3,
+            "unsupported",
+            Some(0),
+            Some("byte 0: CALL {...} subqueries are not supported yet"),
+        ),
+        (
+            "write",
+            &[],
+            "CREATE BRANCH what_if FROM social@trunk",
+            3,
+            "unsupported",
+            Some(0),
+            Some("byte 0: CREATE BRANCH is not supported yet (branch DDL)"),
+        ),
+        // Graph and branch DDL, and a branch selector without a catalog.
+        (
+            "write",
+            &[],
+            "DROP GRAPH social",
+            3,
+            "unsupported",
+            Some(0),
+            None,
+        ),
+        (
+            "write",
+            &[],
+            "MERGE BRANCH what_if INTO trunk",
+            3,
+            "unsupported",
+            Some(0),
+            None,
+        ),
+        (
+            "query",
+            &[],
+            "MATCH (p:Person) AT BRANCH what_if RETURN p.name",
+            3,
+            "unsupported",
+            Some(17),
+            Some("byte 17: AT BRANCH is not supported here: there is no branch catalog"),
+        ),
+        (
+            "write",
+            &[],
+            "MATCH (p:Person {name: 'Ada'}) AT BRANCH what_if SET p.born = 1816",
+            3,
+            "unsupported",
+            Some(31),
+            None,
+        ),
+        // Syntax, in reads and in multi-statement write scripts.
+        (
+            "query",
+            &[],
+            "MATCH (n RETURN n",
+            3,
+            "syntax",
+            Some(17),
+            Some("byte 17: expected closing graph-expression delimiter"),
+        ),
+        (
+            "query",
+            &[],
+            "MATCH (n:Person) RETURN n.name ORDER BY",
+            3,
+            "syntax",
+            Some(39),
+            None,
+        ),
+        (
+            "write",
+            &[],
+            "MATCH (n:Person) DELETE n DETACH DELETE n",
+            3,
+            "syntax",
+            Some(26),
+            Some("statement 0, byte 26: expected end of statement"),
+        ),
+        (
+            "write",
+            &[],
+            "INSERT (:Person {name: 'X'});;",
+            3,
+            "syntax",
+            Some(29),
+            Some("statement 1, byte 29: empty statement"),
+        ),
+        (
+            "query",
+            &[],
+            "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 1 FOR SYSTEM_TIME AS OF SEQ 2 RETURN n.name",
+            3,
+            "syntax",
+            Some(45),
+            Some("byte 45: FOR SYSTEM_TIME appears more than once"),
+        ),
+        // An unknown function: the furthest read parser names what it expected.
+        (
+            "query",
+            &[],
+            "MATCH (n:Person) RETURN nofunc(n.name)",
+            3,
+            "syntax",
+            Some(24),
+            None,
+        ),
+        // Names without a binding.
+        (
+            "write",
+            &[],
+            "INSERT (:Person {nope: 1})",
+            3,
+            "not_found",
+            Some(17),
+            Some("statement 0, byte 17: unknown property name"),
+        ),
+        (
+            "write",
+            &[],
+            "MATCH (a:Person {name: 'Ada'}) CREATE (a)-[:Nope]->(:Person)",
+            3,
+            "not_found",
+            Some(44),
+            None,
+        ),
+        (
+            "query",
+            &[],
+            "CALL fnx.nosuch() YIELD x RETURN x",
+            3,
+            "not_found",
+            Some(15),
+            None,
+        ),
+        // Parameters and literals.
+        (
+            "query",
+            &[],
+            "MATCH (n:Person) WHERE n.born = $born RETURN n.name",
+            3,
+            "invalid_value",
+            Some(32),
+            Some("byte 32: missing parameter value"),
+        ),
+        (
+            "query",
+            &["--param", "extra=int:1"],
+            "MATCH (n:Person) RETURN n.name",
+            3,
+            "invalid_value",
+            Some(30),
+            None,
+        ),
+        (
+            "write",
+            &[],
+            "INSERT (:Person {name: $name})",
+            3,
+            "invalid_value",
+            Some(23),
+            None,
+        ),
+        (
+            "query",
+            &[],
+            "RETURN 99999999999999999999999 AS x",
+            3,
+            "invalid_value",
+            Some(7),
+            None,
+        ),
+        // Statement definitions that parse but are refused.
+        (
+            "query",
+            &[],
+            "MATCH (n:Person) RETURN n.name AS a UNION MATCH (m:Person) RETURN m.name AS b",
+            3,
+            "statement",
+            Some(36),
+            Some("byte 36: UNION operands must return the same column names"),
+        ),
+        (
+            "write",
+            &[],
+            "MERGE (p:Person {name: 'Ada'}) ON MATCH SET p.born = 1, p.born = 2",
+            3,
+            "statement",
+            Some(66),
+            Some("statement 0, byte 66: ON MATCH sets the same property twice"),
+        ),
+        // Execution limits.
+        (
+            "query",
+            &["--max-snapshot-records", "0"],
+            "MATCH (n:Person) RETURN n.name",
+            3,
+            "budget",
+            None,
+            Some(
+                "GQL SnapshotRecords budget exceeded: observed 1, limit 0 (raise with --max-snapshot-records)",
+            ),
+        ),
+        (
+            "query",
+            &["--max-work-units", "1"],
+            "MATCH (n:Person)-[:KNOWS]->(m) RETURN m.name",
+            3,
+            "budget",
+            None,
+            None,
+        ),
+        (
+            "query",
+            &["--max-result-rows", "0"],
+            "MATCH (n:Person) RETURN n.name",
+            3,
+            "budget",
+            None,
+            None,
+        ),
+        // `query` opens a read view, which cannot express a write.
+        (
+            "query",
+            &[],
+            "INSERT (:Person {name: 'Y'})",
+            3,
+            "permission",
+            None,
+            Some("query is read-only: run this write statement with fgdb write"),
+        ),
+    ];
+    assert!(corpus.len() >= 20);
+    for &(command, flags, statement, exit, code, offset, exact) in corpus {
+        let mut args = flags.to_vec();
+        args.push(statement);
+        let refused = db.command(command, &args);
+        refused.failure(exit, "query");
+        let terminal = refused.terminal();
+        assert_eq!(terminal.get("code").string(), code, "{statement}");
+        assert_eq!(
+            terminal.object().get("offset").map(Json::unsigned),
+            offset,
+            "{statement}"
+        );
+        // A byte in the statement, or its end when input ran out.
+        if let Some(offset) = offset {
+            assert!(offset <= statement.len() as u64, "{statement}");
+        }
+        let diagnostics = terminal.get("diagnostics").array();
+        for diagnostic in diagnostics {
+            let text = diagnostic.string();
+            assert_eq!(debug_dump(text), None, "{statement}: {text}");
+        }
+        if let Some(exact) = exact {
+            assert_eq!(diagnostics[0].string(), exact, "{statement}");
+        }
+        let marker = debug_dump(&refused.stderr);
+        assert_eq!(marker, None, "{statement}: {}", refused.stderr);
+    }
+    // A transaction step keeps its code and its own byte.
+    let step = db.command("transaction", &["--write", "CREATE GRAPH g"]);
+    step.failure(3, "query");
+    assert_eq!(step.terminal().get("code").string(), "unsupported");
+    assert_eq!(step.terminal().get("offset").unsigned(), 0);
+    assert_eq!(
+        step.terminal().get("diagnostics").array()[0].string(),
+        "transaction step 1: byte 0: CREATE GRAPH is not supported yet (graph DDL)"
+    );
+    // Human mode names the code before the message.
+    let human = run(
+        false,
+        &[
+            "write",
+            "--db",
+            &db.db,
+            "--key-file",
+            &db.key,
+            "CREATE GRAPH social",
+        ],
+    );
+    assert_eq!(human.code, 3);
+    assert!(human.stdout.is_empty());
+    assert_eq!(
+        human.stderr,
+        "fgdb: error[unsupported]: byte 0: CREATE GRAPH is not supported yet (graph DDL)\n"
+    );
+    // Nothing above wrote: the two original people remain.
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (p:Person) RETURN p.name AS name ORDER BY name"],
+        ),
+        r#"[[{"type":"text","value":"Ada"}],[{"type":"text","value":"Charles"}]]"#,
+    );
 }
 
 #[test]

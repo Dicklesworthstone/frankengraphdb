@@ -40,13 +40,58 @@ pub enum GraphSetTextErrorKind {
         limit: usize,
     },
 }
+impl core::fmt::Display for GraphSetTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Expected(item) => crate::graph_text::write_expected(f, item),
+            Self::Pattern(kind) => kind.fmt(f),
+            Self::SetBuild(error) => error.fmt(f),
+            Self::OrderBuild(error) => error.fmt(f),
+            Self::ProjectionBuild(error) => error.fmt(f),
+            Self::FilterBuild(error) => error.fmt(f),
+            Self::AggregateBuild(error) => error.fmt(f),
+            Self::DifferentColumnsInUnion => {
+                f.write_str("UNION operands must return the same column names")
+            }
+            Self::InvalidClauseComposition => {
+                f.write_str("an unparenthesized UNION chain cannot mix ALL and DISTINCT")
+            }
+            Self::IntegerExpression(error) => error.fmt(f),
+            Self::IntegerOperand => f.write_str("expected an integer operand"),
+            Self::IntegerNesting { limit } => {
+                write!(f, "integer expression nests deeper than {limit} levels")
+            }
+        }
+    }
+}
+impl GraphSetTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        match self {
+            Self::Expected(_) | Self::IntegerOperand => C::Syntax,
+            Self::Pattern(kind) => kind.class(),
+            Self::SetBuild(_)
+            | Self::OrderBuild(_)
+            | Self::ProjectionBuild(_)
+            | Self::FilterBuild(_)
+            | Self::AggregateBuild(_)
+            | Self::DifferentColumnsInUnion
+            | Self::InvalidClauseComposition
+            | Self::IntegerExpression(_)
+            | Self::IntegerNesting { .. } => C::Statement,
+        }
+    }
+}
+impl GraphSetTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph set text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphSetTextError {}

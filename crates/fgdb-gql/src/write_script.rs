@@ -42,13 +42,68 @@ pub struct GraphWriteScriptError {
     pub offset: usize,
     pub kind: GraphWriteScriptErrorKind,
 }
+/// The reason alone: the enclosing error already names the statement and the
+/// script-global byte, so a nested statement's local offset is not repeated.
+impl core::fmt::Display for GraphWriteScriptErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use GraphMutationProgramTemplateError as M;
+        use GraphWriteProgramTemplateError as W;
+        match self {
+            Self::DefinitionTooLarge { limit, observed } => {
+                write!(f, "script is {observed} bytes, limit {limit}")
+            }
+            Self::EmptyStatement => f.write_str("empty statement"),
+            Self::TooManyStatements { limit, observed } => {
+                write!(f, "script has {observed} statements, limit {limit}")
+            }
+            Self::Syntax(kind) => kind.fmt(f),
+            Self::Program(W::InsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::VertexMergeBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::VertexUpsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::EdgeMergeBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::EdgeUpsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::DeleteBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::Program(M::Bind { source, .. })) => source.kind.fmt(f),
+            Self::Program(W::Program(other)) => other.fmt(f),
+        }
+    }
+}
+impl GraphWriteScriptErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        use GraphMutationProgramTemplateError as M;
+        use GraphWriteProgramTemplateError as W;
+        match self {
+            Self::EmptyStatement => C::Syntax,
+            Self::DefinitionTooLarge { .. } | Self::TooManyStatements { .. } => C::Statement,
+            Self::Syntax(kind) => kind.class(),
+            Self::Program(W::InsertBind { source, .. }) => source.class(),
+            Self::Program(W::VertexMergeBind { source, .. }) => source.class(),
+            Self::Program(W::VertexUpsertBind { source, .. }) => source.class(),
+            Self::Program(W::EdgeMergeBind { source, .. }) => source.class(),
+            Self::Program(W::EdgeUpsertBind { source, .. }) => source.class(),
+            Self::Program(W::DeleteBind { source, .. }) => source.class(),
+            Self::Program(W::Program(M::Bind { source, .. })) => source.class(),
+            Self::Program(W::Program(
+                M::ConflictingParameterTypes { .. } | M::UnexpectedArguments,
+            )) => C::InvalidValue,
+            Self::Program(W::Program(M::Definition(_))) => C::Statement,
+        }
+    }
+}
+impl GraphWriteScriptError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphWriteScriptError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph write script")?;
         if let Some(statement) = self.statement {
-            write!(f, " statement {statement}")?;
+            write!(f, "statement {statement}, ")?;
         }
-        write!(f, " at byte {}: {:?}", self.offset, self.kind)
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphWriteScriptError {
@@ -314,12 +369,13 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphWriteScriptBatchBindErro
             Self::Interrupted {
                 argument_set,
                 source,
-            } => {
-                write!(
+            } => match argument_set {
+                Some(argument_set) => write!(
                     f,
-                    "graph write batch binding interrupted at {argument_set:?}: {source}"
-                )
-            }
+                    "graph write batch binding interrupted at argument set {argument_set}: {source}"
+                ),
+                None => write!(f, "graph write batch binding interrupted: {source}"),
+            },
         }
     }
 }

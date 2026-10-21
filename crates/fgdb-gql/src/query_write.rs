@@ -37,7 +37,24 @@ pub enum GraphQueryWriteBuildError {
 }
 impl core::fmt::Display for GraphQueryWriteBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "query-fed write definition: {self:?}")
+        match self {
+            Self::MissingColumn { parameter } => write!(
+                f,
+                "write parameter {parameter} has no column of the same name in the source query"
+            ),
+            Self::NonScalarColumn { parameter, column } => write!(
+                f,
+                "write parameter {parameter} reads source column {column}, which is not a scalar"
+            ),
+            Self::CollectionColumn {
+                parameter,
+                column,
+                expected,
+            } => write!(
+                f,
+                "write parameter {parameter} expects {expected}, but source column {column} is not one"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphQueryWriteBuildError {}
@@ -110,7 +127,7 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphQueryWriteBindError<C> {
             } => {
                 write!(
                     f,
-                    "query-fed write row {row}, column {column} is not {expected:?} or null"
+                    "query-fed write row {row}, column {column} is not {expected} or null"
                 )
             }
             Self::InvalidValue { row, column } => {
@@ -133,9 +150,13 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphQueryWriteBindError<C> {
                 )
             }
             Self::Script(source) => source.fmt(f),
-            Self::Interrupted { row, source } => {
-                write!(f, "query-fed write binding at row {row:?}: {source}")
-            }
+            Self::Interrupted { row, source } => match row {
+                Some(row) => write!(
+                    f,
+                    "query-fed write binding interrupted at row {row}: {source}"
+                ),
+                None => write!(f, "query-fed write binding interrupted: {source}"),
+            },
         }
     }
 }

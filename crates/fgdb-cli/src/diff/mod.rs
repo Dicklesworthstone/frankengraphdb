@@ -203,10 +203,13 @@ fn render(
         };
         frame(out, &summary, &mut bytes, max_output_bytes)
     })();
-    delivery.map_err(|error: Failure| Failure::new(error.code, error.class, format!(
-        "diff incomplete after {sent} fully flushed change(s); output may contain a partial final frame: {}",
-        error.message,
-    )))
+    delivery.map_err(|error: Failure| Failure {
+        message: format!(
+            "diff incomplete after {sent} fully flushed change(s); output may contain a partial final frame: {}",
+            error.message,
+        ),
+        ..error
+    })
 }
 
 // Count actual UTF-8 transport bytes, including every newline and the final

@@ -81,7 +81,29 @@ pub enum GraphVertexUpsertBuildError {
 }
 impl core::fmt::Display for GraphVertexUpsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph vertex MERGE action definition: {self:?}")
+        match self {
+            Self::TooManyActions {
+                branch,
+                limit,
+                observed,
+            } => write!(f, "{branch} has {observed} actions, limit {limit}"),
+            Self::DuplicateProperty { branch } => {
+                write!(f, "{branch} sets the same property twice")
+            }
+            Self::DuplicateLabel { branch } => write!(f, "{branch} sets the same label twice"),
+            Self::ExpressionInputs { branch, action } => write!(
+                f,
+                "{branch} action {action} reads a value other than the merged vertex's"
+            ),
+        }
+    }
+}
+impl core::fmt::Display for GraphVertexUpsertBranch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Match => "ON MATCH",
+            Self::Create => "ON CREATE",
+        })
     }
 }
 impl core::error::Error for GraphVertexUpsertBuildError {}

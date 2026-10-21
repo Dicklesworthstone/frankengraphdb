@@ -174,7 +174,32 @@ pub enum GraphSetFilterError {
 }
 impl core::fmt::Display for GraphSetFilterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph row filter definition: {self:?}")
+        f.write_str("invalid row filter: ")?;
+        match self {
+            Self::Empty => f.write_str("it is empty"),
+            Self::TooManyInstructions { limit, observed } => {
+                write!(f, "{observed} instructions, limit {limit}")
+            }
+            Self::TooManyPredicates { limit, observed } => {
+                write!(f, "{observed} predicates, limit {limit}")
+            }
+            Self::InvalidStack { instruction } => {
+                write!(f, "instruction {instruction} lacks an operand")
+            }
+            Self::UnknownInput {
+                instruction,
+                column,
+            } => write!(f, "instruction {instruction} reads unknown column {column}"),
+            Self::InvalidVertexComparison { instruction } => write!(
+                f,
+                "instruction {instruction} compares a vertex with a value that is not one"
+            ),
+            Self::InvalidValueComparison { instruction } => write!(
+                f,
+                "instruction {instruction} compares values that cannot be compared"
+            ),
+            Self::SetBuild(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for GraphSetFilterError {}

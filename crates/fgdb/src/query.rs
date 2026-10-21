@@ -141,7 +141,9 @@ impl core::fmt::Display for QueryError {
             Self::Unsupported { diagnostics } => {
                 write!(f, "unsupported query construct: {}", diagnostics.join("; "))
             }
-            Self::Refused { source, .. } => write!(f, "unsupported query construct: {source}"),
+            // The furthest-progressing parser's own refusal: its byte and
+            // reason, which need not be an unsupported construct.
+            Self::Refused { source, .. } => source.fmt(f),
             Self::PatternText(e) => e.fmt(f),
             Self::SetText(e) => e.fmt(f),
             Self::PipelineText(e) => e.fmt(f),

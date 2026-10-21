@@ -11,6 +11,7 @@ mod branch_text;
 mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
+mod construct;
 pub mod csv_parameters;
 pub mod csv_records;
 pub mod csv_write_script;
@@ -89,6 +90,7 @@ pub use cheapest_path_text::{
     BoundGraphCheapestPathQuery, GraphCheapestPathTextError, GraphCheapestPathTextErrorKind,
     PreparedGraphCheapestPathText,
 };
+pub use construct::{GqlUnsupportedConstruct, GqlUnsupportedConstructKind};
 pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
     PreparedGraphPipelineAggregateText,
@@ -160,8 +162,8 @@ pub use evidence_page::{
     GqlEvidencePageToken, GqlEvidencePageTokenDecodeError,
 };
 pub use graph_text::{
-    GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
+    GqlRefusalClass, GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind,
+    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
     starts_fnx_graph_projection,
 };

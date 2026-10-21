@@ -23,7 +23,16 @@ pub enum GraphDeleteBuildError {
 }
 impl core::fmt::Display for GraphDeleteBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph DELETE definition: {self:?}")
+        match self {
+            Self::EmptyTargets => f.write_str("DELETE requires at least one target"),
+            Self::TooManyTargets { limit, observed } => {
+                write!(f, "DELETE has {observed} targets, limit {limit}")
+            }
+            Self::TargetColumn { target, column } => write!(
+                f,
+                "DELETE target {target} reads column {column}, which is not a vertex or edge"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphDeleteBuildError {}

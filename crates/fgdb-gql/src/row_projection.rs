@@ -41,7 +41,28 @@ pub enum RowProjectionBuildError {
 }
 impl core::fmt::Display for RowProjectionBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row projection definition: {self:?}")
+        match self {
+            Self::InputWidth { observed } => {
+                write!(
+                    f,
+                    "projection input has an inadmissible width of {observed} columns"
+                )
+            }
+            Self::ColumnCount { input, columns } => write!(
+                f,
+                "projection declares {columns} column types for {input} projected columns"
+            ),
+            Self::OutputType {
+                column,
+                inferred,
+                declared,
+            } => write!(
+                f,
+                "projection column {column} yields {inferred}, but {declared} is declared"
+            ),
+            Self::Projection(error) => error.fmt(f),
+            Self::Filter(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for RowProjectionBuildError {}

@@ -59,7 +59,13 @@ pub enum GraphPathCostError {
 
 impl core::fmt::Display for GraphPathCostError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "bounded path cost error: {self:?}")
+        f.write_str(match self {
+            Self::MissingWeight => "a traversed edge has no weight",
+            Self::NonIntegerWeight => "a traversed edge weight is not an integer",
+            Self::DuplicateEdge => "the weighted path input repeats an edge",
+            Self::DanglingEndpoint => "a weighted path edge has a missing endpoint",
+            Self::CostOverflow => "the weighted path cost overflows",
+        })
     }
 }
 impl core::error::Error for GraphPathCostError {}

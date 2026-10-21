@@ -28,13 +28,35 @@ pub enum GraphCheapestPathTextErrorKind {
     /// The same endpoint variable was bound to two different vertex identities.
     AnchorMismatch,
 }
+impl core::fmt::Display for GraphCheapestPathTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Pattern(kind) => kind.fmt(f),
+            Self::InvalidHopBounds => f.write_str("invalid weighted path hop bounds"),
+            Self::AnchorMismatch => {
+                f.write_str("an endpoint variable is bound to two different vertices")
+            }
+        }
+    }
+}
+impl GraphCheapestPathTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Pattern(kind) => kind.class(),
+            Self::InvalidHopBounds | Self::AnchorMismatch => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphCheapestPathTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphCheapestPathTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "weighted path text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphCheapestPathTextError {}

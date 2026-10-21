@@ -28,7 +28,23 @@ pub enum GraphMutationQueryBuildError {
 }
 impl core::fmt::Display for GraphMutationQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "mutation RETURN definition: {self:?}")
+        match self {
+            Self::Binding { binding } => {
+                write!(f, "RETURN binding {binding} names no input column")
+            }
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+            Self::InputDepth(error) => error.fmt(f),
+            Self::PropertyMapCatalog => f.write_str(
+                "two properties share one name, so a returned property map is ambiguous",
+            ),
+            Self::LabelCatalog => {
+                f.write_str("two labels share one name, so a returned label list is ambiguous")
+            }
+        }
     }
 }
 impl core::error::Error for GraphMutationQueryBuildError {}

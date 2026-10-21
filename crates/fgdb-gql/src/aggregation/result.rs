@@ -28,6 +28,14 @@ pub enum GraphAggregateColumn {
     GroupKey(usize),
     Aggregate(usize),
 }
+impl core::fmt::Display for GraphAggregateColumn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::GroupKey(column) => write!(f, "group key {column}"),
+            Self::Aggregate(column) => write!(f, "aggregate {column}"),
+        }
+    }
+}
 
 /// Integer thresholds compare integer and exact-average cells without
 /// subtraction, truncation or floating conversion. Null yields UNKNOWN

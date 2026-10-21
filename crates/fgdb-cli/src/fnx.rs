@@ -353,7 +353,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     options.fnx.validate()?;
     let parameters = arguments(&options.raw_params)?;
     let read = options.fnx.options(options)?;
-    let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::query)?;
+    let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::statement)?;
     let sealed = options.fnx.sealed_limits();
     if options.buffered.enabled() {
         if sealed.is_some() {

@@ -45,7 +45,25 @@ pub enum GraphEdgeMergeBuildError {
 }
 impl core::fmt::Display for GraphEdgeMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph relationship MERGE definition: {self:?}")
+        match self {
+            Self::SourceColumn { column } => write!(
+                f,
+                "relationship MERGE source column {column} is not a vertex"
+            ),
+            Self::DestinationColumn { column } => write!(
+                f,
+                "relationship MERGE destination column {column} is not a vertex"
+            ),
+            Self::TooManyProperties { limit, observed } => write!(
+                f,
+                "relationship MERGE has {observed} properties, limit {limit}"
+            ),
+            Self::DuplicateProperty => f.write_str("relationship MERGE repeats a property"),
+            Self::NullProperty { .. } => f.write_str(
+                "relationship MERGE has a NULL property value, which can neither match nor be created",
+            ),
+            Self::RelationalInput(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for GraphEdgeMergeBuildError {}

@@ -81,13 +81,41 @@ impl From<GraphMutationTextError> for GraphEdgeUpsertTextError {
         }
     }
 }
+impl core::fmt::Display for GraphEdgeUpsertTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Merge(kind) => kind.fmt(f),
+            Self::UpsertBuild(error) => error.fmt(f),
+            Self::Expression(kind) => kind.fmt(f),
+            Self::DuplicateBranch => f.write_str("MERGE repeats an ON CREATE or ON MATCH branch"),
+            Self::Relation(kind) => kind.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphEdgeUpsertTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Merge(kind) => kind.class(),
+            Self::Expression(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::DuplicateBranch => crate::GqlRefusalClass::Syntax,
+            Self::UpsertBuild(_) | Self::ReturnBuild(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphEdgeUpsertTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphEdgeUpsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph relationship MERGE action text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphEdgeUpsertTextError {}

@@ -306,6 +306,36 @@ rounded JSON numbers. Exit codes: `0` success, `2` usage, `3` query (including
 admission and execution refusals), `4` open (including key-file and wrong-key
 failures), `5` io.
 
+An `error` also carries a stable `code` that says what to do next, and an
+`offset` when the refusal points at a statement byte. Branch on `code`, not on
+the `diagnostics` wording, which may change:
+
+```text
+{"v":1,"event":"error","class":"query","code":"unsupported","offset":0,"diagnostics":["byte 0: CREATE GRAPH is not supported yet (graph DDL)"]}
+{"v":1,"event":"error","class":"query","code":"syntax","offset":26,"diagnostics":["statement 0, byte 26: expected end of statement"]}
+```
+
+| code | class (exit) | meaning |
+|---|---|---|
+| `usage` | usage (2) | the command line is wrong |
+| `syntax` | query (3) | the statement does not parse; `offset` is the byte to fix |
+| `unsupported` | query (3) | a recognized construct that is not supported yet: graph or branch DDL, `AT BRANCH`, `CALL {...}` |
+| `not_found` | query (3) | a label, relation or property name in the statement has no binding |
+| `invalid_value` | query (3) | a parameter or value is missing, unexpected, mistyped or out of range |
+| `statement` | query (3) | the statement parses but its definition is refused; also every remote statement refusal |
+| `budget` | query (3) | an execution limit was exceeded; a larger limit may succeed |
+| `permission` | query (3) | the command or capability may not do this, such as a write given to read-only `query` |
+| `conflict` | query (3) | a concurrent commit won; nothing was committed |
+| `execution` | query (3) | refused while executing or delivering output |
+| `open` | open (4) | the database or key could not be opened |
+| `io` | io (5) | storage or the operating system failed |
+
+`offset` is a UTF-8 byte offset into the statement, into the whole script for
+a multi-statement `write`, or into the step's own text in a `transaction`.
+Statement indexes in messages are zero-based, like the native program's.
+Human mode prints the same code: `fgdb: error[unsupported]: byte 0: ...`.
+`fgdb robot schema` documents the codes under `errors`.
+
 ## Verification
 
 ```sh

@@ -190,9 +190,9 @@ pub(super) fn prepare_statement(
         &source_types,
         &mut resolver,
     )
-    .map_err(Failure::query)?
+    .map_err(Failure::statement)?
     .bind_parameters(params)
-    .map_err(Failure::query)?;
+    .map_err(Failure::statement)?;
     let declarations: Vec<_> = config
         .declarations
         .iter()
@@ -204,8 +204,8 @@ pub(super) fn prepare_statement(
         &declarations,
         &mut resolver,
     )
-    .map_err(Failure::query)?;
-    let query = PreparedGraphQueryWrite::prepare(source, script).map_err(Failure::query)?;
+    .map_err(Failure::statement)?;
+    let query = PreparedGraphQueryWrite::prepare(source, script).map_err(Failure::statement)?;
     Ok(Some(PreparedQueryWrite {
         query,
         // The same effect and creation caps as ordinary `write`; all native

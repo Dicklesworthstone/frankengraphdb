@@ -143,7 +143,38 @@ pub enum GraphEdgeUpsertBuildError {
 }
 impl core::fmt::Display for GraphEdgeUpsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph relationship MERGE action definition: {self:?}")
+        match self {
+            Self::TooManyActions {
+                branch,
+                limit,
+                observed,
+            } => write!(f, "{branch} has {observed} actions, limit {limit}"),
+            Self::DuplicateProperty { branch } => {
+                write!(f, "{branch} sets the same property twice")
+            }
+            Self::TooManyInputs {
+                branch,
+                action,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "{branch} action {action} reads {observed} inputs, limit {limit}"
+            ),
+            Self::InvalidExpressionInput { branch, action } => write!(
+                f,
+                "{branch} action {action} reads a value other than the merged relationship's"
+            ),
+        }
+    }
+}
+impl core::fmt::Display for GraphEdgeUpsertBranch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::NoInput => "MERGE without an input row",
+            Self::Match => "ON MATCH",
+            Self::Create => "ON CREATE",
+        })
     }
 }
 impl core::error::Error for GraphEdgeUpsertBuildError {}

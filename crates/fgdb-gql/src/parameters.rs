@@ -35,6 +35,33 @@ pub enum GqlParameterType {
     Map,
 }
 
+/// GQL type names, for diagnostics.
+impl core::fmt::Display for GqlParameterType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Int64 => "INT64",
+            Self::UInt64 => "UINT64",
+            Self::Scalar(kind) => match kind {
+                CanonicalScalarKind::Null => "NULL",
+                CanonicalScalarKind::Bool => "BOOLEAN",
+                CanonicalScalarKind::Int => "INTEGER",
+                CanonicalScalarKind::Decimal => "DECIMAL",
+                CanonicalScalarKind::Float => "FLOAT",
+                CanonicalScalarKind::Text => "STRING",
+                CanonicalScalarKind::Timestamp => "ZONED DATETIME",
+                CanonicalScalarKind::Bytes => "BYTES",
+                CanonicalScalarKind::Date => "DATE",
+                CanonicalScalarKind::LocalTime => "LOCAL TIME",
+                CanonicalScalarKind::Time => "ZONED TIME",
+                CanonicalScalarKind::LocalDateTime => "LOCAL DATETIME",
+                CanonicalScalarKind::Duration => "DURATION",
+            },
+            Self::List => "LIST",
+            Self::Map => "MAP",
+        })
+    }
+}
+
 /// Scalar arguments own shared bounded storage. This enum is Clone, not Copy;
 /// retrieving or cloning an argument never duplicates its scalar payload.
 #[derive(Clone, PartialEq, Eq)]

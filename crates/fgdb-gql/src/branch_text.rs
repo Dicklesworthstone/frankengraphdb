@@ -34,13 +34,55 @@ pub struct GraphBranchTextError {
     pub kind: GraphBranchTextErrorKind,
 }
 
+impl core::fmt::Display for GraphBranchTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::DefinitionTooLarge => "statement text is too large",
+            Self::TooManyTokens => "statement has too many tokens",
+            Self::UnclosedQuote => "unclosed quoted text",
+            Self::UnclosedComment => "unclosed comment",
+            Self::UnbalancedDelimiter => "unbalanced brackets or parentheses",
+            Self::DuplicateSelector => "AT BRANCH appears more than once",
+            Self::InvalidSelector => "AT BRANCH requires a branch name or text parameter",
+            Self::InvalidSelectorPosition => "AT BRANCH is not allowed at this position",
+            Self::MultipleStatements => "a branch-qualified read must be one statement",
+            Self::InvalidBranchName => "invalid branch name",
+            Self::MissingParameter => "missing branch parameter value",
+            Self::ParameterTypeMismatch => "the branch parameter must be text",
+            Self::ArgumentMap => "the remaining arguments could not be bound",
+        })
+    }
+}
+impl GraphBranchTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        match self {
+            Self::UnclosedQuote
+            | Self::UnclosedComment
+            | Self::UnbalancedDelimiter
+            | Self::DuplicateSelector
+            | Self::InvalidSelector
+            | Self::InvalidSelectorPosition
+            | Self::InvalidBranchName => C::Syntax,
+            Self::MissingParameter | Self::ParameterTypeMismatch | Self::ArgumentMap => {
+                C::InvalidValue
+            }
+            Self::DefinitionTooLarge | Self::TooManyTokens | Self::MultipleStatements => {
+                C::Statement
+            }
+        }
+    }
+}
+impl GraphBranchTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphBranchTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "branch selector error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphBranchTextError {}

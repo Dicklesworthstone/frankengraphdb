@@ -153,86 +153,88 @@ pub(super) fn prepare_statement(
     let declarations: Vec<_> = params.parameter_types().collect();
     // A chain claims its text first: its final RETURN would otherwise route
     // the whole statement to CREATE RETURN.
-    if PreparedGraphWriteChainText::is_chain(statement).map_err(Failure::query)? {
+    if PreparedGraphWriteChainText::is_chain(statement).map_err(Failure::statement)? {
         let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|chain| Some(Returning::Chain(Box::new(chain))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
-    if PreparedGraphInsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
+    if PreparedGraphInsertQueryText::has_return_clause(statement).map_err(Failure::statement)? {
         let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Insert(Box::new(query))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
-    if PreparedGraphMutationQueryText::has_return_clause(statement).map_err(Failure::query)? {
+    if PreparedGraphMutationQueryText::has_return_clause(statement).map_err(Failure::statement)? {
         let template = PreparedGraphMutationQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Mutation(Box::new(query))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
-    if PreparedGraphVertexUpsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
+    if PreparedGraphVertexUpsertQueryText::has_return_clause(statement)
+        .map_err(Failure::statement)?
+    {
         let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Merge(Box::new(query))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
     // ON/SET uses the occurrence-preserving bulk executor. Classification
     // excludes plain MERGE and propagates binding errors without retrying a
     // different write family. Both CLI callers supply their configured budget.
-    if PreparedGraphEdgeUpsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
+    if PreparedGraphEdgeUpsertQueryText::has_return_clause(statement).map_err(Failure::statement)? {
         let template = PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::EdgeUpsert(Box::new(query))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
-    if PreparedGraphEdgeMergeQueryText::has_return_clause(statement).map_err(Failure::query)? {
+    if PreparedGraphEdgeMergeQueryText::has_return_clause(statement).map_err(Failure::statement)? {
         let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::query)?;
+        .map_err(Failure::statement)?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::EdgeMerge(Box::new(query))))
-            .map_err(Failure::query);
+            .map_err(Failure::statement);
     }
     Ok(None)
 }

@@ -60,7 +60,20 @@ pub enum GraphHavingError {
 }
 impl core::fmt::Display for GraphHavingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid HAVING expression: {self:?}")
+        f.write_str("invalid HAVING expression: ")?;
+        match self {
+            Self::Empty => f.write_str("it is empty"),
+            Self::TooManyInstructions { limit, observed } => {
+                write!(f, "{observed} instructions, limit {limit}")
+            }
+            Self::TooManyPredicates { limit, observed } => {
+                write!(f, "{observed} predicates, limit {limit}")
+            }
+            Self::InvalidStack { instruction } => {
+                write!(f, "instruction {instruction} lacks an operand")
+            }
+            Self::UnknownColumn { column } => write!(f, "it references unknown {column}"),
+        }
     }
 }
 impl core::error::Error for GraphHavingError {}

@@ -61,7 +61,28 @@ pub enum GraphInsertQueryBuildError {
 }
 impl core::fmt::Display for GraphInsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "insertion RETURN definition: {self:?}")
+        match self {
+            Self::Binding { binding } => {
+                write!(f, "RETURN binding {binding} names no input column")
+            }
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+            Self::InputDepth(error) => error.fmt(f),
+            Self::UnmappedProperty { binding } => write!(
+                f,
+                "a property of created element {binding} has no bound name to return it under"
+            ),
+            Self::PropertyMapCatalog => f.write_str(
+                "two properties share one name, so a returned property map is ambiguous",
+            ),
+            Self::UnmappedLabel { binding } => write!(
+                f,
+                "a label of created vertex {binding} has no bound name to return it under"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphInsertQueryBuildError {}

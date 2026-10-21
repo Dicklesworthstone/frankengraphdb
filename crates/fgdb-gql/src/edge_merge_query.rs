@@ -53,7 +53,16 @@ pub enum GraphEdgeMergeQueryBuildError {
 }
 impl core::fmt::Display for GraphEdgeMergeQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "relationship MERGE RETURN definition: {self:?}")
+        match self {
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Binding { binding } => {
+                write!(f, "RETURN binding {binding} names no input column")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for GraphEdgeMergeQueryBuildError {}

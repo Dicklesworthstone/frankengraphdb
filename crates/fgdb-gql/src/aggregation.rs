@@ -206,14 +206,14 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::InvalidName => f.write_str("invalid aggregate output name"),
             Self::DuplicateName => f.write_str("aggregate output names must be unique"),
             Self::UnknownOutputColumn { column } => {
-                write!(f, "unknown aggregate output column {column:?}")
+                write!(f, "unknown aggregate output column: {column}")
             }
             Self::TooManyFilters { limit, observed } => write!(
                 f,
                 "aggregate has {observed} HAVING predicates, limit {limit}"
             ),
             Self::DuplicateOrder { column } => {
-                write!(f, "aggregate ORDER BY repeats column {column:?}")
+                write!(f, "aggregate ORDER BY repeats {column}")
             }
             Self::RequiresOutputProjection => {
                 f.write_str("projected aggregate ordering requires an output projection")

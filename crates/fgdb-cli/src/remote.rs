@@ -11,6 +11,7 @@
 
 mod batch;
 
+use super::refusal::Code;
 use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
@@ -394,14 +395,17 @@ fn failure(error: ClientError) -> Failure {
     match error {
         ClientError::Server { code, message } => {
             let message = format!("{}: {message}", code.name());
+            // The server's own vocabulary, which does not split a statement
+            // refusal further; local refusals of the same text do.
+            let refused = |refusal| Failure::coded(refusal, &message);
             match code {
-                ErrorCode::Statement
-                | ErrorCode::PermissionDenied
-                | ErrorCode::Budget
-                | ErrorCode::Conflict
-                | ErrorCode::Execution
-                | ErrorCode::Busy
-                | ErrorCode::Cancelled => Failure::query(message),
+                ErrorCode::Statement => refused(Code::Statement),
+                ErrorCode::PermissionDenied => refused(Code::Permission),
+                ErrorCode::Budget => refused(Code::Budget),
+                ErrorCode::Conflict => refused(Code::Conflict),
+                ErrorCode::Execution | ErrorCode::Busy | ErrorCode::Cancelled => {
+                    refused(Code::Execution)
+                }
                 ErrorCode::Unauthenticated
                 | ErrorCode::NotFoundOrUnauthorized
                 | ErrorCode::UnsupportedVersion => Failure::open(message),

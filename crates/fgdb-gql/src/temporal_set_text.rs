@@ -6,7 +6,9 @@
 //! computed projections, ordering and pagination retain their existing parser
 //! and diagnostics. Every set operand executes against the same selected snapshot.
 
-use crate::temporal_text::{TemplateSequenceSelector, append_template_sequence_selector};
+use crate::temporal_text::{
+    SelectorRefusal, TemplateSequenceSelector, append_template_sequence_selector,
+};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
     GraphPatternTextErrorKind, GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind,
@@ -32,13 +34,45 @@ pub struct GraphTemporalSetTextError {
     pub offset: usize,
     pub kind: GraphTemporalSetTextErrorKind,
 }
+impl GraphTemporalSetTextErrorKind {
+    fn selector(&self) -> Result<SelectorRefusal, &GraphSetTextErrorKind> {
+        Ok(match self {
+            Self::Set(kind) => return Err(kind),
+            Self::MissingSystemTimeClause => SelectorRefusal::Missing,
+            Self::DuplicateSystemTimeClause => SelectorRefusal::Duplicate,
+            Self::InvalidSystemTimePosition => SelectorRefusal::Position,
+            Self::InvalidSequenceSelector => SelectorRefusal::Sequence,
+            Self::ConflictingParameterType => SelectorRefusal::ConflictingParameterType,
+            Self::MissingParameter => SelectorRefusal::MissingParameter,
+            Self::ParameterTypeMismatch { found } => SelectorRefusal::ParameterTypeMismatch(*found),
+            Self::UnexpectedArguments => SelectorRefusal::UnexpectedArguments,
+        })
+    }
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self.selector() {
+            Ok(refusal) => refusal.class(),
+            Err(set) => set.class(),
+        }
+    }
+}
+impl core::fmt::Display for GraphTemporalSetTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.selector() {
+            Ok(refusal) => refusal.fmt(f),
+            Err(set) => set.fmt(f),
+        }
+    }
+}
+impl GraphTemporalSetTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphTemporalSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "temporal graph set text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphTemporalSetTextError {}

@@ -59,7 +59,11 @@ fn source_parameters_and_feed_declarations_have_separate_native_schemas() {
     let options = options_with_missing_projection();
     let error = prepare(&options).expect_err("missing script input must refuse");
     assert_eq!(error.code, 3);
-    assert!(error.message.contains("MissingColumn"), "{}", error.message);
+    assert_eq!(error.refusal, crate::refusal::Code::Statement);
+    assert_eq!(
+        error.message,
+        "write parameter 0 has no column of the same name in the source query"
+    );
 }
 
 fn options_with_missing_projection() -> Options {
@@ -335,7 +339,7 @@ fn late_wrong_collection_shapes_refuse_atomically_without_a_scalar_fallback() {
                 .await.expect_err("the later incompatible collection must refuse");
             assert_eq!(error.code, 3, "{}", error.message);
             // The CLI reports the CollectionValue refusal through Display.
-            let expected = if declaration.ends_with("=list") { "List" } else { "Map" };
+            let expected = if declaration.ends_with("=list") { "LIST" } else { "MAP" };
             assert!(
                 error.message.contains(&format!("is not {expected} or null")),
                 "{}",

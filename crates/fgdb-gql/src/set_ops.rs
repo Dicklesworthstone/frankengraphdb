@@ -220,7 +220,44 @@ pub enum GraphSetBuildError {
 }
 impl core::fmt::Display for GraphSetBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph set definition: {self:?}")
+        match self {
+            Self::JoinInputSchema { side } => {
+                write!(f, "join input {side} does not have the checked schema")
+            }
+            Self::TooManyOperands { limit, observed } => {
+                write!(f, "set operation has {observed} operands, limit {limit}")
+            }
+            Self::TooDeep { limit, observed } => {
+                write!(f, "query nests {observed} levels deep, limit {limit}")
+            }
+            Self::ColumnCount { left, right } => write!(
+                f,
+                "set operation operands return {left} and {right} columns; they must match"
+            ),
+            Self::ColumnType {
+                column,
+                left,
+                right,
+            } => write!(
+                f,
+                "set operation column {column} combines {left} with {right}, which have no common type"
+            ),
+        }
+    }
+}
+impl core::fmt::Display for GraphSetColumnType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Vertex => "a vertex",
+            Self::Scalar => "a scalar",
+            Self::Path => "a path",
+            Self::Vertices => "a vertex list",
+            Self::Edges => "an edge list",
+            Self::Edge => "an edge",
+            Self::List => "a list",
+            Self::Any => "any value",
+            Self::Stored => "a stored property value",
+        })
     }
 }
 impl core::error::Error for GraphSetBuildError {}

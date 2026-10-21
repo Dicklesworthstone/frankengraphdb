@@ -274,13 +274,126 @@ pub enum GraphPatternTextErrorKind {
     AggregateBuild(crate::GraphAggregateBuildError),
 }
 
+/// What a statement-preparation refusal asks of its author. A closed set:
+/// hosts map every text error onto one (the CLI's robot `code`), so a new
+/// error kind must choose its class here, not at each boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GqlRefusalClass {
+    /// The text does not parse; fix it at the reported byte.
+    Syntax,
+    /// A recognized construct this engine does not support yet.
+    Unsupported,
+    /// A label, relation or property name has no binding in the catalog.
+    NotFound,
+    /// A parameter is missing, unexpected or mistyped, or a literal is out of
+    /// range for its type.
+    InvalidValue,
+    /// The statement parses but its definition is refused: a static limit,
+    /// an inadmissible shape or a mix of clauses one statement cannot hold.
+    Statement,
+}
+
+/// `expected "("` for punctuation, `expected RETURN` for words. The item is
+/// the grammar's own static text, never a fragment of the statement.
+pub(crate) fn write_expected(f: &mut core::fmt::Formatter<'_>, item: &str) -> core::fmt::Result {
+    if item.bytes().any(|byte| byte.is_ascii_alphanumeric()) {
+        write!(f, "expected {item}")
+    } else {
+        write!(f, "expected \"{item}\"")
+    }
+}
+
+impl core::fmt::Display for GraphSymbolKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Relation => "relation",
+            Self::Label => "label",
+            Self::Property => "property",
+        })
+    }
+}
+
+impl core::fmt::Display for GraphPatternTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DefinitionTooLarge => f.write_str("statement text is too large"),
+            Self::TooManyTokens => f.write_str("statement has too many tokens"),
+            Self::InvalidToken => f.write_str("invalid token"),
+            Self::NameTooLong => f.write_str("name is too long"),
+            Self::Expected(item) => write_expected(f, item),
+            Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
+            Self::ScalarLiteral => f.write_str("literal is not a valid scalar value here"),
+            Self::BooleanExpression => f.write_str("invalid boolean expression"),
+            Self::BooleanNesting { limit } => {
+                write!(f, "boolean expression nests deeper than {limit} levels")
+            }
+            Self::UnsupportedBooleanScope => {
+                f.write_str("an existential subquery is not supported in this expression")
+            }
+            Self::UnknownVariable => f.write_str("unknown variable"),
+            Self::UnknownSymbol(kind) => write!(f, "unknown {kind} name"),
+            Self::WrongSymbolKind { expected, found } => {
+                write!(f, "expected a {expected} name, found a {found} name")
+            }
+            Self::ParameterDeclaration => f.write_str("invalid parameter declaration"),
+            Self::UnusedParameterDeclaration => f.write_str("a declared parameter is never used"),
+            Self::ConflictingParameterTypes => {
+                f.write_str("a parameter is used where two different types are required")
+            }
+            Self::MissingParameter => f.write_str("missing parameter value"),
+            Self::ParameterTypeMismatch { expected, found } => {
+                write!(f, "parameter has type {found}, expected {expected}")
+            }
+            Self::UnexpectedArguments => {
+                f.write_str("arguments supplied for parameters the statement does not use")
+            }
+            Self::Build(error) => error.fmt(f),
+            Self::OrderBuild(error) => error.fmt(f),
+            Self::AggregateBuild(error) => error.fmt(f),
+        }
+    }
+}
+
+impl GraphPatternTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> GqlRefusalClass {
+        use GqlRefusalClass as C;
+        match self {
+            Self::InvalidToken
+            | Self::Expected(_)
+            | Self::BooleanExpression
+            | Self::UnknownVariable => C::Syntax,
+            Self::UnsupportedBooleanScope => C::Unsupported,
+            Self::UnknownSymbol(_) | Self::WrongSymbolKind { .. } => C::NotFound,
+            Self::IntegerOutOfRange
+            | Self::ScalarLiteral
+            | Self::ParameterDeclaration
+            | Self::UnusedParameterDeclaration
+            | Self::ConflictingParameterTypes
+            | Self::MissingParameter
+            | Self::ParameterTypeMismatch { .. }
+            | Self::UnexpectedArguments => C::InvalidValue,
+            Self::DefinitionTooLarge
+            | Self::TooManyTokens
+            | Self::NameTooLong
+            | Self::BooleanNesting { .. }
+            | Self::Build(_)
+            | Self::OrderBuild(_)
+            | Self::AggregateBuild(_) => C::Statement,
+        }
+    }
+}
+
+impl GraphPatternTextError {
+    #[must_use]
+    pub fn class(&self) -> GqlRefusalClass {
+        self.kind.class()
+    }
+}
+
 impl core::fmt::Display for GraphPatternTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph-pattern text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphPatternTextError {}

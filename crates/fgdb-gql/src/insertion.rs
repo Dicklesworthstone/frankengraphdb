@@ -100,7 +100,54 @@ pub enum GraphInsertBuildError {
 }
 impl core::fmt::Display for GraphInsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph insertion definition: {self:?}")
+        match self {
+            Self::RelationalInput(error) => error.fmt(f),
+            Self::Empty => f.write_str("CREATE requires at least one vertex or relationship"),
+            Self::TooManyDeclarations { limit, observed } => {
+                write!(f, "CREATE declares {observed} elements, limit {limit}")
+            }
+            Self::TooManyFields { limit, observed } => {
+                write!(
+                    f,
+                    "CREATE sets {observed} labels and properties, limit {limit}"
+                )
+            }
+            Self::DuplicateLabel { vertex } => {
+                write!(f, "created vertex {vertex} repeats a label")
+            }
+            Self::DuplicateProperty { declaration } => {
+                write!(f, "created element {declaration} repeats a property")
+            }
+            Self::ValueColumn {
+                declaration,
+                column,
+            } => write!(
+                f,
+                "created element {declaration} reads column {column}, which is not a property value"
+            ),
+            Self::ValueExpression {
+                declaration,
+                property,
+                kind,
+            } => {
+                write!(
+                    f,
+                    "property {property} of created element {declaration} cannot be stored"
+                )?;
+                match kind {
+                    Some(kind) => write!(f, ": {kind}"),
+                    None => Ok(()),
+                }
+            }
+            Self::EndpointColumn { edge, column } => write!(
+                f,
+                "created relationship {edge} uses column {column} as an endpoint, which is not a vertex"
+            ),
+            Self::CreatedEndpoint { edge, vertex } => write!(
+                f,
+                "created relationship {edge} names endpoint vertex {vertex}, which is not created"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphInsertBuildError {}

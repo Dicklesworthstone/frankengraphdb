@@ -33,7 +33,20 @@ pub enum RowAggregateBuildError {
 }
 impl core::fmt::Display for RowAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row aggregate definition: {self:?}")
+        match self {
+            Self::EmptyInput => f.write_str("aggregate input has no columns"),
+            Self::TooManyColumns => f.write_str("aggregate has too many columns"),
+            Self::UnsupportedColumn { column } => {
+                write!(f, "aggregate input column {column} has an unsupported type")
+            }
+            Self::UnknownColumn { column } => {
+                write!(f, "aggregate references unknown input column {column}")
+            }
+            Self::DuplicateKey { column } => {
+                write!(f, "group key repeats input column {column}")
+            }
+            Self::RequiresScalarArgument => f.write_str("aggregate requires a scalar argument"),
+        }
     }
 }
 impl core::error::Error for RowAggregateBuildError {}

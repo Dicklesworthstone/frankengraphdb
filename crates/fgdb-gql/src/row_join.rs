@@ -35,7 +35,27 @@ pub enum RowJoinBuildError {
 }
 impl core::fmt::Display for RowJoinBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row join definition: {self:?}")
+        match self {
+            Self::EmptyInput => f.write_str("join input has no columns"),
+            Self::TooManyColumns { observed } => {
+                write!(f, "join output would have {observed} columns, too many")
+            }
+            Self::EmptyKeys => f.write_str("join requires at least one key"),
+            Self::TooManyKeys => f.write_str("join has too many keys"),
+            Self::KeyColumn { side, column } => {
+                write!(f, "join key column {column} of input {side} does not exist")
+            }
+            Self::KeyType { key } => {
+                write!(f, "join key {key} compares columns of different types")
+            }
+            Self::UnsupportedColumn { side, column } => {
+                write!(
+                    f,
+                    "join input {side} column {column} has an unsupported type"
+                )
+            }
+            Self::Predicate(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for RowJoinBuildError {}

@@ -28,7 +28,7 @@
 use super::query_write::{self, PreparedQueryWrite, QueryWriteOptions};
 use super::write_returning::{self, Returning};
 use super::{
-    Failure, Options, cell, execution_failure, human_value, parameter, quoted, value_cell,
+    Failure, Options, cell, execution_failure, human_value, parameter, quoted, refusal, value_cell,
 };
 use asupersync::fs::Vfs;
 use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
@@ -212,6 +212,7 @@ fn prepare(
                 // Not a native statement: it counts toward the step cap only.
                 return Ok(PreparedStep::Savepoint(op, step.text.clone()));
             }
+            refusal::unsupported_construct(&step.text)?;
             let mut params = GqlParameters::new();
             for (name, raw) in &step.raw_params {
                 params
@@ -252,7 +253,7 @@ fn prepare(
                     if PreparedNativeRead::prepare(&step.text, &params, options).is_ok() {
                         Failure::usage("a read statement: pass it with --query, not --write")
                     } else {
-                        Failure::query(error)
+                        Failure::statement(error)
                     }
                 })?;
                 // Count expanded UNWIND statements, not merely the one textual
@@ -307,11 +308,10 @@ fn prepare(
     Ok((prepared, statements))
 }
 fn at_step(index: usize, error: Failure) -> Failure {
-    Failure::new(
-        error.code,
-        error.class,
-        format!("transaction step {}: {}", index + 1, error.message),
-    )
+    Failure {
+        message: format!("transaction step {}: {}", index + 1, error.message),
+        ..error
+    }
 }
 
 struct BufferedOutput {

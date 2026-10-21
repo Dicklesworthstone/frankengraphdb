@@ -45,7 +45,16 @@ pub enum GraphVertexUpsertQueryBuildError {
 }
 impl core::fmt::Display for GraphVertexUpsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "MERGE RETURN definition: {self:?}")
+        match self {
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+            Self::PropertyMapCatalog => f.write_str(
+                "two properties share one name, so a returned property map is ambiguous",
+            ),
+        }
     }
 }
 impl core::error::Error for GraphVertexUpsertQueryBuildError {}
