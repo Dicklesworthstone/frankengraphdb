@@ -929,11 +929,16 @@ impl PreparedGraphMutationText {
                     )
                 }),
                 // Only DETACH DELETE can retire an edge the statement does
-                // not name. A plain DELETE's edges are its own targets, so
-                // reading one is the runtime DeletedElementRead refusal.
-                deleting: parsed_actions
-                    .iter()
-                    .any(|action| matches!(action.kind, ActionKind::Delete { detach: true })),
+                // not name. Computed targets can cascade too. A plain DELETE's
+                // edges are its own targets, so reading one is the runtime
+                // DeletedElementRead refusal.
+                deleting: parsed_actions.iter().any(|action| {
+                    matches!(
+                        action.kind,
+                        ActionKind::Delete { detach: true }
+                            | ActionKind::RowDelete { detach: true, .. }
+                    )
+                }),
             };
             Some(parser.mutation_return(&mut projections, scope, row.as_deref())?)
         } else {

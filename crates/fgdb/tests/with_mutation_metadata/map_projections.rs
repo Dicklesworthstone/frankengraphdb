@@ -326,3 +326,306 @@ fn row_map_output_budget_failure_and_deleted_map_reads_do_not_publish_effects() 
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
+
+// Computed DELETE operands use a different parsed action than bare names.
+// These laws exercise real preparation and transaction execution so that a
+// blanket refusal of computed deletion cannot masquerade as the cascade fix.
+#[test]
+fn computed_detach_targets_refuse_relationship_reads_before_catalog_access() {
+    use fgdb_gql::{GraphMutationTextErrorKind, GraphPatternTextErrorKind};
+
+    for target in [
+        "a",
+        "[a][0]",
+        "head([a])",
+        "CASE WHEN true THEN a ELSE b END",
+        "[a,b][$which]",
+    ] {
+        let prefix = format!("MATCH (a)-[r:R]->(b) WITH a,b,r DETACH DELETE {target}");
+        let control = format!("{prefix} RETURN 1 AS done");
+        let arguments = if target.contains("$which") {
+            GqlParameters::new().with_int64("which", 0).unwrap()
+        } else {
+            GqlParameters::new()
+        };
+        PreparedGraphMutationQueryText::prepare(&control, R, Catalog)
+            .unwrap_or_else(|error| panic!("valid target refused: {control}: {error:?}"))
+            .bind_parameters(&arguments)
+            .unwrap_or_else(|error| panic!("valid target did not bind: {control}: {error:?}"));
+
+        for tail in [
+            "RETURN r.p AS value",
+            "RETURN properties(r) AS value",
+            "RETURN keys(r) AS value",
+            "RETURN r{.p} AS value",
+            "RETURN r{.*} AS value",
+            "RETURN count(r.p) AS value",
+            "WITH r AS edge RETURN edge.p AS value",
+            "RETURN r.p AS value LIMIT 0",
+            "RETURN CASE WHEN false THEN r.p ELSE 0 END AS value",
+        ] {
+            let statement = format!("{prefix} {tail}");
+            let mut calls = 0;
+            let result = PreparedGraphMutationQueryText::prepare(
+                &statement,
+                R,
+                |kind, name: &str| {
+                    calls += 1;
+                    Catalog.resolve_symbol(kind, name)
+                },
+            );
+            let Err(error) = result else {
+                panic!("post-cascade relationship read admitted: {statement}");
+            };
+            assert_eq!(
+                error.kind,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                    "a vertex property after DETACH DELETE, which may cascade to edges"
+                )),
+                "refusal must identify the cascade, not an unrelated syntax error: {statement}"
+            );
+            assert_eq!(calls, 0, "catalog called for refused output: {statement}");
+        }
+    }
+}
+
+#[test]
+fn path_alias_and_mixed_computed_detach_targets_keep_the_cascade_guard() {
+    use fgdb_gql::{GraphMutationTextErrorKind, GraphPatternTextErrorKind};
+
+    for prefix in [
+        "MATCH (a)-[r:R]->(b) WITH a AS chosen,r AS edge DETACH DELETE [chosen][0]",
+        "MATCH route=(a)-[r:R]->(b) WITH route,r AS edge DETACH DELETE route",
+        "MATCH (a)-[r:R]->(b) WITH a,r AS edge DETACH DELETE null,[a][0]",
+        "MATCH (a)-[r:R]->(b) WITH a,r AS edge DETACH DELETE [a][0],null",
+    ] {
+        let control = format!("{prefix} RETURN 1 AS done");
+        PreparedGraphMutationQueryText::prepare(&control, R, Catalog)
+            .unwrap_or_else(|error| panic!("valid control refused: {control}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        for output in ["edge.p", "edge{.*}"] {
+            let statement = format!("{prefix} RETURN {output} AS value");
+            let mut calls = 0;
+            let result = PreparedGraphMutationQueryText::prepare(
+                &statement,
+                R,
+                |kind, name: &str| {
+                    calls += 1;
+                    Catalog.resolve_symbol(kind, name)
+                },
+            );
+            let Err(error) = result else {
+                panic!("computed cascade escaped: {statement}");
+            };
+            assert_eq!(
+                error.kind,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                    "a vertex property after DETACH DELETE, which may cascade to edges"
+                )),
+                "{statement}"
+            );
+            assert_eq!(calls, 0, "{statement}");
+        }
+    }
+}
+
+#[test]
+fn computed_detach_keeps_explicit_prewrite_values_and_persists_its_cascade() {
+    for limited in [false, true] {
+        run(async |commit, cx, txcx| {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let survivor = db.vertex(VId(BASE + 2)).unwrap();
+            let statement = if limited {
+                "MATCH (a)-[r:R]->(b) WITH a,r.p AS prior \
+                 DETACH DELETE [a][0] RETURN prior LIMIT 0"
+            } else {
+                "MATCH (a)-[r:R]->(b) WITH a,r.p AS prior \
+                 DETACH DELETE [a][0] RETURN prior"
+            };
+            let result = apply(&mut db, commit, cx, txcx, statement, u64::from(!limited))
+                .await
+                .unwrap();
+            let expected = if limited {
+                Vec::new()
+            } else {
+                vec![vec![int(7)]]
+            };
+            assert_eq!(rows(result, &["prior"]), expected);
+            assert!(db.vertex(VId(BASE + 1)).unwrap().is_none());
+            assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
+            assert_eq!(db.vertex(VId(BASE + 2)).unwrap(), survivor);
+            let frontier = db.frontier().unwrap();
+            db.compact(commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(commit, vfs, &path, keys()).await.unwrap();
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert!(db.vertex(VId(BASE + 1)).unwrap().is_none());
+            assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
+            assert_eq!(db.vertex(VId(BASE + 2)).unwrap(), survivor);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+    }
+}
+
+#[test]
+fn refused_computed_cascade_read_preserves_prior_staging_and_can_be_retried_safely() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, fixture()).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let mut txn = db.begin(txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(BASE + 99), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let refused = "MATCH (a)-[r:R]->(b) WITH a,r \
+                       DETACH DELETE [a][0] RETURN r.p AS stale LIMIT 0";
+        assert!(
+            txn.query_write(
+                &mut db,
+                cx,
+                refused,
+                &GqlParameters::new(),
+                Catalog,
+                R,
+                policy(0),
+                no_allocation,
+            )
+            .is_err()
+        );
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+
+        let control = "MATCH (a)-[r:R]->(b) WITH a,r \
+                       DETACH DELETE [a][0] RETURN 1 AS done LIMIT 0";
+        let result = txn
+            .query_write(
+                &mut db,
+                cx,
+                control,
+                &GqlParameters::new(),
+                Catalog,
+                R,
+                policy(0),
+                no_allocation,
+            )
+            .unwrap();
+        assert!(rows(result, &["done"]).is_empty());
+        txn.commit(&mut db, commit).await.unwrap();
+        assert!(db.vertex(VId(BASE + 99)).unwrap().is_some());
+        assert!(db.vertex(VId(BASE + 1)).unwrap().is_none());
+        assert!(db.vertex(VId(BASE + 2)).unwrap().is_some());
+        assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn plain_computed_delete_can_return_an_unaffected_relationships_properties() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, fixture()).await.unwrap();
+        let mut isolated = WriteBatch::new(R);
+        isolated.create_vertex(VId(BASE + 99), vec![MISSING], vec![]);
+        db.write(commit, isolated).await.unwrap();
+        let edge = db.edge(EId(BASE + 10)).unwrap();
+        let endpoints = (
+            db.vertex(VId(BASE + 1)).unwrap(),
+            db.vertex(VId(BASE + 2)).unwrap(),
+        );
+        let result = apply(
+            &mut db,
+            commit,
+            cx,
+            txcx,
+            "MATCH (a)-[r:R]->(b),(isolated:Missing) WITH isolated,r \
+             DELETE head([isolated]) RETURN r.p AS value,r{.*} AS document",
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(result, &["value", "document"]),
+            vec![vec![int(7), map(&[("p", 7)])]]
+        );
+        assert!(db.vertex(VId(BASE + 99)).unwrap().is_none());
+        assert_eq!(db.edge(EId(BASE + 10)).unwrap(), edge);
+        assert_eq!(
+            (
+                db.vertex(VId(BASE + 1)).unwrap(),
+                db.vertex(VId(BASE + 2)).unwrap()
+            ),
+            endpoints
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn explicitly_deleted_computed_targets_keep_runtime_metadata_checks() {
+    for (action, output, detaches) in [
+        ("DETACH DELETE [a][0]", "properties(a)", true),
+        ("DELETE head([r])", "properties(r)", false),
+    ] {
+        run(async |commit, cx, txcx| {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let statement = format!(
+                "MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN {output} AS value LIMIT 0"
+            );
+            // The compiler must not confuse a plain DELETE with a cascade or
+            // reject all metadata merely because the target is computed.
+            PreparedGraphMutationQueryText::prepare(&statement, R, Catalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let result = apply(&mut db, commit, cx, txcx, &statement, 0).await;
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::Mutation(GqlQueryError::Source(_)))
+            ));
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+
+            let control = format!(
+                "MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN 1 AS done LIMIT 0"
+            );
+            let result = apply(&mut db, commit, cx, txcx, &control, 0)
+                .await
+                .unwrap();
+            assert!(rows(result, &["done"]).is_empty());
+            assert_eq!(db.vertex(VId(BASE + 1)).unwrap().is_none(), detaches);
+            assert!(db.vertex(VId(BASE + 2)).unwrap().is_some());
+            assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+    }
+}
