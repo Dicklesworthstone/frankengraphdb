@@ -258,7 +258,9 @@ impl GraphWriteChainStep {
                         Binding::Property(key) => (Some(ElementId::Vertex(vertex)), key),
                         Binding::InputProperty { column, key } => {
                             let element = match input.values().get(column) {
-                                Some(GraphValue::Vertex(vertex)) => Some(ElementId::Vertex(*vertex)),
+                                Some(GraphValue::Vertex(vertex)) => {
+                                    Some(ElementId::Vertex(*vertex))
+                                }
                                 Some(GraphValue::Edge(edge)) => Some(ElementId::Edge(*edge)),
                                 _ => None,
                             };
@@ -267,7 +269,10 @@ impl GraphWriteChainStep {
                         _ => unreachable!("property binding matched above"),
                     };
                     control(Work)?;
-                    let property = element.map(|element| read(element, key)).transpose()?.flatten();
+                    let property = element
+                        .map(|element| read(element, key))
+                        .transpose()?
+                        .flatten();
                     match property {
                         Some(value) => GraphValue::admit_property_value(&value, control)?,
                         None => GraphValue::Scalar(CanonicalScalar::Null),
