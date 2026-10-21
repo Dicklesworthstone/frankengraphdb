@@ -354,7 +354,9 @@ fn null_targets_skip_the_rhs_but_null_assignments_remain_stored_scalars() {
         &[GraphMutationIntent::Property {
             vertex: VId(BASE + 1),
             key: Q,
-            value: Some(CanonicalScalar::Null),
+            value: Some(fgdb_types::CanonicalPropertyValue::Scalar(
+                CanonicalScalar::Null
+            )),
         }]
     );
 }
