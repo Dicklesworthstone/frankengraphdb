@@ -2219,3 +2219,76 @@ fn a_distinct_endpoint_edge_merge_batch_stages_once_and_keeps_the_sequential_ans
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
+    // fgdb-0s2pq item 2: `UNWIND $rows AS row MERGE (a) MERGE (b) MERGE
+    // (a)-[:R]->(b)`, the node-and-relationship ingest idiom, refused at
+    // about 240 rows on a fresh database: every chain step's per-key MERGE
+    // re-admitted each vertex staged so far (100,000 records near 2R^2).
+    let ((), report) = run_async_under_lab(0x7363_2a40, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let statement = "UNWIND $rows AS row MERGE (a:Entity {id: row.s}) \
+                         MERGE (b:Entity {id: row.d}) MERGE (a)-[:R]->(b)";
+        let mut records = Vec::new();
+        for rows in [1000_i64, 2000, 4000] {
+            // Half as many ids as rows, so endpoints repeat across rows and
+            // each pair (s, d) repeats once the cycle wraps.
+            let ids = rows / 2;
+            let pairs: Vec<(i64, i64)> = (0..rows).map(|i| (i % ids, (i * 7 + 1) % ids)).collect();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let input = args(
+                pairs
+                    .iter()
+                    .map(|(s, d)| object(vec![("s", int(*s)), ("d", int(*d))]))
+                    .collect(),
+            );
+            let issued = AtomicU64::new(0);
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    statement,
+                    &input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                        3 * rows as u64,
+                        2 * rows as u64,
+                        rows as u64,
+                    ),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{rows} rows: {error:?}"));
+            let QueryResult::Write { receipt, .. } = result else {
+                panic!("a RETURN-less write returns its receipt")
+            };
+            records.push(receipt.stats().selection.snapshot_records);
+            txn.finish(&mut db, &commit).await.unwrap();
+            // One vertex per id and one relationship per distinct pair.
+            let distinct: std::collections::BTreeSet<(i64, i64)> = pairs.iter().copied().collect();
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len() as i64, ids, "{rows} rows");
+            assert_eq!(db.edges().unwrap().len(), distinct.len(), "{rows} rows");
+            assert_eq!(
+                issued.load(Ordering::Relaxed),
+                ids as u64 + distinct.len() as u64,
+                "{rows} rows"
+            );
+        }
+        // Linear, not quadratic, in the batch size.
+        assert!(records[2] <= 5 * records[0], "{records:?}");
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

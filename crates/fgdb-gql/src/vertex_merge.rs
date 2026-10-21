@@ -511,6 +511,11 @@ impl PreparedGraphVertexMergeRows {
         self.relation
     }
 
+    /// The MERGE's property keys, in the order of [`Self::tuple`]'s values.
+    pub fn property_keys(&self) -> impl Iterator<Item = fgdb_delta_types::PropertyKeyId> + '_ {
+        self.properties.iter().map(|(key, _)| *key)
+    }
+
     /// The input row's column types: the previous write's row, the leading
     /// UNWIND's columns, or none for a first write over one empty row.
     #[must_use]

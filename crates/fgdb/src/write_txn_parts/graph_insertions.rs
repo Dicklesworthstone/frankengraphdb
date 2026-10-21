@@ -260,6 +260,9 @@ impl WriteTxn {
             let mut result = None;
             let mut receipts = Vec::with_capacity(chain.steps().len());
             let last = chain.steps().len().saturating_sub(1);
+            // A chain of action-free MERGEs holds its creations and stages
+            // them once after its last step (fgdb-0s2pq).
+            let mut frozen = frozen_chain(chain).then(FrozenCreations::default);
             for (at, step) in chain.steps().iter().enumerate() {
                 // Only a last step with RETURN delivers rows. A last write
                 // without one (`CREATE (a) WITH a CREATE (b)`) selects the
@@ -358,6 +361,7 @@ impl WriteTxn {
                                 merge,
                                 edge_merge,
                                 rows.take(),
+                                frozen.as_mut(),
                                 &mut allocate,
                             )
                             .map_err(|error| {
@@ -381,6 +385,7 @@ impl WriteTxn {
                                 GraphVertexMergePolicy::new(allowance.query)
                                     .with_creation_limit(allowance.max_vertices),
                                 rows.take(),
+                                frozen.as_mut(),
                                 &mut allocate,
                             )
                             .map_err(|error| {
@@ -436,6 +441,7 @@ impl WriteTxn {
                                 merge,
                                 edge_merge,
                                 rows.take(),
+                                frozen.as_mut(),
                                 |row| {
                                     allocate(fgdb_gql::insertion::GraphInsertRequest::Edge {
                                         row,
@@ -521,6 +527,7 @@ impl WriteTxn {
                                 GraphVertexMergePolicy::new(allowance.query)
                                     .with_creation_limit(allowance.max_vertices),
                                 rows.take(),
+                                None,
                                 &mut allocate,
                             )
                             .map_err(|error| {
@@ -623,6 +630,24 @@ impl WriteTxn {
             let Some(mut returning) = result else {
                 return Err(source(WriteTxnError::NoPreparedWrite));
             };
+            // A frozen chain's creations, in creation order: every vertex
+            // precedes any relationship that names it.
+            if let Some(frozen) = frozen {
+                let batches = frozen.into_batches();
+                if !batches.is_empty() {
+                    for batch in &batches {
+                        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                        database
+                            .admit_write_values(batch)
+                            .map_err(WriteTxnError::Write)
+                            .map_err(source)?;
+                    }
+                    workspace
+                        .txn
+                        .write_ordered(database, batches)
+                        .map_err(source)?;
+                }
+            }
             // Whole-statement counters, as every write RETURN reports them.
             returning.rows.snapshot_records = used.selection.snapshot_records;
             returning.evaluator = used.evaluator;
@@ -1096,6 +1121,7 @@ mod chain_materialization_tests {
                         merge,
                         GraphVertexMergePolicy::new(policy(HIGH, HIGH).query),
                         None,
+                        None,
                         |_| -> Result<ElementId, ()> { panic!("all targets exist") },
                     )
                     .unwrap();
@@ -1113,6 +1139,7 @@ mod chain_materialization_tests {
                         cx,
                         merge,
                         GraphEdgeMergePolicy::new(policy(HIGH, HIGH).query),
+                        None,
                         None,
                         |_| -> Result<ElementId, ()> { panic!("all edges exist") },
                     )
@@ -1297,6 +1324,7 @@ mod chain_materialization_tests {
                             &cx,
                             query.merge(),
                             GraphVertexMergePolicy::new(policy(HIGH, HIGH).query),
+                            None,
                             None,
                             |_| -> Result<ElementId, ()> { panic!("all targets exist") },
                         )

@@ -24,6 +24,209 @@ fn merge_remaining_budget(
     }
 }
 
+/// A write chain's creations while it runs frozen (fgdb-0s2pq). The chain
+/// stages nothing until after its last step, so every step reads the overlay
+/// as the chain found it. These are the chain's own creations, which a later
+/// MERGE must also see, as it would see them staged in a sequential chain.
+#[derive(Default)]
+pub(crate) struct FrozenCreations {
+    vertices: Vec<(
+        VId,
+        Vec<LabelId>,
+        Vec<(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)>,
+    )>,
+    // Candidate buckets: a superset of the equal values. The MERGE's own
+    // predicates decide every match.
+    buckets:
+        std::collections::BTreeMap<(fgdb_delta_types::PropertyKeyId, FrozenValueClass), Vec<usize>>,
+    /// Every creation batch, in creation order, for the one ordered staging.
+    batches: Vec<WriteBatch>,
+}
+
+/// The bucket of every value a scalar can equal: integers and floats by their
+/// f64 image, all decimals together, each temporal kind together, and any
+/// other scalar by its canonical bytes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FrozenValueClass {
+    Number(u64),
+    Decimal,
+    Temporal(u8),
+    Exact(Vec<u8>),
+}
+
+impl FrozenValueClass {
+    fn of(value: &CanonicalScalar) -> Self {
+        // -0.0 equals 0.0. NaN equals nothing, so any bucket serves it.
+        let number =
+            |value: f64| Self::Number(if value == 0.0 { 0.0_f64 } else { value }.to_bits());
+        match value {
+            CanonicalScalar::Int(value) => number(*value as f64),
+            CanonicalScalar::Float(value) => number(value.get()),
+            CanonicalScalar::Decimal(_) => Self::Decimal,
+            CanonicalScalar::Timestamp(_) => Self::Temporal(0),
+            CanonicalScalar::Date(_) => Self::Temporal(1),
+            CanonicalScalar::LocalTime(_) => Self::Temporal(2),
+            CanonicalScalar::Time(_) => Self::Temporal(3),
+            CanonicalScalar::LocalDateTime(_) => Self::Temporal(4),
+            CanonicalScalar::Duration(_) => Self::Temporal(5),
+            other => Self::Exact(other.encode().unwrap_or_default()),
+        }
+    }
+}
+
+impl FrozenCreations {
+    /// Hold one creation batch for the chain's ordered staging; its vertices
+    /// join every later lookup.
+    pub(crate) fn defer(&mut self, batch: WriteBatch) {
+        for row in &batch.rows {
+            if let PendingRow::Vertex {
+                vid, labels, props, ..
+            } = row
+            {
+                let at = self.vertices.len();
+                for (key, value) in props {
+                    if let CanonicalPropertyValue::Scalar(value) = value {
+                        self.buckets
+                            .entry((*key, FrozenValueClass::of(value)))
+                            .or_default()
+                            .push(at);
+                    }
+                }
+                self.vertices.push((*vid, labels.clone(), props.clone()));
+            }
+        }
+        self.batches.push(batch);
+    }
+
+    /// The held batches, in creation order.
+    pub(crate) fn into_batches(self) -> Vec<WriteBatch> {
+        self.batches
+    }
+
+    /// The chain's created vertices that satisfy every predicate of a MERGE
+    /// whose first key is `key = value`, in creation order.
+    fn matching(
+        &self,
+        key: Option<(fgdb_delta_types::PropertyKeyId, &CanonicalScalar)>,
+        predicates: &[fgdb_gql::algebra::VertexPredicate],
+    ) -> Vec<VId> {
+        let accepts = |at: &usize| {
+            let (_, labels, props) = &self.vertices[*at];
+            predicates
+                .iter()
+                .all(|predicate| predicate.matches(labels, props))
+        };
+        let Some((key, value)) = key else {
+            return (0..self.vertices.len())
+                .filter(accepts)
+                .map(|at| self.vertices[at].0)
+                .collect();
+        };
+        let bucket = |class: FrozenValueClass| {
+            self.buckets
+                .get(&(key, class))
+                .map_or(&[][..], Vec::as_slice)
+        };
+        let mut candidates: Vec<usize> = match FrozenValueClass::of(value) {
+            // A number can equal a decimal, and a decimal any number.
+            class @ FrozenValueClass::Number(_) => bucket(class)
+                .iter()
+                .chain(bucket(FrozenValueClass::Decimal))
+                .copied()
+                .collect(),
+            FrozenValueClass::Decimal => self
+                .buckets
+                .range((key, FrozenValueClass::Number(0))..=(key, FrozenValueClass::Decimal))
+                .flat_map(|(_, at)| at.iter().copied())
+                .collect(),
+            class => bucket(class).to_vec(),
+        };
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter(accepts)
+            .map(|at| self.vertices[at].0)
+            .collect()
+    }
+}
+
+/// Whether a write chain runs frozen (fgdb-0s2pq): every step is an
+/// action-free vertex MERGE or a relationship MERGE whose selection reads only
+/// the previous step's rows, with at most one relationship MERGE and no
+/// RETURN. Such a chain's effects are pure creations. Each lookup sees the
+/// chain-entry overlay plus the chain's own held vertices, and the
+/// relationship MERGE finds no relationship on a held vertex, so holding
+/// every creation until the end gives the sequential chain's answer.
+fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
+    use fgdb_gql::GraphWriteChainStep;
+    let mut vertex_steps = 0;
+    let mut edge_steps = 0;
+    for step in chain.steps() {
+        match step {
+            GraphWriteChainStep::VertexMerge(merge) => {
+                if merge.actions().is_some() {
+                    return false;
+                }
+                // Every tuple's single MERGE shares this template's shape.
+                let probe: Vec<CanonicalScalar> = merge
+                    .property_keys()
+                    .map(|_| CanonicalScalar::Int(0))
+                    .collect();
+                if !merge
+                    .merge_for(&probe)
+                    .is_ok_and(|single| frozen_merge_predicates(&single).is_some())
+                {
+                    return false;
+                }
+                vertex_steps += 1;
+            }
+            GraphWriteChainStep::EdgeMergeRows { merge, .. }
+            | GraphWriteChainStep::EdgeMerge(merge)
+                if merge
+                    .input_relation()
+                    .is_some_and(|relation| !relation.reads_graph()) =>
+            {
+                edge_steps += 1;
+            }
+            _ => return false,
+        }
+    }
+    vertex_steps > 0 && edge_steps <= 1
+}
+
+/// The predicates of a single-tuple MERGE's one-vertex selection, when that
+/// selection is a plain scan filtered by them and projecting the vertex alone
+/// (what `PreparedGraphVertexMergeRows::merge_for` builds). Anything else has
+/// no frozen form.
+fn frozen_merge_predicates(
+    merge: &fgdb_gql::PreparedGraphVertexMerge,
+) -> Option<Vec<fgdb_gql::algebra::VertexPredicate>> {
+    use fgdb_gql::algebra::GlaOperator;
+    let selection = merge.selection();
+    if selection.columns().len() != 1 || merge.target_column() != 0 {
+        return None;
+    }
+    let mut predicates = Vec::new();
+    let mut scans = 0;
+    for operator in selection.plan().operators() {
+        match operator {
+            GlaOperator::ScanVertices => scans += 1,
+            GlaOperator::Select {
+                predicates: more, ..
+            } => predicates.extend(more.iter().cloned()),
+            GlaOperator::VertexIdentity { .. }
+            | GlaOperator::Project { .. }
+            | GlaOperator::ProjectBindings { .. }
+            | GlaOperator::ProjectValues { .. }
+            | GlaOperator::Distinct
+            | GlaOperator::OrderByVertexId => {}
+            _ => return None,
+        }
+    }
+    (scans == 1).then_some(predicates)
+}
+
 // A proposal is private until its owner has staged and completed it. It is not
 // a second evaluator: the supplied GLA source and ordinary insertion collector
 // still own all expression, matching and allocation semantics.
@@ -355,6 +558,12 @@ impl WriteTxn {
     /// then identity order. Each pair, like each tuple, takes one scratch
     /// entry. These are private occurrences, not final result rows: the
     /// enclosing chain admits RETURN only after grouping and pagination.
+    ///
+    /// With `frozen` (a chain of action-free MERGEs, fgdb-0s2pq), creations
+    /// are held there instead of staged, and each tuple also matches the
+    /// chain's held vertices that its predicates admit: the same answer as
+    /// staging each creation, without re-reading a growing overlay per tuple.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_graph_vertex_merges_over<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -362,6 +571,7 @@ impl WriteTxn {
         merge: &fgdb_gql::PreparedGraphVertexMergeRows,
         policy: fgdb_gql::GraphVertexMergePolicy,
         owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        mut frozen: Option<&mut FrozenCreations>,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> VertexMergeRowsResult<A> {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
@@ -498,13 +708,39 @@ impl WriteTxn {
                             .max_created_vertices
                             .saturating_sub(used.created_vertices),
                     );
+                    // A frozen chain's held vertices are part of what this
+                    // MERGE sees, exactly as if they had been staged.
+                    let held = match frozen.as_deref() {
+                        Some(frozen) => {
+                            let predicates = frozen_merge_predicates(&single).ok_or(
+                                GqlQueryError::Source(GraphVertexMergeError::Source(
+                                    WriteTxnError::UnsupportedAtomicMutation,
+                                )),
+                            )?;
+                            frozen.matching(
+                                merge.property_keys().next().zip(tuple.first()),
+                                &predicates,
+                            )
+                        }
+                        None => Vec::new(),
+                    };
                     // Every distinct match is bound (openCypher MERGE), never
                     // refused as ambiguous.
                     let proposal = collect_vertex_merge_output::<VertexMergeTargets, _, A, _>(
                         &single,
                         allowance,
                         |pattern, allowance| {
-                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                            let mut selected = self
+                                .execute_graph_pattern_governed(database, cx, pattern, allowance)?;
+                            for vertex in held {
+                                selected.value.push(
+                                    fgdb_gql::algebra::GraphValueRow::from_owned_values(vec![
+                                        fgdb_gql::algebra::GraphValue::Vertex(vertex),
+                                    ]),
+                                );
+                                selected.rows.result_rows += 1;
+                            }
+                            Ok(selected)
                         },
                         &mut allocate,
                         || cx.checkpoint(),
@@ -549,7 +785,10 @@ impl WriteTxn {
                             }
                             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                             // Preserve the insertion adapter's composition choice.
-                            let staged = if self
+                            let staged = if let Some(frozen) = frozen.as_deref_mut() {
+                                frozen.defer(batch);
+                                Ok(())
+                            } else if self
                                 .staged
                                 .iter()
                                 .all(|staged| staged.relation == merge.relation())
