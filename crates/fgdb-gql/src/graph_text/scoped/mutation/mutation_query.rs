@@ -3,6 +3,7 @@
 //! mutation's proposal for that field; nothing is rescanned or re-matched.
 
 mod combined;
+mod row_maps;
 
 use super::*;
 use crate::mutation_text::{
@@ -335,7 +336,7 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         match self.row {
             Some(row) => match self.returning.row_metadata(parser, row, self.scope)? {
                 Some(column) => Ok(Some(column)),
-                None => self.returning.row_leaf(parser, row),
+                None => self.returning.row_leaf(parser, row, self.scope),
             },
             None => self.returning.leaf(parser, self.columns, self.scope),
         }
@@ -346,8 +347,10 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         source: Name<'a>,
         input: ReturnMapInput<'a>,
     ) -> Result<usize, GraphPatternTextError> {
-        self.returning
-            .map_input(parser, self.columns, self.scope, source, input)
+        match self.row {
+            Some(row) => self.returning.row_map_input(parser, row, self.scope, source, input),
+            None => self.returning.map_input(parser, self.columns, self.scope, source, input),
+        }
     }
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.returning.types()
@@ -605,6 +608,7 @@ impl<'a> ParsedMutationReturn<'a> {
         &mut self,
         parser: &mut Parser<'a>,
         row: &[(Name<'a>, GraphSetColumnType)],
+        scope: ReturnScope,
     ) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);
@@ -623,21 +627,19 @@ impl<'a> ParsedMutationReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let token = lookahead.next()?;
-                if let TokenKind::Word(text) = token.kind
-                    && let Some(current) = parser.boundary_read(row.len())?
-                {
+                if let TokenKind::Word(text) = token.kind {
                     let key = Name { text, at: token.at };
-                    return self
-                        .column(
-                            Binding::Property {
-                                target: index,
-                                key,
-                                current,
-                            },
-                            key,
-                            GraphSetColumnType::Stored,
-                        )
-                        .map(Some);
+                    let column = self.row_map_input(
+                        parser,
+                        row,
+                        scope,
+                        row[index].0,
+                        ReturnMapInput::Property(key),
+                    )?;
+                    for _ in 0..3 {
+                        parser.advance()?;
+                    }
+                    return Ok(Some(column));
                 }
             }
         }

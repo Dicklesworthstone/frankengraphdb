@@ -347,3 +347,6 @@ fn metadata_respects_scope_and_map_locals_instead_of_reviving_graph_names() {
         ]);
     });
 }
+
+#[path = "with_mutation_metadata/map_projections.rs"]
+mod map_projections;
