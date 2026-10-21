@@ -69,7 +69,9 @@ impl QueryWriteOptions {
                     "float" => GqlParameterType::Scalar(CanonicalScalarKind::Float),
                     "decimal" => GqlParameterType::Scalar(CanonicalScalarKind::Decimal),
                     "bytes" => GqlParameterType::Scalar(CanonicalScalarKind::Bytes),
-                    _ => return Err(Failure::usage("unknown --feed-type scalar type")),
+                    "list" => GqlParameterType::List,
+                    "map" => GqlParameterType::Map,
+                    _ => return Err(Failure::usage("unknown --feed-type parameter type")),
                 };
                 self.names
                     .insert(name, GqlParameterValue::Int64(0))
