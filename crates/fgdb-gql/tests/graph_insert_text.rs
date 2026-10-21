@@ -703,15 +703,17 @@ fn connected_creation_caps_count_new_declarations_not_node_references() {
     let query = prepare(&format!("{text},(n0)"));
     assert_eq!(query.vertices_per_row(), MAX_GRAPH_INSERT_DECLARATIONS);
     assert_eq!(query.edges_per_row(), 0);
+    // A closed ring of n vertices declares exactly 2n: the cap itself.
+    let ring = MAX_GRAPH_INSERT_DECLARATIONS / 2;
     let mut chain = "CREATE (n0)".to_owned();
-    for index in 1..128 {
+    for index in 1..ring {
         chain.push_str(&format!("-[:R]->(n{index})"));
     }
     chain.push_str("-[:R]->(n0)");
     let query = prepare(&chain);
     assert_eq!(
         (query.vertices_per_row(), query.edges_per_row()),
-        (128, 128)
+        (ring, ring)
     );
     for too_large in [
         format!("{text},()"),

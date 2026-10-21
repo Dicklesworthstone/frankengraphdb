@@ -19,8 +19,13 @@ use crate::{
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
-pub const MAX_GRAPH_INSERT_DECLARATIONS: usize = 256;
-pub const MAX_GRAPH_INSERT_FIELDS: usize = 256;
+// One statement's text is at most MAX_GRAPH_TEXT_BYTES (64 KiB), which bounds
+// what these can admit anyway. 4096 admits a whole hand-written dataset in one
+// CREATE, such as the openCypher movie graph (TCK Create4 [1]: 424
+// declarations, about 730 fields), and preparation stays linear apart from a
+// short name scan per node reference.
+pub const MAX_GRAPH_INSERT_DECLARATIONS: usize = 4096;
+pub const MAX_GRAPH_INSERT_FIELDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphInsertEndpoint {
