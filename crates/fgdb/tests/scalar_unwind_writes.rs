@@ -1816,3 +1816,129 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn a_constant_update_batch_stages_once_and_keeps_the_sequential_answer() {
+    // fgdb-2l3pt: `MATCH ... SET n.p = row.p` writes a bound constant to a
+    // field its MATCH does not read, so every row is evaluated against the
+    // entry overlay and the batch is staged once. Before, each row re-walked
+    // every earlier row's staged update, and the CLI's 10,000,000-unit work
+    // allowance refused a 2000-row batch at row 1678.
+    let ((), report) = run_async_under_lab(0x7363_2a3d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let value = |vertex: &fgdb::VertexRow, key: PropertyKeyId| {
+            vertex
+                .props
+                .iter()
+                .find(|(actual, _)| *actual == key)
+                .map(|(_, value)| value.clone())
+        };
+        let int_value = |value: i64| Some(CanonicalScalar::Int(value).into());
+        let no_identity = |request: GraphWriteIdentityRequest| -> Result<ElementId, Infallible> {
+            panic!(
+                "an update requested an identity at statement {}",
+                request.statement
+            )
+        };
+        let update = "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n.p = row.p";
+        let mut records = Vec::new();
+        for rows in [1000_i64, 2000, 4000] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 0..rows {
+                seed.create_vertex(
+                    VId(1_000_000 + id as u128),
+                    vec![ENTITY],
+                    vec![
+                        (ID, CanonicalScalar::Int(id)),
+                        (P, CanonicalScalar::Int(-1)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let input = args(
+                (0..rows)
+                    .map(|id| object(vec![("id", int(id)), ("p", int(id * 10))]))
+                    .collect(),
+            );
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    update,
+                    &input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                        rows as u64,
+                        0,
+                        0,
+                    ),
+                    no_identity,
+                )
+                .unwrap_or_else(|error| panic!("{rows} rows: {error:?}"));
+            let QueryResult::Write { receipt, .. } = result else {
+                panic!("a RETURN-less write returns its receipt")
+            };
+            assert_eq!(receipt.stats().completed_statements, rows as usize);
+            assert_eq!(receipt.stats().mutation_effects, rows as u64);
+            records.push(receipt.stats().selection.snapshot_records);
+            txn.finish(&mut db, &commit).await.unwrap();
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), rows as usize);
+            for vertex in &vertices {
+                let id = vertex.vid.0 as i64 - 1_000_000;
+                assert_eq!(value(vertex, ID), int_value(id));
+                assert_eq!(value(vertex, P), int_value(id * 10), "id {id}");
+            }
+        }
+        // Each row reads the same bounded records whatever the batch size.
+        assert_eq!(records[1], 2 * records[0], "{records:?}");
+        assert_eq!(records[2], 4 * records[0], "{records:?}");
+
+        // Repeated keys: the frozen constant update keeps the last write, and
+        // a right-hand side reading the target stays sequential, so the
+        // second row sees the first row's increment.
+        for (text, expected) in [
+            (update, 2),
+            (
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n.p = n.p + row.p",
+                3,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(7),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(5)), (P, CanonicalScalar::Int(0))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            txn.query_write(
+                &mut db,
+                &cx,
+                text,
+                &args(vec![
+                    object(vec![("id", int(5)), ("p", int(1))]),
+                    object(vec![("id", int(5)), ("p", int(2))]),
+                ]),
+                symbols,
+                R,
+                policy(10, 0),
+                no_identity,
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            txn.finish(&mut db, &commit).await.unwrap();
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 1);
+            assert_eq!(value(&vertices[0], P), int_value(expected), "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

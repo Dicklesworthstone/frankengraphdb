@@ -404,8 +404,10 @@ impl PreparedGraphWriteProgram {
 
     /// All selections and assignment values in this program use the entry
     /// transaction overlay. Its vertex field updates then apply in input order.
-    /// This provenance is only issued by the native UNWIND compiler; ordinary
-    /// mixed programs, including MERGE and disjoint row updates, stay sequential.
+    /// This provenance is only issued by the native UNWIND compiler: for an
+    /// update that feeds its own MATCH, and for a constant update that cannot
+    /// (freeze_constant_vertex_update_input). Ordinary mixed programs,
+    /// including MERGE and disjoint row updates, stay sequential.
     #[must_use]
     pub const fn freezes_vertex_update_input(&self) -> bool {
         self.frozen_vertex_update_input
@@ -422,6 +424,19 @@ impl PreparedGraphWriteProgram {
         }
         self.frozen_vertex_update_input = true;
         true
+    }
+
+    /// The caller proves from the resolved definition that no assignment
+    /// writes a field or label the statement's MATCH reads (fgdb-2l3pt). When
+    /// every assignment also writes a bound constant, each row selects and
+    /// assigns exactly what sequential execution would, and ordered staging
+    /// keeps the last write to a field, so freezing is a physical choice only.
+    /// Any other program is left sequential.
+    pub(crate) fn freeze_constant_vertex_update_input(&mut self) -> bool {
+        self.statements.iter().all(|statement| {
+            matches!(statement, GraphWriteStatement::Mutation(input)
+                if input.writes_only_constants())
+        }) && self.freeze_vertex_update_input()
     }
 
     /// Every statement is one vertex upsert of a single template whose MERGE

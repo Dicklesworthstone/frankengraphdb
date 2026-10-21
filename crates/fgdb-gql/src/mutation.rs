@@ -462,6 +462,22 @@ impl PreparedGraphMutation {
         })
     }
 
+    /// Every assignment writes a bound constant (a literal or an argument) or
+    /// a label, or removes a field. No right-hand side reads the selected
+    /// row, so no earlier input row's staged effects can change its value.
+    pub(crate) fn writes_only_constants(&self) -> bool {
+        self.actions.iter().all(|action| {
+            matches!(
+                action,
+                GraphMutationAction::SetProperty {
+                    value: GraphMutationValue::Literal(_),
+                    ..
+                } | GraphMutationAction::RemoveProperty { .. }
+                    | GraphMutationAction::SetLabel { .. }
+            )
+        })
+    }
+
     /// Bound the program's field-intent statistics from the resolved definition.
     /// A complete-map replacement expands its clear action to at most every
     /// unkept catalog key: the collector refuses a property name absent from

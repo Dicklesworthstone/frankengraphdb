@@ -382,6 +382,15 @@ impl BoundGraphWriteScriptBatch {
         self
     }
 
+    /// Mark an eligible constant vertex-update batch for single-preparation
+    /// execution (PreparedGraphWriteProgram::freeze_constant_vertex_update_input).
+    /// The caller has proved that no assignment feeds the statement's MATCH.
+    /// An ineligible batch is returned unchanged and runs sequentially.
+    pub(crate) fn with_frozen_constant_vertex_updates(mut self) -> Self {
+        self.program.freeze_constant_vertex_update_input();
+        self
+    }
+
     #[must_use]
     pub fn program(&self) -> &PreparedGraphWriteProgram {
         &self.program

@@ -111,20 +111,29 @@ fn multirow_vertex_updates_freeze_selection_feedback_across_fields_aliases_and_s
 #[test]
 fn disjoint_updates_single_vertex_deletion_and_merges_keep_their_native_programs() {
     let input = rows(vec![int(1), int(1), int(2)]);
-    for tail in [
-        "MATCH (n:Entity {id:x}) SET n.p=x",
-        "MATCH (n:Entity {id:x}) SET n.p=n.p+1",
-        "MATCH (n:Entity {id:x}) SET n:Other",
-        "MATCH (n:Entity {id:x}) REMOVE n.name",
-        "MATCH (n:Entity {id:x}) DETACH DELETE n",
-        "MATCH (n:Entity {id:x}) DELETE n",
-        "MERGE (n:Entity {id:x}) ON CREATE SET n.p=1 ON MATCH SET n.p=n.p+1",
+    // A constant update cannot change what a later row reads, so it stages
+    // once (fgdb-2l3pt); a right-hand side reading the row stays sequential.
+    for (tail, frozen) in [
+        ("MATCH (n:Entity {id:x}) SET n.p=x", true),
+        ("MATCH (n:Entity {id:x}) SET n.p=n.p+1", false),
+        ("MATCH (n:Entity {id:x}) SET n:Other", true),
+        ("MATCH (n:Entity {id:x}) REMOVE n.name", true),
+        ("MATCH (n:Entity {id:x}) DETACH DELETE n", false),
+        ("MATCH (n:Entity {id:x}) DELETE n", false),
+        (
+            "MERGE (n:Entity {id:x}) ON CREATE SET n.p=1 ON MATCH SET n.p=n.p+1",
+            false,
+        ),
     ] {
         let definition = GraphUnwindWriteText::parse(&format!("UNWIND $rows AS x {tail}")).unwrap();
         let actual = definition.bind(&input, RelationId(1), symbols).unwrap();
         assert_eq!(actual.argument_sets(), 3, "{tail}");
         assert_eq!(actual.program().statements().len(), 3, "{tail}");
-        assert!(!actual.program().freezes_vertex_update_input(), "{tail}");
+        assert_eq!(
+            actual.program().freezes_vertex_update_input(),
+            frozen,
+            "{tail}"
+        );
     }
 }
 
@@ -669,5 +678,59 @@ fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequent
                 .freezes_vertex_upsert_input(),
             "{tail}"
         );
+    }
+}
+
+#[test]
+fn constant_vertex_updates_freeze_and_row_reading_updates_stay_sequential() {
+    // fgdb-2l3pt: an update that writes only bound constants to fields its
+    // MATCH does not read stages once. Before, every row re-walked each
+    // earlier row's staged update, and the CLI's work allowance refused a
+    // 2000-row `MATCH ... SET n.p = row.p` batch at row 1678.
+    let distinct = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(2)), ("p", int(20))]),
+        object(vec![("id", int(3)), ("p", int(30))]),
+    ]);
+    let duplicate = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(1)), ("p", int(20))]),
+    ]);
+    let single = rows(vec![object(vec![("id", int(1)), ("p", int(10))])]);
+    let bind = |tail: &str, input: &GqlParameters| {
+        GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}"))
+            .unwrap()
+            .bind(input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"))
+    };
+    for tail in [
+        "MATCH (n:Entity {id: row.id}) SET n.p = row.p",
+        "MATCH (n:Entity) WHERE n.id = row.id SET n.p = row.p, n.name = 'seen'",
+        "MATCH (n:Entity {id: row.id}) SET n:Other",
+        "MATCH (n:Entity {id: row.id}) REMOVE n.name",
+    ] {
+        // Ordered staging keeps a repeated target's last write, as the
+        // sequential program does.
+        for input in [&distinct, &duplicate] {
+            let bound = bind(tail, input);
+            assert!(bound.program().freezes_vertex_update_input(), "{tail}");
+            assert!(!bound.program().freezes_vertex_upsert_input(), "{tail}");
+        }
+        assert!(
+            !bind(tail, &single).program().freezes_vertex_update_input(),
+            "{tail}"
+        );
+    }
+    for tail in [
+        // The right-hand side reads the target, which an earlier row with the
+        // same key has changed.
+        "MATCH (n:Entity {id: row.id}) SET n.p = n.p + 1",
+        "MATCH (n:Entity {id: row.id}) SET n.p = n.name",
+        // A relationship update has another staging contract.
+        "MATCH (a:Entity)-[e:R {id: row.id}]->(b) SET e.p = row.p",
+    ] {
+        let bound = bind(tail, &distinct);
+        assert!(!bound.program().freezes_vertex_update_input(), "{tail}");
+        assert_eq!(bound.program().statements().len(), 3, "{tail}");
     }
 }
