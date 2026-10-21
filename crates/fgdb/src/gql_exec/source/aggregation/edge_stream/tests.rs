@@ -55,7 +55,11 @@ fn history_predecessors_equal_authoritative_rows_and_every_source_boundary_propa
             DatabaseSecurityNamespaceId([0xa8; 32]),
             [0xa9; 32],
         );
-        let mut db = Database::open_memory(&commit, keys).await.unwrap();
+        let vfs = crate::MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys.clone())
+            .await
+            .unwrap();
         let relation = RelationId(7);
         let key = PropertyKeyId(9);
         let mut batch = crate::WriteBatch::new(relation);
@@ -71,9 +75,14 @@ fn history_predecessors_equal_authoritative_rows_and_every_source_boundary_propa
             );
         }
         db.write(&commit, batch).await.unwrap();
-        let old = db.read_session().unwrap();
         // Force a flat base before writes so the next generation exercises
         // overlay ties, not merely a rebuilt flat history for every identity.
+        // A write folds into the overlay; reopening builds the flat base.
+        drop(db);
+        let mut db = Database::open_with_vfs(&commit, vfs, &path, keys)
+            .await
+            .unwrap();
+        let old = db.read_session().unwrap();
         assert_eq!(old.snapshot.adjacency_index().base.ids.len(), 3);
         for round in 0..4 {
             let mut update = crate::WriteBatch::new(relation);
