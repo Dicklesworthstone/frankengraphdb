@@ -177,10 +177,14 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
             .into_iter()
             .enumerate()
             {
-                assert_eq!(ids(&result.value), expected, "{predicate}");
-                // Transaction overlays have their own complete canonical source.
-                let records = if entrypoint == 4 { 7 } else { indexed_records };
-                assert_eq!(result.rows.snapshot_records, records, "{predicate}");
+                assert_eq!(ids(&result.value), expected, "{predicate} at {entrypoint}");
+                // A transaction overlay serves equality from the same property
+                // index (bound_vertex_sources, f7ac7617): every entrypoint
+                // charges only the candidates it resolves (ruling fgdb-bupm).
+                assert_eq!(
+                    result.rows.snapshot_records, indexed_records,
+                    "{predicate} at {entrypoint}"
+                );
             }
         }
         txn.abort();

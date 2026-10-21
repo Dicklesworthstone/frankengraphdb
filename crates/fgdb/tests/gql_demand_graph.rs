@@ -387,6 +387,9 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
                 expected(11, 2)
             );
         }
+        // Demand access with a text or vector lane is mixed demand
+        // (query_beacon/demand.rs): without a maintained exact index it
+        // refuses with that reason, before any read.
         for modality in [
             "text => 'graph', text_property => 'body'",
             "vector => [1], vector_properties => ['body']",
@@ -401,7 +404,7 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
             assert!(
                 error
                     .to_string()
-                    .contains("demand graph access requires a graph-only read"),
+                    .contains("mixed demand search requires a compatible maintained exact index"),
                 "{error}"
             );
             let error = txn
@@ -417,7 +420,7 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
             assert!(
                 error
                     .to_string()
-                    .contains("demand graph access requires a graph-only read"),
+                    .contains("mixed demand search requires a compatible maintained exact index"),
                 "{error}"
             );
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
