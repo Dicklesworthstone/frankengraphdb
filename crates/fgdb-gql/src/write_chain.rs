@@ -174,6 +174,112 @@ impl core::fmt::Debug for GraphWriteChainStep {
     }
 }
 
+impl GraphWriteChainStep {
+    /// Build one private continuation occurrence after a vertex or relationship
+    /// MERGE. Only the visible prefix is copied; hidden reads do not escape.
+    /// Each row, cell, nested value and variable payload is admitted before its
+    /// allocation. These are evaluator events, never final ResultRow events.
+    /// The host must keep its statement rollback guard and cumulative meter.
+    pub fn continuation_row_controlled<E: From<crate::GraphIntegerError>>(
+        &self,
+        input: &crate::algebra::GraphValueRow,
+        resolved: fgdb_delta_types::ElementId,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<crate::algebra::GraphValueRow, E> {
+        use crate::GlaExecutionEvent::ScratchEntry;
+        use crate::algebra::{GraphValue, GraphValueRow};
+        use fgdb_delta_types::ElementId;
+
+        let invalid = || crate::GraphIntegerError {
+            instruction: 0,
+            kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+        };
+        let (keep, identity) = match (self, resolved) {
+            (Self::VertexMerge(merge), ElementId::Vertex(vertex)) => {
+                (merge.keep, GraphValue::Vertex(vertex))
+            }
+            (Self::EdgeMergeRows { keep, .. }, ElementId::Edge(edge)) => {
+                (*keep, GraphValue::Edge(edge))
+            }
+            _ => return Err(invalid().into()),
+        };
+        let prefix = input.values().get(..keep).ok_or_else(invalid)?;
+        control(ScratchEntry)?; // the occurrence in the host's row buffer
+        let mut cells = Vec::new();
+        for value in prefix {
+            control(ScratchEntry)?; // the cell slot, before copying its payload
+            cells.push(value.copy_with_control(control)?);
+        }
+        control(ScratchEntry)?;
+        cells.push(identity);
+        Ok(GraphValueRow::from_owned_values(cells))
+    }
+
+    /// Bind one vertex MERGE RETURN input after all MERGE actions have staged.
+    /// Carried values use the native controlled copier; stored property values
+    /// use the same pre-copy admission as native graph projections. A missing
+    /// property or NULL carried element stays NULL. This does not project,
+    /// group, page, publish, or spend a final result row.
+    pub fn vertex_return_row_controlled<E: From<crate::GraphIntegerError>>(
+        &self,
+        input: &crate::algebra::GraphValueRow,
+        vertex: fgdb_types::VId,
+        mut read: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<crate::algebra::GraphValue>, E> {
+        use crate::GlaExecutionEvent::{ScratchEntry, Work};
+        use crate::GraphVertexMergeRowsBinding as Binding;
+        use crate::algebra::GraphValue;
+        use fgdb_delta_types::ElementId;
+        use fgdb_types::CanonicalScalar;
+
+        let Self::VertexMergeQuery(query) = self else {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+            }
+            .into());
+        };
+        control(ScratchEntry)?; // the occurrence, before growing the row buffer
+        let mut cells = Vec::new();
+        for binding in query.bindings() {
+            control(ScratchEntry)?;
+            let value = match *binding {
+                Binding::Input(column) => match input.values().get(column) {
+                    Some(value) => value.copy_with_control(control)?,
+                    None => GraphValue::Scalar(CanonicalScalar::Null),
+                },
+                Binding::Vertex => GraphValue::Vertex(vertex),
+                Binding::Property(_) | Binding::InputProperty { .. } => {
+                    let (element, key) = match *binding {
+                        Binding::Property(key) => (Some(ElementId::Vertex(vertex)), key),
+                        Binding::InputProperty { column, key } => {
+                            let element = match input.values().get(column) {
+                                Some(GraphValue::Vertex(vertex)) => Some(ElementId::Vertex(*vertex)),
+                                Some(GraphValue::Edge(edge)) => Some(ElementId::Edge(*edge)),
+                                _ => None,
+                            };
+                            (element, key)
+                        }
+                        _ => unreachable!("property binding matched above"),
+                    };
+                    control(Work)?;
+                    let property = element.map(|element| read(element, key)).transpose()?.flatten();
+                    match property {
+                        Some(value) => GraphValue::admit_property_value(&value, control)?,
+                        None => GraphValue::Scalar(CanonicalScalar::Null),
+                    }
+                }
+            };
+            cells.push(value);
+        }
+        Ok(cells)
+    }
+}
+
 /// A bound chain. The host executes `steps()` in order, handing each step's
 /// rows to the next (`PreparedGraphInsertQuery::execute_governed_over`).
 #[derive(Clone, PartialEq, Eq)]
@@ -219,3 +325,7 @@ impl PreparedGraphWriteChain {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "write_chain/bindings_tests.rs"]
+mod bindings_tests;
