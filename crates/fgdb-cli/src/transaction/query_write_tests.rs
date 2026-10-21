@@ -744,8 +744,16 @@ fn late_collection_refusal_aborts_prior_transaction_writes_and_returning_rows() 
                 "{}",
                 error.message
             );
+            // The refusal names the declared collection kind the late row lacks.
+            let expected = if declaration.starts_with("items") {
+                "List"
+            } else {
+                "Map"
+            };
             assert!(
-                error.message.contains("CollectionValue"),
+                error
+                    .message
+                    .contains(&format!("is not {expected} or null")),
                 "{}",
                 error.message
             );

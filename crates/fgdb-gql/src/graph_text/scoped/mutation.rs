@@ -1821,12 +1821,13 @@ mod graph_function_tests {
                 || Ok(()),
             )
             .unwrap();
+            // A stored collection is GitHub main's StoredProperty intent (b75ef707).
             assert_eq!(
                 batch.intents(),
-                &[crate::GraphMutationIntent::Property {
-                    vertex: fgdb_types::VId(1),
+                &[crate::GraphMutationIntent::StoredProperty {
+                    target: fgdb_delta_types::ElementId::Vertex(fgdb_types::VId(1)),
                     key: PropertyKeyId(1),
-                    value: Some(stored(expected)),
+                    value: stored(expected),
                 }],
                 "{expression}"
             );
