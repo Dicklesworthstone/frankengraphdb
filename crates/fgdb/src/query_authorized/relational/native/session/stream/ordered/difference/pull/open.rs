@@ -200,12 +200,8 @@ where
                     .await
                     .map_err(difference_error)
             };
-            let inner = checked_future(
-                &mut guard,
-                || execution.borrow_mut().checkpoint(),
-                future,
-            )
-            .await?;
+            let inner =
+                checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await?;
             let control: LiveControl<'q> = Box::new(move |action| {
                 let mut execution = execution.borrow_mut();
                 match action {
@@ -230,5 +226,4 @@ where
             after,
         })
     }
-
 }

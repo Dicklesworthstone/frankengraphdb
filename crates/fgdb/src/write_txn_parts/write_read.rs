@@ -9,9 +9,9 @@ type WriteChainReadResult<A> = Result<
     TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, A>>,
 >;
 
-fn write_read_source_error<A>(error: WriteTxnError) -> TxnGqlError<
-    fgdb_gql::GraphWriteChainError<WriteTxnError, A>,
-> {
+fn write_read_source_error<A>(
+    error: WriteTxnError,
+) -> TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, A>> {
     fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Read(
         fgdb_gql::GraphSetExecutionError::Source(error),
     ))
@@ -24,9 +24,11 @@ fn admit_write_read<A>(
     if chain.accepts_read_continuation(continuation) {
         Ok(())
     } else {
-        Err(fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Read(
-            fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },
-        )))
+        Err(fgdb_gql::GqlQueryError::Source(
+            fgdb_gql::GraphWriteChainError::Read(fgdb_gql::GraphSetExecutionError::InputSchema {
+                operand: 0,
+            }),
+        ))
     }
 }
 
@@ -59,7 +61,8 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> WriteChainReadResult<A> {
         use fgdb_gql::{GqlExecutionBudget, GqlQueryError, WithElementReads};
-        self.ensure_database(database).map_err(write_read_source_error)?;
+        self.ensure_database(database)
+            .map_err(write_read_source_error)?;
         admit_write_read(chain, continuation)?;
         cx.with_restriction(|| {
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -70,19 +73,28 @@ impl WriteTxn {
                 None => GqlExecutionBudget::UNLIMITED,
             };
             let (_, head, receipt) = workspace.txn.execute_graph_write_chain_governed(
-                database, cx, chain, write_policy, allocate,
+                database,
+                cx,
+                chain,
+                write_policy,
+                allocate,
             )?;
             // Both pattern and point reads use this same staged overlay. The
             // owned row bag is moved through the native source wrapper once.
             let source = WithElementReads {
-                source: InsertGraphSource { transaction: workspace.txn, database, cx },
+                source: InsertGraphSource {
+                    transaction: workspace.txn,
+                    database,
+                    cx,
+                },
                 elements: |element, key| {
                     workspace.txn.merge_return_property(database, element, key)
                 },
             };
-            let returning = chain.finish_read_continuation(
-                continuation, head, policy.query, source, || cx.checkpoint(),
-            )?;
+            let returning =
+                chain.finish_read_continuation(continuation, head, policy.query, source, || {
+                    cx.checkpoint()
+                })?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             workspace.accept();
             Ok((receipt, returning))
@@ -99,11 +111,19 @@ impl WriteTxn {
         continuation: &fgdb_gql::PreparedGraphSet,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
     ) -> WriteChainReadResult<WriteTxnError> {
-        self.ensure_database(database).map_err(write_read_source_error)?;
+        self.ensure_database(database)
+            .map_err(write_read_source_error)?;
         admit_write_read(chain, continuation)?;
-        let allocate = database.engine_allocator(cx).map_err(write_read_source_error)?;
+        let allocate = database
+            .engine_allocator(cx)
+            .map_err(write_read_source_error)?;
         self.execute_graph_write_chain_then_read_governed(
-            database, cx, chain, continuation, policy, allocate,
+            database,
+            cx,
+            chain,
+            continuation,
+            policy,
+            allocate,
         )
     }
 }
@@ -131,15 +151,26 @@ impl<V: Vfs + Clone> Database<V> {
         TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, A>>,
     > {
         admit_write_read(chain, continuation)?;
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| write_read_source_error(WriteTxnError::Write(error)))?;
         let (receipt, rows) = match transaction.execute_graph_write_chain_then_read_governed(
-            self, cx, chain, continuation, policy, allocate,
+            self,
+            cx,
+            chain,
+            continuation,
+            policy,
+            allocate,
         ) {
             Ok(result) => result,
-            Err(error) => { transaction.abort(); return Err(error); }
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
         };
-        let completion = transaction.finish(self, commit_cx).await
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
             .map_err(write_read_source_error)?;
         Ok((receipt, rows, completion))
     }
@@ -163,15 +194,25 @@ impl<V: Vfs + Clone> Database<V> {
         TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, WriteTxnError>>,
     > {
         admit_write_read(chain, continuation)?;
-        let mut transaction = self.begin(txcx)
+        let mut transaction = self
+            .begin(txcx)
             .map_err(|error| write_read_source_error(WriteTxnError::Write(error)))?;
         let (receipt, rows) = match transaction.execute_graph_write_chain_then_read_engine_governed(
-            self, cx, chain, continuation, policy,
+            self,
+            cx,
+            chain,
+            continuation,
+            policy,
         ) {
             Ok(result) => result,
-            Err(error) => { transaction.abort(); return Err(error); }
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
         };
-        let completion = transaction.finish(self, commit_cx).await
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
             .map_err(write_read_source_error)?;
         Ok((receipt, rows, completion))
     }

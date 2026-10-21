@@ -17,7 +17,10 @@ impl PreparedGraphSet {
         ) -> bool {
             match &plan.node {
                 SetNode::Owned => {
-                    if *found || plan.columns.as_slice() != columns || plan.types.as_slice() != types {
+                    if *found
+                        || plan.columns.as_slice() != columns
+                        || plan.types.as_slice() != types
+                    {
                         return false;
                     }
                     *found = true;

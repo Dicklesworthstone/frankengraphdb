@@ -552,6 +552,7 @@ impl WriteTxn {
     /// [`Self::execute_graph_edge_merges_governed`] for the last write of a
     /// chain: `owned` are the previous write's rows, which the MERGE's row
     /// relation reads through its owned leaf (fgdb-cpny9).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_graph_edge_merges_over<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,

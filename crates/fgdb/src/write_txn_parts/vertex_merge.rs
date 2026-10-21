@@ -24,17 +24,20 @@ fn merge_remaining_budget(
     }
 }
 
+/// One held vertex: its identity, labels and properties.
+type FrozenVertex = (
+    VId,
+    Vec<LabelId>,
+    Vec<(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)>,
+);
+
 /// A write chain's creations while it runs frozen (fgdb-0s2pq). The chain
 /// stages nothing until after its last step, so every step reads the overlay
 /// as the chain found it. These are the chain's own creations, which a later
 /// MERGE must also see, as it would see them staged in a sequential chain.
 #[derive(Default)]
 pub(crate) struct FrozenCreations {
-    vertices: Vec<(
-        VId,
-        Vec<LabelId>,
-        Vec<(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)>,
-    )>,
+    vertices: Vec<FrozenVertex>,
     // Candidate buckets: a superset of the equal values. The MERGE's own
     // predicates decide every match.
     buckets:

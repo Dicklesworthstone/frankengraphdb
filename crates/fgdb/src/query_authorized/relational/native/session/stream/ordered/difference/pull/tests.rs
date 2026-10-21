@@ -219,10 +219,7 @@ fn pull_delivery_exposes_metadata_before_work_and_certifies_only_clean_exhaustio
             assert!(changes.insert(cells(&row), weight).is_none());
         }
         assert_eq!(cursor.state(), ScanState::Exhausted);
-        assert_eq!(
-            changes,
-            Bag::from([(value(3), -2), (value(9), 1)])
-        );
+        assert_eq!(changes, Bag::from([(value(3), -2), (value(9), 1)]));
         drop(cursor);
         assert!(!scoped.is_closed());
         assert_eq!(pool.used(), 0);
@@ -267,7 +264,6 @@ fn unpolled_open_and_explicit_close_do_not_consume_a_difference_suffix() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
-
 
 #[test]
 fn dropped_in_flight_pull_fuses_delivery_and_preserves_scratch_poisoning() {

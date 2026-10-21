@@ -106,11 +106,9 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send> AuthorizedDifferenceC
             .guard
             .as_mut()
             .expect("open difference cursor guards its pin");
-        let outcome = checked_future(
-            guard,
-            || control(Control::Checkpoint),
-            async { inner.next_change().await.map_err(difference_error) },
-        )
+        let outcome = checked_future(guard, || control(Control::Checkpoint), async {
+            inner.next_change().await.map_err(difference_error)
+        })
         .await;
         let outcome = match outcome {
             Ok(change @ Some(_)) => {
@@ -142,4 +140,3 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send> AuthorizedDifferenceC
         }
     }
 }
-

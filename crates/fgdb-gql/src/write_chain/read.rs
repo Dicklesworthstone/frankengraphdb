@@ -5,9 +5,9 @@ use super::{GraphWriteChainError, GraphWriteChainStep, PreparedGraphWriteChain};
 use crate::algebra::GraphValueRow;
 use crate::set_ops::WithOwnedRows;
 use crate::{
-    GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
-    GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetColumnType,
-    GraphSetExecutionError, GraphSetSource, PreparedGraphSet,
+    GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlExecutionStats,
+    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetColumnType, GraphSetExecutionError,
+    GraphSetSource, PreparedGraphSet,
 };
 
 type ReadResult<T, E, A, C> = Result<T, GqlQueryError<GraphWriteChainError<E, A>, C>>;
@@ -85,16 +85,29 @@ impl PreparedGraphWriteChain {
         }
         policy
             .rows
-            .check(GqlBudgetDimension::SnapshotRecords, head.rows.snapshot_records)
+            .check(
+                GqlBudgetDimension::SnapshotRecords,
+                head.rows.snapshot_records,
+            )
             .map_err(GqlQueryError::Rows)?;
         let mut evaluator = head.evaluator;
         for (used, limit, dimension) in [
-            (evaluator.work_units, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (evaluator.scratch_entries, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                evaluator.work_units,
+                policy.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                evaluator.scratch_entries,
+                policy.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if used > limit {
                 return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                    dimension, limit, observed: u128::from(used),
+                    dimension,
+                    limit,
+                    observed: u128::from(used),
                 }));
             }
         }
@@ -108,7 +121,9 @@ impl PreparedGraphWriteChain {
             let limit = policy.evaluator.max_work_units;
             if observed > u128::from(limit) {
                 return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                    dimension: GlaLimitDimension::WorkUnits, limit, observed,
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed,
                 }));
             }
             evaluator.work_units = observed as u64;
@@ -140,23 +155,36 @@ impl PreparedGraphWriteChain {
         let output = continuation
             .execute_with_source(
                 budget,
-                &mut WithOwnedRows { source: &mut source, rows: Some(head.value) },
+                &mut WithOwnedRows {
+                    source: &mut source,
+                    rows: Some(head.value),
+                },
                 &mut checkpoint,
             )
             .map_err(|error| match error {
                 GqlQueryError::Evaluator(mut error) => {
                     let (spent, limit) = match error.dimension {
-                        GlaLimitDimension::WorkUnits => (evaluator.work_units, policy.evaluator.max_work_units),
-                        GlaLimitDimension::ScratchEntries => (evaluator.scratch_entries, policy.evaluator.max_scratch_entries),
+                        GlaLimitDimension::WorkUnits => {
+                            (evaluator.work_units, policy.evaluator.max_work_units)
+                        }
+                        GlaLimitDimension::ScratchEntries => (
+                            evaluator.scratch_entries,
+                            policy.evaluator.max_scratch_entries,
+                        ),
                     };
                     error.observed = error.observed.saturating_add(u128::from(spent));
                     error.limit = limit;
                     GqlQueryError::Evaluator(error)
                 }
-                GqlQueryError::Rows(mut error) if error.dimension == GqlBudgetDimension::SnapshotRecords => {
-                    let Some(observed) = error.observed.checked_add(head.rows.snapshot_records) else {
+                GqlQueryError::Rows(mut error)
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords =>
+                {
+                    let Some(observed) = error.observed.checked_add(head.rows.snapshot_records)
+                    else {
                         return GqlQueryError::Source(GraphWriteChainError::Read(
-                            GraphSetExecutionError::AccountingOverflow { dimension: error.dimension },
+                            GraphSetExecutionError::AccountingOverflow {
+                                dimension: error.dimension,
+                            },
                         ));
                     };
                     error.observed = observed;
@@ -167,21 +195,34 @@ impl PreparedGraphWriteChain {
             })?;
         // Native execution admitted the output under exactly these remainders;
         // checked sums also fail closed if a future source violates that law.
-        let inconsistent = || GqlQueryError::Source(GraphWriteChainError::Read(
-            GraphSetExecutionError::InvalidSourceStatistics { operand: 0 },
-        ));
+        let inconsistent = || {
+            GqlQueryError::Source(GraphWriteChainError::Read(
+                GraphSetExecutionError::InvalidSourceStatistics { operand: 0 },
+            ))
+        };
         let rows = GqlExecutionStats {
-            snapshot_records: head.rows.snapshot_records.checked_add(output.rows.snapshot_records)
+            snapshot_records: head
+                .rows
+                .snapshot_records
+                .checked_add(output.rows.snapshot_records)
                 .ok_or_else(inconsistent)?,
             result_rows: output.rows.result_rows,
         };
         let evaluator = GlaExecutionStats {
-            work_units: evaluator.work_units.checked_add(output.evaluator.work_units)
+            work_units: evaluator
+                .work_units
+                .checked_add(output.evaluator.work_units)
                 .ok_or_else(inconsistent)?,
-            scratch_entries: evaluator.scratch_entries.checked_add(output.evaluator.scratch_entries)
+            scratch_entries: evaluator
+                .scratch_entries
+                .checked_add(output.evaluator.scratch_entries)
                 .ok_or_else(inconsistent)?,
         };
-        Ok(GqlQueryExecution { value: output.value, rows, evaluator })
+        Ok(GqlQueryExecution {
+            value: output.value,
+            rows,
+            evaluator,
+        })
     }
 }
 
