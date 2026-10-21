@@ -158,12 +158,12 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> WriteChainResult<A> {
-        use fgdb_gql::algebra::GraphValue;
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};
         use fgdb_gql::{
-            GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+            GlaExecutionEvent, GlaExecutionStats, GqlExecutionStats, GqlQueryError,
+            GqlQueryExecution, GqlQueryPolicy,
             GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats,
-            GraphInsertQueryError, GraphVertexMergePolicy, GraphVertexMergeRowsBinding,
+            GraphInsertQueryError, GraphVertexMergePolicy,
             GraphVertexMergeRowsQueryError, GraphWriteChainError, GraphWriteChainStep,
             GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
         };
@@ -363,7 +363,7 @@ impl WriteTxn {
                         (stats, unreturned(&stats))
                     }
                     GraphWriteChainStep::VertexMerge(merge) => {
-                        let (stats, receipt, input, pairs) = workspace
+                        let (mut stats, receipt, input, pairs) = workspace
                             .txn
                             .execute_graph_vertex_merges_over(
                                 database,
@@ -382,10 +382,22 @@ impl WriteTxn {
                                 })
                             })?;
                         receipts.push(receipt);
-                        let output = pairs
-                            .into_iter()
-                            .map(|(at, vertex)| merge.output_row(&input[at], vertex))
-                            .collect();
+                        // Multiplicity can repeat a large carried value for
+                        // every matching vertex. Admit each complete copy
+                        // against this step's remaining allowance, before it
+                        // grows the private continuation buffer.
+                        let mut output = Vec::new();
+                        for (at, vertex) in pairs {
+                            output.push(step.continuation_row_controlled(
+                                &input[at],
+                                ElementId::Vertex(vertex),
+                                &mut |event| {
+                                    vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                                        cx, allowance.query, &mut stats.evaluator, event,
+                                    )
+                                },
+                            )?);
+                        }
                         let stats = GraphInsertStats {
                             selection: stats.match_selection,
                             evaluator: stats.evaluator,
@@ -403,8 +415,8 @@ impl WriteTxn {
                         };
                         (stats, returning)
                     }
-                    GraphWriteChainStep::EdgeMergeRows { merge, keep } => {
-                        let (stats, resolved, selected) = workspace
+                    GraphWriteChainStep::EdgeMergeRows { merge, .. } => {
+                        let (mut stats, resolved, selected) = workspace
                             .txn
                             .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
                                 database,
@@ -432,7 +444,9 @@ impl WriteTxn {
                         // resolved to, in row order and then identity order.
                         let mut output = Vec::new();
                         for row in &selected {
-                            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                            vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                                cx, allowance.query, &mut stats.evaluator, GlaExecutionEvent::Work,
+                            )?;
                             let values = row.values();
                             let (Some(source), Some(destination)) = (
                                 values[source_column].as_vertex(),
@@ -444,11 +458,15 @@ impl WriteTxn {
                                 continue;
                             };
                             for &(edge, _) in edges {
-                                let mut cells = values[..(*keep).min(values.len())].to_vec();
-                                cells.push(GraphValue::Edge(edge));
-                                output.push(fgdb_gql::algebra::GraphValueRow::from_owned_values(
-                                    cells,
-                                ));
+                                output.push(step.continuation_row_controlled(
+                                    row,
+                                    ElementId::Edge(edge),
+                                    &mut |event| {
+                                        vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                                            cx, allowance.query, &mut stats.evaluator, event,
+                                        )
+                                    },
+                                )?);
                             }
                         }
                         receipts.push(GraphWriteStepReceipt::EdgeMergeBatch {
@@ -475,7 +493,7 @@ impl WriteTxn {
                                 ),
                             ))
                         };
-                        let (stats, receipt, input, pairs) = workspace
+                        let (mut stats, receipt, input, pairs) = workspace
                             .txn
                             .execute_graph_vertex_merges_over(
                                 database,
@@ -498,61 +516,29 @@ impl WriteTxn {
                         // properties read after the statement: the merged
                         // vertex's, and a carried element's (ON/SET effects
                         // included). A NULL column reads NULL.
-                        let read = |element: Option<ElementId>,
+                        let mut read = |element: ElementId,
                                     key|
                          -> Result<
-                            GraphValue,
+                            Option<fgdb_types::CanonicalPropertyValue>,
                             TxnGqlError<GraphWriteChainError<WriteTxnError, A>>,
                         > {
-                            let value = match element {
-                                None => None,
-                                Some(element) => workspace
-                                    .txn
-                                    .merge_return_property(database, element, key)
-                                    .map_err(chain)?,
-                            };
-                            match value {
-                                None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
-                                Some(value) => GraphValue::from_property_value(&value).ok_or(
-                                    GqlQueryError::Data(fgdb_gql::GraphIntegerError {
-                                        instruction: 0,
-                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
-                                    }),
-                                ),
-                            }
+                            workspace
+                                .txn
+                                .merge_return_property(database, element, key)
+                                .map_err(chain)
                         };
-                        let mut returned = Vec::with_capacity(pairs.len());
+                        let mut returned = Vec::new();
                         for (at, vertex) in pairs {
-                            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                            let mut row = Vec::with_capacity(query.bindings().len());
-                            for binding in query.bindings() {
-                                row.push(match *binding {
-                                    GraphVertexMergeRowsBinding::Input(column) => input[at]
-                                        .values()
-                                        .get(column)
-                                        .cloned()
-                                        .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
-                                    GraphVertexMergeRowsBinding::Vertex => {
-                                        GraphValue::Vertex(vertex)
-                                    }
-                                    GraphVertexMergeRowsBinding::Property(key) => {
-                                        read(Some(ElementId::Vertex(vertex)), key)?
-                                    }
-                                    GraphVertexMergeRowsBinding::InputProperty { column, key } => {
-                                        let element = match input[at].values().get(column) {
-                                            Some(GraphValue::Vertex(carried)) => {
-                                                Some(ElementId::Vertex(*carried))
-                                            }
-                                            Some(GraphValue::Edge(carried)) => {
-                                                Some(ElementId::Edge(*carried))
-                                            }
-                                            _ => None,
-                                        };
-                                        read(element, key)?
-                                    }
-                                });
-                            }
-                            returned.push(row);
+                            returned.push(step.vertex_return_row_controlled(
+                                &input[at],
+                                vertex,
+                                &mut read,
+                                &mut |event| {
+                                    vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                                        cx, allowance.query, &mut stats.evaluator, event,
+                                    )
+                                },
+                            )?);
                         }
                         let stats = GraphInsertStats {
                             selection: stats.match_selection,
@@ -931,5 +917,357 @@ impl WriteTxn {
             vertices.unwrap_or_default(),
             edges.unwrap_or_default(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod chain_materialization_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
+    use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
+    use fgdb_gql::{
+        GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GqlParameterType,
+        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+        GraphEdgeMergePolicy, GraphSymbol, GraphSymbolKind,
+        GraphVertexMergePolicy, GraphWriteChainStep, PreparedGraphWriteChain,
+        PreparedGraphWriteChainText,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const Q: PropertyKeyId = PropertyKeyId(2);
+    const HIGH: u64 = 10_000_000;
+    const WIDE: VId = VId((1_u128 << 100) | 2);
+    const WIDE_EDGE: EId = EId((1_u128 << 112) | 1);
+    const VERTEX: &str = "UNWIND [1,1,2] AS k WITH k,$payload AS payload \
+        MERGE (n:Target {p:k}) CREATE (c:Copy {p:size(payload)})";
+    const EDGE: &str = "MATCH (a:Source),(b:Target) WHERE b.p=1 \
+        WITH a,b,$payload AS payload MERGE (a)-[r:R]->(b) \
+        CREATE (c:Copy {p:size(payload)})";
+    const RETURNING: &str = "UNWIND [1,1,2] AS k WITH k,$payload AS payload \
+        MERGE (n:Target {p:k}) ON MATCH SET n.seen=7 \
+        RETURN n,n.q AS q,payload AS payload ORDER BY n";
+
+    fn keys() -> crate::DatabaseKeys {
+        crate::DatabaseKeys::new(
+            [0x31; 32], DatabaseSecurityNamespaceId([0x32; 32]), [0x33; 32],
+        )
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Label, "Source") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Label, "Target") => Some(GraphSymbol::Label(LabelId(2))),
+            (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(LabelId(3))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            (GraphSymbolKind::Property, "seen") => Some(GraphSymbol::Property(PropertyKeyId(3))),
+            _ => None,
+        }
+    }
+
+    fn payload() -> Vec<GraphValue> {
+        vec![
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(2048)).unwrap()),
+            GraphValue::List(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ].into()),
+        ]
+    }
+
+    fn prepare(text: &str) -> PreparedGraphWriteChain {
+        assert!(PreparedGraphWriteChainText::is_chain(text).unwrap(), "{text}");
+        PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text, R, &[("payload", GqlParameterType::List)], symbols,
+        )
+        .expect(text)
+        .bind_parameters(&GqlParameters::new().with_list("payload", payload()).unwrap())
+        .expect(text)
+    }
+
+    fn policy(work: u64, scratch: u64) -> GraphInsertPolicy {
+        GraphInsertPolicy::new(GqlQueryPolicy::new(HIGH, HIGH, work, scratch), 100, 100)
+    }
+
+    fn seed() -> WriteBatch {
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![LabelId(1)], vec![]);
+        let stored = GraphValue::List(payload().into()).to_property_value().unwrap();
+        for (vertex, key) in [(VId(2), 1), (WIDE, 1), (VId(3), 2)] {
+            seed.create_vertex_values(vertex, vec![LabelId(2)], vec![
+                (P, CanonicalScalar::Int(key).into()), (Q, stored.clone()),
+            ]);
+        }
+        seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+        seed.add_edge(WIDE_EDGE, VId(1), VId(2), vec![]);
+        seed.add_edge(EId(3), VId(1), WIDE, vec![]);
+        seed
+    }
+
+    fn stage_prefix<V: Vfs + Clone>(transaction: &mut WriteTxn, db: &mut Database<V>) {
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(77), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(db, prefix).unwrap();
+    }
+
+    fn allocate(next: &AtomicU64, request: GraphInsertRequest) -> Result<ElementId, ()> {
+        let id = u128::from(next.fetch_add(1, Ordering::Relaxed));
+        Ok(match request {
+            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(id)),
+            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(id)),
+        })
+    }
+
+    fn event(stats: &mut GlaExecutionStats, event: GlaExecutionEvent) {
+        assert_ne!(event, GlaExecutionEvent::ResultRow);
+        stats.work_units += 1;
+        stats.scratch_entries += u64::from(event == GlaExecutionEvent::ScratchEntry);
+    }
+
+    fn no_graph(
+        _: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+        panic!("the final CREATE consumes owned rows, never a fresh graph scan")
+    }
+
+    // Independently execute the native MERGE and CREATE, not the chain adapter.
+    // Use the old row constructors for expected values; derive copy charges
+    // from the canonical value copier and explicit occurrence/cell slots.
+    fn continuation_reference<V: Vfs + Clone>(
+        transaction: &mut WriteTxn, db: &mut Database<V>, cx: &fgdb_types::QueryCx,
+        chain: &PreparedGraphWriteChain,
+    ) -> (GlaExecutionStats, usize) {
+        let mut copies = GlaExecutionStats::default();
+        let (mut expected, rows) = match &chain.steps()[0] {
+            GraphWriteChainStep::VertexMerge(merge) => {
+                let (stats, _, input, pairs) = transaction.execute_graph_vertex_merges_over(
+                    db, cx, merge, GraphVertexMergePolicy::new(policy(HIGH, HIGH).query),
+                    None, |_| -> Result<ElementId, ()> { panic!("all targets exist") },
+                ).unwrap();
+                let rows = pairs.into_iter().map(|(at, vertex)| {
+                    merge.output_row(&input[at], vertex)
+                }).collect::<Vec<_>>();
+                assert_eq!(rows.len(), 5, "two matches for each repeated key, then one");
+                (stats.evaluator, rows)
+            }
+            GraphWriteChainStep::EdgeMergeRows { merge, keep } => {
+                let (stats, resolved, input) = transaction
+                    .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, ()>(
+                        db, cx, merge, GraphEdgeMergePolicy::new(policy(HIGH, HIGH).query),
+                        None, |_| -> Result<ElementId, ()> { panic!("all edges exist") },
+                    ).unwrap();
+                let mut rows = Vec::new();
+                for row in &input {
+                    event(&mut copies, GlaExecutionEvent::Work);
+                    let source = row.values()[merge.source_column()].as_vertex().unwrap();
+                    let destination = row.values()[merge.destination_column()].as_vertex().unwrap();
+                    for &(edge, _) in &resolved.edges[&(source, destination)] {
+                        let mut cells = row.values()[..*keep].to_vec();
+                        cells.push(GraphValue::Edge(edge));
+                        rows.push(GraphValueRow::from_owned_values(cells));
+                    }
+                }
+                assert_eq!(rows.len(), 3, "parallel full-width edge IDs remain separate");
+                assert!(rows.iter().any(|row| row.values().last() == Some(&GraphValue::Edge(WIDE_EDGE))));
+                (stats.evaluator, rows)
+            }
+            _ => panic!("a non-returning MERGE must own the first step"),
+        };
+        let count = rows.len();
+        for row in &rows {
+            event(&mut copies, GlaExecutionEvent::ScratchEntry);
+            for value in &row.values()[..row.len() - 1] {
+                event(&mut copies, GlaExecutionEvent::ScratchEntry);
+                let _copy = value.copy_with_control(&mut |observed| {
+                    event(&mut copies, observed);
+                    Ok::<(), ()>(())
+                }).unwrap();
+            }
+            event(&mut copies, GlaExecutionEvent::ScratchEntry);
+        }
+        assert!(copies.scratch_entries > 100, "amplified payload costs must be nonzero");
+        expected.work_units += copies.work_units;
+        expected.scratch_entries += copies.scratch_entries;
+        let GraphWriteChainStep::Insert(insertion) = &chain.steps()[1] else {
+            panic!("the final CREATE must not synthesize a RETURN")
+        };
+        let next = AtomicU64::new(1_000);
+        let proposal = insertion.execute_governed_over(
+            Some(rows), policy(HIGH, HIGH), no_graph,
+            |request| allocate(&next, request), || Ok(()),
+        ).unwrap();
+        assert_eq!(proposal.stats().created_vertices as usize, count);
+        expected.work_units += proposal.stats().evaluator.work_units;
+        expected.scratch_entries += proposal.stats().evaluator.scratch_entries;
+        (expected, count)
+    }
+
+    #[test]
+    fn vertex_and_parallel_edge_continuations_spend_each_payload_copy_before_next_write() {
+        let ((), report) = run_async_under_lab(0xc4a2_1001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            for text in [VERTEX, EDGE] {
+                let chain = prepare(text);
+                for dimension in [GlaLimitDimension::WorkUnits, GlaLimitDimension::ScratchEntries] {
+                    let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+                    db.write(&contexts.commit(), seed()).await.unwrap();
+                    let basis = db.frontier().unwrap();
+                    let mut reference = db.begin(&contexts.txn()).unwrap();
+                    stage_prefix(&mut reference, &mut db);
+                    let (expected, count) = continuation_reference(
+                        &mut reference, &mut db, &contexts.query(), &chain,
+                    );
+                    reference.abort();
+                    let mut transaction = db.begin(&contexts.txn()).unwrap();
+                    stage_prefix(&mut transaction, &mut db);
+                    let digest = transaction.staged_effect_digest().unwrap();
+                    let next = AtomicU64::new(1_000);
+                    let mut tight = policy(expected.work_units, expected.scratch_entries);
+                    if dimension == GlaLimitDimension::WorkUnits {
+                        tight.query.evaluator.max_work_units -= 1;
+                    } else {
+                        tight.query.evaluator.max_scratch_entries -= 1;
+                    }
+                    let refused = transaction.execute_graph_write_chain_governed(
+                        &mut db, &contexts.query(), &chain, tight,
+                        |request| allocate(&next, request),
+                    ).unwrap_err();
+                    assert!(matches!(refused, GqlQueryError::Evaluator(limit) if limit.dimension == dimension));
+                    assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+                    assert_eq!(db.frontier().unwrap(), basis);
+                    assert!(db.vertex(VId(77)).unwrap().is_none());
+                    let after_failure = next.load(Ordering::Relaxed);
+                    let (stats, result, receipt) = transaction.execute_graph_write_chain_governed(
+                        &mut db, &contexts.query(), &chain,
+                        policy(expected.work_units, expected.scratch_entries),
+                        |request| allocate(&next, request),
+                    ).unwrap();
+                    assert_eq!(stats.evaluator, expected, "{text}");
+                    assert_eq!(result.evaluator, expected);
+                    assert_eq!(receipt.stats().evaluator, expected);
+                    assert!(result.value.is_empty());
+                    assert_eq!(result.rows.result_rows, 0);
+                    assert_eq!(stats.created_vertices as usize, count);
+                    transaction.finish(&mut db, &contexts.commit()).await.unwrap();
+                    assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+                    assert_eq!(db.vertices().unwrap().len(), 5 + count);
+                    assert_eq!(db.edges().unwrap().len(), 3);
+                    for id in 1_000..after_failure {
+                        assert!(db.vertex(VId(u128::from(id))).unwrap().is_none());
+                    }
+                    for id in after_failure..next.load(Ordering::Relaxed) {
+                        assert_eq!(db.vertex(VId(u128::from(id))).unwrap().unwrap().props,
+                            vec![(P, CanonicalScalar::Int(2).into())]);
+                    }
+                    assert_eq!(contexts.txn().outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn return_binding_costs_survive_limit_zero_and_late_failure_restores_merge_actions() {
+        let ((), report) = run_async_under_lab(0xc4a2_1002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            for text in [RETURNING.to_owned(), format!("{RETURNING} LIMIT 0")] {
+                let chain = prepare(&text);
+                let [step] = chain.steps() else {
+                    panic!("one returning MERGE step is expected")
+                };
+                let GraphWriteChainStep::VertexMergeQuery(query) = step else {
+                    panic!("the native per-row MERGE must own this statement")
+                };
+                for dimension in [GlaLimitDimension::WorkUnits, GlaLimitDimension::ScratchEntries] {
+                    let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+                    db.write(&contexts.commit(), seed()).await.unwrap();
+                    let basis = db.frontier().unwrap();
+                    let original = db.vertex(VId(2)).unwrap().unwrap().props;
+                    let mut reference = db.begin(&contexts.txn()).unwrap();
+                    stage_prefix(&mut reference, &mut db);
+                    let cx = contexts.query();
+                    let (stats, _, input, pairs) = reference.execute_graph_vertex_merges_over(
+                        &mut db, &cx, query.merge(),
+                        GraphVertexMergePolicy::new(policy(HIGH, HIGH).query), None,
+                        |_| -> Result<ElementId, ()> { panic!("all targets exist") },
+                    ).unwrap();
+                    assert_eq!(pairs.len(), 5);
+                    let mut copying = GlaExecutionStats::default();
+                    let mut rows = Vec::new();
+                    for (at, vertex) in pairs {
+                        rows.push(step.vertex_return_row_controlled(
+                            &input[at], vertex,
+                            |element, key| reference.merge_return_property(&db, element, key)
+                                .map_err(GqlQueryError::<WriteTxnError, ()>::Source),
+                            &mut |observed| {
+                                event(&mut copying, observed);
+                                Ok::<(), GqlQueryError<WriteTxnError, ()>>(())
+                            },
+                        ).unwrap());
+                    }
+                    assert!(copying.scratch_entries > 100);
+                    let mut complete = stats.evaluator;
+                    complete.work_units += copying.work_units;
+                    complete.scratch_entries += copying.scratch_entries;
+                    let expected = query.finish_governed::<WriteTxnError, ()>(
+                        rows, stats.match_selection, complete, policy(HIGH, HIGH).query, || Ok(()),
+                    ).unwrap();
+                    reference.abort();
+                    if text == RETURNING {
+                        assert_eq!(expected.value.len(), 5);
+                        for row in &expected.value {
+                            assert_eq!(row.values()[1], GraphValue::List(payload().into()));
+                            assert_eq!(row.values()[2], GraphValue::List(payload().into()));
+                        }
+                        assert_eq!(expected.value.iter().filter(|row| {
+                            row.values()[0] == GraphValue::Vertex(WIDE)
+                        }).count(), 2);
+                    } else {
+                        assert!(expected.value.is_empty());
+                    }
+                    let mut transaction = db.begin(&contexts.txn()).unwrap();
+                    stage_prefix(&mut transaction, &mut db);
+                    let digest = transaction.staged_effect_digest().unwrap();
+                    let mut tight = policy(expected.evaluator.work_units, expected.evaluator.scratch_entries);
+                    if dimension == GlaLimitDimension::WorkUnits {
+                        tight.query.evaluator.max_work_units -= 1;
+                    } else {
+                        tight.query.evaluator.max_scratch_entries -= 1;
+                    }
+                    let refused = transaction.execute_graph_write_chain_governed(
+                        &mut db, &cx, &chain, tight,
+                        |_| -> Result<ElementId, ()> { panic!("a match cannot allocate") },
+                    ).unwrap_err();
+                    assert!(matches!(refused, GqlQueryError::Evaluator(limit) if limit.dimension == dimension));
+                    assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+                    assert_eq!(transaction.vertex(&db, VId(2)).unwrap().unwrap().props, original);
+                    assert_eq!(db.frontier().unwrap(), basis);
+                    let (stats, actual, receipt) = transaction.execute_graph_write_chain_governed(
+                        &mut db, &cx, &chain,
+                        policy(expected.evaluator.work_units, expected.evaluator.scratch_entries),
+                        |_| -> Result<ElementId, ()> { panic!("a match cannot allocate") },
+                    ).unwrap();
+                    assert_eq!(actual, expected);
+                    assert_eq!(stats.evaluator, expected.evaluator);
+                    assert_eq!(receipt.stats().evaluator, expected.evaluator);
+                    transaction.finish(&mut db, &contexts.commit()).await.unwrap();
+                    assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+                    assert_eq!(db.vertices().unwrap().len(), 5);
+                    for vertex in [VId(2), WIDE, VId(3)] {
+                        assert!(db.vertex(vertex).unwrap().unwrap().props.contains(
+                            &(PropertyKeyId(3), CanonicalScalar::Int(7).into()),
+                        ));
+                    }
+                    assert_eq!(contexts.txn().outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
