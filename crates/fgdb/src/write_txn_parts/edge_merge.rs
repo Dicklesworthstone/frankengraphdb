@@ -616,7 +616,7 @@ impl WriteTxn {
                     database,
                     cx,
                     query.merge(),
-                    policy,
+                    query.merge_policy(policy),
                     owned,
                     |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
                 )

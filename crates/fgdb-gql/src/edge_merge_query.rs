@@ -185,6 +185,28 @@ impl PreparedGraphEdgeMergeQuery {
     pub const fn merge(&self) -> &PreparedGraphEdgeMerge {
         &self.merge
     }
+
+    /// The allowance for the MERGE step itself. Only a plain RETURN (no
+    /// grouping, WITH tail, DISTINCT or page) emits at least one row per
+    /// selected row, so only then does a selection beyond the row allowance
+    /// refuse before any identity is allocated. Otherwise the selected rows
+    /// are private input to the returning pipeline, which alone charges
+    /// result rows; work, scratch and source records stay cumulative.
+    #[must_use]
+    pub fn merge_policy(&self, policy: crate::GraphEdgeMergePolicy) -> crate::GraphEdgeMergePolicy {
+        if self.grouping.is_none()
+            && self.tail.is_none()
+            && matches!(self.quantifier, GraphSetQuantifier::All)
+            && self.offset == 0
+            && self.count.is_none()
+        {
+            return policy;
+        }
+        crate::GraphEdgeMergePolicy {
+            query: crate::set_ops::owned_head_policy(policy.query),
+            ..policy
+        }
+    }
     #[must_use]
     pub fn bindings(&self) -> &[GraphEdgeMergeBinding] {
         &self.bindings
@@ -302,19 +324,17 @@ impl PreparedGraphEdgeMergeQuery {
             rows: selection,
             evaluator,
         };
-        if let Some(grouping) = &self.grouping {
-            returning = crate::set_ops::finish_owned_aggregate(
-                returning,
-                policy,
-                grouping,
-                &mut checkpoint,
-            )?;
-        }
+        // A WITH head's rows, grouped or not, are private input to its tail;
+        // only the tail's rows count against the statement's row allowance.
         let head = if self.tail.is_some() {
             crate::set_ops::owned_head_policy(policy)
         } else {
             policy
         };
+        if let Some(grouping) = &self.grouping {
+            returning =
+                crate::set_ops::finish_owned_aggregate(returning, head, grouping, &mut checkpoint)?;
+        }
         let returning = crate::set_ops::finish_owned_projection(
             returning,
             head,
@@ -801,6 +821,32 @@ mod with_tests {
                 ),
                 Err(GqlQueryError::Interrupted(()))
             ));
+        }
+    }
+
+    #[test]
+    fn only_a_plain_return_charges_the_merge_selection_as_result_rows() {
+        // A plain RETURN emits at least one row per selected row, so a large
+        // selection refuses before allocation. Grouping, a WITH tail,
+        // DISTINCT and a page can emit fewer rows than were selected.
+        let plain = "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r AS edge";
+        let allowance = crate::GraphEdgeMergePolicy::new(policy(1));
+        let merge = |query: &PreparedGraphEdgeMergeQuery| query.merge_policy(allowance);
+        assert_eq!(merge(&prepare(plain)), allowance);
+        for query in [
+            prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN count(*) AS n"),
+            prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r.p AS p RETURN p"),
+            prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN DISTINCT r.p AS p"),
+            prepare(plain).with_page(0, Some(1)),
+        ] {
+            let lifted = merge(&query);
+            assert_ne!(lifted.query.rows.max_result_rows(), Some(1), "{query:?}");
+            assert_eq!(
+                lifted.query.rows.max_snapshot_records(),
+                allowance.query.rows.max_snapshot_records()
+            );
+            assert_eq!(lifted.query.evaluator, allowance.query.evaluator);
+            assert_eq!(lifted.max_created_edges, allowance.max_created_edges);
         }
     }
 }
