@@ -161,7 +161,12 @@ impl PreparedQueryWrite {
 /// their writes. No failed definition is retried as an ordinary write script.
 pub(super) fn prepare(options: &Options) -> Result<Option<PreparedQueryWrite>, Failure> {
     options.query_write.validate(options.rows.is_some())?;
-    prepare_statement(&options.text, &options.params, &options.query_write, options)
+    prepare_statement(
+        &options.text,
+        &options.params,
+        &options.query_write,
+        options,
+    )
 }
 
 /// Each ordered write step owns both definitions, its source parameters and

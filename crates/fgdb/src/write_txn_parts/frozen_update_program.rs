@@ -69,7 +69,9 @@ impl WriteTxn {
                                 vertex
                             }
                             GraphMutationIntent::StoredProperty {
-                                target: ElementId::Vertex(vertex), key, value,
+                                target: ElementId::Vertex(vertex),
+                                key,
+                                value,
                             } => {
                                 batch.set_vertex_property_value(vertex, key, Some(value));
                                 vertex

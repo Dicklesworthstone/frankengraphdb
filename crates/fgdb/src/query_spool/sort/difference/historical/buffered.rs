@@ -37,9 +37,7 @@ fn prepare<V: Vfs + Clone>(
     }
     cx.with_restriction(|| {
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let definition = |error| {
-            GqlQueryError::Source(NativeSpoolError::Prepare(Box::new(error)))
-        };
+        let definition = |error| GqlQueryError::Source(NativeSpoolError::Prepare(Box::new(error)));
         let unsupported = || {
             definition(QueryError::StreamingUnsupported {
                 facade: prepared.facade_class(),
@@ -153,22 +151,51 @@ impl PreparedNativeRead {
             let endpoints = opened?;
             let input_policy = private_policy(policy);
             let (before_result, used) = native(
-                endpoints.before.spool_in_view_with_resolver(
-                    view, cx, input_policy, &mut *scratch, &mut *source,
-                    &mut *auxiliary, group_capacity, max_partitions, run_rows,
-                    max_runs, page_bytes, max_row_bytes, max_input_rows,
-                    max_work_units, resolver,
-                ).await,
+                endpoints
+                    .before
+                    .spool_in_view_with_resolver(
+                        view,
+                        cx,
+                        input_policy,
+                        &mut *scratch,
+                        &mut *source,
+                        &mut *auxiliary,
+                        group_capacity,
+                        max_partitions,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_input_rows,
+                        max_work_units,
+                        resolver,
+                    )
+                    .await,
             )?;
             let input_policy = native(remaining(input_policy, &before_result))?;
             let allowance = native(subtract(max_work_units, used))?;
             let (after_result, spent) = native(
-                endpoints.after.spool_in_view_with_resolver(
-                    view, cx, input_policy, &mut *scratch, &mut *source,
-                    &mut *auxiliary, group_capacity, max_partitions, run_rows,
-                    max_runs, page_bytes, max_row_bytes, max_input_rows,
-                    allowance, resolver,
-                ).await.map_err(|error| physical_error(error, used, max_work_units)),
+                endpoints
+                    .after
+                    .spool_in_view_with_resolver(
+                        view,
+                        cx,
+                        input_policy,
+                        &mut *scratch,
+                        &mut *source,
+                        &mut *auxiliary,
+                        group_capacity,
+                        max_partitions,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_input_rows,
+                        allowance,
+                        resolver,
+                    )
+                    .await
+                    .map_err(|error| physical_error(error, used, max_work_units)),
             )?;
             if before_result.snapshot_seq() != before || after_result.snapshot_seq() != after {
                 return Err(GqlQueryError::Source(NativeSpoolError::IncompleteCursor));
@@ -176,12 +203,23 @@ impl PreparedNativeRead {
             // Endpoints cannot change through this exclusive view borrow.
             // Drop all bound programs before the file-only cursor escapes.
             drop(endpoints);
-            let used = used.checked_add(spent)
+            let used = used
+                .checked_add(spent)
                 .ok_or(GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
-            before_result.difference_continuing(
-                &after_result, cx, source, scratch, run_rows, max_runs, page_bytes,
-                policy.rows.max_result_rows().unwrap_or(u64::MAX), max_work_units, used,
-            ).await
+            before_result
+                .difference_continuing(
+                    &after_result,
+                    cx,
+                    source,
+                    scratch,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    policy.rows.max_result_rows().unwrap_or(u64::MAX),
+                    max_work_units,
+                    used,
+                )
+                .await
         })
     }
 }

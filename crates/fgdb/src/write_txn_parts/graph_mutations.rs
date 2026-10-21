@@ -225,12 +225,16 @@ impl WriteTxn {
                     batch.set_edge_property_value(edge, key, value);
                 }
                 GraphMutationIntent::StoredProperty {
-                    target: ElementId::Vertex(vertex), key, value,
+                    target: ElementId::Vertex(vertex),
+                    key,
+                    value,
                 } => {
                     batch.set_vertex_property_value(vertex, key, Some(value));
                 }
                 GraphMutationIntent::StoredProperty {
-                    target: ElementId::Edge(edge), key, value,
+                    target: ElementId::Edge(edge),
+                    key,
+                    value,
                 } => {
                     batch.set_edge_property_value(edge, key, Some(value));
                 }
@@ -289,7 +293,8 @@ impl WriteTxn {
                     match intent {
                         GraphMutationIntent::Property { vertex, .. }
                         | GraphMutationIntent::StoredProperty {
-                            target: ElementId::Vertex(vertex), ..
+                            target: ElementId::Vertex(vertex),
+                            ..
                         }
                         | GraphMutationIntent::Label { vertex, .. }
                         | GraphMutationIntent::DetachDelete { vertex }
@@ -298,7 +303,8 @@ impl WriteTxn {
                         }
                         GraphMutationIntent::EdgeProperty { edge, .. }
                         | GraphMutationIntent::StoredProperty {
-                            target: ElementId::Edge(edge), ..
+                            target: ElementId::Edge(edge),
+                            ..
                         }
                         | GraphMutationIntent::DeleteEdge { edge } => {
                             edges.insert(*edge);

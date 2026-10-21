@@ -18,10 +18,12 @@ pub(super) fn written<E, C>(
         at: (usize, usize),
         control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, C>,
     ) -> ResultOf<(), E, C> {
-        let invalid = || GqlQueryError::Source(GraphMutationError::NonScalarValue {
-            row: at.0,
-            action: at.1,
-        });
+        let invalid = || {
+            GqlQueryError::Source(GraphMutationError::NonScalarValue {
+                row: at.0,
+                action: at.1,
+            })
+        };
         if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
             return Err(invalid());
         }
@@ -46,9 +48,12 @@ pub(super) fn written<E, C>(
 
     let mut remaining = GraphValue::MAX_LIST_NODES;
     reserve(value, 0, &mut remaining, (row, action), control)?;
-    value.to_written_property().ok_or(GqlQueryError::Source(
-        GraphMutationError::NonScalarValue { row, action },
-    ))
+    value
+        .to_written_property()
+        .ok_or(GqlQueryError::Source(GraphMutationError::NonScalarValue {
+            row,
+            action,
+        }))
 }
 
 /// Price exact canonical equality without allocating an encoded surrogate.
@@ -68,7 +73,12 @@ pub(super) fn compare_payload<E>(
         }
         CanonicalPropertyValue::Map(values) => {
             for entry in values.entries() {
-                for _ in 0..=entry.key().as_str().len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                for _ in 0..=entry
+                    .key()
+                    .as_str()
+                    .len()
+                    .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                {
                     control(GlaExecutionEvent::Work)?;
                 }
                 compare_payload(entry.value(), control)?;
@@ -100,7 +110,12 @@ pub(super) fn returned<E, C>(
             CanonicalPropertyValue::Map(values) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 for entry in values.entries() {
-                    for _ in 0..=entry.key().as_str().len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    for _ in 0..=entry
+                        .key()
+                        .as_str()
+                        .len()
+                        .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                    {
                         control(GlaExecutionEvent::ScratchEntry)?;
                     }
                     reserve(entry.value(), control)?;
@@ -111,7 +126,10 @@ pub(super) fn returned<E, C>(
     }
     reserve(value, control)?;
     GraphValue::from_property_value(value).ok_or(GqlQueryError::Source(
-        GraphMutationError::InputSchema { row, column: binding },
+        GraphMutationError::InputSchema {
+            row,
+            column: binding,
+        },
     ))
 }
 

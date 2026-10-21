@@ -1048,9 +1048,10 @@ mod tests {
                 }]
             );
         }
-        let expected = GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice())
-            .to_written_property()
-            .unwrap();
+        let expected =
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice())
+                .to_written_property()
+                .unwrap();
         for expression in [
             GraphSetValue::Index {
                 list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
@@ -1060,7 +1061,9 @@ mod tests {
         ] {
             let query = composite(expression).unwrap();
             assert_eq!(
-                run_with(&query, &[CanonicalScalar::Int(7)], policy()).unwrap().intents(),
+                run_with(&query, &[CanonicalScalar::Int(7)], policy())
+                    .unwrap()
+                    .intents(),
                 &[GraphMutationIntent::StoredProperty {
                     target: ElementId::Vertex(VId(1)),
                     key: PropertyKeyId(2),

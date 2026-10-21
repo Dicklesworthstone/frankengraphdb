@@ -219,12 +219,9 @@ fn prepare(
                     .map_err(Failure::query)?;
             }
             if step.kind == StepKind::Write {
-                if let Some(query) = query_write::prepare_statement(
-                    &step.text,
-                    &params,
-                    &step.query_write,
-                    options,
-                )? {
+                if let Some(query) =
+                    query_write::prepare_statement(&step.text, &params, &step.query_write, options)?
+                {
                     // Reserve this source and all later fixed statements now.
                     // The actual expansion is admitted at execution, before
                     // source rows bind or any dependent script can stage.
@@ -554,9 +551,8 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
                     }
                     PreparedStep::QueryWrite(query) => {
-                        let remaining = MAX_STATEMENTS
-                            .checked_sub(statements)
-                            .ok_or_else(|| {
+                        let remaining =
+                            MAX_STATEMENTS.checked_sub(statements).ok_or_else(|| {
                                 Failure::query("transaction exceeds 64 native statements")
                             })?;
                         let execution =
@@ -580,7 +576,9 @@ async fn run_with_limits<V: Vfs + Clone>(
                         } else {
                             output.line(&format!(
                                 "statement {}: {} source row(s), {} staged write statement(s)",
-                                index + 1, execution.input_rows, added,
+                                index + 1,
+                                execution.input_rows,
+                                added,
                             ))?;
                         }
                     }
