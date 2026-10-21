@@ -149,6 +149,13 @@ fn action_templates<'a>(
                             value: GraphMutationValue::Literal(value),
                         })
                     }
+                    // Replacement-map entries also reach this lowering. Keep
+                    // declared lists (including typed NULL) on the native
+                    // value binder, not the scalar-only ParameterProperty arm.
+                    Some(value @ ReadValueTemplate::Parameter {
+                        null_type: crate::GraphSetColumnType::List,
+                        ..
+                    }) => MutationActionTemplate::CompositeProperty { target, key, value },
                     Some(ReadValueTemplate::Parameter {
                         index: parameter, ..
                     }) => MutationActionTemplate::ParameterProperty {
@@ -235,7 +242,7 @@ fn scalar(
 
 impl<'a> Parser<'a> {
     /// Whether a DELETE target after WITH names, bare, a carried vertex or,
-    /// without DETACH, a carried relationship (fgdb-sl4ym). Anything else is
+    /// without DETACH a carried relationship (fgdb-sl4ym). Anything else is
     /// a value of the row (TCK Delete5).
     fn row_element_target(
         &self,
