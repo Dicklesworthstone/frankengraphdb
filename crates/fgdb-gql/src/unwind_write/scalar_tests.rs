@@ -734,3 +734,100 @@ fn constant_vertex_updates_freeze_and_row_reading_updates_stay_sequential() {
         assert_eq!(bound.program().statements().len(), 3, "{tail}");
     }
 }
+
+#[test]
+fn row_maps_assigned_with_plus_equals_lower_to_one_field_per_key() {
+    // fgdb-0s2pq: `SET n += row` assigns each input row's map. Rows sharing a
+    // key set lower to `SET n += {k1: $f1, ...}`, one scalar field per key.
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(2)), ("p", int(20))]),
+    ]);
+    let bind = |text: &str, input: &GqlParameters| {
+        GraphUnwindWriteText::parse(text)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind(input, RelationId(1), symbols)
+    };
+    for text in [
+        "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n += row",
+        "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+        "UNWIND $rows AS r MATCH (n:Entity {id: r.id}) SET n += r, n:Other",
+    ] {
+        let bound = bind(text, &input).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(bound.argument_sets(), 2, "{text}");
+        assert_eq!(bound.program().statements().len(), 2, "{text}");
+    }
+    let nested = rows(vec![object(vec![
+        ("id", int(1)),
+        ("props", object(vec![("p", int(5)), ("name", int(6))])),
+    ])]);
+    bind(
+        "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n += row.props",
+        &nested,
+    )
+    .unwrap();
+
+    // A second key set would make a missing key assign NULL.
+    let differing = rows(vec![
+        object(vec![("id", int(1)), ("p", int(10))]),
+        object(vec![("id", int(2)), ("name", int(20))]),
+    ]);
+    let text = "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n += row";
+    let refused = bind(text, &differing).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            GraphUnwindWriteError::Row {
+                row: 1,
+                offset,
+                kind: GraphUnwindRowError::MapKeysDiffer,
+            } if offset == text.rfind("+= ").unwrap() + 3
+        ),
+        "{refused:?}"
+    );
+    let spaced = rows(vec![object(vec![("id", int(1)), ("a b", int(10))])]);
+    assert!(matches!(
+        bind(text, &spaced),
+        Err(GraphUnwindWriteError::Row {
+            kind: GraphUnwindRowError::UnsupportedMapKey,
+            ..
+        })
+    ));
+    // A map in a scalar position keeps the scalar-field refusal.
+    assert!(matches!(
+        bind(
+            "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n.p = row",
+            &input
+        ),
+        Err(GraphUnwindWriteError::Row {
+            kind: GraphUnwindRowError::ExpectedScalarField,
+            ..
+        })
+    ));
+
+    // Diagnostics inside the spliced map point at the original alias, and
+    // later bytes keep their own coordinates. `zz` is not in the catalog.
+    let unknown = rows(vec![object(vec![("id", int(1)), ("zz", int(10))])]);
+    for text in [
+        "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n += row",
+        "UNWIND $rows AS r MATCH (n:Entity {id: r.id}) SET n += r",
+    ] {
+        let GraphUnwindWriteError::Definition(error) = bind(text, &unknown).unwrap_err() else {
+            panic!("{text}")
+        };
+        assert_eq!(error.offset, text.rfind("+= ").unwrap() + 3, "{text}");
+    }
+    let GraphUnwindWriteError::Definition(error) = bind(
+        "UNWIND $rows AS r MATCH (n:Entity {id: r.id}) SET n += r, n:Missing",
+        &input,
+    )
+    .unwrap_err() else {
+        panic!("an unknown label refuses at preparation")
+    };
+    assert_eq!(
+        error.offset,
+        "UNWIND $rows AS r MATCH (n:Entity {id: r.id}) SET n += r, n:Missing"
+            .find("Missing")
+            .unwrap()
+    );
+}

@@ -50,6 +50,28 @@ pub const MAX_UNWIND_FIELD_STEPS: usize = 64;
 /// source is a static path from an earlier alias, not a graph read or a query.
 pub const MAX_UNWIND_SOURCES: usize = 8;
 
+/// The next two-letter native parameter name not already in `reserved`.
+/// Parsing names row fields with it; binding names a row map's key fields.
+pub(crate) fn fresh_parameter(
+    reserved: &mut std::collections::BTreeSet<String>,
+    cursor: &mut usize,
+) -> Option<String> {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    while *cursor < LETTERS.len() * LETTERS.len() {
+        let index = *cursor;
+        *cursor += 1;
+        let name = String::from_utf8(vec![
+            LETTERS[index / LETTERS.len()],
+            LETTERS[index % LETTERS.len()],
+        ])
+        .expect("ASCII parameter name");
+        if reserved.insert(name.clone()) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphUnwindRowError {
     ExpectedMap,
@@ -57,6 +79,12 @@ pub enum GraphUnwindRowError {
     ExpectedListField,
     ExpectedScalarField,
     IncompatibleFieldTypes,
+    /// A row map assigned with `+=` names a different key set than row 0's.
+    /// One native template serves every row, and a missing key would assign
+    /// NULL where `+=` leaves the field unchanged.
+    MapKeysDiffer,
+    /// A row map key that is not a plain property name.
+    UnsupportedMapKey,
 }
 
 /// Errors contain coordinates and typed causes, never source text or row values.

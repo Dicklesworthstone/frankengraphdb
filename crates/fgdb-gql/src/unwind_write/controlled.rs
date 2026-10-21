@@ -152,6 +152,13 @@ impl GraphUnwindWriteText {
             }
             .into());
         }
+        if let Some(lowered) = self.with_map_fields(rows, &mut control)? {
+            // The lowered text has no map operand left, so this re-entry
+            // happens once, and the key fields bind as ordinary scalars.
+            return lowered.bind_with_limit_controlled_resolver(
+                arguments, relation, max_rows, resolve, control,
+            );
+        }
         if arguments.len() != self.external_parameters.len() + 1 {
             return Err(GraphUnwindWriteError::ArgumentNames.into());
         }
@@ -364,6 +371,189 @@ impl GraphUnwindWriteText {
             // every earlier row per row (fgdb-2l3pt); others stay sequential.
             Ok(bound.with_frozen_vertex_upserts())
         }
+    }
+}
+
+impl GraphUnwindWriteText {
+    /// `SET n += row` (or `row.key` naming a map) assigns the row's map. When
+    /// every input row holds a map with row 0's key set there, the operand is
+    /// that literal map, one scalar field per key: `SET n += {k1: $f1, ...}`
+    /// (fgdb-0s2pq). One native template serves every row, and a missing key
+    /// would assign NULL where `+=` leaves a field unchanged, so differing key
+    /// sets refuse. Only root rows are inspected, before expansion; any other
+    /// use of a map keeps the scalar-field refusal.
+    fn with_map_fields<C>(
+        &self,
+        rows: &[GraphValue],
+        control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+    ) -> Result<Option<Self>, GraphUnwindBindError<C>> {
+        let mut maps: Vec<(usize, Vec<Box<str>>)> = Vec::new();
+        for (index, field) in self.fields.iter().enumerate() {
+            work(control, 1)?;
+            if field.source != 0 {
+                continue;
+            }
+            // An empty map has nothing to assign; it keeps the scalar refusal.
+            let Some((keys, _)) = field_value(&rows[0], &field.path, field.offset, 0, control)?
+                .and_then(GraphValue::as_map)
+                .filter(|(keys, _)| !keys.is_empty())
+            else {
+                continue;
+            };
+            let sites = self.parameter_sites(&field.parameter);
+            if sites.is_empty() || !sites.iter().all(|&site| self.assigns_map_at(site)) {
+                continue;
+            }
+            let refusal = |row, kind| GraphUnwindWriteError::Row {
+                row,
+                offset: field.offset,
+                kind,
+            };
+            for (row_index, row) in rows.iter().enumerate().skip(1) {
+                work(control, keys.len() as u64 + 1)?;
+                let same = field_value(row, &field.path, field.offset, row_index, control)?
+                    .and_then(GraphValue::as_map)
+                    .is_some_and(|(actual, _)| actual == keys);
+                if !same {
+                    return Err(refusal(row_index, GraphUnwindRowError::MapKeysDiffer).into());
+                }
+            }
+            let plain = |key: &str| {
+                let mut bytes = key.bytes();
+                bytes
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+                    && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            };
+            if !keys.iter().all(|key| plain(key)) {
+                return Err(refusal(0, GraphUnwindRowError::UnsupportedMapKey).into());
+            }
+            maps.push((index, keys.to_vec()));
+        }
+        if maps.is_empty() {
+            return Ok(None);
+        }
+
+        let mut reserved: std::collections::BTreeSet<String> = self
+            .fields
+            .iter()
+            .map(|field| field.parameter.clone())
+            .chain(self.external_parameters.iter().cloned())
+            .chain([self.source_parameter.clone()])
+            .collect();
+        let mut cursor = 0;
+        let mut fields = Vec::with_capacity(self.fields.len());
+        let mut replacements = std::collections::BTreeMap::new();
+        for (index, field) in self.fields.iter().enumerate() {
+            let Some((_, keys)) = maps.iter().find(|(map, _)| *map == index) else {
+                fields.push(field.clone());
+                continue;
+            };
+            work(control, keys.len() as u64 + 1)?;
+            let mut operand = String::from("{");
+            for (at, key) in keys.iter().enumerate() {
+                // 2,704 names exceed the 1,000-argument cap each row's
+                // parameter set enforces below, so this cannot run out first.
+                let parameter = fresh_parameter(&mut reserved, &mut cursor)
+                    .ok_or(GraphUnwindWriteError::ArgumentNames)?;
+                if at != 0 {
+                    operand.push_str(", ");
+                }
+                operand.push_str(key);
+                operand.push_str(": $");
+                operand.push_str(&parameter);
+                let mut path = field.path.to_vec();
+                path.push(UnwindFieldAccess::Key(key.to_string()));
+                fields.push(UnwindField {
+                    source: field.source,
+                    path: path.into_boxed_slice(),
+                    parameter,
+                    offset: field.offset,
+                });
+            }
+            operand.push('}');
+            replacements.insert(field.parameter.as_str(), operand);
+        }
+
+        // Splice each operand over its `$name` hole. An expanded short alias
+        // already has a provenance edit over exactly that hole; it is
+        // replaced. Later edits shift by the growth before them, which keeps
+        // original_offset's cumulative arithmetic.
+        let mut sites: Vec<(usize, &str)> = replacements
+            .iter()
+            .flat_map(|(parameter, operand)| {
+                self.parameter_sites(parameter)
+                    .into_iter()
+                    .map(move |site| (site, operand.as_str()))
+            })
+            .collect();
+        sites.sort_unstable();
+        let mut lowered = String::with_capacity(self.lowered.len());
+        let mut source_offsets = Vec::with_capacity(self.source_offsets.len() + sites.len());
+        let mut copied = 0;
+        let mut growth = 0;
+        let mut edits = self.source_offsets.iter().peekable();
+        for (site, operand) in sites {
+            let hole = site..site + 3;
+            while let Some(edit) = edits.next_if(|edit| edit.generated.end <= hole.start) {
+                source_offsets.push(UnwindSourceOffset {
+                    generated: edit.generated.start + growth..edit.generated.end + growth,
+                    original: edit.original.clone(),
+                });
+            }
+            let original = match edits.next_if(|edit| edit.generated == hole) {
+                Some(edit) => edit.original.clone(),
+                None => {
+                    let start = self.original_offset(hole.start);
+                    start..start + 3
+                }
+            };
+            lowered.push_str(&self.lowered[copied..hole.start]);
+            let generated = lowered.len();
+            lowered.push_str(operand);
+            source_offsets.push(UnwindSourceOffset {
+                generated: generated..lowered.len(),
+                original,
+            });
+            growth += operand.len() - 3;
+            copied = hole.end;
+        }
+        for edit in edits {
+            source_offsets.push(UnwindSourceOffset {
+                generated: edit.generated.start + growth..edit.generated.end + growth,
+                original: edit.original.clone(),
+            });
+        }
+        lowered.push_str(&self.lowered[copied..]);
+        Ok(Some(Self {
+            lowered,
+            source_offsets: source_offsets.into_boxed_slice(),
+            fields: fields.into_boxed_slice(),
+            ..self.clone()
+        }))
+    }
+
+    /// Byte offsets of `$name` holes in the lowered text. Generated names are
+    /// two letters; a longer user parameter that shares a prefix is not one.
+    fn parameter_sites(&self, parameter: &str) -> Vec<usize> {
+        let hole = format!("${parameter}");
+        let bytes = self.lowered.as_bytes();
+        self.lowered
+            .match_indices(&hole)
+            .map(|(site, _)| site)
+            .filter(|&site| {
+                bytes
+                    .get(site + hole.len())
+                    .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+            })
+            .collect()
+    }
+
+    /// Whether the hole at `site` is the right-hand side of `+=`.
+    fn assigns_map_at(&self, site: usize) -> bool {
+        self.lowered[..site]
+            .trim_end_matches(|ch: char| ch.is_ascii_whitespace())
+            .ends_with("+=")
     }
 }
 

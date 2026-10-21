@@ -1942,3 +1942,101 @@ fn a_constant_update_batch_stages_once_and_keeps_the_sequential_answer() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn a_row_map_assigned_with_plus_equals_writes_its_keys_and_keeps_other_fields() {
+    // fgdb-0s2pq: the driver ingest idiom `SET n += row` writes each row's
+    // map key by key, exactly as its per-key spelling does, and leaves every
+    // field outside the map unchanged.
+    let ((), report) = run_async_under_lab(0x7363_2a3e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let input = args(vec![
+            object(vec![("id", int(1)), ("p", int(10))]),
+            object(vec![("id", int(2)), ("p", int(20))]),
+        ]);
+        let mut outcomes = Vec::new();
+        for (text, seeded) in [
+            (
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n += row",
+                2,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n.id = row.id, n.p = row.p",
+                2,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+                1,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.id = row.id, n.p = row.p",
+                1,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=seeded {
+                seed.create_vertex(
+                    VId(100 + id as u128),
+                    vec![ENTITY],
+                    vec![
+                        (ID, CanonicalScalar::Int(id)),
+                        (P, CanonicalScalar::Int(-1)),
+                        (NAME, CanonicalScalar::ucs_basic_text("keep").unwrap()),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let issued = AtomicU64::new(0);
+            let mut txn = db.begin(&txcx).unwrap();
+            txn.query_write(
+                &mut db,
+                &cx,
+                text,
+                &input,
+                symbols,
+                R,
+                policy(100, 10),
+                |request| {
+                    let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                    Ok::<_, Infallible>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            txn.finish(&mut db, &commit).await.unwrap();
+            outcomes.push(db.vertices().unwrap());
+        }
+        assert_eq!(outcomes[0], outcomes[1], "MATCH SET += row");
+        assert_eq!(outcomes[2], outcomes[3], "MERGE SET += row");
+        let keep = Some(CanonicalScalar::ucs_basic_text("keep").unwrap().into());
+        for (vertices, kept) in [(&outcomes[0], [true, true]), (&outcomes[2], [true, false])] {
+            assert_eq!(vertices.len(), 2);
+            for (index, id) in [1_i64, 2].into_iter().enumerate() {
+                let vertex = vertices
+                    .iter()
+                    .find(|vertex| {
+                        vertex.props.iter().any(|(key, value)| {
+                            *key == ID && *value == CanonicalScalar::Int(id).into()
+                        })
+                    })
+                    .unwrap_or_else(|| panic!("id {id}"));
+                let field = |key: PropertyKeyId| {
+                    vertex
+                        .props
+                        .iter()
+                        .find(|(actual, _)| *actual == key)
+                        .map(|(_, value)| value.clone())
+                };
+                assert_eq!(field(P), Some(CanonicalScalar::Int(id * 10).into()));
+                assert_eq!(field(NAME), if kept[index] { keep.clone() } else { None });
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

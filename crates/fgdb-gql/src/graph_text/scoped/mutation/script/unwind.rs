@@ -7,7 +7,7 @@
 use super::{Lexer, Token, TokenKind, next_script_token, scan};
 use crate::unwind_write::{
     GraphUnwindWriteError, GraphUnwindWriteText, MAX_UNWIND_FIELD_STEPS, MAX_UNWIND_SOURCES,
-    UnwindField, UnwindFieldAccess, UnwindSource, UnwindSourceOffset,
+    UnwindField, UnwindFieldAccess, UnwindSource, UnwindSourceOffset, fresh_parameter,
 };
 use crate::{GraphPatternTextErrorKind, GraphWriteScriptError, GraphWriteScriptErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,23 +109,6 @@ fn field_path(
         }
     }
     Ok((path, next, end))
-}
-
-fn fresh_parameter(reserved: &mut BTreeSet<String>, cursor: &mut usize) -> Option<String> {
-    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    while *cursor < LETTERS.len() * LETTERS.len() {
-        let index = *cursor;
-        *cursor += 1;
-        let name = String::from_utf8(vec![
-            LETTERS[index / LETTERS.len()],
-            LETTERS[index % LETTERS.len()],
-        ])
-        .expect("ASCII parameter name");
-        if reserved.insert(name.clone()) {
-            return Some(name);
-        }
-    }
-    None
 }
 
 /// `MATCH (a {..}), (b {..}) [WHERE ..] CREATE (a)-[:R {..}]->(b), ...`: no
