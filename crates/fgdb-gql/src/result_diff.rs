@@ -238,6 +238,15 @@ impl GraphResultDiff {
     /// Private endpoint output has no public row cap; explicit query pages are
     /// still part of its definition. Equal cuts/empty answers do not skip source
     /// validation, errors or cancellation. No partial delta escapes on failure.
+    ///
+    /// Adapt and consolidate each occurrence before visiting the next one.
+    /// Beyond the source's materialized endpoint, retain only the current net
+    /// support and one adapted row, not a second bag of every occurrence from
+    /// both endpoints. Source evaluation is still materialized and there is no
+    /// spill or allocator-byte bound. Work/scratch admission stays cumulative,
+    /// including copies of duplicate rows and entries removed by cancellation.
+    /// Consolidation of Before is charged before After receives its allowance;
+    /// an earlier consolidation refusal does not invoke the later source.
     pub fn execute<'a, E, C>(
         before: CommitSeq,
         after: CommitSeq,
@@ -270,7 +279,11 @@ impl GraphResultDiff {
                 meter.charge(GlaExecutionEvent::ScratchEntry)?;
             }
         }
-        let mut updates = Vec::new();
+        // One private signed relation for the entire operation. Its insertion
+        // order is exactly the former from_updates order: Before, then After.
+        // Consolidating here releases duplicate/cancelled payloads immediately
+        // and makes their actual work visible to the next source's admission.
+        let mut changes = ZSet::new();
         for endpoint in [DiffEndpoint::Before, DiffEndpoint::After] {
             meter.charge(GlaExecutionEvent::Work)?;
             let input = source(endpoint, meter.remaining()).map_err(|error| {
@@ -290,8 +303,12 @@ impl GraphResultDiff {
                         for (column, value) in row.values().iter().enumerate() {
                             cells.push(copy_value(value, endpoint, column, &mut meter)?);
                         }
-                        meter.charge(GlaExecutionEvent::ScratchEntry)?;
-                        updates.push((cells.into_boxed_slice(), ZWeight::from_i128(sign)));
+                        accumulate_row(
+                            &mut changes,
+                            cells.into_boxed_slice(),
+                            sign,
+                            &mut meter,
+                        )?;
                     }
                 }
                 InputRows::Aggregates {
@@ -338,24 +355,19 @@ impl GraphResultDiff {
                             };
                             cells.push(cell);
                         }
-                        meter.charge(GlaExecutionEvent::ScratchEntry)?;
-                        updates.push((cells.into_boxed_slice(), ZWeight::from_i128(sign)));
+                        accumulate_row(
+                            &mut changes,
+                            cells.into_boxed_slice(),
+                            sign,
+                            &mut meter,
+                        )?;
                     }
                 }
             }
         }
-        // The existing exact Z-set engine cancels duplicate insertions and
-        // retractions; do not threshold inputs or mistake a zero total for empty.
-        let changes: ZSet<Row> = ZSet::from_updates(updates, LimbLimit::new(4), &mut |event| {
-            meter.charge::<E>(match event {
-                ZSetEvent::Work => GlaExecutionEvent::Work,
-                ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-            })
-        })
-        .map_err(|error| match error {
-            ZSetError::Control(error) | ZSetError::Callback(error) => error,
-            _ => GqlQueryError::Source(GraphDiffError::Arithmetic),
-        })?;
+        // Only final support consumes the public row quota. Intermediate
+        // retractions can all cancel even when that quota is zero. The private
+        // relation is never released on a source, arithmetic or control error.
         let count = u64::try_from(changes.len())
             .map_err(|_| GqlQueryError::Source(GraphDiffError::Arithmetic))?;
         policy
@@ -387,6 +399,27 @@ impl core::fmt::Debug for GraphResultDiff {
             .field("data", &"[REDACTED]")
             .finish()
     }
+}
+
+// Reuse the exact signed kernel, including its promoted-weight admission and
+// entry accounting. There is no infallible arithmetic or alternate equality.
+fn accumulate_row<E, C>(
+    changes: &mut ZSet<Row>,
+    row: Row,
+    sign: i128,
+    meter: &mut Meter<'_, C>,
+) -> Result<(), Error<E, C>> {
+    changes
+        .accumulate(row, ZWeight::from_i128(sign), LimbLimit::new(4), &mut |event| {
+            meter.charge::<E>(match event {
+                ZSetEvent::Work => GlaExecutionEvent::Work,
+                ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            })
+        })
+        .map_err(|error| match error {
+            ZSetError::Control(error) | ZSetError::Callback(error) => error,
+            _ => GqlQueryError::Source(GraphDiffError::Arithmetic),
+        })
 }
 
 fn check_width<E, C>(
@@ -512,6 +545,9 @@ impl<C> Meter<'_, C> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod online_tests;
 
 #[cfg(test)]
 mod release_tests {

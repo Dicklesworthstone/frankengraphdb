@@ -8,6 +8,7 @@
 
 mod coalesced;
 mod pinned;
+mod snapshot;
 
 use super::*;
 use crate::QueryValue;

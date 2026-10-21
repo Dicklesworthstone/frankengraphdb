@@ -10,6 +10,7 @@
 use super::*;
 
 mod coalesced;
+mod historical;
 mod owned;
 
 /// An opaque, subscription-specific receipt. It acknowledges a complete frame,
@@ -106,6 +107,8 @@ impl From<StandingQueryError> for SubscriptionError {
 /// One independent delivery position over a database-owned native circuit.
 /// The first successful poll selects the then-current baseline, not the time
 /// this object was created. Commits before that poll are included in its bag.
+/// The explicit open_standing_replay_subscription_at constructor instead
+/// returns an already pending historical baseline, which must be ACKed first.
 /// An ACK advances only this consumer, never the producer's commit frontier.
 ///
 /// Keep the complete frame until the consumer transaction has applied it, then

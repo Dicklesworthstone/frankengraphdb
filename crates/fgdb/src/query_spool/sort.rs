@@ -11,6 +11,8 @@ use std::cmp::Ordering;
 // resolve from query_spool/, as a mod.rs's would. Name them explicitly.
 #[path = "sort/canonical.rs"]
 mod canonical;
+#[path = "sort/difference.rs"]
+mod difference;
 #[path = "sort/prepared.rs"]
 mod prepared;
 pub use prepared::PreparedBufferedOrder;
@@ -142,6 +144,19 @@ struct Run {
     rows: u64,
 }
 
+// At most one completed run per binary level. Stack order is source order,
+// oldest first, and levels strictly decrease from bottom to top. A level k
+// covers 2^k adjacent initial runs (the last may have fewer rows).
+struct PendingRun {
+    run: Run,
+    level: u32,
+    in_destination: bool,
+}
+
+fn catalog_slots(initial_runs: u64) -> usize {
+    (u64::BITS - initial_runs.max(1).leading_zeros()) as usize
+}
+
 // Interleave two positions over ONE file without cloning a file handle or
 // duplicating the authenticated frame reader. Each next() temporarily lends
 // the same exclusive file to the ordinary NativeSpoolCursor. Cached pages
@@ -231,13 +246,19 @@ impl NativeResultSpool {
     /// the second return value is additional logical sort work, not I/O/latency.
     ///
     /// Exactly `run_rows` rows (except the last run) are retained for fallible
-    /// in-place heapsort. Pairwise merge passes retain two row heads, two cached
-    /// input pages and one output page, not an entire run. All frame buffers and
-    /// vector capacities use their file's MemoryPool. Run metadata is O(initial
-    /// runs), explicitly capped by max_runs and charged before source demand.
+    /// in-place heapsort. Adjacent equal-size runs merge as they are produced;
+    /// a charged binary-level stack retains O(log(initial runs)) run handles,
+    /// never two input-proportional catalogs. max_runs still caps the TOTAL
+    /// initial runs, not the live stack depth, and is checked before reading.
+    /// Merges retain two row heads, two input pages and one output page. Run
+    /// generation releases its row vector and cached input page before merging.
+    /// All frame buffers and vector capacities use their file's MemoryPool.
     /// Hosts should give both files children of a common pool for a total cap.
     /// Minimum headroom must cover row buffers, page buffers, writer metadata
-    /// and the two catalogs; choosing oversized run_rows can refuse admission.
+    /// and the level stack; choosing oversized run_rows can refuse admission.
+    /// Releasing generation buffers may reallocate a row vector and reread a
+    /// boundary page per initial run. This is a memory tradeoff, not a latency
+    /// promise. The spill files' own metadata and quotas retain their limits.
     ///
     /// Source and destination must be distinct, exclusively owned scratch
     /// files. Passes alternate between them, always APPENDING. A final copy, if
@@ -393,21 +414,29 @@ impl NativeResultSpool {
             }
             .into());
         }
-        let count = usize::try_from(required).map_err(|_| SpillError::SizeOverflow)?;
         let pool = source.memory_pool().clone();
-        let mut current = ChargedVec::<Run>::new(&pool, cx, count)?;
-        let mut next = ChargedVec::<Run>::new(&pool, cx, count.div_ceil(2))?;
-        let capacity =
-            usize::try_from(self.row_count().min(width)).map_err(|_| SpillError::SizeOverflow)?;
-        {
-            let mut rows = ChargedVec::<TrackedBytes>::new(&pool, cx, capacity)?;
-            let mut input = self.reader(source);
-            let mut remaining = self.row_count();
-            loop {
+        let slots = catalog_slots(required);
+        let mut pending = ChargedVec::<PendingRun>::new(&pool, cx, slots)?;
+        // Unlike a borrowed reader, this position can lend either scratch file
+        // to a merge between pulls. Original pages are immutable; every resume
+        // still uses their original run handle, offset and authentication.
+        let mut input = Input::new(
+            Run {
+                pages: self.run.clone(),
+                rows: self.row_count(),
+            },
+            self.max_row_bytes,
+        );
+        let mut remaining = self.row_count();
+        for _ in 0..required {
+            let mut completed = {
+                let capacity = usize::try_from(remaining.min(width))
+                    .map_err(|_| SpillError::SizeOverflow)?;
+                let mut rows = ChargedVec::<TrackedBytes>::new(&pool, cx, capacity)?;
                 for _ in 0..remaining.min(width) {
                     work.charge(1)?;
                     let row = input
-                        .next_row(cx)
+                        .next(source, cx)
                         .await?
                         .ok_or(NativeSpoolError::IncompleteCursor)?;
                     order.validate(row.as_ref(), self.encoded_columns, &mut work)?;
@@ -421,59 +450,69 @@ impl NativeResultSpool {
                 }
                 work.charge(1)?;
                 let pages = writer.finish(cx).await?;
-                current.values.push(Run {
-                    pages,
-                    rows: rows_written,
-                });
                 remaining -= rows_written;
-                rows.values.clear();
-                if remaining == 0 {
-                    break;
+                PendingRun {
+                    run: Run {
+                        pages,
+                        rows: rows_written,
+                    },
+                    level: 0,
+                    in_destination: true,
                 }
+            };
+            input.page = None; // no generation payload survives into merging
+            while pending
+                .values
+                .last()
+                .is_some_and(|left| left.level == completed.level)
+            {
+                let left = pending.values.pop().expect("checked pending run");
+                completed = merge_pending(
+                    source,
+                    destination,
+                    left,
+                    completed,
+                    self.max_row_bytes,
+                    page_bytes,
+                    order,
+                    self.encoded_columns,
+                    &mut work,
+                )
+                .await?;
             }
-            if input.next_row(cx).await?.is_some() || input.state() != ScanState::Exhausted {
+            // A logic regression must refuse, not grow an uncharged catalog.
+            if pending.values.len() >= slots {
                 return Err(NativeSpoolError::IncompleteCursor.into());
             }
+            pending.values.push(completed);
         }
-        let mut in_destination = true;
-        while current.values.len() > 1 {
-            work.charge(1)?;
-            if in_destination {
-                merge_pass(
-                    destination,
-                    source,
-                    &current.values,
-                    &mut next.values,
-                    self.max_row_bytes,
-                    page_bytes,
-                    order,
-                    self.encoded_columns,
-                    &mut work,
-                )
-                .await?;
-            } else {
-                merge_pass(
-                    source,
-                    destination,
-                    &current.values,
-                    &mut next.values,
-                    self.max_row_bytes,
-                    page_bytes,
-                    order,
-                    self.encoded_columns,
-                    &mut work,
-                )
-                .await?;
-            }
-            current.values.clear();
-            std::mem::swap(&mut current, &mut next);
-            in_destination = !in_destination;
+        if remaining != 0 || input.next(source, cx).await?.is_some() {
+            return Err(NativeSpoolError::IncompleteCursor.into());
         }
-        let mut final_run = current
+        drop(input);
+        // Fold the unpaired right suffix into its older left neighbor. This
+        // preserves the original adjacent-run merge tree and left-first ties,
+        // including non-power-of-two counts and a short final initial run.
+        let mut completed = pending
             .values
             .pop()
             .ok_or(NativeSpoolError::IncompleteCursor)?;
-        if !in_destination {
+        while let Some(left) = pending.values.pop() {
+            completed = merge_pending(
+                source,
+                destination,
+                left,
+                completed,
+                self.max_row_bytes,
+                page_bytes,
+                order,
+                self.encoded_columns,
+                &mut work,
+            )
+            .await?;
+        }
+        let mut final_run = completed.run;
+        if !completed.in_destination {
             final_run = merge_pair(
                 source,
                 destination,
@@ -520,41 +559,88 @@ async fn write_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pass<A, B, O: FrameOrder + Send>(
+async fn merge_pending<A, B, O: FrameOrder + Send>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
-    runs: &[Run],
-    output: &mut Vec<Run>,
+    left: PendingRun,
+    mut right: PendingRun,
     max_row_bytes: usize,
     page_bytes: usize,
     order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> core::result::Result<(), O::Error>
+) -> core::result::Result<PendingRun, O::Error>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     O::Error: Send,
 {
-    debug_assert!(output.is_empty() && output.capacity() >= runs.len().div_ceil(2));
-    for pair in runs.chunks(2) {
+    // A final unpaired suffix may reside in the opposite file. Move only the
+    // right suffix to the left run's file, never swap semantic operand order.
+    // The ordinary authenticated single-run copy retains append-only quotas.
+    if left.in_destination != right.in_destination {
         work.charge(1)?;
-        output.push(
+        right.run = if left.in_destination {
             merge_pair(
                 source,
                 destination,
-                &pair[0],
-                pair.get(1),
+                &right.run,
+                None,
                 max_row_bytes,
                 page_bytes,
                 order,
                 columns,
                 work,
             )
-            .await?,
-        );
+            .await?
+        } else {
+            merge_pair(
+                destination,
+                source,
+                &right.run,
+                None,
+                max_row_bytes,
+                page_bytes,
+                order,
+                columns,
+                work,
+            )
+            .await?
+        };
     }
-    Ok(())
+    work.charge(1)?;
+    let run = if left.in_destination {
+        merge_pair(
+            destination,
+            source,
+            &left.run,
+            Some(&right.run),
+            max_row_bytes,
+            page_bytes,
+            order,
+            columns,
+            work,
+        )
+        .await?
+    } else {
+        merge_pair(
+            source,
+            destination,
+            &left.run,
+            Some(&right.run),
+            max_row_bytes,
+            page_bytes,
+            order,
+            columns,
+            work,
+        )
+        .await?
+    };
+    Ok(PendingRun {
+        run,
+        level: left.level + 1,
+        in_destination: !left.in_destination,
+    })
 }
 
 /// Type-erased because both merge callers cross it once per pair: a caller's
@@ -705,3 +791,7 @@ fn sift<O: FrameOrder>(
 #[cfg(test)]
 #[path = "sort/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sort/leveled_tests.rs"]
+mod leveled_tests;

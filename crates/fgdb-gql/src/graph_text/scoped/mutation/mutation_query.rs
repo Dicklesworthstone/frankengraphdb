@@ -3,6 +3,7 @@
 //! mutation's proposal for that field; nothing is rescanned or re-matched.
 
 mod combined;
+mod row_maps;
 
 use super::*;
 use crate::mutation_text::{
@@ -333,7 +334,10 @@ struct MutationLeaves<'r, 'a> {
 impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self.row {
-            Some(row) => self.returning.row_leaf(parser, row),
+            Some(row) => match self.returning.row_metadata(parser, row, self.scope)? {
+                Some(column) => Ok(Some(column)),
+                None => self.returning.row_leaf(parser, row, self.scope),
+            },
             None => self.returning.leaf(parser, self.columns, self.scope),
         }
     }
@@ -343,8 +347,10 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         source: Name<'a>,
         input: ReturnMapInput<'a>,
     ) -> Result<usize, GraphPatternTextError> {
-        self.returning
-            .map_input(parser, self.columns, self.scope, source, input)
+        match self.row {
+            Some(row) => self.returning.row_map_input(parser, row, self.scope, source, input),
+            None => self.returning.map_input(parser, self.columns, self.scope, source, input),
+        }
     }
     fn types(&self) -> Vec<GraphSetColumnType> {
         self.returning.types()
@@ -506,6 +512,95 @@ impl<'a> ParsedMutationReturn<'a> {
             .map(Some)
     }
 
+    /// A complete metadata call over an element retained by the incoming
+    /// WITH. Its captured map/list is a preimage, not the answer: the mutation
+    /// owner overlays final properties/labels before projection or grouping.
+    /// Local/map-valued operands stay with the ordinary expression compiler.
+    fn row_metadata(
+        &mut self,
+        parser: &mut Parser<'a>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+        scope: ReturnScope,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
+        let labels = word.eq_ignore_ascii_case("labels");
+        if !labels && !word.eq_ignore_ascii_case("properties") && !word.eq_ignore_ascii_case("keys") {
+            return Ok(None);
+        }
+        let mut lookahead = parser.lexer.clone();
+        if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let token = lookahead.next()?;
+        let TokenKind::Word(name) = token.kind else {
+            return Ok(None);
+        };
+        if parser.elements.contains(&name)
+            || !matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(None);
+        }
+        let visible = parser.visible_width(row);
+        let Some(target) = row[..visible].iter().position(|(source, _)| source.text == name) else {
+            return Ok(None);
+        };
+        let domain = row[target].1;
+        if !matches!(domain, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            || labels && domain != GraphSetColumnType::Vertex
+        {
+            return Ok(None);
+        }
+        if !labels && domain == GraphSetColumnType::Edge && scope.deleting {
+            return Err(error(
+                token.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a vertex property after DETACH DELETE, which may cascade to edges",
+                ),
+            ));
+        }
+        let kind = if labels {
+            GraphSetColumnType::List
+        } else {
+            GraphSetColumnType::Any
+        };
+        let current = parser
+            .boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == row.len() && target < boundary.visible)
+            .and_then(|boundary| {
+                if labels {
+                    boundary.functions.iter().find_map(|&(source, function, column)| {
+                        (source == name && function == GraphPathFunction::Labels).then_some(column)
+                    })
+                } else {
+                    boundary.reads.iter().find_map(|&(source, field, column)| {
+                        (source == name && field.text == "*").then_some(column)
+                    })
+                }
+            })
+            .filter(|&column| row.get(column).is_some_and(|(_, domain)| *domain == kind))
+            .ok_or_else(|| {
+                error(
+                    token.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "metadata carried by the incoming WITH row",
+                    ),
+                )
+            })?;
+        let binding = if labels {
+            Binding::Labels { target, current }
+        } else {
+            Binding::Properties { target, current }
+        };
+        let column = self.column(binding, Name { text: name, at: token.at }, kind)?;
+        for _ in 0..4 {
+            parser.advance()?;
+        }
+        Ok(Some(column))
+    }
+
     /// A RETURN leaf after a write after WITH: a value of the WITH row. A
     /// property of an element the row carries is that element after the
     /// write: the row's hidden read of it before the write, overlaid by the
@@ -514,6 +609,7 @@ impl<'a> ParsedMutationReturn<'a> {
         &mut self,
         parser: &mut Parser<'a>,
         row: &[(Name<'a>, GraphSetColumnType)],
+        scope: ReturnScope,
     ) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);
@@ -523,7 +619,8 @@ impl<'a> ParsedMutationReturn<'a> {
         {
             return Ok(None);
         }
-        let Some(index) = row.iter().position(|(name, _)| name.text == word) else {
+        let visible = parser.visible_width(row);
+        let Some(index) = row[..visible].iter().position(|(name, _)| name.text == word) else {
             return Ok(None);
         };
         let kind = row[index].1;
@@ -531,21 +628,19 @@ impl<'a> ParsedMutationReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let token = lookahead.next()?;
-                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = token.kind
-                    && let Some(current) = parser.boundary_read(row.len())?
-                {
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = token.kind {
                     let key = Name { text, at: token.at };
-                    return self
-                        .column(
-                            Binding::Property {
-                                target: index,
-                                key,
-                                current,
-                            },
-                            key,
-                            GraphSetColumnType::Stored,
-                        )
-                        .map(Some);
+                    let column = self.row_map_input(
+                        parser,
+                        row,
+                        scope,
+                        row[index].0,
+                        ReturnMapInput::Property(key),
+                    )?;
+                    for _ in 0..3 {
+                        parser.advance()?;
+                    }
+                    return Ok(Some(column));
                 }
             }
         }
@@ -797,6 +892,13 @@ impl<'a> Parser<'a> {
             output = items.output;
             spellings = items.spellings;
         }
+        // Pages address the completed projection, not its incoming WITH row.
+        // Equal widths do not make those two column spaces interchangeable.
+        let input_boundary = if row.is_some() {
+            self.boundary_reads.take()
+        } else {
+            None
+        };
         if let Some(ReadStageTemplate::Page {
             order,
             offset,
@@ -809,7 +911,10 @@ impl<'a> Parser<'a> {
             returning.count = count;
         }
         if head {
-            let tail = self.write_tail(&mut returning, columns, scope, output)?;
+            if row.is_some() {
+                self.boundary_reads = input_boundary;
+            }
+            let tail = self.write_tail(&mut returning, columns, scope, output, row)?;
             returning.tail = Some(tail);
         }
         Ok(returning)
@@ -819,16 +924,19 @@ impl<'a> Parser<'a> {
     /// carries its post-write properties through the WITH's WHERE/pages,
     /// terminal RETURN or first UNWIND expression. Hidden grouping keys are
     /// functions of kept identities; no summary becomes an element binding.
-    /// UNWIND drops hidden cells, retaining visible items and its own output.
+    /// A row-fed write uses its admitted incoming field slots, never graph
+    /// projection indices or a fresh read. UNWIND drops the hidden cells.
     fn write_tail(
         &mut self,
         returning: &mut ParsedMutationReturn<'a>,
         columns: &mut Vec<Projection<'a>>,
         scope: ReturnScope,
         mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<Vec<ReadStageTemplate>, GraphMutationTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
+        let input_boundary = self.boundary_reads.take();
         for (alias, key) in self.write_tail_reads(&schema)? {
             let Some(at) = schema[..visible]
                 .iter()
@@ -847,14 +955,58 @@ impl<'a> Parser<'a> {
             else {
                 continue;
             };
-            let variable = columns[input].variable;
-            let column = returning.map_input(
-                self,
-                columns,
-                scope,
-                variable,
-                ReturnMapInput::Property(key),
-            )?;
+            let column = if let Some(row) = row {
+                let &(source, kind) = row.get(input).ok_or_else(|| {
+                    error(key.at, GraphPatternTextErrorKind::UnknownVariable)
+                })?;
+                if kind == GraphSetColumnType::Edge && scope.deleting {
+                    return Err(error(
+                        key.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a vertex property after DETACH DELETE, which may cascade to edges",
+                        ),
+                    )
+                    .into());
+                }
+                let current = input_boundary
+                    .as_ref()
+                    .filter(|boundary| boundary.width == row.len() && input < boundary.visible)
+                    .and_then(|boundary| {
+                        boundary.reads.iter().find_map(|&(name, field, column)| {
+                            (name == source.text && field.text == key.text && column < row.len())
+                                .then_some(column)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        error(
+                            key.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "a property carried by the incoming WITH row",
+                            ),
+                        )
+                    })?;
+                returning.column(
+                    Binding::Property {
+                        target: input,
+                        key,
+                        current,
+                    },
+                    key,
+                    GraphSetColumnType::Stored,
+                )?
+            } else {
+                let variable = columns
+                    .get(input)
+                    .ok_or_else(|| error(key.at, GraphPatternTextErrorKind::UnknownVariable))?
+                    .variable;
+                returning.map_input(
+                    self,
+                    columns,
+                    scope,
+                    variable,
+                    ReturnMapInput::Property(key),
+                )?
+            };
             let column = match &mut returning.grouping {
                 Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
                 None => column,
@@ -1073,7 +1225,7 @@ pub(super) fn push_tail_read<'a>(
 }
 
 /// Single-statement framing on the script lexer: one terminal semicolon is
-/// accepted, and a second statement refuses (naming `shape`) before any
+/// accepted, and a second statement, refuses (naming `shape`) before any
 /// catalog callback.
 pub(super) fn statement_body<'s>(
     statement: &'s str,
@@ -1107,10 +1259,10 @@ pub(super) fn statement_body<'s>(
 
 impl PreparedGraphMutationQueryText {
     /// Classify write text with native token framing: a MATCH-led (or
-    /// UNWIND-led, fgdb-0s2pq) statement with a top-level `SET x.`/`SET
-    /// x:`/`SET x +=`, `REMOVE x`, `DELETE x` or `DETACH DELETE x` clause
-    /// followed by a top-level RETURN. A CREATE, INSERT or MERGE clause, or a
-    /// second statement, is not this shape. Quoted values, property keys and
+    /// UNWIND-led, fgdb-0s2pq) statement with a top-level SET, REMOVE, DELETE
+    /// or DETACH DELETE clause followed by RETURN. SET/REMOVE also admit the
+    /// parser's `(name).property` target. A CREATE, INSERT or MERGE clause, or
+    /// a second statement, keeps its owner. Quoted values, property keys and
     /// aliases never become clause words. This validates nothing and resolves
     /// no symbol; prepare owns that.
     pub fn has_return_clause(statement: &str) -> Result<bool, GraphMutationTextError> {
@@ -1156,22 +1308,22 @@ impl PreparedGraphMutationQueryText {
                             return Ok(false);
                         }
                         let target = matches!(next, TokenKind::Word(_));
-                        // `SET (n).name`: a parenthesized variable is the same
-                        // property target (Set1 [3], [4]).
-                        let parenthesized = matches!(next, TokenKind::Punct(b'('))
-                            && matches!(after, TokenKind::Word(_))
-                            && matches!(
-                                script::next_script_token(&mut lookahead)?.kind,
-                                TokenKind::Punct(b')')
-                            )
-                            && matches!(
-                                script::next_script_token(&mut lookahead)?.kind,
-                                TokenKind::Punct(b'.')
-                            );
-                        if (clause("SET") || clause("REMOVE"))
-                            && (parenthesized
-                                || target
-                                    && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'=')))
+                        // Match parenthesized_property_target's exact prefix,
+                        // not every parenthesized expression after a keyword.
+                        let property_action = (clause("SET") || clause("REMOVE"))
+                            && (target
+                                && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
+                                || matches!(next, TokenKind::Punct(b'('))
+                                    && matches!(after, TokenKind::Word(_))
+                                    && matches!(
+                                        script::next_script_token(&mut lookahead)?.kind,
+                                        TokenKind::Punct(b')')
+                                    )
+                                    && matches!(
+                                        script::next_script_token(&mut lookahead)?.kind,
+                                        TokenKind::Punct(b'.')
+                                    ));
+                        if property_action
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
                             || clause("DELETE") && target
@@ -1252,6 +1404,25 @@ mod framing_tests {
             ("MATCH (n) SET n = {p: 1} RETURN n", true),
             ("MATCH (n) WITH n SET n.p = 1 RETURN n", true),
             ("MATCH (n) REMOVE n.p RETURN n", true),
+            ("MATCH (n) SET (n).p = 1 RETURN n.p", true),
+            ("MATCH (n) REMOVE (n).p RETURN n.p", true),
+            ("MATCH ()-[r:R]->() SET (r).p = 1 RETURN r.p", true),
+            ("MATCH ()-[r:R]->() REMOVE (r).p RETURN r", true),
+            ("MATCH (n) WITH n AS kept SET (kept).p = 1 RETURN kept", true),
+            ("OPTIONAL MATCH (n) SET (n).p = 1 RETURN n", true),
+            (
+                "mAtCh (n) sEt /* target */ ( /* name */ n ).p = 1 RETURN n.p",
+                true,
+            ),
+            ("MATCH (n) SET (n).p = 1", false),
+            ("MATCH (n) REMOVE (n).p", false),
+            ("MATCH (n) SET (n) RETURN n", false),
+            ("MATCH (n) SET ((n)).p = 1 RETURN n", false),
+            ("MATCH (n) RETURN 'SET (n).p = 1 RETURN n'", false),
+            ("MATCH (n) /* REMOVE (n).p */ RETURN n", false),
+            ("MATCH (n) RETURN (n).SET", false),
+            ("MATCH (n) SET (n).p = 1 CREATE (m) RETURN m", false),
+            ("MATCH (n) SET (n).p = 1; MATCH (m) RETURN m", false),
             ("MATCH (n) DETACH DELETE n RETURN n", true),
             ("MATCH (n) DELETE n RETURN 42 AS num", true),
             ("MATCH ()-[r]->() DELETE r RETURN type(r)", true),
