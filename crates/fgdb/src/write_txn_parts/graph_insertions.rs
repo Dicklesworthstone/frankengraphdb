@@ -592,7 +592,18 @@ impl WriteTxn {
                         (merged(&stats), returning)
                     }
                 };
-                add(&mut used, &stats);
+                // A query step's execution includes its write prefix PLUS
+                // projection, grouping, ordering and WITH-tail evaluation.
+                // The write stats alone stop before that work. Carry the
+                // complete counters into the next allowance and the final
+                // receipt; do not add the prefix a second time. Non-query
+                // steps supply the same counters through `unreturned`.
+                let complete = GraphInsertStats {
+                    selection: returning.rows,
+                    evaluator: returning.evaluator,
+                    ..stats
+                };
+                add(&mut used, &complete);
                 if at == last {
                     result = Some(returning);
                 } else {
