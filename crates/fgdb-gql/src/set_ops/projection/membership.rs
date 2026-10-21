@@ -1,7 +1,8 @@
 //! Borrowed, governed membership for evaluated native lists. Scalar equality
-//! retains the row-predicate law (including UNKNOWN for incompatible domains),
-//! not the total ordering used to consolidate Z-set keys. Nested comparisons
-//! use governed heap frames rather than relying on process-stack depth.
+//! retains the row-predicate law (including FALSE between values of different
+//! domains, fgdb-v6ku6), not the total ordering used to consolidate Z-set
+//! keys. Nested comparisons use governed heap frames rather than relying on
+//! process-stack depth.
 
 use crate::GlaExecutionEvent;
 use crate::algebra::{GraphValue, IntegerComparison};
@@ -27,7 +28,10 @@ pub(crate) fn evaluate<E>(
 /// Three-valued `left = right` under the same law as membership. A list or
 /// map compares element by element: a definite mismatch is FALSE, else an
 /// UNKNOWN element makes it UNKNOWN. Maps with different key sets are FALSE
-/// whatever their values (fgdb-9cawv).
+/// whatever their values (fgdb-9cawv). Two non-null values of different
+/// domains are FALSE, as in openCypher (fgdb-v6ku6); a list of graph elements
+/// (nodes(p), relationships(p)) is a list, equal to a list value element by
+/// element.
 pub(crate) fn equal<E>(
     left: &GraphValue,
     right: &GraphValue,
@@ -112,7 +116,23 @@ pub(crate) fn equal<E>(
                             continue;
                         }
                     }
-                    _ => None,
+                    (GraphValue::Vertices(ids), GraphValue::List(items))
+                    | (GraphValue::List(items), GraphValue::Vertices(ids)) => equal_elements(
+                        ids.iter().map(|id| GraphValue::Vertex(*id)),
+                        items,
+                        control,
+                    )?,
+                    (GraphValue::Edges(ids), GraphValue::List(items))
+                    | (GraphValue::List(items), GraphValue::Edges(ids)) => {
+                        equal_elements(ids.iter().map(|id| GraphValue::Edge(*id)), items, control)?
+                    }
+                    // Only two empty lists are equal; any element pair is a
+                    // vertex against a relationship.
+                    (GraphValue::Vertices(vertices), GraphValue::Edges(edges))
+                    | (GraphValue::Edges(edges), GraphValue::Vertices(vertices)) => {
+                        Some(vertices.is_empty() && edges.is_empty())
+                    }
+                    _ => IntegerComparison::Equal.across_domains(),
                 }
             };
         }
@@ -191,6 +211,32 @@ pub(crate) fn order<E>(
     }
 }
 
+/// A list of graph elements against a list value, element by element. Each
+/// element is a vertex or an edge: an equal identity is TRUE, a NULL item is
+/// UNKNOWN, and any other item is FALSE. A definite mismatch dominates an
+/// UNKNOWN item; every item is still governed.
+fn equal_elements<E>(
+    elements: impl ExactSizeIterator<Item = GraphValue>,
+    items: &[GraphValue],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    if elements.len() != items.len() {
+        return Ok(Some(false));
+    }
+    let mut result = Some(true);
+    for (element, item) in elements.zip(items) {
+        control(GlaExecutionEvent::Work)?;
+        if item.is_null() {
+            if result == Some(true) {
+                result = None;
+            }
+        } else if element != *item {
+            result = Some(false);
+        }
+    }
+    Ok(result)
+}
+
 fn equal_sequence<T: PartialEq, E>(
     left: &[T],
     right: &[T],
@@ -249,8 +295,11 @@ mod tests {
         assert_eq!(member(&int(1), &[int(2), int(3)]), Some(false));
         assert_eq!(member(&int(1), &[null(), int(1), int(1)]), Some(true));
         assert_eq!(member(&int(1), &[int(1), null()]), Some(true));
+        // fgdb-v6ku6: a member of another domain is unequal, not UNKNOWN.
         let boolean = GraphValue::Scalar(CanonicalScalar::Bool(true));
-        assert_eq!(member(&int(1), &[boolean]), None);
+        assert_eq!(member(&int(1), std::slice::from_ref(&boolean)), Some(false));
+        assert_eq!(member(&int(1), &[boolean, null()]), None);
+        assert_eq!(member(&int(1), &[list(vec![int(1)])]), Some(false));
     }
 
     #[test]
@@ -285,7 +334,7 @@ mod tests {
             member(&vertex, &[GraphValue::Vertex(VId(u64::MAX.into()))]),
             Some(false)
         );
-        assert_eq!(member(&vertex, std::slice::from_ref(&edge)), None);
+        assert_eq!(member(&vertex, std::slice::from_ref(&edge)), Some(false));
         assert_eq!(member(&edge, std::slice::from_ref(&edge)), Some(true));
         let path = GraphValue::Path(GraphPath::new(
             VId(u128::MAX),
@@ -297,6 +346,56 @@ mod tests {
             vec![(EId(u128::MAX), VId(u128::MAX))].into_boxed_slice(),
         ));
         assert_eq!(member(&path, &[reverse]), Some(false));
+        assert_eq!(member(&path, std::slice::from_ref(&vertex)), Some(false));
+    }
+
+    /// fgdb-v6ku6: nodes(p) and relationships(p) are lists. Changing the
+    /// list representation never turns an equal list into a FALSE one.
+    #[test]
+    fn element_lists_equal_list_values_element_by_element() {
+        let both_ways = |left: &GraphValue, right: &GraphValue| {
+            let forward = equal(left, right, &mut |_| Ok::<_, ()>(())).unwrap();
+            let backward = equal(right, left, &mut |_| Ok::<_, ()>(())).unwrap();
+            assert_eq!(forward, backward);
+            forward
+        };
+        let vertices = GraphValue::Vertices(vec![VId(1), VId(2)].into_boxed_slice());
+        let edges = GraphValue::Edges(vec![EId(1), EId(2)].into_boxed_slice());
+        let vertex = |id| GraphValue::Vertex(VId(id));
+        let edge = |id| GraphValue::Edge(EId(id));
+        assert_eq!(
+            both_ways(&vertices, &list(vec![vertex(1), vertex(2)])),
+            Some(true)
+        );
+        assert_eq!(both_ways(&edges, &list(vec![edge(1), edge(2)])), Some(true));
+        assert_eq!(both_ways(&vertices, &list(vec![vertex(1), null()])), None);
+        assert_eq!(
+            both_ways(&vertices, &list(vec![vertex(2), null()])),
+            Some(false)
+        );
+        assert_eq!(
+            both_ways(&vertices, &list(vec![vertex(1), int(2)])),
+            Some(false)
+        );
+        assert_eq!(both_ways(&vertices, &list(vec![vertex(1)])), Some(false));
+        assert_eq!(
+            both_ways(&edges, &list(vec![vertex(1), vertex(2)])),
+            Some(false)
+        );
+        assert_eq!(both_ways(&vertices, &edges), Some(false));
+        assert_eq!(
+            both_ways(
+                &GraphValue::Vertices(Box::new([])),
+                &GraphValue::Edges(Box::new([]))
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            both_ways(&GraphValue::Vertices(Box::new([])), &list(vec![])),
+            Some(true)
+        );
+        assert_eq!(both_ways(&vertices, &int(1)), Some(false));
+        assert_eq!(both_ways(&vertices, &null()), None);
     }
 
     #[test]

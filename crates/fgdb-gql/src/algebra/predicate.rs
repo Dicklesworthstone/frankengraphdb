@@ -3,12 +3,14 @@
 //! The scalar union, equality, ordering and encoding remain fgdb_types-owned.
 //! Query comparisons admit Int/Float pairs by exact numeric value, without
 //! changing canonical storage identity or cross-kind ordering. Missing/null
-//! and unrelated scalar kinds produce UNKNOWN. Within a kind, comparisons
-//! retain STRICT_PORTABLE order, including canonical NaN/collation/time rules.
+//! produce UNKNOWN. Two present values of different domains are unequal, as
+//! in openCypher (fgdb-v6ku6): `=` is FALSE, `<>` is TRUE, and an ordering is
+//! UNKNOWN. Within a kind, comparisons retain STRICT_PORTABLE order, including
+//! canonical NaN/collation/time rules.
 
 use super::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, IntegerComparison, VertexPredicate};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, ScalarEncodeError};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, ScalarEncodeError};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -67,8 +69,9 @@ impl core::fmt::Debug for ScalarPredicate {
 impl ScalarPredicate {
     /// The existing six comparison operators also apply to canonical scalar
     /// operands. Int/Float comparisons use exact numeric value, not cross-kind
-    /// storage ranks or a lossy integer-to-float coercion. Missing and unrelated
-    /// scalar kinds do not become true under NotEqual.
+    /// storage ranks or a lossy integer-to-float coercion. Missing and null
+    /// values do not become true under NotEqual; a present value of another
+    /// domain does (fgdb-v6ku6).
     pub fn new(
         value: CanonicalScalar,
         comparison: IntegerComparison,
@@ -128,6 +131,14 @@ impl ScalarPredicate {
             .accepts_scalar_pair(actual, Some(self.value()))
     }
 
+    /// [`Self::matches`] over a stored property, which may be a List or Map.
+    #[must_use]
+    pub fn matches_property(&self, actual: Option<&CanonicalPropertyValue>) -> bool {
+        self.comparison
+            .evaluate_property_scalar(actual, Some(self.value()))
+            == Some(true)
+    }
+
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         bytes.push(self.comparison.tag());
         bytes.extend_from_slice(&(self.operand.encoded.len() as u64).to_be_bytes());
@@ -153,10 +164,24 @@ fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
 }
 
 impl IntegerComparison {
+    /// Two present, non-null values of different domains (fgdb-v6ku6, owner
+    /// ruling (a), as openCypher): they are not equal, so `=` is FALSE and
+    /// `<>` is TRUE, and they have no order, so the four orderings are UNKNOWN.
+    #[must_use]
+    pub const fn across_domains(self) -> Option<bool> {
+        match self {
+            Self::Equal => Some(false),
+            Self::NotEqual => Some(true),
+            Self::Greater | Self::Less | Self::GreaterOrEqual | Self::LessOrEqual => None,
+        }
+    }
+
     /// Compare borrowed scalar operands without collapsing UNKNOWN into FALSE.
-    /// Int/Float pairs compare numerically in either direction; other unequal
-    /// scalar kinds, missing properties, and stored null remain UNKNOWN. Float
-    /// NaN retains the existing STRICT_PORTABLE position after positive infinity.
+    /// Int/Float pairs compare numerically in either direction. Scalars of
+    /// different domains answer [`Self::across_domains`]; Decimal against Int
+    /// or Float is one numeric domain with no exact comparison here, and stays
+    /// UNKNOWN, as do missing properties and stored null. Float NaN retains
+    /// the existing STRICT_PORTABLE position after positive infinity.
     #[must_use]
     pub fn evaluate_scalar_pair(
         self,
@@ -181,7 +206,8 @@ impl IntegerComparison {
                 return None;
             }
             _ if core::mem::discriminant(left) == core::mem::discriminant(right) => left.cmp(right),
-            _ => return None,
+            _ if numeric_domain(left) && numeric_domain(right) => return None,
+            _ => return self.across_domains(),
         };
         Some(match self {
             Self::Equal => order == Ordering::Equal,
@@ -191,6 +217,27 @@ impl IntegerComparison {
             Self::GreaterOrEqual => order != Ordering::Less,
             Self::LessOrEqual => order != Ordering::Greater,
         })
+    }
+
+    /// A stored property (left) against a scalar operand (right). A stored
+    /// List or Map (fgdb-k3nub) is present, never NULL, and of another domain
+    /// than any scalar, so it answers [`Self::across_domains`] unless the
+    /// scalar is NULL. A scalar property compares as the scalar pair does.
+    #[must_use]
+    pub fn evaluate_property_scalar(
+        self,
+        property: Option<&CanonicalPropertyValue>,
+        scalar: Option<&CanonicalScalar>,
+    ) -> Option<bool> {
+        match property {
+            Some(CanonicalPropertyValue::Scalar(property)) => {
+                self.evaluate_scalar_pair(Some(property), scalar)
+            }
+            Some(_) if scalar.is_some_and(|scalar| !matches!(scalar, CanonicalScalar::Null)) => {
+                self.across_domains()
+            }
+            _ => None,
+        }
     }
 
     /// WHERE selection keeps only TRUE. Call evaluate_scalar_pair when the
@@ -203,6 +250,15 @@ impl IntegerComparison {
     ) -> bool {
         self.evaluate_scalar_pair(left, right) == Some(true)
     }
+}
+
+/// Int, Float and Decimal are one value domain: numbers. A pair of them is
+/// never "different domains", even where no exact comparison exists.
+pub(crate) const fn numeric_domain(value: &CanonicalScalar) -> bool {
+    matches!(
+        value,
+        CanonicalScalar::Int(_) | CanonicalScalar::Float(_) | CanonicalScalar::Decimal(_)
+    )
 }
 
 /// Compare without rounding the integer to binary64. In particular, 2^53+1
@@ -285,33 +341,42 @@ mod tests {
                 let predicate = ScalarPredicate::new(expected.clone(), comparison).unwrap();
                 assert!(!predicate.matches(None));
                 for actual in &values {
+                    // Some(None): values of different domains (fgdb-v6ku6).
                     let order = match (actual, expected) {
                         (CanonicalScalar::Null, _) | (_, CanonicalScalar::Null) => None,
                         // This fixture's floats are exactly zero, +inf, and NaN.
                         // Neither nonzero float can be reached by an i64.
                         (CanonicalScalar::Int(i), CanonicalScalar::Float(f)) => {
-                            Some(if f.get() == 0.0 {
+                            Some(Some(if f.get() == 0.0 {
                                 i.cmp(&0)
                             } else {
                                 Ordering::Less
-                            })
+                            }))
                         }
                         (CanonicalScalar::Float(f), CanonicalScalar::Int(i)) => {
-                            Some(if f.get() == 0.0 {
+                            Some(Some(if f.get() == 0.0 {
                                 0.cmp(i)
                             } else {
                                 Ordering::Greater
-                            })
+                            }))
                         }
                         _ if core::mem::discriminant(actual)
                             == core::mem::discriminant(expected) =>
                         {
                             // Independently encoded order, not the comparator.
-                            Some(actual.encode().unwrap().cmp(&expected.encode().unwrap()))
+                            Some(Some(
+                                actual.encode().unwrap().cmp(&expected.encode().unwrap()),
+                            ))
                         }
-                        _ => None,
+                        _ => Some(None),
                     };
-                    let wanted = order.map(|order| accepts_order(comparison, order));
+                    // Unequal, and unordered, across domains.
+                    let wanted = order.and_then(|order| match (order, comparison) {
+                        (Some(order), _) => Some(accepts_order(comparison, order)),
+                        (None, IntegerComparison::Equal) => Some(false),
+                        (None, IntegerComparison::NotEqual) => Some(true),
+                        (None, _) => None,
+                    });
                     assert_eq!(
                         comparison.evaluate_scalar_pair(Some(actual), Some(expected)),
                         wanted
@@ -417,8 +482,86 @@ mod tests {
         };
         assert!(!predicate.matches(&[], &[]));
         assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Null.into())]));
-        assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Int(1).into())]));
         assert!(predicate.matches(&[], &[(key, CanonicalScalar::Bool(false).into())]));
+        // fgdb-v6ku6: a present value of another domain is unequal.
+        assert!(predicate.matches(&[], &[(key, CanonicalScalar::Int(1).into())]));
+    }
+
+    /// fgdb-v6ku6, owner ruling (a): openCypher answers FALSE for `=` and
+    /// TRUE for `<>` between values of different domains, and UNKNOWN for an
+    /// ordering. Numbers are one domain; NULL and absence stay UNKNOWN.
+    #[test]
+    fn values_of_different_domains_are_unequal_and_unordered() {
+        let text = CanonicalScalar::ucs_basic_text("a").unwrap();
+        let date =
+            CanonicalScalar::Date(fgdb_types::CanonicalDate::from_civil(2020, 1, 1).unwrap());
+        let decimal = CanonicalScalar::Decimal(fgdb_types::CanonicalDecimal::default());
+        let pairs = [
+            (CanonicalScalar::Int(1), text.clone()),
+            (CanonicalScalar::Float(CanonicalF64::new(1.0)), text.clone()),
+            (CanonicalScalar::Bool(true), CanonicalScalar::Int(1)),
+            (text.clone(), CanonicalScalar::bytes(vec![b'a']).unwrap()),
+            (date.clone(), CanonicalScalar::Int(1)),
+            (date, text.clone()),
+            (decimal.clone(), text),
+        ];
+        for (left, right) in &pairs {
+            for comparison in COMPARISONS {
+                let wanted = comparison.across_domains();
+                assert_eq!(
+                    comparison.evaluate_scalar_pair(Some(left), Some(right)),
+                    wanted
+                );
+                assert_eq!(
+                    comparison.evaluate_scalar_pair(Some(right), Some(left)),
+                    wanted
+                );
+            }
+        }
+        assert_eq!(IntegerComparison::Equal.across_domains(), Some(false));
+        assert_eq!(IntegerComparison::NotEqual.across_domains(), Some(true));
+        for comparison in &COMPARISONS[2..] {
+            assert_eq!(comparison.across_domains(), None);
+        }
+        // Decimal against Int or Float is one numeric domain with no exact
+        // comparison here: UNKNOWN, never a guessed FALSE. 1 = 1.0 stays TRUE.
+        let one = CanonicalScalar::Int(1);
+        let float = CanonicalScalar::Float(CanonicalF64::new(1.0));
+        for comparison in COMPARISONS {
+            for number in [&one, &float] {
+                assert_eq!(
+                    comparison.evaluate_scalar_pair(Some(&decimal), Some(number)),
+                    None
+                );
+            }
+        }
+        assert_eq!(
+            IntegerComparison::Equal.evaluate_scalar_pair(Some(&one), Some(&float)),
+            Some(true)
+        );
+        // A stored List or Map is present and of another domain than any
+        // scalar; against NULL or nothing it is UNKNOWN.
+        let list = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![CanonicalScalar::Int(1).into()]).unwrap(),
+        );
+        for comparison in COMPARISONS {
+            assert_eq!(
+                comparison.evaluate_property_scalar(Some(&list), Some(&one)),
+                comparison.across_domains()
+            );
+            assert_eq!(
+                comparison.evaluate_property_scalar(Some(&list), Some(&CanonicalScalar::Null)),
+                None
+            );
+            assert_eq!(comparison.evaluate_property_scalar(Some(&list), None), None);
+            assert_eq!(comparison.evaluate_property_scalar(None, Some(&one)), None);
+            let predicate = ScalarPredicate::new(one.clone(), comparison).unwrap();
+            assert_eq!(
+                predicate.matches_property(Some(&list)),
+                comparison == IntegerComparison::NotEqual
+            );
+            assert!(!predicate.matches_property(None));
+        }
     }
 
     #[test]
@@ -478,12 +621,21 @@ mod tests {
         let boolean = CanonicalScalar::Bool(false);
         let null = CanonicalScalar::Null;
         for comparison in COMPARISONS {
-            for absent in [None, Some(&null), Some(&boolean)] {
+            for absent in [None, Some(&null)] {
                 assert!(!comparison.accepts_scalar_pair(Some(&small), absent));
                 assert!(!comparison.accepts_scalar_pair(absent, Some(&small)));
                 assert_eq!(comparison.evaluate_scalar_pair(Some(&small), absent), None);
                 assert_eq!(comparison.evaluate_scalar_pair(absent, Some(&small)), None);
             }
+            // Another domain is present: unequal and unordered (fgdb-v6ku6).
+            assert_eq!(
+                comparison.evaluate_scalar_pair(Some(&small), Some(&boolean)),
+                comparison.across_domains()
+            );
+            assert_eq!(
+                comparison.evaluate_scalar_pair(Some(&boolean), Some(&small)),
+                comparison.across_domains()
+            );
             assert_eq!(
                 comparison.accepts_scalar_pair(Some(&small), Some(&large)),
                 comparison.accepts(i64::MIN, i64::MAX)

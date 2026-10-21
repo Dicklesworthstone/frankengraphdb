@@ -70,13 +70,15 @@ fn quoted_boolean_and_null_operands_follow_independent_value_expectations() {
         Some(text("TRUE")),
         Some(text("")),
     ];
+    // A present value of another domain is unequal (fgdb-v6ku6): `<>` keeps
+    // it, and `=` or an ordering does not.
     for (predicate, expected) in [
         ("n.p = 'ready'", vec![2]),
-        ("n.p != 'ready'", vec![3, 7, 8]),
+        ("n.p != 'ready'", vec![3, 4, 5, 6, 7, 8]),
         ("n.p < 'ready'", vec![3, 7, 8]),
         ("n.p >= 'ready'", vec![2]),
         ("n.p = TRUE", vec![4]),
-        ("n.p <> false", vec![4]),
+        ("n.p <> false", vec![2, 3, 4, 6, 7, 8]),
         ("n.p <= FALSE", vec![5]),
         ("n.p = 'TRUE'", vec![7]),
         ("n.p = ''", vec![8]),

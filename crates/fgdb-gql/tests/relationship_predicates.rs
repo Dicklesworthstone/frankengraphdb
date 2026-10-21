@@ -89,13 +89,26 @@ fn relationship_equality_and_inequality_agree_in_row_filters_and_match_on() {
 }
 
 #[test]
-fn relationship_values_through_unwind_preserve_duplicates_and_reject_non_edges() {
+fn relationship_values_through_unwind_preserve_duplicates_and_never_equal_non_edges() {
     for (operator, equal) in [("=", true), ("<>", false)] {
         let mut expected = Vec::new();
         for r in 11..=14 {
             for s in 11..=14 {
                 if (r == s) == equal {
                     expected.extend([pair(r, Some(s)), pair(r, Some(s))]);
+                }
+            }
+        }
+        // The integer 11 is of another domain than every relationship
+        // (fgdb-v6ku6): never `=`, always `<>`. Numbers order after
+        // relationships; each carried r contributes one 11.
+        if !equal {
+            for s in 11..=14 {
+                for _ in 11..=14 {
+                    expected.push(GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(11)),
+                        GraphValue::Edge(EId(s)),
+                    ]));
                 }
             }
         }

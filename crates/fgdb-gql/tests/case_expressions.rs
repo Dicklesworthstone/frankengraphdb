@@ -110,6 +110,9 @@ fn first_true_branch_and_first_nonnull_equality_have_lazy_defaults() {
         ),
         ("CASE NULL WHEN NULL THEN 1 ELSE 2 END", Some(2)),
         ("CASE 3 WHEN 1 THEN 4 END", None),
+        // A WHEN value of another domain is unequal (fgdb-v6ku6): no match.
+        ("CASE 1 WHEN TRUE THEN 2 END", None),
+        ("CASE 1 WHEN 'a' THEN 1/0 WHEN 1 THEN 3 ELSE 4 END", Some(3)),
         ("COALESCE(CASE WHEN NULL THEN 1 END, 5)+2", Some(7)),
         (
             "CASE WHEN (2+3)*4=20 AND NOT (NULL IS NOT NULL OR FALSE) THEN -7 ELSE 1/0 END",
@@ -398,7 +401,6 @@ fn malformed_branches_and_excessive_definitions_refuse_before_catalog_callbacks(
         "CASE WHEN TRUE THEN END",
         "CASE WHEN 1 THEN 2 END",
         "CASE WHEN TRUE THEN 2 ELSE 'text' END",
-        "CASE 1 WHEN TRUE THEN 2 END",
         "CASE WHEN n.p=1 THEN 2",
         "CASE WHEN TRUE THEN 2 ELSE 3 WHEN FALSE THEN 4 END",
         "CASE WHEN TRUE THEN 1 ELSE missing.p END",

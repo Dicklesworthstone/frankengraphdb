@@ -900,8 +900,15 @@ fn nullable_aliases_and_boolean_filters_do_not_turn_unknown_into_true() {
     let query =
         prepare("MATCH (n) WITH n,n.p AS value WHERE NOT (value=1 OR value IS NULL) RETURN n");
     let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
-    assert_eq!(result.value.len(), 1);
-    assert_eq!(result.value[0].get(0).unwrap().as_vertex(), Some(VId(2)));
+    // TRUE is of another domain than 1 (fgdb-v6ku6): `value=1` is FALSE
+    // there, not UNKNOWN, so NOT keeps vertex 3 as it keeps vertex 2.
+    let mut kept = result
+        .value
+        .iter()
+        .map(|row| row.get(0).unwrap().as_vertex())
+        .collect::<Vec<_>>();
+    kept.sort();
+    assert_eq!(kept, vec![Some(VId(2)), Some(VId(3))]);
     let absent =
         prepare("MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n,m WHERE m IS NULL RETURN n,m");
     let result = run(&absent, &values, wide(), &mut || Ok(())).unwrap();

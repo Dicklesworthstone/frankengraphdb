@@ -277,18 +277,16 @@ fn prepare_root(
             }
             Op::Coalesce => merge_positions(&[0, 1], false)?,
             Op::Case => merge_positions(&[1, 2], false)?,
+            // Equality, and IN and simple CASE, which are made of it, answer
+            // between any two kinds: values of different domains are unequal
+            // (fgdb-v6ku6). Only an ordering requires comparable kinds.
+            Op::Compare(IntegerComparison::Equal | IntegerComparison::NotEqual)
+            | Op::InList { .. } => Kind::Boolean,
             Op::Compare(_) => {
                 merge_positions(&[0, 1], true)?;
                 Kind::Boolean
             }
-            Op::InList { .. } => {
-                merge_positions(&(0..arity).collect::<Vec<_>>(), true)?;
-                Kind::Boolean
-            }
             Op::SimpleCase { alternatives } => {
-                let mut candidates = vec![0];
-                candidates.extend((0..*alternatives).map(|arm| 1 + 2 * arm));
-                merge_positions(&candidates, true)?;
                 let mut results: Vec<_> = (0..*alternatives).map(|arm| 2 + 2 * arm).collect();
                 results.push(arity - 1);
                 merge_positions(&results, false)?
@@ -802,7 +800,7 @@ mod tests {
             vec![
                 floating(1.0),
                 Op::Truth(Some(true)),
-                Op::Compare(IntegerComparison::Equal),
+                Op::Compare(IntegerComparison::Less),
             ],
             vec![
                 Op::ScalarColumn(0),
@@ -818,18 +816,62 @@ mod tests {
                 Op::Truth(Some(false)),
                 Op::Case,
             ],
-            vec![
-                Op::ScalarColumn(0),
-                floating(1.0),
-                Op::Truth(Some(true)),
-                Op::InList { members: 2 },
-            ],
         ] {
             assert!(matches!(
                 prepare_scalar(&ops),
                 Err(GraphIntegerBuildError::OperandType { .. })
             ));
         }
+        // fgdb-v6ku6: `=`, `<>`, IN and simple CASE answer across domains,
+        // as openCypher does: values of different domains are unequal.
+        for (ops, expected) in [
+            (
+                vec![
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::Compare(IntegerComparison::Equal),
+                ],
+                Some(false),
+            ),
+            (
+                vec![
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::Compare(IntegerComparison::NotEqual),
+                ],
+                Some(true),
+            ),
+            (
+                vec![
+                    Op::Truth(Some(true)),
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::InList { members: 2 },
+                ],
+                Some(true),
+            ),
+            (
+                vec![
+                    Op::Literal(Some(1)),
+                    Op::Truth(Some(true)),
+                    Op::Literal(None),
+                    Op::InList { members: 2 },
+                ],
+                None,
+            ),
+        ] {
+            assert_eq!(scalar_value(&ops, &[]), boolean_scalar(expected));
+        }
+        assert_eq!(
+            value(&[
+                Op::Literal(Some(1)),
+                Op::Truth(Some(true)),
+                Op::Column(usize::MAX),
+                Op::Literal(Some(7)),
+                Op::SimpleCase { alternatives: 1 }
+            ]),
+            Some(7)
+        );
         // Owner ruling 2026-10-09 (fgdb-0g2ou): an Integer/Float result mix
         // is a per-row dynamic value in a scalar root, as in openCypher, and
         // stays refused in an integer root.
@@ -852,17 +894,30 @@ mod tests {
             prepare(&[floating(1.0)]),
             Err(GraphIntegerBuildError::OperandType { .. })
         ));
+        let row = [GraphValue::Scalar(CanonicalScalar::Bool(true))];
+        for (comparison, expected) in [
+            (IntegerComparison::Equal, false),
+            (IntegerComparison::NotEqual, true),
+        ] {
+            let comparison =
+                prepare_scalar(&[Op::ScalarColumn(0), floating(1.0), Op::Compare(comparison)])
+                    .unwrap();
+            assert_eq!(
+                comparison
+                    .evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                CanonicalScalar::Bool(expected)
+            );
+        }
+        // An ordering across domains remains a typed error, never a guess.
         let comparison = prepare_scalar(&[
             Op::ScalarColumn(0),
             floating(1.0),
-            Op::Compare(IntegerComparison::Equal),
+            Op::Compare(IntegerComparison::Less),
         ])
         .unwrap();
         assert!(matches!(
-            comparison.evaluate_scalar_with_control(
-                &[GraphValue::Scalar(CanonicalScalar::Bool(true))],
-                &mut |_| Ok::<_, ()>(())
-            ),
+            comparison.evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(())),
             Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
                 kind: GraphIntegerErrorKind::IncompatibleOperands,
                 ..

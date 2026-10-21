@@ -138,6 +138,12 @@ impl<'a> Cell<'a> {
     fn is_null(self) -> bool {
         matches!(self, Self::Value(value) if value.is_null())
     }
+    /// A present value that is not a number (Int, Float or Decimal): of
+    /// another domain than every number (fgdb-v6ku6).
+    fn not_a_number(self) -> bool {
+        matches!(self, Self::Value(value)
+            if !matches!(value, ValueRef::Scalar(scalar) if crate::algebra::numeric_domain(scalar)))
+    }
     fn integer(self) -> Option<i128> {
         match self {
             Self::Count(value) => Some(i128::from(value)),
@@ -574,6 +580,12 @@ impl PreparedGraphAggregate {
                 GraphAggregateTest::IsNull => cell.is_null(),
                 GraphAggregateTest::IsNotNull => !cell.is_null(),
                 GraphAggregateTest::Integer { .. } if cell.is_null() => false,
+                // A number is unequal to a value of another domain.
+                GraphAggregateTest::Integer {
+                    comparison:
+                        comparison @ (IntegerComparison::Equal | IntegerComparison::NotEqual),
+                    ..
+                } if cell.not_a_number() => comparison == IntegerComparison::NotEqual,
                 GraphAggregateTest::Integer { comparison, value } => {
                     let order = cell.numeric_comparison(Cell::Integer(value)).ok_or(
                         GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate }),
@@ -1310,9 +1322,10 @@ mod tests {
                             IntegerComparison::Greater,
                             0,
                         ),
+                        // An ordering: equality across domains is decided.
                         numeric(
                             GraphAggregateColumn::GroupKey(0),
-                            IntegerComparison::Equal,
+                            IntegerComparison::GreaterOrEqual,
                             1,
                         ),
                     ],
@@ -1330,6 +1343,29 @@ mod tests {
                     GraphAggregateError::NonIntegerHaving { predicate: 1 }
                 ))
             ));
+        }
+        // fgdb-v6ku6: TRUE is of another domain than 1, so `= 1` rejects the
+        // group and `<> 1` keeps it, with no domain refusal.
+        for (comparison, kept) in [
+            (IntegerComparison::Equal, 0),
+            (IntegerComparison::NotEqual, 1),
+        ] {
+            let query = definition(0, None)
+                .with_result_clauses(
+                    &[numeric(GraphAggregateColumn::GroupKey(0), comparison, 1)],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                query
+                    .finish_groups(&input, &mut |_| Ok::<
+                        _,
+                        GqlQueryError<GraphAggregateError<()>, ()>,
+                    >(()))
+                    .unwrap()
+                    .len(),
+                kept
+            );
         }
     }
 

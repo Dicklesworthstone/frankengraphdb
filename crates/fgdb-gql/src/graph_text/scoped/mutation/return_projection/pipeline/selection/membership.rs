@@ -192,11 +192,14 @@ mod tests {
         assert!(template.bind_parameters(&extra).is_err());
     }
 
+    /// An ordering against a list parameter used as a membership list is a
+    /// conflicting context and refuses before any catalog access. Equality
+    /// with it is not a conflict (fgdb-v6ku6): a scalar is unequal to a list.
     #[test]
     fn conflicting_parameter_contexts_refuse_before_catalog_access() {
         for statement in [
             "MATCH (n:X) WITH n, $ids AS old WHERE n IN $ids RETURN n",
-            "MATCH (n:X) WITH n WHERE n IN $ids AND 1 = $ids RETURN n",
+            "MATCH (n:X) WITH n WHERE n IN $ids AND 1 < $ids RETURN n",
         ] {
             let mut calls = 0;
             assert!(
@@ -207,6 +210,16 @@ mod tests {
                 .is_err()
             );
             assert_eq!(calls, 0, "{statement}");
+        }
+        let ids = GqlParameters::new()
+            .with_list("ids", vec![int(2), null()])
+            .unwrap();
+        for (operator, wanted) in [("=", vec![]), ("<>", expected(&[2, 2]))] {
+            let statement = format!(
+                "UNWIND [1, 2, 2, 3, NULL] AS n WITH n \
+                 WHERE n IN $ids AND 1 {operator} $ids RETURN n"
+            );
+            assert_eq!(run(&prepare(&statement, &ids)), wanted, "{statement}");
         }
         let mut calls = 0;
         assert!(

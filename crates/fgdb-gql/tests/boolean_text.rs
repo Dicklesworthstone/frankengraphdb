@@ -269,10 +269,18 @@ fn boolean_constants_and_keyword_named_variables_keep_null_and_identity_semantic
     ] {
         assert!(PreparedGraphText::prepare(statement, symbols).is_ok());
     }
-    for value in [
-        None,
-        Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
-        Some(CanonicalPropertyValue::from(CanonicalScalar::Bool(true))),
+    // NOT keeps a missing or NULL operand UNKNOWN. A Bool is of another
+    // domain than 1 (fgdb-v6ku6): `a.n = 1` is FALSE, so NOT keeps the row.
+    for (value, kept) in [
+        (None, false),
+        (
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
+            false,
+        ),
+        (
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Bool(true))),
+            true,
+        ),
     ] {
         let pattern = query("MATCH (a) WHERE NOT (a.n=1) RETURN a");
         let result = pattern
@@ -287,7 +295,7 @@ fn boolean_constants_and_keyword_named_variables_keep_null_and_identity_semantic
                 || Ok::<_, ()>(()),
             )
             .unwrap();
-        assert!(result.value.is_empty());
+        assert_eq!(result.value.len(), usize::from(kept));
     }
 }
 

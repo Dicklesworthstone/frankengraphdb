@@ -337,10 +337,20 @@ fn three_valued_boolean_and_incompatible_comparison_semantics_are_shared() {
     .unwrap();
     let mut state = IncrementalRowProjection::new(definition);
     apply(&mut state, &input);
-    assert_eq!(state.rows().len(), 1);
+    // NOT (1 = NULL) stays UNKNOWN; 1 and '1' are of different domains, so
+    // NOT (1 = '1') is TRUE, as NOT (1 = 2) is (fgdb-v6ku6).
+    let mut kept = state
+        .rows()
+        .iter()
+        .map(|(row, _)| row.values()[1].clone())
+        .collect::<Vec<_>>();
+    kept.sort();
     assert_eq!(
-        state.rows().iter().next().unwrap().0.values()[1],
-        GraphValue::Scalar(CanonicalScalar::Int(2))
+        kept,
+        vec![
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("1").unwrap()),
+        ]
     );
 }
 

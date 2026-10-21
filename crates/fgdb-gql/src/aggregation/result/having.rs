@@ -5,8 +5,8 @@
 //! invalid numeric operands. Counts, integer sums and exact-average fractions
 //! share overflow-free rational comparisons, including binary64 operands,
 //! without rounding either side. Other
-//! scalars compare only within their canonical kind. Null and incompatible
-//! nonnumeric kinds are UNKNOWN.
+//! scalars compare only within their canonical kind. Null is UNKNOWN. Values
+//! of different domains are unequal and unordered (fgdb-v6ku6).
 
 use super::*;
 use crate::algebra::ScalarPredicate;
@@ -384,6 +384,14 @@ fn compare<E, C>(
             || left.float().is_some()
             || right.float().is_some() =>
         {
+            // A number is unequal to a value of another domain (fgdb-v6ku6).
+            if matches!(
+                comparison,
+                IntegerComparison::Equal | IntegerComparison::NotEqual
+            ) && (left.not_a_number() || right.not_a_number())
+            {
+                return Ok(comparison.across_domains());
+            }
             // Preserve the existing numeric HAVING domain refusal, even under
             // OR TRUE / AND FALSE. Never make adding parentheses hide it.
             return Err(GqlQueryError::Source(
@@ -397,7 +405,21 @@ fn compare<E, C>(
                 a.cmp(b)
             }
             (Cell::Value(ValueRef::Vertex(a)), Cell::Value(ValueRef::Vertex(b))) => a.cmp(&b),
-            _ => return Ok(None),
+            // Relationships are equal or not; they have no order.
+            (Cell::Value(ValueRef::Edge(a)), Cell::Value(ValueRef::Edge(b))) => {
+                if !matches!(
+                    comparison,
+                    IntegerComparison::Equal | IntegerComparison::NotEqual
+                ) {
+                    return Ok(None);
+                }
+                a.cmp(&b)
+            }
+            // Like the row filter IR, HAVING borrows its cells and does not
+            // equate two composites: UNKNOWN.
+            (Cell::Value(a), Cell::Value(b)) if composite(a) && composite(b) => return Ok(None),
+            // Values of different domains are unequal and unordered.
+            _ => return Ok(comparison.across_domains()),
         },
     };
     Ok(Some(match comparison {
@@ -408,6 +430,13 @@ fn compare<E, C>(
         IntegerComparison::GreaterOrEqual => order != Ordering::Less,
         IntegerComparison::LessOrEqual => order != Ordering::Greater,
     }))
+}
+
+fn composite(value: ValueRef<'_>) -> bool {
+    !matches!(
+        value,
+        ValueRef::Scalar(_) | ValueRef::Vertex(_) | ValueRef::Edge(_)
+    )
 }
 
 impl PreparedGraphAggregate {
@@ -697,6 +726,75 @@ mod tests {
         ));
     }
 
+    /// fgdb-v6ku6: a relationship equals only itself and has no order; a
+    /// value of another domain is unequal to it, under NOT too. Two
+    /// composites stay UNKNOWN: HAVING does not equate them. (A number
+    /// against another domain keeps its ordering refusal; see below.)
+    #[test]
+    fn group_cells_of_different_domains_are_unequal_and_unordered() {
+        let (one, text, list) = (
+            CanonicalScalar::Int(1),
+            CanonicalScalar::ucs_basic_text("a").unwrap(),
+            [GraphValue::Scalar(CanonicalScalar::Int(1))],
+        );
+        let (first, second) = (ValueRef::Edge(EId(1)), ValueRef::Edge(EId(2)));
+        for (left, comparison, right, truth) in [
+            (first, IntegerComparison::Equal, first, Some(true)),
+            (first, IntegerComparison::Equal, second, Some(false)),
+            (first, IntegerComparison::NotEqual, second, Some(true)),
+            (first, IntegerComparison::Less, second, None),
+            (
+                first,
+                IntegerComparison::Equal,
+                ValueRef::Scalar(&one),
+                Some(false),
+            ),
+            (
+                first,
+                IntegerComparison::NotEqual,
+                ValueRef::Vertex(VId(1)),
+                Some(true),
+            ),
+            (
+                ValueRef::List(&list),
+                IntegerComparison::Equal,
+                ValueRef::Scalar(&one),
+                Some(false),
+            ),
+            (
+                ValueRef::List(&list),
+                IntegerComparison::Less,
+                ValueRef::Scalar(&text),
+                None,
+            ),
+            (
+                ValueRef::List(&list),
+                IntegerComparison::NotEqual,
+                ValueRef::Scalar(&text),
+                Some(true),
+            ),
+            (
+                ValueRef::List(&list),
+                IntegerComparison::Equal,
+                ValueRef::List(&list),
+                None,
+            ),
+        ] {
+            let group = Group {
+                key: &[left, right],
+                state: &[],
+            };
+            let compare = cmp(Arg::Column(K(0)), comparison, Arg::Column(K(1)));
+            assert_eq!(
+                evaluate(std::slice::from_ref(&compare), group),
+                truth == Some(true)
+            );
+            assert_eq!(evaluate(&[compare, Op::Not], group), truth == Some(false));
+        }
+    }
+
+    /// NULL stays UNKNOWN under NOT. A value of another domain is unequal
+    /// (fgdb-v6ku6), so NOT of its equality keeps the group.
     #[test]
     fn null_and_incompatible_values_remain_unknown_under_not() {
         let wanted =
@@ -723,7 +821,10 @@ mod tests {
                     ],
                     group
                 ),
-                matches!(actual, CanonicalScalar::Bool(false))
+                matches!(
+                    actual,
+                    CanonicalScalar::Bool(false) | CanonicalScalar::Text(_)
+                )
             );
         }
         let missing = [Accumulator::Sum {
@@ -924,10 +1025,11 @@ mod tests {
             vec![ValueRef::Scalar(&boolean)],
             vec![Accumulator::Count(0), Accumulator::Extreme(None)],
         );
+        // An ordering: `true = 1` is FALSE across domains (fgdb-v6ku6).
         for (truth, op) in [(false, Op::And), (true, Op::Or)] {
             let expr = expression(&[
                 Op::Truth(Some(truth)),
-                cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Integer(1)),
+                cmp(Arg::Column(K(0)), IntegerComparison::Less, Arg::Integer(1)),
                 op,
             ]);
             for count in [None, Some(0)] {
@@ -1152,8 +1254,8 @@ mod tests {
                 .clone()
                 .with_having_expression(&expression(&[
                     Op::Truth(Some(truth)),
-                    cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Integer(1)),
-                    op,
+                    cmp(Arg::Column(K(0)), IntegerComparison::Less, Arg::Integer(1)),
+                    op.clone(),
                 ]))
                 .unwrap();
             assert!(matches!(
@@ -1162,6 +1264,22 @@ mod tests {
                     GraphAggregateError::NonIntegerHaving { predicate: 1 }
                 ))
             ));
+            // Equality is decided across domains (fgdb-v6ku6): `true = 1` is
+            // FALSE, so only OR TRUE keeps the row.
+            let decided = query
+                .clone()
+                .with_having_expression(&expression(&[
+                    Op::Truth(Some(truth)),
+                    cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Integer(1)),
+                    op,
+                ]))
+                .unwrap();
+            assert_eq!(
+                decided
+                    .evaluate_incremental_having(&boolean, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                Some(truth)
+            );
         }
         let invalid = query
             .with_result_clauses(
@@ -1173,10 +1291,11 @@ mod tests {
                             value: 0,
                         },
                     },
+                    // An ordering: `true = 1` is decided FALSE (fgdb-v6ku6).
                     GraphAggregateFilter {
                         column: K(0),
                         test: GraphAggregateTest::Integer {
-                            comparison: IntegerComparison::Equal,
+                            comparison: IntegerComparison::LessOrEqual,
                             value: 1,
                         },
                     },

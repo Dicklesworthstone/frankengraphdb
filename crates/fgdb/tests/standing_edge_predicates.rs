@@ -132,7 +132,19 @@ fn storage_count(db: &Database<MemVfs>, edge: bool, operator: usize) -> u64 {
             let order = match numeric_order(a, b) {
                 Some(order) => order,
                 None if core::mem::discriminant(a) == core::mem::discriminant(b) => a.cmp(b),
-                None => return false,
+                // Values of different domains are unequal (fgdb-v6ku6): only
+                // `<>` holds. Decimal against Int or Float stays UNKNOWN.
+                None => {
+                    let number = |value: &CanonicalScalar| {
+                        matches!(
+                            value,
+                            CanonicalScalar::Int(_)
+                                | CanonicalScalar::Float(_)
+                                | CanonicalScalar::Decimal(_)
+                        )
+                    };
+                    return operator == 1 && !(number(a) && number(b));
+                }
             };
             match operator {
                 0 => order == Ordering::Equal,

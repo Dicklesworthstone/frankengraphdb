@@ -223,42 +223,48 @@ impl RowPredicate {
                 } => {
                     let left = domain(left)?;
                     let right = domain(right)?;
-                    if matches!(
-                        left,
-                        GraphSetColumnType::Path
-                            | GraphSetColumnType::Vertices
-                            | GraphSetColumnType::Edges
-                            | GraphSetColumnType::List
-                    ) || matches!(
-                        right,
-                        GraphSetColumnType::Path
-                            | GraphSetColumnType::Vertices
-                            | GraphSetColumnType::Edges
-                            | GraphSetColumnType::List
-                    ) {
+                    let equality = matches!(
+                        comparison,
+                        IntegerComparison::Equal | IntegerComparison::NotEqual
+                    );
+                    let composite = |domain| {
+                        matches!(
+                            domain,
+                            GraphSetColumnType::Path
+                                | GraphSetColumnType::Vertices
+                                | GraphSetColumnType::Edges
+                                | GraphSetColumnType::List
+                        )
+                    };
+                    // This IR does not equate two composites. A composite is
+                    // unequal to a scalar or an element (fgdb-v6ku6), which
+                    // can never hold one; it has no order.
+                    let atomic = |domain| {
+                        matches!(
+                            domain,
+                            GraphSetColumnType::Scalar
+                                | GraphSetColumnType::Vertex
+                                | GraphSetColumnType::Edge
+                        )
+                    };
+                    if (composite(left) && !(equality && atomic(right)))
+                        || (composite(right) && !(equality && atomic(left)))
+                    {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     // Relationships compare by EId, never endpoints or the
-                    // total row order. Any may carry a relationship after
-                    // UNWIND; its actual domain is checked by compare().
+                    // total row order: only for (in)equality. Against any
+                    // other domain a relationship is unequal; compare()
+                    // checks an Any column's actual domain.
                     if (left == GraphSetColumnType::Edge || right == GraphSetColumnType::Edge)
-                        && (!matches!(
-                            comparison,
-                            IntegerComparison::Equal | IntegerComparison::NotEqual
-                        ) || !(left == right
-                            || left == GraphSetColumnType::Any
-                            || right == GraphSetColumnType::Any))
+                        && !equality
                     {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
                         && left != GraphSetColumnType::Any
                         && right != GraphSetColumnType::Any
-                        && !(left == right
-                            && matches!(
-                                comparison,
-                                IntegerComparison::Equal | IntegerComparison::NotEqual
-                            ))
+                        && !equality
                     {
                         return Err(Error::InvalidVertexComparison { instruction });
                     }
@@ -344,7 +350,8 @@ enum Cell<'a> {
     Scalar(&'a CanonicalScalar),
     Vertex(fgdb_types::VId),
     Edge(fgdb_types::EId),
-    Incompatible,
+    /// A path, list, map or list of graph elements in a dynamic column.
+    Composite,
 }
 impl Cell<'_> {
     fn is_null(self) -> bool {
@@ -375,7 +382,7 @@ fn resolve<'a, E>(
                 | GraphValue::Vertices(_)
                 | GraphValue::Edges(_)
                 | GraphValue::List(_)
-                | GraphValue::Map { .. } => Cell::Incompatible,
+                | GraphValue::Map { .. } => Cell::Composite,
             }
         }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
@@ -399,7 +406,11 @@ fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Op
         (Cell::Scalar(left), Cell::Scalar(right)) => {
             comparison.evaluate_scalar_pair(Some(left), Some(right))
         }
-        _ => None,
+        // This IR does not equate two composites: the private join probes
+        // and equality lookups key them as non-witnesses. It stays UNKNOWN.
+        (Cell::Composite, Cell::Composite) => None,
+        // Values of different domains are unequal and unordered (fgdb-v6ku6).
+        _ => comparison.across_domains(),
     }
 }
 fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
@@ -559,10 +570,23 @@ mod tests {
                 IntegerComparison::Equal,
                 None,
             ),
+            // Another domain is unequal (fgdb-v6ku6), never UNKNOWN.
             (
                 CanonicalScalar::Bool(true),
                 float(1.0),
                 IntegerComparison::NotEqual,
+                Some(true),
+            ),
+            (
+                CanonicalScalar::Bool(true),
+                float(1.0),
+                IntegerComparison::Equal,
+                Some(false),
+            ),
+            (
+                CanonicalScalar::Bool(true),
+                float(1.0),
+                IntegerComparison::Less,
                 None,
             ),
         ] {

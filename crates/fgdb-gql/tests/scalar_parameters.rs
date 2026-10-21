@@ -145,7 +145,8 @@ fn scalar_bindings_match_independent_encoded_order_for_every_supported_compariso
                         return None;
                     }
                     // Int and Float compare exactly across kinds; any other
-                    // pair of unequal kinds is UNKNOWN.
+                    // pair of unequal kinds is of different domains
+                    // (fgdb-v6ku6): only `<>` holds, every ordering UNKNOWN.
                     let order = match numeric_order(actual, expected) {
                         Some(order) => order,
                         None if CanonicalScalarKind::of(actual)
@@ -153,7 +154,7 @@ fn scalar_bindings_match_independent_encoded_order_for_every_supported_compariso
                         {
                             actual.encode().unwrap().cmp(&expected.encode().unwrap())
                         }
-                        None => return None,
+                        None => return (operator == "<>").then_some(VId(at as u128)),
                     };
                     let accepts = if ["<>", "<=", ">="].contains(&operator) {
                         order != comparison

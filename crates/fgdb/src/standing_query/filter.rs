@@ -87,8 +87,9 @@ impl State {
 impl<V: Vfs + Clone> Database<V> {
     /// Filter a maintained row/set/join/projection/filter bag using the same
     /// checked three-valued predicate law as relational WHERE. Only TRUE keeps
-    /// an occurrence. NULL and incompatible scalar kinds remain UNKNOWN even
-    /// beneath NOT. Project computed operands first, then filter their columns.
+    /// an occurrence. NULL remains UNKNOWN even beneath NOT; values of
+    /// different domains are unequal (fgdb-v6ku6). Project computed operands
+    /// first, then filter their columns.
     /// Input names/types and exact duplicate counts are preserved, not coerced.
     ///
     /// The parent's selected DISTINCT/order/page is upstream of the predicate.

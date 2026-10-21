@@ -617,9 +617,9 @@ fn composite_values_are_operands_of_scalar_operators() {
 /// fgdb-9cawv: a list or map literal compared with `=`, `<>`, `!=` or IN is
 /// one three-valued comparison: a definite mismatch is FALSE, else an
 /// UNKNOWN element makes it UNKNOWN, and maps with different key sets are
-/// FALSE whatever their values (TCK Comparison1 [6], [7], List5). Mixed
-/// domains keep the engine's row-predicate law: UNKNOWN, where openCypher
-/// says FALSE.
+/// FALSE whatever their values (TCK Comparison1 [6], [7], List5). Values of
+/// different domains are unequal, as openCypher says (fgdb-v6ku6, owner
+/// ruling (a), 2026-10-21): FALSE, never UNKNOWN.
 #[test]
 fn composite_literals_compare_three_valued() {
     let truth = |value: bool| CanonicalScalar::Bool(value);
@@ -631,7 +631,7 @@ fn composite_literals_compare_three_valued() {
         ("[[1]] = [[1], [null]]", truth(false)),
         ("[[1], [2]] = [[1], [null]]", null.clone()),
         ("[[1], [2, 3]] = [[1], [null]]", truth(false)),
-        ("['a'] = [1]", null.clone()),
+        ("['a'] = [1]", truth(false)),
         ("[1, 2] = [1, 2]", truth(true)),
         ("[1] = null", null.clone()),
         // Comparison1 [7].
@@ -692,11 +692,12 @@ fn composite_literals_compare_three_valued() {
         ("[1] = [1] AND [2] <> [3]", truth(true)),
         ("NOT [1] = [2]", truth(true)),
         // IN binds tighter than the comparison (Precedence3 [6]): the right
-        // operand is the membership, unless parentheses say otherwise.
-        ("[1, 2] = [3, 4] IN [true, false]", null.clone()),
-        ("[1, 2] = ([3, 4] IN [true, false])", null.clone()),
+        // operand is the membership, unless parentheses say otherwise. A
+        // list against a Boolean is FALSE across domains (fgdb-v6ku6).
+        ("[1, 2] = [3, 4] IN [true, false]", truth(false)),
+        ("[1, 2] = ([3, 4] IN [true, false])", truth(false)),
         ("([1, 2] = [3, 4]) IN [true, false]", truth(true)),
-        ("[1, 2] = [1, 2] IN [false]", null.clone()),
+        ("[1, 2] = [1, 2] IN [false]", truth(false)),
         ("[1] IN [[1]] = true", truth(true)),
         ("[1, 2][0] = 1", truth(true)),
         ("{k: 1}.k = 1", truth(true)),
@@ -742,6 +743,129 @@ fn composite_literals_compare_three_valued() {
             .collect::<Vec<_>>(),
         vec![truth(true), truth(false), truth(false)]
     );
+}
+
+/// fgdb-v6ku6, owner ruling (a): openCypher answers FALSE for `=`, TRUE for
+/// `<>`, and FALSE for IN between values of different domains, at every
+/// level: inside lists (TCK Comparison1 [6], List3, List5) and between
+/// scalars at the top. Lists compare element-wise: different lengths are
+/// FALSE, a definite mismatch wins, and a NULL makes the answer NULL only
+/// when no element pair is decisively unequal. Numbers are one domain
+/// (1 = 1.0), and an ordering across domains stays NULL.
+#[test]
+fn values_of_different_domains_are_unequal_as_in_opencypher() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    let null = CanonicalScalar::Null;
+    let cases = [
+        // Comparison1 [6].
+        ("['a'] = [1]", truth(false)),
+        // List3 [1], [3], [6]; [4] and [7] stay NULL.
+        ("[1, 2] = 'foo'", truth(false)),
+        ("[1, 2] = [null, 'foo']", truth(false)),
+        ("[[1, 2], [1, 3]] = [[1, 2], [null, 'foo']]", truth(false)),
+        ("[1, 2] = [null, 2]", null.clone()),
+        (
+            "[[1, 2], ['foo', 'bar']] = [[1, 2], [null, 'bar']]",
+            null.clone(),
+        ),
+        // List5 [6], [7], [8], [11], [12], [13], [18], [19], [28], [30],
+        // [33], [38].
+        ("[1, 2] IN [1, [1, '2']]", truth(false)),
+        ("[1] IN [1, 2]", truth(false)),
+        ("[1, 2] IN [1, 2]", truth(false)),
+        ("[1, 2] IN [1, [2, 1]]", truth(false)),
+        ("[1, 2] IN [1, [1, 2, 3]]", truth(false)),
+        ("[1, 2] IN [1, [[1, 2]]]", truth(false)),
+        ("[[1]] IN [2, [1]]", truth(false)),
+        ("[[1, 3]] IN [2, [1, 3]]", truth(false)),
+        ("[1, 2] IN [[null, 'foo']]", truth(false)),
+        ("[1, 2] IN [[1, 2, null]]", truth(false)),
+        ("[[1, 2], [3, 4]] IN [[[1, 2], [3, 4], null]]", truth(false)),
+        ("[] IN [1, 2]", truth(false)),
+        // List5 null rules that stay: [20], [22], [24], [25], [29], [31], [40].
+        ("null IN [null]", null.clone()),
+        ("[null] IN [null]", null.clone()),
+        ("3 IN [1, null, 3]", truth(true)),
+        ("4 IN [1, null, 3]", null.clone()),
+        ("[1, 2] IN [[null, 2]]", null.clone()),
+        ("[1, 2, null] IN [1, [1, 2, null]]", null.clone()),
+        ("[] IN [1, null]", null.clone()),
+        // Mixed element types against a scalar (List5 [5]).
+        ("1 IN ['1', 2]", truth(false)),
+        ("[1] = 1", truth(false)),
+        ("[1] <> 1", truth(true)),
+        ("{a: 1} = [1]", truth(false)),
+        ("{a: 1} <> [1]", truth(true)),
+        // Top-level scalars of unrelated kinds.
+        ("1 = 'a'", truth(false)),
+        ("1 <> 'a'", truth(true)),
+        ("1 != 'a'", truth(true)),
+        ("NOT (1 = 'a')", truth(true)),
+        ("1 = true", truth(false)),
+        ("1.5 <> false", truth(true)),
+        ("1 IN ['a', 2]", truth(false)),
+        ("'a' IN [1, 'a']", truth(true)),
+        ("1 NOT IN ['a', 2]", truth(true)),
+        ("2 IN ['a', null]", null.clone()),
+        ("date('2020-01-01') = 1", truth(false)),
+        ("date('2020-01-01') <> 'a'", truth(true)),
+        ("CASE 1 WHEN 'a' THEN 'x' ELSE 'y' END", text("y")),
+        ("n.text = 1", truth(false)),
+        ("n.text <> 1", truth(true)),
+        ("n.text IN [1, 'x']", truth(true)),
+        ("n.text IN [1, true]", truth(false)),
+        ("n.text IN [1, null]", null.clone()),
+        // The null rules and numeric equality that must not move.
+        ("1 IN [1, null]", truth(true)),
+        ("2 IN [1, null]", null.clone()),
+        ("null = null", null.clone()),
+        ("1 = null", null.clone()),
+        ("1 = 1.0", truth(true)),
+        ("1 <> 1.0", truth(false)),
+        ("1 IN [1.0, 'a']", truth(true)),
+        // An ordering across domains stays NULL.
+        ("[1] < ['a']", null.clone()),
+    ];
+    for (expression, expected) in &cases {
+        assert_eq!(&scalar(expression, &text("x")), expected, "{expression}");
+        // The TCK's bare RETURN form, over the unit row.
+        if !expression.contains("n.text") {
+            let result = execute(
+                &prepare(&format!("RETURN {expression} AS x")),
+                &text("x"),
+                policy(),
+            )
+            .unwrap();
+            assert_eq!(
+                result.value[0].values()[0].as_scalar(),
+                Some(expected),
+                "RETURN {expression}"
+            );
+        }
+    }
+    // A stored property of another domain under WHERE: `=` drops the row,
+    // `<>` and NOT `=` keep it; NULL stays UNKNOWN either way.
+    for (predicate, input, kept) in [
+        ("n.text = 1", text("x"), false),
+        ("n.text <> 1", text("x"), true),
+        ("NOT n.text = 1", text("x"), true),
+        ("NOT (n.text = 1 OR n.text = true)", text("x"), true),
+        ("n.text = 1 OR n.text <> true", text("x"), true),
+        ("NOT n.text IN [1, true]", text("x"), true),
+        ("n.text <> 'x'", CanonicalScalar::Int(1), true),
+        ("NOT n.text = 'x'", CanonicalScalar::Bool(true), true),
+        ("n.text <> 1", CanonicalScalar::Null, false),
+        ("NOT n.text = 1", CanonicalScalar::Null, false),
+        ("n.text < 1", text("x"), false),
+        ("NOT n.text < 1", text("x"), false),
+    ] {
+        let query = prepare(&format!("MATCH (n) WHERE {predicate} RETURN n.text AS v"));
+        assert_eq!(
+            execute(&query, &input, policy()).unwrap().value.len(),
+            usize::from(kept),
+            "{predicate} over {input:?}"
+        );
+    }
 }
 
 /// openCypher `^` (TCK Precedence2 [2] to [4], Return2 [1]): always a float,

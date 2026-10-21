@@ -439,9 +439,10 @@ fn not_keeps_unknown_and_nested_text_programs_track_hidden_properties() {
             seed.create_vertex(VId(at as u128 + 1), vec![], props);
         }
         db.write(&commit, seed).await.unwrap();
-        // Missing, stored null and a unlike scalar kind remain UNKNOWN under
-        // NOT; none is admitted merely because the comparison was not TRUE.
-        assert_eq!(count(&db, &cx, &not_handle), 2);
+        // Missing and stored null remain UNKNOWN under NOT; neither is
+        // admitted merely because the comparison was not TRUE. A Bool is of
+        // another domain than 7 (fgdb-v6ku6): `= 7` is FALSE, so NOT admits it.
+        assert_eq!(count(&db, &cx, &not_handle), 3);
         assert_eq!(count(&db, &cx, &text_handle), 2);
         let mut update = WriteBatch::new(R);
         update.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(6)));
@@ -451,7 +452,7 @@ fn not_keeps_unknown_and_nested_text_programs_track_hidden_properties() {
             Some(CanonicalScalar::ucs_basic_text("albert").unwrap()),
         );
         db.write(&commit, update).await.unwrap();
-        assert_eq!(count(&db, &cx, &not_handle), 3);
+        assert_eq!(count(&db, &cx, &not_handle), 4);
         assert_eq!(count(&db, &cx, &text_handle), 3);
         let mut update = WriteBatch::new(R);
         update.set_vertex_property(
@@ -462,7 +463,7 @@ fn not_keeps_unknown_and_nested_text_programs_track_hidden_properties() {
         update.set_vertex_property(VId(6), NAME, Some(CanonicalScalar::Null));
         update.set_vertex_property(VId(5), P, None);
         db.write(&commit, update).await.unwrap();
-        assert_eq!(count(&db, &cx, &not_handle), 2);
+        assert_eq!(count(&db, &cx, &not_handle), 3);
         assert_eq!(count(&db, &cx, &text_handle), 1);
         assert_eq!(
             db.standing_query(&cx, &not_handle).unwrap().rows(),

@@ -83,8 +83,11 @@ fn text_or_allows_nonmembers_but_detects_membership_through_either_property() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// NOT keeps a missing or NULL value UNKNOWN, so neither enters the read
+/// result. A Bool is of another domain than 7 (fgdb-v6ku6): `n.p = 7` is
+/// FALSE, so NOT admits it and its concurrent write is a read conflict.
 #[test]
-fn text_not_keeps_missing_null_and_incompatible_values_unknown() {
+fn text_not_keeps_missing_and_null_unknown_but_admits_another_domain() {
     let ((), report) = run_async_under_lab(0x7653_0202, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
@@ -98,7 +101,10 @@ fn text_not_keeps_missing_null_and_incompatible_values_unknown() {
             Some(CanonicalScalar::Int(7)),
             Some(CanonicalScalar::Int(8)),
         ] {
-            let enters = value == Some(CanonicalScalar::Int(8));
+            let enters = matches!(
+                value,
+                Some(CanonicalScalar::Int(8) | CanonicalScalar::Bool(true))
+            );
             let mut database = fixture(&cx).await;
             let mut transaction = database.begin(&txcx).unwrap();
             let result = transaction

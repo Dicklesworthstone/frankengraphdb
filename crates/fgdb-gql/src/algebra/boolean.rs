@@ -330,20 +330,19 @@ impl GraphBooleanExpression {
                     comparison,
                     right,
                 } => {
-                    // An element compares only for (in)equality with an
-                    // element of the same kind (false = vertex, true = edge).
-                    let element = |operand: &GraphBooleanOperand<'_>| match operand {
-                        GraphBooleanOperand::Vertex(_) => Some(false),
-                        GraphBooleanOperand::Edge(_) => Some(true),
-                        _ => None,
+                    // An element compares only for (in)equality. Against a
+                    // value of another kind it is unequal (fgdb-v6ku6).
+                    let element = |operand: &GraphBooleanOperand<'_>| {
+                        matches!(
+                            operand,
+                            GraphBooleanOperand::Vertex(_) | GraphBooleanOperand::Edge(_)
+                        )
                     };
-                    let (left_element, right_element) = (element(&left), element(&right));
-                    if (left_element.is_some() || right_element.is_some())
-                        && !(left_element == right_element
-                            && matches!(
-                                comparison,
-                                IntegerComparison::Equal | IntegerComparison::NotEqual
-                            ))
+                    if (element(&left) || element(&right))
+                        && !matches!(
+                            comparison,
+                            IntegerComparison::Equal | IntegerComparison::NotEqual
+                        )
                     {
                         return Err(GraphBooleanError::InvalidElementComparison);
                     }
@@ -640,12 +639,12 @@ fn compare<E: From<crate::GraphIntegerError>>(
         }
         // Two stored collections compare as composite values do: element by
         // element, three-valued (fgdb-9cawv, fgdb-k3nub). Against a scalar, a
-        // vertex or an edge, a collection is UNKNOWN, as any other pair of
-        // unrelated kinds is.
+        // vertex or an edge, a collection is of another domain, as any other
+        // pair of unrelated kinds is: unequal, and unordered (fgdb-v6ku6).
         (Value::Stored(left), Value::Stored(right)) => Truth::from(
             crate::algebra_exec::compare_stored(comparison, left, right, control)?,
         ),
-        _ => Truth::Unknown,
+        _ => Truth::from(comparison.across_domains()),
     })
 }
 
@@ -1120,6 +1119,9 @@ mod tests {
         }
     }
 
+    /// NOT keeps a missing or NULL operand UNKNOWN. A Bool against an Int
+    /// is of another domain (fgdb-v6ku6): unequal, so NOT `=` admits it and
+    /// NOT `<>` does not, and unordered, so NOT of an ordering stays UNKNOWN.
     #[test]
     fn negation_does_not_admit_missing_null_or_incompatible_values() {
         let expected = CanonicalScalar::Int(7);
@@ -1163,6 +1165,7 @@ mod tests {
                 let expected = match value {
                     Some(CanonicalScalar::Int(n)) => !comparison.accepts(*n, 7),
                     Some(CanonicalScalar::Float(n)) => !comparison.accepts(n.get() as i64, 7),
+                    Some(CanonicalScalar::Bool(_)) => comparison == IntegerComparison::Equal,
                     _ => false,
                 };
                 assert_eq!(actual, expected);
@@ -1292,21 +1295,17 @@ mod tests {
             Err(GraphBooleanError::InvalidVariableName)
         ));
         let literal = CanonicalScalar::Int(1);
-        assert!(matches!(
-            GraphBooleanExpression::prepare(&[Op::Compare {
-                left: Arg::Vertex("a"),
-                comparison: IntegerComparison::Equal,
-                right: Arg::Literal(&literal)
-            }]),
-            Err(GraphBooleanError::InvalidElementComparison)
-        ));
-        // An edge equals only an edge, and only for (in)equality.
+        // An element has no order, against anything.
         for (left, comparison, right) in [
-            (Arg::Edge("r"), IntegerComparison::Equal, Arg::Vertex("a")),
             (Arg::Edge("r"), IntegerComparison::Less, Arg::Edge("s")),
             (
+                Arg::Vertex("a"),
+                IntegerComparison::Greater,
+                Arg::Vertex("b"),
+            ),
+            (
                 Arg::Literal(&literal),
-                IntegerComparison::Equal,
+                IntegerComparison::LessOrEqual,
                 Arg::Edge("r"),
             ),
         ] {
@@ -1319,6 +1318,48 @@ mod tests {
                 Err(GraphBooleanError::InvalidElementComparison)
             ));
         }
+        // An element is unequal to a value of another kind (fgdb-v6ku6).
+        for (left, right) in [
+            (Arg::Vertex("a"), Arg::Literal(&literal)),
+            (Arg::Literal(&literal), Arg::Vertex("a")),
+            (
+                Arg::Vertex("a"),
+                Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(3),
+                },
+            ),
+        ] {
+            for (comparison, expected) in [
+                (IntegerComparison::Equal, false),
+                (IntegerComparison::NotEqual, true),
+            ] {
+                let program = bound(&[Op::Compare {
+                    left,
+                    comparison,
+                    right,
+                }]);
+                let stored = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
+                assert_eq!(
+                    program
+                        .evaluate(
+                            &[Some(VId(1))],
+                            &mut |_, _| Ok::<_, Failure<()>>(Some(&stored)),
+                            &mut |_| Ok(())
+                        )
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(
+            GraphBooleanExpression::prepare(&[Op::Compare {
+                left: Arg::Edge("r"),
+                comparison: IntegerComparison::Equal,
+                right: Arg::Vertex("a"),
+            }])
+            .is_ok()
+        );
         assert!(
             GraphBooleanExpression::prepare(&[Op::Compare {
                 left: Arg::Edge("r"),

@@ -174,13 +174,15 @@ fn expression(and: bool, negate: bool) -> GraphBooleanExpression {
 
 // Independent truth tables, rather than calling the production comparator.
 fn truth(row: &Record, and: bool, negate: bool) -> bool {
+    // An ordering across domains is UNKNOWN; equality is FALSE (fgdb-v6ku6).
     let a = match property(row, P) {
         Some(CanonicalScalar::Int(value)) => Some(*value > 0),
         _ => None,
     };
     let b = match property(row, Q) {
         Some(CanonicalScalar::Bool(value)) => Some(*value),
-        _ => None,
+        None | Some(CanonicalScalar::Null) => None,
+        Some(_) => Some(false),
     };
     let result = if and {
         match (a, b) {
@@ -488,7 +490,12 @@ fn pair_truth(row: &Record, right_key: PropertyKeyId, comparison: Cmp) -> bool {
     let order = match (property(row, P), property(row, right_key)) {
         (Some(CanonicalScalar::Int(a)), Some(CanonicalScalar::Int(b))) => a.cmp(b),
         (Some(CanonicalScalar::Bool(a)), Some(CanonicalScalar::Bool(b))) => a.cmp(b),
-        _ => return false,
+        (None | Some(CanonicalScalar::Null), _) | (_, None | Some(CanonicalScalar::Null)) => {
+            return false;
+        }
+        // An Int against a Bool: different domains, so only `<>` holds
+        // (fgdb-v6ku6).
+        _ => return comparison == Cmp::NotEqual,
     };
     match comparison {
         Cmp::Equal => order == Equal,

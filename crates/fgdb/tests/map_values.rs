@@ -973,3 +973,161 @@ fn map_projection_reads_properties_and_is_null_for_a_null_source() {
         }
     });
 }
+
+/// fgdb-v6ku6, owner ruling (a): `=` is FALSE, `<>` TRUE and IN FALSE
+/// between values of different domains, as in openCypher, wherever a query
+/// compares them: a stored List against a scalar under WHERE, NOT and OR,
+/// scalar properties of unrelated kinds, two properties, a WITH filter, a
+/// grouped filter, a projection and the bare RETURN. NULL stays UNKNOWN, and
+/// an ordering across domains stays NULL. Without the ruling, `NOT n.first =
+/// 'a'` silently dropped every vertex whose `first` is a List.
+#[test]
+fn values_of_different_domains_are_unequal_through_database_queries() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let empty = GqlParameters::new();
+        // a: p 10, first ['math', 'poetry']; b: p 20, first ['a']; c: p 30;
+        // d: first 'a' and no p; e: p 'x' and no first.
+        for statement in [
+            "MATCH (n:Person {name: 'a'}) SET n.first = ['math', 'poetry']",
+            "MATCH (n:Person {name: 'b'}) SET n.first = ['a']",
+            "CREATE (:Person {name: 'd', first: 'a'})",
+            "CREATE (:Person {name: 'e', p: 'x'})",
+        ] {
+            write(&mut db, (&commit, &cx, &txn), statement, &empty)
+                .await
+                .expect(statement);
+        }
+        let column = |statement: &str| {
+            let mut values: Vec<_> = cells(
+                db.query(&cx, statement, &empty, symbols, policy())
+                    .expect(statement),
+            )
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect();
+            values.sort();
+            values
+        };
+        let names = |list: &[&str]| list.iter().map(|name| text(name)).collect::<Vec<_>>();
+        for (statement, expected) in [
+            // A stored List against a scalar.
+            (
+                "MATCH (n:Person) WHERE NOT n.first = 'a' RETURN n.name AS name",
+                names(&["a", "b"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first <> 'a' RETURN n.name AS name",
+                names(&["a", "b"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first = 'a' RETURN n.name AS name",
+                names(&["d"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first <> 'a' OR n.p = 30 RETURN n.name AS name",
+                names(&["a", "b", "c"]),
+            ),
+            // Scalar properties of unrelated kinds.
+            (
+                "MATCH (n:Person) WHERE n.p <> 10 RETURN n.name AS name",
+                names(&["b", "c", "e"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE NOT n.p = 'x' RETURN n.name AS name",
+                names(&["a", "b", "c"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.p = 10 OR n.name <> 1 RETURN n.name AS name",
+                names(&["a", "b", "c", "d", "e"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.p IN [10, 'x'] RETURN n.name AS name",
+                names(&["a", "e"]),
+            ),
+            // An ordering across domains stays UNKNOWN, under NOT too.
+            (
+                "MATCH (n:Person) WHERE n.p < 'z' RETURN n.name AS name",
+                names(&["e"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE NOT n.p < 'z' RETURN n.name AS name",
+                names(&[]),
+            ),
+            // Two properties.
+            (
+                "MATCH (a:Person {name: 'a'}), (b:Person) WHERE NOT a.first = b.first \
+                 RETURN b.name AS name",
+                names(&["b", "d"]),
+            ),
+            (
+                "MATCH (a:Person {name: 'a'}), (b:Person) WHERE a.first <> b.name \
+                 RETURN b.name AS name",
+                names(&["a", "b", "c", "d", "e"]),
+            ),
+            // A WITH filter and a grouped filter.
+            (
+                "MATCH (n:Person) WITH n.name AS name, n.first AS first \
+                 WHERE first <> 'a' RETURN name",
+                names(&["a", "b"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n.name AS name, n.p AS p WHERE NOT p = 'x' RETURN name",
+                names(&["a", "b", "c"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n.p AS p, count(*) AS c WHERE p <> 10 RETURN p",
+                vec![int(20), int(30), text("x")],
+            ),
+        ] {
+            assert_eq!(column(statement), expected, "{statement}");
+        }
+        // A projection of scalar comparisons.
+        let statement = "MATCH (n:Person) RETURN n.name AS name, n.p <> 'x' AS a, \
+                         n.p = 10 AS b, n.name <> 1 AS c, n.p IN ['x', 20] AS d";
+        let mut rows = cells(
+            db.query(&cx, statement, &empty, symbols, policy())
+                .expect(statement),
+        );
+        rows.sort();
+        let truth = |value: bool| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        let (t, f) = (truth(true), truth(false));
+        assert_eq!(
+            rows,
+            vec![
+                vec![text("a"), t.clone(), t.clone(), t.clone(), f.clone()],
+                vec![text("b"), t.clone(), f.clone(), t.clone(), t.clone()],
+                vec![text("c"), t.clone(), f.clone(), t.clone(), f.clone()],
+                vec![text("d"), null(), null(), t.clone(), null()],
+                vec![text("e"), f.clone(), f, t.clone(), t],
+            ],
+            "{statement}"
+        );
+        // The bare RETURN, with the null rules and numeric equality that stay.
+        let statement = "RETURN 1 = 'a' AS a, 1 <> 'a' AS b, 1 IN ['a', 2] AS c, \
+                         [1] = ['a'] AS d, 1 IN [1, null] AS e, 2 IN [1, null] AS f, \
+                         null = null AS g, 1 = 1.0 AS h";
+        assert_eq!(
+            cells(
+                db.query(&cx, statement, &empty, symbols, policy())
+                    .expect(statement)
+            ),
+            vec![vec![
+                truth(false),
+                truth(true),
+                truth(false),
+                truth(false),
+                truth(true),
+                null(),
+                null(),
+                truth(true),
+            ]],
+            "{statement}"
+        );
+    });
+}

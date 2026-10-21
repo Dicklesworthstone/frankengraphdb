@@ -469,30 +469,45 @@ fn native_value_having_uses_the_existing_null_unknown_and_numeric_error_rules() 
             .commit();
         assert_eq!(candidate.rows().len(), usize::from(!value.is_null()));
     }
-    let expression = GraphHavingExpression::prepare(&[
-        GraphHavingOp::Truth(Some(true)),
-        GraphHavingOp::Compare {
-            left: GraphHavingOperand::Column(GraphAggregateColumn::GroupKey(0)),
-            comparison: IntegerComparison::Equal,
-            right: GraphHavingOperand::Integer(1),
-        },
-        GraphHavingOp::Or,
-    ])
-    .unwrap();
-    let def = definition(false)
-        .with_having_expression(&expression)
+    // A list against a number: an ordering is the numeric domain refusal;
+    // equality is decided, FALSE across domains (fgdb-v6ku6).
+    for (comparison, kept) in [
+        (IntegerComparison::Less, None),
+        (IntegerComparison::Equal, Some(0)),
+        (IntegerComparison::NotEqual, Some(1)),
+    ] {
+        let expression = GraphHavingExpression::prepare(&[
+            GraphHavingOp::Truth(Some(false)),
+            GraphHavingOp::Compare {
+                left: GraphHavingOperand::Column(GraphAggregateColumn::GroupKey(0)),
+                comparison,
+                right: GraphHavingOperand::Integer(1),
+            },
+            GraphHavingOp::Or,
+        ])
         .unwrap();
-    let mut candidate = IncrementalGroupAggregate::new(def, &[GraphSetColumnType::Any; 2]).unwrap();
-    assert!(matches!(
-        candidate.prepare(
+        let def = definition(false)
+            .with_having_expression(&expression)
+            .unwrap();
+        let mut candidate =
+            IncrementalGroupAggregate::new(def, &[GraphSetColumnType::Any; 2]).unwrap();
+        let prepared = candidate.prepare(
             &bag([(row(list(vec![int(1)]), int(1)), 1)]),
             LIMBS,
             None,
-            &mut ok
-        ),
-        Err(GroupError::NonIntegerHaving)
-    ));
-    assert!(candidate.rows().is_empty());
+            &mut ok,
+        );
+        match kept {
+            None => {
+                assert!(matches!(prepared, Err(GroupError::NonIntegerHaving)));
+                assert!(candidate.rows().is_empty());
+            }
+            Some(kept) => {
+                prepared.unwrap().commit();
+                assert_eq!(candidate.rows().len(), kept);
+            }
+        }
+    }
     // COLLECT's visitation order is not supplied by a bag. It remains refused.
     let collect = PreparedGraphSetAggregate::prepare(
         dynamic(),

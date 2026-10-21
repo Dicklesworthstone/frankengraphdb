@@ -1854,6 +1854,16 @@ fn compare_cells<E>(
     if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
         return compare_scalars(comparison, left, right, instruction, control);
     }
+    // Every other cell is a number: a count, a wide sum or an exact average.
+    // It is unequal to a scalar of another domain (fgdb-v6ku6).
+    if matches!(
+        comparison,
+        IntegerComparison::Equal | IntegerComparison::NotEqual
+    ) && [left, right].into_iter().any(|cell| {
+        matches!(cell, ExpressionCell::Scalar(value) if !crate::algebra::numeric_domain(value))
+    }) {
+        return Ok(comparison.across_domains());
+    }
     let incompatible = |_| {
         GraphIntegerEvaluationError::Value(GraphIntegerError {
             instruction,
@@ -1930,7 +1940,17 @@ fn compare_scalars<E>(
         (CanonicalScalar::Int(_), CanonicalScalar::Float(_))
             | (CanonicalScalar::Float(_), CanonicalScalar::Int(_))
     );
-    if !numeric_pair && core::mem::discriminant(left) != core::mem::discriminant(right) {
+    // `=` and `<>` answer across value domains (fgdb-v6ku6). An ordering
+    // across domains, and Decimal against Int or Float, remain typed errors.
+    let across_domains = matches!(
+        comparison,
+        IntegerComparison::Equal | IntegerComparison::NotEqual
+    ) && !(crate::algebra::numeric_domain(left)
+        && crate::algebra::numeric_domain(right));
+    if !numeric_pair
+        && !across_domains
+        && core::mem::discriminant(left) != core::mem::discriminant(right)
+    {
         return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
             instruction,
             kind: GraphIntegerErrorKind::IncompatibleOperands,

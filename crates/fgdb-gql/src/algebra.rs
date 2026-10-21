@@ -26,6 +26,7 @@ pub use pattern::{
     MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError,
     PatternLimitDimension, PreparedGraphPattern, PreparedGraphPatternFactors,
 };
+pub(crate) use predicate::numeric_domain;
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue,
@@ -241,7 +242,8 @@ impl IntegerComparison {
     }
 }
 
-/// Ordinary comparisons reject missing, null and incompatible scalar kinds.
+/// Ordinary comparisons reject missing and null values. A present value of
+/// another domain is unequal (fgdb-v6ku6): only NotEqual accepts it.
 /// PropertyNull explicitly tests missing/stored null without conflating errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VertexPredicate {
@@ -277,8 +279,9 @@ impl VertexPredicate {
     /// Evaluate borrowed canonical fields without cloning their payloads.
     ///
     /// A stored List or Map (fgdb-k3nub) is a present, non-NULL value, and
-    /// every predicate here compares a property against a scalar literal: such
-    /// a comparison is UNKNOWN, exactly as for an absent property, and rejects.
+    /// every predicate here compares a property against a scalar literal: the
+    /// two are of different domains (fgdb-v6ku6), so `=` and every ordering
+    /// reject and `<>` accepts. An absent property is UNKNOWN and rejects.
     #[must_use]
     pub fn matches_borrowed<'a>(
         &self,
@@ -293,17 +296,17 @@ impl VertexPredicate {
                 value,
             } => properties.into_iter().any(|(actual_key, value_ref)| {
                 actual_key == *key
-                    && comparison.accepts_scalar_pair(
-                        value_ref.as_scalar(),
+                    && comparison.evaluate_property_scalar(
+                        Some(value_ref),
                         Some(&CanonicalScalar::Int(*value)),
-                    )
+                    ) == Some(true)
             }),
             Self::ScalarProperty { key, predicate } => {
                 let actual = properties
                     .into_iter()
                     .find(|(actual_key, _)| actual_key == key)
-                    .and_then(|(_, value)| value.as_scalar());
-                predicate.matches(actual)
+                    .map(|(_, value)| value);
+                predicate.matches_property(actual)
             }
             Self::PropertyNull { key, is_null } => {
                 let actual = properties
@@ -1486,12 +1489,16 @@ mod tests {
                 comparison,
                 value: 1,
             };
+            assert!(!predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Null.into())]));
+            // Another domain is unequal (fgdb-v6ku6): only `<>` accepts it.
             for actual in [
-                CanonicalScalar::Null,
                 CanonicalScalar::Bool(true),
                 CanonicalScalar::ucs_basic_text("1").unwrap(),
             ] {
-                assert!(!predicate.matches(&[], &[(PropertyKeyId(4), actual.into())]));
+                assert_eq!(
+                    predicate.matches(&[], &[(PropertyKeyId(4), actual.into())]),
+                    comparison == IntegerComparison::NotEqual
+                );
             }
             assert!(!predicate.matches(&[], &[]));
             assert!(

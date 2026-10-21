@@ -48,8 +48,9 @@ impl GraphPatternBuilder {
     /// product: ordinary connectivity and identity constraints still apply.
     ///
     /// The comparison executes inside its scope before OPTIONAL establishes a
-    /// match and before an EXISTS witness or aggregate input is accepted. Null,
-    /// missing and unlike scalar kinds reject every ordinary comparison. Use
+    /// match and before an EXISTS witness or aggregate input is accepted. Null
+    /// and missing values reject every ordinary comparison; values of
+    /// different domains are unequal, so only `<>` accepts them. Use
     /// prepare_values (vertex columns are allowed) or its scoped variants;
     /// predicate-only identity execution cannot supply these property reads.
     pub fn compare_properties(

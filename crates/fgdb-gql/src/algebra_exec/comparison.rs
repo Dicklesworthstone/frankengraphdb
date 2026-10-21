@@ -8,7 +8,8 @@ use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 /// Two stored List or Map property values compare as composite values do:
 /// element by element, three-valued (fgdb-9cawv, fgdb-k3nub). Both are
 /// admitted as owned query values first; a collection against a scalar,
-/// vertex or edge is the caller's UNKNOWN and never reaches here.
+/// vertex or edge is the caller's comparison across domains (fgdb-v6ku6)
+/// and never reaches here.
 pub(crate) fn compare_stored<E: From<crate::GraphIntegerError>>(
     comparison: IntegerComparison,
     left: &CanonicalPropertyValue,
@@ -31,9 +32,11 @@ impl IntegerComparison {
     /// [`Self::accepts_scalar_pair`] over stored property values
     /// (fgdb-k3nub), decided exactly as CompareProperties decides it: two
     /// stored Lists or Maps compare element by element, a collection against
-    /// a scalar or an absent value is UNKNOWN, and otherwise the scalar pair
-    /// compares. Only TRUE is kept. Element evaluation charges `control`; a
-    /// collection beyond the query bounds raises StoredValueBounds.
+    /// an absent value or a NULL is UNKNOWN, a collection against any other
+    /// scalar is a comparison across domains (fgdb-v6ku6), and otherwise the
+    /// scalar pair compares. Only TRUE is kept. Element evaluation charges
+    /// `control`; a collection beyond the query bounds raises
+    /// StoredValueBounds.
     pub fn accepts_property_pair<E: From<crate::GraphIntegerError>>(
         self,
         left: Option<&CanonicalPropertyValue>,
@@ -46,10 +49,32 @@ impl IntegerComparison {
         {
             return Ok(compare_stored(self, left, right, control)? == Some(true));
         }
-        Ok(self.accepts_scalar_pair(
-            left.and_then(CanonicalPropertyValue::as_scalar),
-            right.and_then(CanonicalPropertyValue::as_scalar),
-        ))
+        Ok(self.evaluate_scalar_or_collection(left, right) == Some(true))
+    }
+
+    /// A pair of stored values of which at most one is a List or Map. The
+    /// collection, if any, is of another domain than the scalar it meets.
+    fn evaluate_scalar_or_collection(
+        self,
+        left: Option<&CanonicalPropertyValue>,
+        right: Option<&CanonicalPropertyValue>,
+    ) -> Option<bool> {
+        match (left, right) {
+            (Some(collection), scalar) if collection.is_collection() => self
+                .evaluate_property_scalar(
+                    Some(collection),
+                    scalar.and_then(CanonicalPropertyValue::as_scalar),
+                ),
+            (scalar, Some(collection)) if collection.is_collection() => self
+                .evaluate_property_scalar(
+                    Some(collection),
+                    scalar.and_then(CanonicalPropertyValue::as_scalar),
+                ),
+            (left, right) => self.evaluate_scalar_pair(
+                left.and_then(CanonicalPropertyValue::as_scalar),
+                right.and_then(CanonicalPropertyValue::as_scalar),
+            ),
+        }
     }
 }
 
@@ -114,16 +139,17 @@ pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
         control(GlaExecutionEvent::Work)?;
         return Ok(compare_stored(*comparison, left, right, control)? == Some(true));
     }
-    // A collection against a scalar compares UNKNOWN, as an absent value does.
-    let (left, right) = (
-        left.and_then(CanonicalPropertyValue::as_scalar),
-        right.and_then(CanonicalPropertyValue::as_scalar),
-    );
-    for value in [left, right].into_iter().flatten() {
+    // A collection against an absent value or a NULL is UNKNOWN; against any
+    // other scalar it is a comparison across domains (fgdb-v6ku6).
+    for value in [left, right]
+        .into_iter()
+        .flatten()
+        .filter_map(CanonicalPropertyValue::as_scalar)
+    {
         charge_payload(value, control)?;
     }
     control(GlaExecutionEvent::Work)?;
-    Ok(comparison.accepts_scalar_pair(left, right))
+    Ok(comparison.evaluate_scalar_or_collection(left, right) == Some(true))
 }
 
 /// [`charge_payload`] for a stored property value (fgdb-k3nub): a scalar is
