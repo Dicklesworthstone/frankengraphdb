@@ -110,7 +110,7 @@ fn all_small_bags_match_counts_in_both_directions_across_run_boundaries() {
         for mut code in 0..81 {
             let mut counts = [0_usize; 4];
             for count in &mut counts { *count = code % 3; code /= 3; }
-            let make = |offset| (0..2).rev().flat_map(|key| {
+            let make = |offset| (0..2_usize).rev().flat_map(|key| {
                 std::iter::repeat_n(row(key as i64), counts[offset + key])
             }).collect::<Vec<_>>();
             let (before, after) = (make(0), make(2));
@@ -267,18 +267,20 @@ fn visitor_failure_and_drop_apply_backpressure_without_consuming_original_runs()
         assert!(matches!(error, Err(GqlQueryError::Source(NativeSpoolError::Spill(SpillError::InvalidRun)))));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         calls.store(0, AtomicOrdering::SeqCst);
-        let mut future = Box::pin(a.visit_difference(&b, &cx, &mut source, &mut scratch, 3, 100, 61, 100, u64::MAX,
-            |_, row| {
-                calls.fetch_add(1, AtomicOrdering::SeqCst);
-                async move { pending::<()>().await; drop(row); Ok(()) }
-            }));
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(future.as_mut().poll(&mut task).is_pending());
-        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
-        let reads = (backing.0.lock().unwrap().reads, dest.0.lock().unwrap().reads);
-        assert!(future.as_mut().poll(&mut task).is_pending());
-        assert_eq!((backing.0.lock().unwrap().reads, dest.0.lock().unwrap().reads), reads);
-        drop(future);
+        // Block-scoped: the Context is not Send and must not span an await.
+        {
+            let mut future = Box::pin(a.visit_difference(&b, &cx, &mut source, &mut scratch, 3, 100, 61, 100, u64::MAX,
+                |_, row| {
+                    calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    async move { pending::<()>().await; drop(row); Ok(()) }
+                }));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+            let reads = (backing.0.lock().unwrap().reads, dest.0.lock().unwrap().reads);
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert_eq!((backing.0.lock().unwrap().reads, dest.0.lock().unwrap().reads), reads);
+        }
         assert_eq!(read(&b, &cx, &mut source).await, rows);
         let (result, changes) = collect(&a, &b, &cx, &mut source, &mut scratch, 3, 100, u64::MAX).await;
         assert_eq!(result.unwrap().0, 40);

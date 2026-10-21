@@ -1,5 +1,8 @@
 //! Authenticated Strata histories with several simultaneously retained records.
 //! The test holds returned values, not a replacement graph or decoder model.
+// Buffered scans nest the store's futures past the default recursion limit
+// when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};

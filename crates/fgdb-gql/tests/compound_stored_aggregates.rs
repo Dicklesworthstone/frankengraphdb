@@ -210,7 +210,7 @@ fn stored_nonnumeric_values_fail_at_execution_even_beneath_limit_zero() {
             template.bind_parameters(&arguments).unwrap()
         };
         for bad in [
-            GraphValue::Scalar(CanonicalScalar::Text("not numeric".into())),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("not numeric").unwrap()),
             boolean(true),
             GraphValue::List(vec![int(2)].into_boxed_slice()),
         ] {

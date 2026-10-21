@@ -53,8 +53,8 @@ pub(crate) use prism::{
 };
 pub use view::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
-    PreparedBufferedAggregate, PreparedBufferedOrder,
+    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolDifference,
+    NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact

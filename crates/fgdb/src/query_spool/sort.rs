@@ -15,6 +15,7 @@ mod canonical;
 mod difference;
 #[path = "sort/prepared.rs"]
 mod prepared;
+pub use difference::NativeSpoolDifference;
 pub use prepared::PreparedBufferedOrder;
 pub(crate) use prepared::ordered_input;
 
