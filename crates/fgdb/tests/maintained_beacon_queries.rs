@@ -246,9 +246,12 @@ fn mismatch_history_ann_and_failed_maintenance_keep_the_source_path() {
                 ..
             }))
         ));
+        // The procedure has refused seeds without an explicit max_hops since
+        // it landed (25cf0f73). The corpus has no edges, so the hop count
+        // does not change what the graph-capable source admits.
         let graph = prepare(
             "CALL hybrid.search(text => 'graph', text_property => 'body', label => 'Doc', \
-             seeds => [1], k => 4) YIELD node RETURN node",
+             seeds => [1], max_hops => 1, k => 4) YIELD node RETURN node",
         );
         assert_eq!(
             db.execute_graph_set_governed(&cx, &graph, policy())
