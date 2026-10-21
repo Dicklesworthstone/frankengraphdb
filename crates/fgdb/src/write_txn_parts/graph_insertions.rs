@@ -194,7 +194,7 @@ impl WriteTxn {
             }));
         }
         // What the statement has left after the steps so far.
-        let remaining = |used: &GraphInsertStats, last: bool| {
+        let remaining = |used: &GraphInsertStats, delivers: bool| {
             let records = policy
                 .query
                 .rows
@@ -202,7 +202,7 @@ impl WriteTxn {
                 .map_or(u64::MAX, |limit| {
                     limit.saturating_sub(used.selection.snapshot_records)
                 });
-            let rows = if last {
+            let rows = if delivers {
                 policy.query.rows.max_result_rows().unwrap_or(u64::MAX)
             } else {
                 u64::MAX
@@ -262,7 +262,17 @@ impl WriteTxn {
             let mut receipts = Vec::with_capacity(chain.steps().len());
             let last = chain.steps().len().saturating_sub(1);
             for (at, step) in chain.steps().iter().enumerate() {
-                let allowance = remaining(&used, at == last);
+                // Only a last step with RETURN delivers rows. A last write
+                // without one (`CREATE (a) WITH a CREATE (b)`) selects the
+                // statement's private input, as every earlier step does.
+                let delivers = at == last
+                    && matches!(
+                        step,
+                        GraphWriteChainStep::Query(_)
+                            | GraphWriteChainStep::EdgeMergeQuery(_)
+                            | GraphWriteChainStep::VertexMergeQuery(_)
+                    );
+                let allowance = remaining(&used, delivers);
                 // A step without RETURN rows: its own counters, no rows.
                 let unreturned = |stats: &GraphInsertStats| GqlQueryExecution {
                     value: Vec::new(),
