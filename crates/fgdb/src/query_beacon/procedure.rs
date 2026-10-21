@@ -10,9 +10,11 @@
 //! `vector_property` holding the whole embedding as packed little-endian f32
 //! bytes (`metric`
 //! l2/cosine/dot, exact unless `ann` gives the HNSW `ef_search`), restricted
-//! to `label` when given. Numeric properties require exact f32 by default;
-//! `vector_encoding => 'coordinates-rounded'` explicitly rounds finite
-//! integers, floats and decimals to f32. The original properties are unchanged.
+//! to `label` when given. Numeric properties round once to the nearest f32 by
+//! default (`vector_encoding => 'coordinates-rounded'`: finite integers, floats
+//! and decimals; fgdb-ekic6); `vector_encoding => 'coordinates'` opts into exact
+//! f32 admission, which refuses any other value. The original properties are
+//! unchanged.
 //! `seeds` with an explicit nonnegative `max_hops`
 //! enable the graph lane (`relation`, `direction` out/in/both, `include_seeds`,
 //! `graph_candidates`, `graph_weight`). Seeds may be the ONLY retrieval input:

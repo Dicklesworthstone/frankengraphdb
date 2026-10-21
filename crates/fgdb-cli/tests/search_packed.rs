@@ -422,3 +422,86 @@ fn packed_cli_refuses_bad_shapes_before_open_and_bad_stored_values_without_rows(
         );
     }
 }
+
+#[test]
+fn decimal_coordinates_round_once_by_default_and_exact_is_an_explicit_opt_in() {
+    // fgdb-ekic6: ordinary decimals in per-coordinate properties used to refuse
+    // every default search. The packed oracle holds the same text parsed to f32
+    // by the CLI's `vector:` parameter, not by the Beacon projector.
+    let db = Fixture::new();
+    db.okay("create", &[]);
+    db.okay(
+        "write",
+        &[
+            "CREATE (:Document {name:'near', x:0.1, y:0.2, embedding:$near}), \
+                (:Document {name:'far', x:0.7, y:0.9, embedding:$far})",
+            "--param",
+            "near=vector:0.1,0.2",
+            "--param",
+            "far=vector:0.7,0.9",
+        ],
+    );
+    let search = |extra: &[&str]| {
+        let mut args = vec![
+            "--vector",
+            "0.1,0.2",
+            "--vector-property",
+            "x",
+            "--vector-property",
+            "y",
+            "--k",
+            "2",
+        ];
+        args.extend_from_slice(extra);
+        db.command("search", &args)
+    };
+    let packed = db.okay(
+        "search",
+        &[
+            "--vector",
+            "0.1,0.2",
+            "--vector-encoding",
+            "packed",
+            "--vector-property",
+            "embedding",
+            "--k",
+            "2",
+        ],
+    );
+    assert_eq!(rows(&packed).len(), 2);
+    assert!(rows(&packed)[0].ends_with("{\"type\":\"float\",\"value\":\"0\"}]}"));
+    let rounded: [&[&str]; 2] = [&[], &["--vector-encoding", "coordinates-rounded"]];
+    for extra in rounded {
+        let output = search(extra);
+        assert!(output.status.success(), "{extra:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), packed);
+    }
+    let gql = |encoding: &str| {
+        db.command(
+            "query",
+            &[&format!(
+                "CALL hybrid.search(vector => [0.1, 0.2], vector_properties => ['x', 'y']\
+                 {encoding}, k => 2) YIELD node, vector_distance \
+                 RETURN node AS vertex, vector_distance AS distance ORDER BY distance"
+            )],
+        )
+    };
+    let default = gql("");
+    assert!(default.status.success());
+    assert_eq!(
+        rows(&String::from_utf8(default.stdout).unwrap()),
+        rows(&packed)
+    );
+    for exact in [
+        search(&["--vector-encoding", "coordinates"]),
+        gql(", vector_encoding => 'coordinates'"),
+    ] {
+        assert_eq!(exact.status.code(), Some(3));
+        let stdout = String::from_utf8(exact.stdout).unwrap();
+        assert!(rows(&stdout).is_empty());
+        assert!(
+            stdout.contains("vector float is not finite exact f32"),
+            "{stdout}"
+        );
+    }
+}

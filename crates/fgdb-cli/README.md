@@ -224,7 +224,10 @@ corpus is an explicit projection chosen by flags:
   unless `--ann <ef_search>` asks for the approximate HNSW walk. With
   `--vector-encoding packed`, name exactly one bytes property containing all
   coordinates as little-endian f32 values (see CSV example above). The default
-  encoding remains `coordinates`; no stored-value type is used to guess it.
+  encoding is `coordinates-rounded`: each stored integer, float or decimal
+  coordinate rounds once to the nearest f32. `--vector-encoding coordinates`
+  opts into exact mode, which refuses any value f32 cannot hold exactly. No
+  stored-value type is used to guess the encoding.
 - Both lanes: exact reciprocal-rank fusion of `--candidates` hits per lane
   (default `--k`). This fuses two candidate sets. It is not an exhaustive
   hybrid answer.

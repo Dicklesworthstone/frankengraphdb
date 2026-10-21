@@ -28,8 +28,9 @@ mod numeric;
 /// ANY missing/null coordinate omits the vector lane. A present wrong-typed
 /// value refuses the read. Absent lanes are never filled with synthetic zeros.
 ///
-/// Numeric coordinates are exact f32 by default; rounding requires the explicit
-/// `CoordinatesRoundedF32` encoding. Stored values are never changed. Repeated keys
+/// Numeric coordinates round once to the nearest f32 by default
+/// (`CoordinatesRoundedF32`, fgdb-ekic6); exact admission requires the explicit
+/// `Coordinates` encoding. Stored values are never changed. Repeated keys
 /// deliberately repeat coordinates. A caller must mask keys BEFORE resolving
 /// their values. `encoding` says how the vector keys hold coordinates.
 #[derive(Clone, Debug)]
@@ -44,19 +45,22 @@ pub struct Projection<K> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VectorEncoding {
     /// One key per coordinate, each an integer or float exactly
-    /// representable as f32.
-    #[default]
+    /// representable as f32; any other value refuses the read. The explicit
+    /// exact opt-in (`coordinates`); it was the default before fgdb-ekic6.
     Coordinates,
     /// Exactly one key whose value is a byte string of `dimensions`
     /// little-endian IEEE-754 binary32 values (4 bytes each), every one
     /// finite: an embedding stored as one property. Any other length or a
     /// non-byte value refuses the read rather than truncating or padding.
     PackedF32Le,
-    /// One key per coordinate, rounded explicitly to binary32. Integers and
-    /// finite binary64 values use Rust's numeric cast; exact decimals parse
+    /// One key per coordinate, rounded once to the nearest binary32 (ties to
+    /// even), the default. Integers and finite binary64 values use Rust's
+    /// numeric cast, as `hybrid.search` query vectors do; exact decimals parse
     /// directly to f32, without an intervening binary64 rounding. Overflow and
     /// nonfinite input refuse. Underflow to a subnormal or signed zero is allowed.
     /// Search distances are over these projected f32s, not the original values.
+    /// Every value `Coordinates` admits projects to the same f32 here.
+    #[default]
     CoordinatesRoundedF32,
 }
 
@@ -113,7 +117,7 @@ impl<K, L> ReadOptions<K, L> {
             projection: Projection {
                 text: Some(property),
                 vector: Vec::new(),
-                encoding: VectorEncoding::Coordinates,
+                encoding: VectorEncoding::default(),
             },
             index: IndexConfig::default(),
             policy: ReadPolicy::default(),

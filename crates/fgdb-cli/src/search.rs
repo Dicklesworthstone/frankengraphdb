@@ -15,11 +15,13 @@
 //! - `--vector-encoding packed --vector-property <embedding>` instead reads
 //!   one packed property, as written by `--param e=vector:<x,y,...>`. Its
 //!   bytes must contain exactly one finite little-endian f32 per query
-//!   coordinate. `--vector-encoding coordinates` is the default. The CLI
-//!   never guesses an encoding from dimensions or the first stored value;
-//! - `--vector-encoding coordinates-rounded` explicitly rounds finite stored
-//!   integers, floats and decimals to f32. Distances describe that projection,
-//!   not the original numbers; overflow refuses and underflow is permitted.
+//!   coordinate. The CLI never guesses an encoding from dimensions or the
+//!   first stored value;
+//! - `--vector-encoding coordinates-rounded`, the default, rounds finite stored
+//!   integers, floats and decimals once to the nearest f32 (fgdb-ekic6).
+//!   Distances describe that projection, not the original numbers; overflow
+//!   refuses and underflow is permitted. `--vector-encoding coordinates` opts
+//!   into exact admission, refusing any value f32 cannot hold exactly.
 //! - both lanes together run the exact reciprocal-rank fusion of the two
 //!   candidate sets (`--candidates <n>` per lane, default `--k`), which is
 //!   NOT an exhaustive hybrid answer;
@@ -887,11 +889,22 @@ mod tests {
 
     #[test]
     fn packed_encoding_is_explicit_and_invalid_projection_shapes_refuse() {
+        // Per-coordinate properties round once to f32 by default (fgdb-ekic6).
         let default = prepare(&options(&["--vector", "1", "--vector-property", "x"])).unwrap();
         assert_eq!(
             default.read.projection.encoding,
-            VectorEncoding::Coordinates
+            VectorEncoding::CoordinatesRoundedF32
         );
+        let exact = prepare(&options(&[
+            "--vector",
+            "1",
+            "--vector-property",
+            "x",
+            "--vector-encoding",
+            "coordinates",
+        ]))
+        .unwrap();
+        assert_eq!(exact.read.projection.encoding, VectorEncoding::Coordinates);
         for parts in [
             vec!["--vector", "1,2", "--vector-property", "embedding"],
             vec![

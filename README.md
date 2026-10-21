@@ -361,9 +361,10 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property 
 # ...or the same packed property through the search command
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property emb=3 \
   --vector 0.1,0.8,0.1 --vector-encoding packed --vector-property emb --metric cosine --k 5
-# (--vector-encoding coordinates-rounded explicitly rounds stored integer, float and
-#  decimal coordinates to f32; the default encoding refuses any decimal and any value
-#  f32 cannot hold exactly)
+# (per-coordinate properties: stored integer, float and decimal coordinates round once
+#  to the nearest f32 by default (coordinates-rounded); --vector-encoding coordinates,
+#  or vector_encoding => 'coordinates' in hybrid.search, opts into exact mode, which
+#  refuses any decimal and any value f32 cannot hold exactly)
 
 # Graph-only neighborhood: seeds and an explicit hop bound are a complete request
 # (docs/cli_graph_only_search.md); inside GQL, hybrid.search's

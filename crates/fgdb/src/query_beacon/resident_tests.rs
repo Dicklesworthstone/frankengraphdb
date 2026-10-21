@@ -227,11 +227,13 @@ fn retained_construction_admits_explicit_lanes_without_changing_one_shot_lane_el
         let commit = contexts.commit();
         let query = contexts.query();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        // This integer must not be silently rounded to a different f32 point.
+        // Under the explicit exact opt-in, this integer must not be silently
+        // rounded to a different f32 point (the default rounds, fgdb-ekic6).
         db.write(&commit, document(1, "graph", 16_777_217, 0))
             .await
             .unwrap();
         let mut definition = options();
+        definition.projection.encoding = fgdb_beacon::read::VectorEncoding::Coordinates;
         assert_eq!(
             db.beacon_search(&query, &definition, text_query())
                 .unwrap()
@@ -992,7 +994,7 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         changed.projection.vector.reverse();
         mismatches.push(changed);
         let mut changed = definition.clone();
-        changed.projection.encoding = fgdb_beacon::read::VectorEncoding::CoordinatesRoundedF32;
+        changed.projection.encoding = fgdb_beacon::read::VectorEncoding::Coordinates;
         mismatches.push(changed);
         let mut changed = definition.clone();
         changed.index.vector.as_mut().unwrap().metric = DistanceMetric::NegativeDotProduct;

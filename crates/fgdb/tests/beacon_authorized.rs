@@ -10,7 +10,8 @@ use fgdb_beacon::{
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
 };
 use fgdb_warden::{
     Authority, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope,
@@ -120,13 +121,15 @@ async fn database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
                 ],
             );
         }
-        // Neither value's type may be examined by restricted projection.
+        // Neither value's type may be examined by restricted projection. The
+        // coordinate overflows f32, so it refuses under every numeric encoding,
+        // including the default rounding (fgdb-ekic6).
         batch.create_vertex(
             VId(116),
             vec![H],
             vec![
                 (T, CanonicalScalar::Int(8)),
-                (X, CanonicalScalar::Int(16_777_217)),
+                (X, CanonicalScalar::Float(CanonicalF64::new(f64::MAX))),
             ],
         );
     }

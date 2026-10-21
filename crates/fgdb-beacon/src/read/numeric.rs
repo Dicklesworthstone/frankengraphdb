@@ -1,4 +1,5 @@
-//! Explicit lossy coordinate projection; exact and packed encodings are unchanged.
+//! Default lossy coordinate projection (fgdb-ekic6); explicit exact and packed
+//! encodings are unchanged.
 
 use crate::{BeaconError, WorkControl};
 use fgdb_types::CanonicalScalar;
@@ -73,8 +74,11 @@ mod tests {
     }
 
     #[test]
-    fn rounding_is_explicit_and_default_exact_admission_does_not_change() {
-        assert_eq!(VectorEncoding::default(), VectorEncoding::Coordinates);
+    fn rounding_is_the_default_and_explicit_exact_admission_does_not_change() {
+        assert_eq!(
+            VectorEncoding::default(),
+            VectorEncoding::CoordinatesRoundedF32
+        );
         for (value, bits) in [
             (float(0.1), 0x3dcc_cccd),
             (CanonicalScalar::Int(16_777_217), 0x4b80_0000),

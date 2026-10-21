@@ -374,7 +374,7 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
                 0 => changed.vertex_label = None,
                 1 => changed.projection.text = Some(PropertyKeyId(8)),
                 2 => changed.projection.vector = vec![PropertyKeyId(8)],
-                3 => changed.projection.encoding = VectorEncoding::CoordinatesRoundedF32,
+                3 => changed.projection.encoding = VectorEncoding::Coordinates,
                 4 => changed.index.text.as_mut().unwrap().k1 = 0.4,
                 5 => {
                     changed.index.vector =

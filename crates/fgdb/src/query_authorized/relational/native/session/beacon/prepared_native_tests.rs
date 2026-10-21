@@ -420,9 +420,10 @@ fn definitions_sources_and_raw_element_parameters_cannot_bypass_the_frozen_corpu
                 "vector_properties => ['x']",
                 "vector_properties => ['name']",
             ),
+            // The frozen index uses the default rounded encoding (fgdb-ekic6).
             CALL.replace(
                 "vector_properties => ['x']",
-                "vector_properties => ['x'], vector_encoding => 'coordinates-rounded'",
+                "vector_properties => ['x'], vector_encoding => 'coordinates'",
             ),
             CALL.replace(
                 "vector_properties => ['x']",
