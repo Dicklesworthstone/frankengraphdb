@@ -22,6 +22,7 @@
 //! immutable OriginBirthOrder values. Forking an image handle shares its bytes,
 //! but does not authorize the image under an unrelated branch.
 
+mod buffered;
 mod image;
 mod incoming;
 pub use incoming::{
@@ -71,6 +72,8 @@ impl Default for SealedLimits {
 #[derive(Debug)]
 pub enum SealedError {
     Store(Box<StoreError>),
+    /// A selected extent or its pool admission refused after buffered open.
+    BufferedSource(Box<crate::store::BufferedReadError>),
     History(crate::root::RootError),
     Entry(BlockError),
     Inline(InlineError),

@@ -7,6 +7,7 @@ use crate::tiered::edge_scan::{
 };
 
 mod retained;
+mod sealed;
 
 pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
 
