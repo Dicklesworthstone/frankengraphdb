@@ -513,6 +513,17 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 batch.set_edge_property(edge, key, value);
                 ElementId::Edge(edge)
             }
+            GraphMutationIntent::StoredProperty { target, key, value } => {
+                match target {
+                    ElementId::Vertex(vertex) => {
+                        batch.set_vertex_property_value(vertex, key, Some(value));
+                    }
+                    ElementId::Edge(edge) => {
+                        batch.set_edge_property_value(edge, key, Some(value));
+                    }
+                }
+                target
+            }
             GraphMutationIntent::Label {
                 vertex,
                 label,

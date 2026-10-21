@@ -224,6 +224,16 @@ impl WriteTxn {
                 GraphMutationIntent::EdgeProperty { edge, key, value } => {
                     batch.set_edge_property(edge, key, value);
                 }
+                GraphMutationIntent::StoredProperty {
+                    target: ElementId::Vertex(vertex), key, value,
+                } => {
+                    batch.set_vertex_property_value(vertex, key, Some(value));
+                }
+                GraphMutationIntent::StoredProperty {
+                    target: ElementId::Edge(edge), key, value,
+                } => {
+                    batch.set_edge_property_value(edge, key, Some(value));
+                }
                 GraphMutationIntent::Label {
                     vertex,
                     label,
@@ -278,12 +288,18 @@ impl WriteTxn {
                 for intent in proposal.intents() {
                     match intent {
                         GraphMutationIntent::Property { vertex, .. }
+                        | GraphMutationIntent::StoredProperty {
+                            target: ElementId::Vertex(vertex), ..
+                        }
                         | GraphMutationIntent::Label { vertex, .. }
                         | GraphMutationIntent::DetachDelete { vertex }
                         | GraphMutationIntent::Delete { vertex } => {
                             targets.insert(*vertex);
                         }
                         GraphMutationIntent::EdgeProperty { edge, .. }
+                        | GraphMutationIntent::StoredProperty {
+                            target: ElementId::Edge(edge), ..
+                        }
                         | GraphMutationIntent::DeleteEdge { edge } => {
                             edges.insert(*edge);
                         }

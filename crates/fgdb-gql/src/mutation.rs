@@ -20,24 +20,23 @@ use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_MUTATION_ACTIONS: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationValue {
-    /// Position of a scalar property in the selection's immutable output schema.
+    /// Position of a scalar or list property in the immutable selection schema.
     Column(usize),
     /// A checked canonical operand; clones share its bounded encoded storage.
     Literal(GqlScalarParameter),
     /// Checked canonical scalar bytecode over the same frozen selection row.
     /// All column references are validated before storage execution begins.
     Expression(GraphIntegerExpression),
-    /// A composite read value over the same row: a list index, a map entry
-    /// (`row.name`), size(), IN, a list quantifier or reduce(). The shared
-    /// row evaluator computes it; only a scalar result is a property value,
-    /// and any other result is a typed refusal, never a truncation.
+    /// A composite read value over the same row. The shared row evaluator
+    /// computes it; a scalar or bounded list of written values can be stored.
+    /// Maps and graph elements at any depth refuse, never truncate.
     Composite(crate::GraphSetValue),
 }
 impl core::fmt::Debug for GraphMutationValue {
@@ -125,7 +124,7 @@ pub enum GraphMutationBinding {
     /// The target's complete post-statement property map. `current` holds
     /// the frozen admitted map, and the selection plan's reverse catalog
     /// names every final assignment merged into it. REMOVE omits a field;
-    /// SET retains its scalar, including canonical NULL. A NULL OPTIONAL
+    /// SET retains its scalar or list, including canonical NULL. A NULL OPTIONAL
     /// target returns NULL; a deleted target or unmapped assignment refuses.
     /// Edge maps with DETACH DELETE are refused at preparation because an
     /// incident edge can disappear through a vertex's cascade.
@@ -162,7 +161,7 @@ pub enum GraphMutationBuildError {
         column: usize,
     },
     /// A composite value that does not fit the selection schema or can never
-    /// be a scalar property value.
+    /// be a scalar or list property value.
     ValueExpression {
         action: usize,
         kind: Option<crate::GraphSetProjectionError>,
@@ -194,7 +193,9 @@ pub enum GraphMutationError<E> {
         action: usize,
         error: GraphIntegerError,
     },
-    /// A composite value produced a list, map or graph element for a property.
+    /// A value cannot be a written property: a map, graph element, or a list
+    /// containing one or exceeding the native collection bounds. The legacy
+    /// variant name is retained for existing callers.
     NonScalarValue {
         row: usize,
         action: usize,
@@ -214,7 +215,7 @@ pub enum GraphMutationError<E> {
         row: usize,
         binding: usize,
     },
-    /// A complete-map RETURN binding did not receive a bounded scalar map.
+    /// A complete-map RETURN binding did not receive a bounded property map.
     InvalidPropertyMap {
         row: usize,
         binding: usize,
@@ -251,7 +252,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::NonScalarValue { row, action } => {
                 write!(
                     f,
-                    "mutation row {row} action {action}: not a scalar property value"
+                    "mutation row {row} action {action}: not a scalar property value or bounded stored list"
                 )
             }
             Self::ConflictingAssignment {
@@ -337,6 +338,15 @@ pub enum GraphMutationIntent {
         edge: EId,
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
+    },
+    /// A bounded non-scalar written value. The collector currently emits
+    /// lists only; scalar assignments and removals retain the existing arms.
+    /// Adapters must stage this through their ordinary stored-property writer
+    /// with the same before/after authorization and rollback as scalar fields.
+    StoredProperty {
+        target: ElementId,
+        key: PropertyKeyId,
+        value: CanonicalPropertyValue,
     },
     Label {
         vertex: VId,
@@ -442,7 +452,7 @@ impl PreparedGraphMutation {
 
     /// The caller supplies the existing WriteBatch relation coordinate. It is
     /// never guessed from a MATCH relation, a result value, or an ambient catalog.
-    /// Property targets are vertex or edge columns; assignment inputs are scalar.
+    /// Property targets are vertex or edge columns; inputs are written values.
     /// Deletion and updates cannot be mixed in one simultaneous statement.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>,
@@ -540,7 +550,14 @@ impl PreparedGraphMutation {
                     }
                 };
                 match value {
-                    GraphMutationValue::Column(column) => check(*column)?,
+                    GraphMutationValue::Column(column) => {
+                        if !matches!(
+                            columns.get(*column),
+                            Some(GraphSetColumnType::List | GraphSetColumnType::Any)
+                        ) {
+                            check(*column)?;
+                        }
+                    }
                     GraphMutationValue::Expression(expression) => {
                         for column in expression.referenced_columns() {
                             check(column)?;
@@ -552,7 +569,9 @@ impl PreparedGraphMutation {
                             |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
                         let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
                             .map_err(|kind| refused(Some(kind)))?;
-                        if !(kind.is_scalar_like() || kind == GraphSetColumnType::Any) {
+                        if !(kind.is_scalar_like()
+                            || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any))
+                        {
                             return Err(refused(None));
                         }
                     }
