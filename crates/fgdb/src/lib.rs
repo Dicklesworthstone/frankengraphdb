@@ -181,6 +181,7 @@ pub use query::{
     NativeSpoolDifference, NativeSpoolError, PinnedIndex, PreparedBufferedAggregate,
     PreparedBufferedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue,
     QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
+    SealedProjectionOpenError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
@@ -2959,7 +2960,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<EmbeddedReadView, OpenError> {
         let path = path.as_ref();
         require_database_dir(cx, &vfs, path).await?;
-        let lagging = match Self::read_current_generation(cx, &vfs, path, &keys).await? {
+        let lagging = match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
             ReadGeneration::Current(published) => {
                 return Self::read_published(cx, &keys, published).await;
             }
@@ -3006,11 +3007,18 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &'a V,
         path: &'a Path,
         keys: &'a DatabaseKeys,
+        root_limits: Option<&'a fgdb_strata::store::RootReadLimits>,
     ) -> SendFuture<'a, Result<ReadGeneration<V>, OpenError>>
     where
         V: 'a,
     {
-        Box::pin(Self::read_current_generation_inner(cx, vfs, path, keys))
+        Box::pin(Self::read_current_generation_inner(
+            cx,
+            vfs,
+            path,
+            keys,
+            root_limits,
+        ))
     }
 
     async fn read_current_generation_inner(
@@ -3018,12 +3026,15 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &V,
         path: &Path,
         keys: &DatabaseKeys,
+        root_limits: Option<&fgdb_strata::store::RootReadLimits>,
     ) -> Result<ReadGeneration<V>, OpenError> {
         let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
             return Ok(ReadGeneration::Unselected);
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
-        let Some((claimed, resolved)) = read_slot(cx, &store, &probe, keys, path).await? else {
+        let Some((claimed, resolved)) =
+            read_slot_with_source_limits(cx, &store, &probe, keys, path, root_limits).await?
+        else {
             return Ok(ReadGeneration::Unselected);
         };
         let chain = CommitCoordinator::scan_committed_chain(cx, vfs, path).await?;
@@ -3036,6 +3047,7 @@ impl<V: Vfs + Clone> Database<V> {
             store,
             root_id: checkpoint.root_id,
             manifest: checkpoint.manifest,
+            published_at: checkpoint.published_at,
         };
         Ok(if chain_frontier == checkpoint.published_at.0 {
             ReadGeneration::Current(published)
@@ -3062,6 +3074,7 @@ impl<V: Vfs + Clone> Database<V> {
                 store,
                 root_id,
                 manifest,
+                ..
             } = published;
             let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
             let mut snapshot =
@@ -6360,6 +6373,8 @@ struct PublishedRead<V: Vfs> {
     root_id: PartitionRootVersion,
     /// The stored manifest that selected `root_id`.
     manifest: ManifestVersion,
+    /// The frontier already bound to this manifest and the committed chain.
+    published_at: CommitSeq,
 }
 
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
@@ -6408,6 +6423,25 @@ async fn read_slot<V: Vfs>(
     )>,
     OpenError,
 > {
+    read_slot_with_source_limits(cx, store, probe, keys, path, None).await
+}
+
+/// The same slot/manifest selection law with optional metadata admission for
+/// a bounded consumer. Limits apply to the FIRST decode, not a later reread.
+async fn read_slot_with_source_limits<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    probe: &RootStore<V>,
+    keys: &DatabaseKeys,
+    path: &Path,
+    limits: Option<&fgdb_strata::store::RootReadLimits>,
+) -> Result<
+    Option<(
+        ManifestVersion,
+        Vec<(ManifestRecord, fgdb_strata::root::PartitionRoot)>,
+    )>,
+    OpenError,
+> {
     let slot = match probe.current(cx).await {
         Ok(slot) => slot,
         Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -6417,11 +6451,20 @@ async fn read_slot<V: Vfs>(
     };
     validate_plain_slot(&slot, keys, path)?;
     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
-    match store.resolve_manifest(cx, claimed).await {
+    let resolved = match limits {
+        Some(limits) => {
+            store
+                .resolve_manifest_with_source_limits(cx, claimed, limits)
+                .await
+        }
+        None => store.resolve_manifest(cx, claimed).await,
+    };
+    match resolved {
         Ok(resolved) if resolved.len() == 1 => Ok(Some((claimed, resolved))),
         Err(error) if let Some(refusal) = unsupported_manifest(&error, claimed, path) => {
             Err(refusal)
         }
+        Err(error) if limits.is_some() => Err(OpenError::Store(error)),
         _ => Err(OpenError::SlotDisagreesWithStream {
             path: path.to_path_buf(),
             slot_manifest: claimed.0,

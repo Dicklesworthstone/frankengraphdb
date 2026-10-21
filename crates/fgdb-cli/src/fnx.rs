@@ -2,7 +2,7 @@
 //! over the admitted generation. The default uses the decoded adapter on a
 //! read-only open; --buffered builds only the selected decoded projection
 //! through authenticated checkpoint cursors; --sealed explicitly seals one
-//! pinned source and executes compressed cursors through a writable database.
+//! pinned source in one read-only pass and executes compressed cursors.
 //!
 //! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
@@ -21,15 +21,15 @@
 //! `int:`, `float:`, `bool:`, `null` and `vertex:<id>` for a source vertex.
 use super::{Failure, Options, decimal_usize, float_text, render_rows_iter};
 use asupersync::fs::Vfs;
-use fgdb::{BufferedReadView, Database, EmbeddedReadView};
+use fgdb::{BufferedReadView, Database, DatabaseKeys, EmbeddedReadView, SealedProjectionOpenError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
     FnxReadResult, FnxSelection, FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
     ProjectionSpec, SelfLoopPolicy,
 };
-use fgdb_strata::tiered::sealed::SealedLimits;
-use fgdb_types::{CommitSeq, QueryCx, VId};
+use fgdb_strata::{store::RootReadLimits, tiered::sealed::SealedLimits};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::io::Write;
 
 /// Is this `query` text a standalone Prism call? `CALL` is a keyword (any
@@ -419,12 +419,14 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     render(result, robot, out)
 }
 
-/// The temporary seal is bound to the engine's pinned source and is not
-/// published as durable graph authority. Its resident preparation and the
-/// projection directory retain their separate engine admissions.
+/// Prepare directly from the current authenticated checkpoint. No writer or
+/// resident database is opened, and source payloads are read only once. The
+/// temporary image remains derived, with separate source/projection limits.
 pub(super) async fn run_sealed(
-    db: &Database,
+    open_cx: &CommitCx,
     cx: &QueryCx,
+    options: &Options,
+    keys: DatabaseKeys,
     prepared: &Prepared,
     robot: bool,
     out: &mut impl Write,
@@ -432,11 +434,32 @@ pub(super) async fn run_sealed(
     let (memory, sealing) = prepared
         .sealed
         .ok_or_else(|| Failure::usage("compressed analytics requires --sealed"))?;
-    let result = db
-        .execute_fnx_sealed(cx, &prepared.call, prepared.read, memory, sealing)
-        .await
-        .map_err(Failure::query)?;
-    render(result, robot, out)
+    let mut root_limits = RootReadLimits::default();
+    root_limits.max_incidences = root_limits.max_incidences.max(sealing.max_incidences);
+    let graph = Database::open_prism_sealed_projection(
+        open_cx,
+        cx,
+        &options.db,
+        keys,
+        prepared.read,
+        sealing,
+        root_limits,
+    )
+    .await
+    .map_err(|error| match error {
+        SealedProjectionOpenError::Open(error) => super::open_failure(error),
+        SealedProjectionOpenError::Read(error) => super::execution_failure(error),
+        SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
+    })?;
+    let analytics = prepared
+        .call
+        .execute_sealed(cx, &graph, prepared.read.execution_limits, memory)
+        .map_err(super::execution_failure)?;
+    render(
+        FnxReadResult::bind_selection(analytics, prepared.read.selection),
+        robot,
+        out,
+    )
 }
 
 fn render(result: FnxReadResult, robot: bool, out: &mut impl Write) -> Result<(), Failure> {

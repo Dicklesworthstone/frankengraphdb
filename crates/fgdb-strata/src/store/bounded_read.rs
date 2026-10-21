@@ -207,6 +207,51 @@ pub type ReopenedAdjacency = (
 );
 
 impl<V: Vfs> BlockStore<V> {
+    /// Resolve a native single-partition manifest under the source's metadata
+    /// byte and reference ceilings. Bytes are bounded before decoding, and
+    /// segmented reference lists before loading or flattening their children.
+    /// Ordinary opens use the same canonical decoders and identity checks;
+    /// this entrypoint only narrows their admission bounds.
+    pub async fn resolve_manifest_with_source_limits(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::manifest::ManifestVersion,
+        limits: &RootReadLimits,
+    ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
+    {
+        let bytes = self
+            .read_object_bytes(
+                cx,
+                id.0,
+                (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+            )
+            .await?;
+        let records =
+            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                .map_err(StoreError::MalformedManifest)?;
+        if records.len() > 1 {
+            return Err(StoreError::RootReferenceLimit {
+                resource: "native manifest roots",
+                requested: records.len(),
+                limit: 1,
+            });
+        }
+        let mut resolved = Vec::with_capacity(records.len());
+        for record in records {
+            let (root, _) = self
+                .get_root_and_segments_limited(
+                    cx,
+                    record.root,
+                    limits.max_root_bytes,
+                    limits.max_blocks,
+                    limits.max_vertex_patches,
+                )
+                .await?;
+            resolved.push((record, root));
+        }
+        Ok(resolved)
+    }
+
     /// Shared by ordinary root reads and source-budgeted traversal. A smaller
     /// caller limit cannot enlarge the format's canonical maximum.
     pub(super) async fn get_root_with_byte_limit(
@@ -433,8 +478,9 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
     ) -> Result<ReopenedAdjacency, RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None)
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, false)
             .await
+            .map(|(adjacency, _)| adjacency)
     }
 
     /// Prove the SAME complete source as `reopen_adjacency_bounded`, but retain
@@ -449,10 +495,28 @@ impl<V: Vfs> BlockStore<V> {
         limits: RootReadLimits,
         relation: fgdb_delta_types::RelationId,
     ) -> Result<ReopenedAdjacency, RootReadError> {
-        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation))
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), false)
+            .await
+            .map(|(adjacency, _)| adjacency)
+    }
+
+    /// Keep the admitted vertex history beside a selected relation so a
+    /// read-only analytics opener can derive its vertex directory without a
+    /// second root walk. This remains ordinary owned data, not an authority
+    /// receipt; only the sealer inside this crate can mint the image anchor.
+    pub(crate) async fn reopen_relation_with_vertices_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), true)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn reopen_selected_adjacency_bounded(
         &self,
         cx: &QueryCx,
@@ -460,7 +524,8 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
         relation: Option<fgdb_delta_types::RelationId>,
-    ) -> Result<ReopenedAdjacency, RootReadError> {
+        retain_vertices: bool,
+    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
         let root = self
             .get_root_with_byte_limit(cx, id, limits.max_root_bytes)
@@ -501,19 +566,19 @@ impl<V: Vfs> BlockStore<V> {
                 &mut super::RootWalk::default(),
             )
             .await?;
-        // Still validate the complete vertex history. The validator retains its
-        // existing owned version records, but no second patch collection is kept.
-        drop(
-            self.inspect_root_patches_observed(
+        // Every caller validates the complete vertex history. A combined
+        // analytics opener keeps the same immutable rows for its directory;
+        // adjacency-only callers still retain no second patch collection.
+        let patches = self
+            .inspect_root_patches_observed(
                 cx,
                 &root,
-                |_, _, _| None::<()>,
+                |_, _, (rows, _)| retain_vertices.then_some(rows),
                 &mut observe,
                 1,
                 &mut super::RootWalk::default(),
             )
-            .await?,
-        );
+            .await?;
         let mut blocks = Vec::new();
         let mut properties = Vec::new();
         blocks
@@ -528,7 +593,7 @@ impl<V: Vfs> BlockStore<V> {
             properties.push(props);
         }
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
-        Ok((root, blocks, properties))
+        Ok(((root, blocks, properties), patches))
     }
 }
 

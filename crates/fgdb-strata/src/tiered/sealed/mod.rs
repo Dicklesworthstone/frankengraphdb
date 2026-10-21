@@ -330,6 +330,31 @@ impl<V: Vfs> BlockStore<V> {
             .await
     }
 
+    /// Seal a relation and retain its source's authenticated vertex history
+    /// from the SAME bounded root walk. A read-only host can build a selected
+    /// vertex directory without first opening a resident database or reading
+    /// any payload twice. Unselected relations still undergo full admission.
+    /// The returned history is ordinary immutable data, not a source receipt;
+    /// the image's opaque anchor is minted here only after complete validation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_vertex_history(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<(SealedPartition, Vec<crate::vertex::VertexPatchRows>), SealedError> {
+        let (adjacency, vertices) = self
+            .reopen_relation_with_vertices_bounded(cx, root_id, floor, source, relation)
+            .await
+            .map_err(sealed_source_error)?;
+        let partition =
+            seal_admitted_adjacency(cx, root_id, floor, Some(relation), limits, adjacency)?;
+        Ok((partition, vertices))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn seal_selected_adjacency(
         &self,
@@ -340,7 +365,7 @@ impl<V: Vfs> BlockStore<V> {
         limits: SealedLimits,
         source: crate::store::RootReadLimits,
     ) -> Result<SealedPartition, SealedError> {
-        let (root, blocks, properties) = match relation {
+        let adjacency = match relation {
             Some(relation) => {
                 self.reopen_relation_adjacency_bounded(cx, root_id, floor, source, relation)
                     .await
@@ -351,23 +376,37 @@ impl<V: Vfs> BlockStore<V> {
             }
         }
         .map_err(sealed_source_error)?;
-        cx.checkpoint().map_err(SealedError::Interrupted)?;
-        let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
-            .map_err(SealedError::History)?;
-        drop(blocks);
-        drop(properties);
-        let scope = SealedScope {
-            source_root: root_id,
-            graph: root.graph,
-            branch: root.branch,
-            partition: root.partition,
-            floor,
-            publication: root.published_at,
-        };
-        let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
-        let image = image::build(compacted, limits, &mut checkpoint)?;
-        SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)
+        seal_admitted_adjacency(cx, root_id, floor, relation, limits, adjacency)
     }
+}
+
+/// Only authenticated store walks call this; accepting public row vectors is
+/// deliberately not an API for constructing source authority.
+fn seal_admitted_adjacency(
+    cx: &QueryCx,
+    root_id: PartitionRootVersion,
+    floor: CommitSeq,
+    relation: Option<RelationId>,
+    limits: SealedLimits,
+    adjacency: crate::store::ReopenedAdjacency,
+) -> Result<SealedPartition, SealedError> {
+    let (root, blocks, properties) = adjacency;
+    cx.checkpoint().map_err(SealedError::Interrupted)?;
+    let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
+        .map_err(SealedError::History)?;
+    drop(blocks);
+    drop(properties);
+    let scope = SealedScope {
+        source_root: root_id,
+        graph: root.graph,
+        branch: root.branch,
+        partition: root.partition,
+        floor,
+        publication: root.published_at,
+    };
+    let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
+    let image = image::build(compacted, limits, &mut checkpoint)?;
+    SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)
 }
 
 fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {

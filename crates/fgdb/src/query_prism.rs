@@ -4,7 +4,7 @@
 
 use super::Cancel;
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::{Database, EmbeddedReadView, GqlError, ReadError};
+use crate::{Database, DatabaseKeys, EmbeddedReadView, GqlError, OpenError, ReadError, UnixVfs};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
@@ -21,9 +21,10 @@ use fgdb_prism::{
 };
 use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
-use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, QueryCx, VId};
 use std::mem::size_of;
 use std::num::NonZeroUsize;
+use std::path::Path;
 
 use fgdb_prism::FnxSealedExecutionError;
 
@@ -38,6 +39,184 @@ pub(crate) use projection::{bind_procedure, procedure_options};
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
+
+/// Failure to prepare compressed analytics directly from a read-only
+/// checkpoint. Source authentication, projection admission and opening keep
+/// their original causes; no error falls back to a writable resident open.
+#[derive(Debug)]
+pub enum SealedProjectionOpenError {
+    Open(OpenError),
+    Read(SealedReadError),
+    /// No checkpoint is current with the observed committed chain. Recovery
+    /// or a writer's pending publication must complete before retrying.
+    RecoveryRequired,
+}
+
+impl core::fmt::Display for SealedProjectionOpenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Open(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
+            Self::RecoveryRequired => f.write_str(
+                "sealed open needs a current authenticated checkpoint; the published root is missing or behind the commit log (wait for the writer or recover through Database::open first)",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for SealedProjectionOpenError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Read(error) => Some(error),
+            Self::RecoveryRequired => None,
+        }
+    }
+}
+
+impl From<OpenError> for SealedProjectionOpenError {
+    fn from(error: OpenError) -> Self {
+        Self::Open(error)
+    }
+}
+
+impl From<SealedReadError> for SealedProjectionOpenError {
+    fn from(error: SealedReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl Database<UnixVfs> {
+    /// Prepare a reusable compressed projection with one authenticated source
+    /// traversal and no resident database or writer lease. The current root
+    /// must already be published; this path never repairs or writes storage.
+    /// Only the selected relation is retained for sealing, while every source
+    /// object and its complete history are authenticated under `root_limits`.
+    /// The source, vertex staging, sealed image and projection retain their
+    /// separate limits. This is not a persistent Tier R or an RSS bound.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_prism_sealed_projection(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        options: FnxReadOptions,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+    ) -> Result<SealedGraphView, SealedProjectionOpenError> {
+        Self::open_prism_sealed_projection_with_vfs(
+            cx,
+            query_cx,
+            UnixVfs::new(),
+            path,
+            keys,
+            options,
+            sealing,
+            root_limits,
+        )
+        .await
+    }
+}
+
+impl<V: Vfs + Clone> Database<V> {
+    /// The same read-only preparation through the injected production/lab
+    /// filesystem. A concurrent writer can advance without changing the
+    /// already selected immutable root or the returned projection.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_prism_sealed_projection_with_vfs(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        options: FnxReadOptions,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+    ) -> Result<SealedGraphView, SealedProjectionOpenError> {
+        query_cx
+            .with_restriction_async(async {
+                query_cx
+                    .checkpoint()
+                    .map_err(Error::Cancelled)
+                    .map_err(SealedReadError::from)?;
+                let relation = options
+                    .selection
+                    .relation
+                    .ok_or(SealedReadError::Projection(
+                        SealedProjectionError::RelationRequired,
+                    ))?;
+                let path = path.as_ref();
+                crate::require_database_dir(cx, &vfs, path).await?;
+                let published =
+                    match Self::read_current_generation(cx, &vfs, path, &keys, Some(&root_limits))
+                        .await?
+                    {
+                        crate::ReadGeneration::Current(published) => published,
+                        crate::ReadGeneration::Lagging(_) | crate::ReadGeneration::Unselected => {
+                            return Err(SealedProjectionOpenError::RecoveryRequired);
+                        }
+                    };
+                let as_of = options.as_of.unwrap_or(published.published_at);
+                if as_of > published.published_at {
+                    return Err(
+                        SealedReadError::from(Error::Read(ReadError::BeyondFrontier {
+                            asked: as_of,
+                            frontier: published.published_at,
+                        }))
+                        .into(),
+                    );
+                }
+                let (partition, patches) = published
+                    .store
+                    .seal_relation_with_vertex_history(
+                        query_cx,
+                        published.root_id,
+                        as_of,
+                        relation,
+                        sealing,
+                        root_limits,
+                    )
+                    .await
+                    .map_err(SealedReadError::Seal)?;
+                let scope = partition.anchor().scope();
+                if scope.source_root != published.root_id
+                    || scope.publication != published.published_at
+                    || scope.graph != crate::GRAPH
+                    || scope.branch != crate::BRANCH
+                    || scope.partition != crate::PARTITION
+                {
+                    return Err(SealedReadError::SourceMismatch.into());
+                }
+                let vertices = select_prism_vertices(
+                    &patches,
+                    as_of,
+                    options.selection,
+                    options.projection_limits,
+                    options.source_limits,
+                    &mut source_control(query_cx, options.source_limits),
+                    &mut 0usize,
+                )
+                .map_err(SealedReadError::from)?;
+                // Properties and history used only to select the directory are
+                // no longer retained while incoming/projection indexes are built.
+                drop(patches);
+                SealedGraphView::build(
+                    query_cx,
+                    &partition,
+                    &vertices,
+                    SealedProjectionSpec {
+                        as_of,
+                        selection: options.selection,
+                        projection: options.projection,
+                    },
+                    options.projection_limits,
+                )
+                .map_err(SealedReadError::Projection)
+                .map_err(SealedProjectionOpenError::Read)
+            })
+            .await
+    }
+}
 
 /// Why a native read's `CALL fnx.*` stage was refused.
 #[derive(Debug)]
@@ -679,27 +858,15 @@ impl EmbeddedReadView {
         control: &mut impl FnMut(SourceEvent) -> Result<(), Error>,
         staging_bytes: &mut usize,
     ) -> Result<Vec<VId>, Error> {
-        let mut vertices = Vec::new();
-        source::visit_vertices(&self.snapshot.patches, as_of, control, |row, control| {
-            control(SourceEvent::Work)?;
-            if selection
-                .vertex_label
-                .is_some_and(|label| row.labels.binary_search(&label).is_err())
-            {
-                return Ok(());
-            }
-            // The same visitor/order/admission law serves BOTH adapters.
-            debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
-            push_staged(
-                &mut vertices,
-                row.vid,
-                "vertices",
-                limits.max_vertices,
-                staging_bytes,
-                source_limits.max_staging_bytes,
-            )
-        })?;
-        Ok(vertices)
+        select_prism_vertices(
+            &self.snapshot.patches,
+            as_of,
+            selection,
+            limits,
+            source_limits,
+            control,
+            staging_bytes,
+        )
     }
 
     pub fn call_fnx(
@@ -871,6 +1038,39 @@ impl EmbeddedReadView {
             Ok(graph)
         })
     }
+}
+
+/// One visibility, label selection, ordering and admission law for resident
+/// views and the directly opened compressed projection.
+fn select_prism_vertices(
+    patches: &[fgdb_strata::vertex::VertexPatchRows],
+    as_of: CommitSeq,
+    selection: FnxSelection,
+    limits: ProjectionLimits,
+    source_limits: FnxSourceLimits,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), Error>,
+    staging_bytes: &mut usize,
+) -> Result<Vec<VId>, Error> {
+    let mut vertices = Vec::new();
+    source::visit_vertices(patches, as_of, control, |row, control| {
+        control(SourceEvent::Work)?;
+        if selection
+            .vertex_label
+            .is_some_and(|label| row.labels.binary_search(&label).is_err())
+        {
+            return Ok(());
+        }
+        debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
+        push_staged(
+            &mut vertices,
+            row.vid,
+            "vertices",
+            limits.max_vertices,
+            staging_bytes,
+            source_limits.max_staging_bytes,
+        )
+    })?;
+    Ok(vertices)
 }
 
 fn supported_sealed_call(

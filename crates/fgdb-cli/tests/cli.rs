@@ -1100,3 +1100,68 @@ fn as_of_reads_report_selected_seq_and_certify_to_refuses_overwrite() {
     refused(&overwrite, 2, "usage");
     assert_eq!(std::fs::read(&certificate).unwrap(), original_bytes);
 }
+
+#[test]
+fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files() {
+    let fixture = Fixture::new("sealed-live-writer");
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    runtime.block_on(async {
+        let mut writer = Database::create(&commit, fixture.db(), keys())
+            .await
+            .unwrap();
+        let mut first = WriteBatch::new(RelationId(1));
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(EId(1), VId(1), VId(2), vec![]);
+        writer.write(&commit, first).await.unwrap();
+        let historical = writer.frontier().unwrap().0.to_string();
+        let mut second = WriteBatch::new(RelationId(1));
+        second.create_vertex(VId(3), vec![], vec![]);
+        second.add_edge(EId(2), VId(2), VId(3), vec![]);
+        writer.write(&commit, second).await.unwrap();
+        let current = writer.frontier().unwrap().0.to_string();
+        let before = directory_bytes(&fixture.db());
+        for text in [
+            "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance",
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        ] {
+            let mut previous_rows = None;
+            for cut in [&historical, &current] {
+                let mut arguments = vec![
+                    "--relation",
+                    "KNOWS=1",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--parallel-edges",
+                    "collapse",
+                    "--as-of",
+                    cut.as_str(),
+                ];
+                arguments.push(text);
+                let decoded = fixture.robot("query", &arguments);
+                assert_eq!(succeeded(&decoded, "rows"), cut.parse::<u64>().unwrap());
+                arguments.insert(arguments.len() - 1, "--sealed");
+                let sealed = fixture.robot("query", &arguments);
+                assert_eq!(succeeded(&sealed, "rows"), cut.parse::<u64>().unwrap());
+                assert_eq!(
+                    sealed.stdout, decoded.stdout,
+                    "complete NDJSON differs at cut {cut}: {text}"
+                );
+                let actual_rows = rows(&sealed);
+                assert_eq!(actual_rows.len(), if cut == &historical { 2 } else { 3 });
+                if let Some(old) = previous_rows.replace(actual_rows.clone()) {
+                    assert_ne!(old, actual_rows, "historical output must remain historical");
+                }
+                assert_eq!(
+                    directory_bytes(&fixture.db()),
+                    before,
+                    "analytics must neither publish a root nor alter any database file"
+                );
+            }
+        }
+        drop(writer);
+    });
+}
