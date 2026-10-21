@@ -91,7 +91,6 @@ impl core::fmt::Display for GraphWriteChainTextError {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
-            Self::Read(error) => error.fmt(f),
         }
     }
 }
@@ -101,7 +100,6 @@ impl core::error::Error for GraphWriteChainTextError {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
-            Self::Read(error) => Some(error),
         }
     }
 }
@@ -125,6 +123,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
         }
     }
 }
@@ -136,6 +135,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
+            Self::Read(error) => Some(error),
         }
     }
 }
