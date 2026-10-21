@@ -509,9 +509,15 @@ impl WriteTxn {
         ),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
-        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, None, |_| {
-            allocate(fgdb_gql::GraphEdgeMergeRequest)
-        })
+        self.execute_graph_edge_merge_output_governed(
+            database,
+            cx,
+            merge,
+            policy,
+            None,
+            None,
+            |_| allocate(fgdb_gql::GraphEdgeMergeRequest),
+        )
         .map(|(stats, outcome, _)| (stats, outcome))
     }
 

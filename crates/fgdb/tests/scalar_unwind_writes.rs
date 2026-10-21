@@ -41,6 +41,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(ENTITY)),
+        (GraphSymbolKind::Label, "Other") => Some(GraphSymbol::Label(LabelId(2))),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
@@ -2289,6 +2290,180 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
         }
         // Linear, not quadratic, in the batch size.
         assert!(records[2] <= 5 * records[0], "{records:?}");
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
+    // fgdb-0s2pq: the frozen chain holds its creations until its last step.
+    // Its graph must equal running each row's three MERGEs as ordinary
+    // statements: repeated keys and pairs, committed vertices and edges, a
+    // vertex staged earlier in the same transaction, a float key equal to an
+    // integer one, a self-loop, and a MERGE whose labels are a superset.
+    let ((), report) = run_async_under_lab(0x7363_2a41, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let float = |value: f64| {
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        };
+        let scalar = |value: &GraphValue| value.as_scalar().unwrap().clone();
+        let rows: Vec<(GraphValue, GraphValue)> = vec![
+            (int(1), int(2)),
+            (int(2), int(3)),
+            (int(4), int(4)),
+            (int(4), int(5)),
+            (int(5), int(4)),
+            (int(6), float(7.0)),
+            (int(7), int(6)),
+            (int(8), int(1)),
+            (int(9), int(9)),
+            (int(1), int(2)),
+        ];
+        // Committed: ids 1 and 2 joined by R, and id 8 with both labels;
+        // staged earlier in the transaction: id 3.
+        let seeded = |transaction: &mut fgdb::WriteTxn, db: &mut Database<MemVfs>| {
+            let mut staged = WriteBatch::new(R);
+            staged.create_vertex(
+                VId(5_003),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(3))],
+            );
+            transaction.write(db, staged).unwrap();
+        };
+        let open = || async {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(5_001),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(1))],
+            );
+            seed.create_vertex(
+                VId(5_002),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(2))],
+            );
+            seed.create_vertex(
+                VId(5_008),
+                vec![ENTITY, LabelId(2)],
+                vec![(ID, CanonicalScalar::Int(8))],
+            );
+            seed.add_edge(EId(6_001), VId(5_001), VId(5_002), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            db
+        };
+        // The graph by content: identities differ between the two runs.
+        let content = |db: &Database<MemVfs>| {
+            let vertices = db.vertices().unwrap();
+            // Labels and the id's value, spelled out: scalar Debug output is
+            // redacted, so it cannot tell two ids apart.
+            let name = |vid: VId| {
+                let vertex = vertices.iter().find(|vertex| vertex.vid == vid).unwrap();
+                assert_eq!(vertex.props.len(), 1, "only id is ever written");
+                let id = match &vertex.props[0] {
+                    (key, fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id)))
+                        if *key == ID =>
+                    {
+                        format!("int {id}")
+                    }
+                    (
+                        key,
+                        fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Float(id)),
+                    ) if *key == ID => {
+                        format!("float {}", id.get())
+                    }
+                    _ => panic!("an id is an integer or a float"),
+                };
+                format!("{:?} {id}", vertex.labels)
+            };
+            let mut nodes: Vec<String> = vertices.iter().map(|vertex| name(vertex.vid)).collect();
+            nodes.sort();
+            let mut edges: Vec<(String, String)> = db
+                .edges()
+                .unwrap()
+                .iter()
+                .map(|edge| (name(edge.entry.src), name(edge.entry.dst)))
+                .collect();
+            edges.sort();
+            (nodes, edges)
+        };
+        let issued = AtomicU64::new(0);
+        let allocate = |request: GraphWriteIdentityRequest| {
+            let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+            Ok::<_, Infallible>(match request.request {
+                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+            })
+        };
+        let program = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+            1_000,
+            1_000,
+            1_000,
+        );
+        for labels in [":Entity", ":Entity:Other"] {
+            let chain = format!(
+                "UNWIND $rows AS row MERGE (a{labels} {{id: row.s}}) \
+                 MERGE (b:Entity {{id: row.d}}) MERGE (a)-[:R]->(b)"
+            );
+            let mut frozen = open().await;
+            let mut transaction = frozen.begin(&txcx).unwrap();
+            seeded(&mut transaction, &mut frozen);
+            let input = args(
+                rows.iter()
+                    .map(|(s, d)| object(vec![("s", s.clone()), ("d", d.clone())]))
+                    .collect(),
+            );
+            transaction
+                .query_write(
+                    &mut frozen,
+                    &cx,
+                    &chain,
+                    &input,
+                    symbols,
+                    R,
+                    program,
+                    allocate,
+                )
+                .unwrap_or_else(|error| panic!("{chain}: {error:?}"));
+            transaction.finish(&mut frozen, &commit).await.unwrap();
+
+            let mut reference = open().await;
+            let mut transaction = reference.begin(&txcx).unwrap();
+            seeded(&mut transaction, &mut reference);
+            for (s, d) in &rows {
+                let params = GqlParameters::new()
+                    .with_scalar("s", scalar(s))
+                    .unwrap()
+                    .with_scalar("d", scalar(d))
+                    .unwrap();
+                for statement in [
+                    format!("MERGE (a{labels} {{id: $s}})"),
+                    "MERGE (b:Entity {id: $d})".to_owned(),
+                    format!(
+                        "MATCH (a{labels} {{id: $s}}), (b:Entity {{id: $d}}) MERGE (a)-[:R]->(b)"
+                    ),
+                ] {
+                    transaction
+                        .query_write(
+                            &mut reference,
+                            &cx,
+                            &statement,
+                            &params,
+                            symbols,
+                            R,
+                            program,
+                            allocate,
+                        )
+                        .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+                }
+            }
+            transaction.finish(&mut reference, &commit).await.unwrap();
+            assert_eq!(content(&frozen), content(&reference), "{chain}");
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
