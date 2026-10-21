@@ -432,7 +432,11 @@ impl NativeAggregateSpool {
                     columns: Arc::clone(&self.columns),
                     before: self.snapshot_seq(),
                     after: after.snapshot_seq(),
-                    merge: Some(Merge::new(&before_sorted, &sorted, order)),
+                    merge: Some(NativeSpoolDifference::<B>::merge_with_order(
+                        &before_sorted,
+                        &sorted,
+                        order,
+                    )),
                     max_changed_rows,
                     changed: 0,
                     work,

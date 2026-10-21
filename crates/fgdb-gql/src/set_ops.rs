@@ -1106,6 +1106,24 @@ impl PreparedGraphSet {
         execute::execute(self, policy, source, checkpoint)
     }
 
+    /// Whether any source of this relation reads the graph: a pattern or a
+    /// procedure call. Owned rows and literal values read nothing.
+    #[must_use]
+    pub fn reads_graph(&self) -> bool {
+        match &self.node {
+            SetNode::Pattern(_) | SetNode::ProcedureCall(_) => true,
+            SetNode::Values | SetNode::Owned => false,
+            SetNode::Aggregate(summary) => summary.input().reads_graph(),
+            SetNode::Unwind { input, .. }
+            | SetNode::Scope(input)
+            | SetNode::Filter { input, .. }
+            | SetNode::Project { input, .. } => input.reads_graph(),
+            SetNode::CrossJoin { left, right }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => left.reads_graph() || right.reads_graph(),
+        }
+    }
+
     /// Whether any source of this relation is a procedure call.
     #[must_use]
     pub fn calls_procedure(&self) -> bool {

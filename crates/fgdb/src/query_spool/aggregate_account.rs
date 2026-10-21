@@ -6,6 +6,7 @@ use super::*;
 // admission, including the additional public-tuple copies held by a consumer.
 #[path = "aggregate_difference.rs"]
 mod difference;
+pub use difference::NativeAggregateSpoolDifference;
 
 /// Predecode reservation: typed slots and actual variable payloads, plus bounded
 /// scalar decoder overlap (notably zoned timestamp's temporary identifier).

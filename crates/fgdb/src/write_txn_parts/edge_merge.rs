@@ -540,7 +540,7 @@ impl WriteTxn {
         ),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
-        self.execute_graph_edge_merges_over(database, cx, merge, policy, None, allocate)
+        self.execute_graph_edge_merges_over(database, cx, merge, policy, None, None, allocate)
     }
 
     /// [`Self::execute_graph_edge_merges_governed`] for the last write of a
@@ -553,6 +553,7 @@ impl WriteTxn {
         merge: &fgdb_gql::PreparedGraphEdgeMerge,
         policy: fgdb_gql::GraphEdgeMergePolicy,
         owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        held: Option<&mut FrozenCreations>,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
         (
@@ -561,9 +562,15 @@ impl WriteTxn {
         ),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
-        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, owned, |row| {
-            allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 })
-        })
+        self.execute_graph_edge_merge_output_governed(
+            database,
+            cx,
+            merge,
+            policy,
+            owned,
+            held,
+            |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
+        )
         .map(|(stats, receipt, _)| (stats, receipt))
     }
 
@@ -618,6 +625,7 @@ impl WriteTxn {
                     query.merge(),
                     query.merge_policy(policy),
                     owned,
+                    None,
                     |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
                 )
                 .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Merge))?;
@@ -693,6 +701,7 @@ impl WriteTxn {
 
     /// `owned` is a chained write's input rows (the previous write's), read
     /// by the MERGE's row relation; `None` for every other statement.
+    #[allow(clippy::too_many_arguments)]
     fn execute_graph_edge_merge_output_governed<Output: EdgeMergeOutput, V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -700,6 +709,7 @@ impl WriteTxn {
         merge: &fgdb_gql::PreparedGraphEdgeMerge,
         policy: fgdb_gql::GraphEdgeMergePolicy,
         owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        held: Option<&mut FrozenCreations>,
         allocate: impl FnMut(usize) -> Result<ElementId, A>,
     ) -> EdgeMergeOutputResult<Output, A> {
         use fgdb_gql::{GqlQueryError, GraphEdgeMergeError};
@@ -708,10 +718,16 @@ impl WriteTxn {
             database, cx, merge, policy, owned, allocate,
         )?;
         if let Some(batch) = proposal.creation {
-            // The collector's final checkpoint already preceded staging.
-            // Preserve the native adapter's atomic write and error carrier.
-            cx.with_restriction(|| self.write(database, batch))
-                .map_err(infrastructure)?;
+            match held {
+                // A frozen chain stages its creations after its last step
+                // (fgdb-0s2pq).
+                Some(held) => held.defer(batch),
+                // The collector's final checkpoint already preceded staging.
+                // Preserve the native adapter's atomic write and error carrier.
+                None => cx
+                    .with_restriction(|| self.write(database, batch))
+                    .map_err(infrastructure)?,
+            }
         }
         Ok((proposal.stats, proposal.outcome, proposal.selected))
     }

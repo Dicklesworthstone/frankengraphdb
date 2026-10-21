@@ -17,8 +17,8 @@ mod codec;
 #[path = "query_spool/sort.rs"]
 mod sort;
 pub use aggregate::{
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, PreparedBufferedAggregate,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
 pub(crate) use sort::ordered_input;
 pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};

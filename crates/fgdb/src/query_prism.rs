@@ -166,18 +166,19 @@ impl<V: Vfs + Clone> Database<V> {
                         .into(),
                     );
                 }
-                let (partition, patches) = published
-                    .store
-                    .seal_relation_with_vertex_history(
+                // Type-erased like the commit chokepoints (fgdb-a5y6m): the
+                // sealer's future nests deep enough that a concrete caller's
+                // Send proof overflows unless the chain is split here.
+                let sealing: crate::SendFuture<'_, _> =
+                    Box::pin(published.store.seal_relation_with_vertex_history(
                         query_cx,
                         published.root_id,
                         as_of,
                         relation,
                         sealing,
                         root_limits,
-                    )
-                    .await
-                    .map_err(SealedReadError::Seal)?;
+                    ));
+                let (partition, patches) = sealing.await.map_err(SealedReadError::Seal)?;
                 let scope = partition.anchor().scope();
                 if scope.source_root != published.root_id
                     || scope.publication != published.published_at

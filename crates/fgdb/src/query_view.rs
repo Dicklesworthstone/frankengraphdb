@@ -23,9 +23,9 @@ mod branch;
 #[path = "query_spool.rs"]
 mod spool;
 pub use spool::{
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolDifference,
-    NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
+    NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input};
 
