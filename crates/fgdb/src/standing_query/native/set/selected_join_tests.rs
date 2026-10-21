@@ -121,7 +121,10 @@ fn selective_circuit_avoids_cartesian_admission_and_keeps_exact_committed_deltas
         let StandingQuery::Join(join) = &db.standing_queries[first + 2] else {
             panic!("missing selected join")
         };
-        assert_eq!(join.spec().keys(), &[(0, 0)]);
+        // n.k is a Scalar column: its WHERE equality stays in ON, because
+        // Int(7) = Float(7) is TRUE while their typed arrangement keys differ
+        // (b0a17b20). Only Vertex/Edge equalities become typed keys.
+        assert!(join.spec().keys().is_empty());
         assert!(join.spec().predicate().is_some());
         assert_eq!(check(&db, &cx, &query, &handle).values().sum::<i128>(), 64);
         let mut before = sets::rows(&db.standing_queries[handle.index])
@@ -156,7 +159,7 @@ fn selective_circuit_avoids_cartesian_admission_and_keeps_exact_committed_deltas
         let StandingQuery::Join(join) = &db.standing_queries[first + 2] else {
             panic!()
         };
-        assert_eq!(join.spec().keys(), &[(0, 0)]);
+        assert!(join.spec().keys().is_empty());
         assert!(join.spec().predicate().is_some());
         assert_eq!(query.canonical_bytes(), frozen);
         // An unrelated durable tick must remain a real empty successor delta.
@@ -267,7 +270,8 @@ fn reordered_and_repeated_with_columns_survive_commits_and_whole_circuit_rebuild
         let StandingQuery::Join(join) = &db.standing_queries[first + 2] else {
             panic!()
         };
-        assert_eq!(join.spec().keys(), &[(0, 0)]);
+        // Scalar key columns stay in ON (b0a17b20), as in the law above.
+        assert!(join.spec().keys().is_empty());
         let frozen_spec = join.spec().clone();
         let mut change = WriteBatch::new(RelationId(1));
         change.set_vertex_property(VId(10_008), P, Some(CanonicalScalar::Int(-1)));
