@@ -153,7 +153,7 @@ fn pull_and_visitor_share_ordered_groups_and_the_same_work_schedule() {
                 code /= 3;
             }
             let make = |offset| {
-                (0..2_usize)
+                (0_usize..2)
                     .rev()
                     .flat_map(|key| std::iter::repeat_n(row(key as i64), counts[offset + key]))
                     .collect::<Vec<_>>()
@@ -394,11 +394,12 @@ fn dropping_a_pending_pull_fuses_the_cursor_and_keeps_the_file_poisoned() {
         drop(first);
         assert!(pool.used() > 0);
         backing.0.lock().unwrap().pending_read = true;
-        // Block-scoped: the Context is not Send and must not span an await.
         {
+            // A Context is not Send: keep it out of the lab future's later awaits.
             let mut future = cursor.next_change();
             let mut task = Context::from_waker(Waker::noop());
             assert!(future.as_mut().poll(&mut task).is_pending());
+            drop(future);
         }
         assert_eq!(cursor.state(), ScanState::Failed);
         assert_eq!(cursor.changed_rows(), 1);

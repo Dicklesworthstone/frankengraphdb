@@ -12,9 +12,7 @@ use fgdb_gql::{
     GraphVertexMergeOutcome, GraphVertexUpsertError, GraphWriteIdentityRequest,
     GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteStepReceipt,
 };
-use fgdb_types::{
-    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId,
-};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const R: RelationId = RelationId(1);
@@ -25,10 +23,6 @@ const SCRIPT: &str = "MERGE (n:N {p:1}); \
     MERGE (n:N {p:1}) ON MATCH SET n.p=2,n.q=n.q+1 SET n.q=n.q*2; \
     MERGE (n:N {p:2}) ON MATCH SET n.q=n.q+5";
 
-/// A stored integer property, as `props` reports it since stored lists.
-fn stored(value: i64) -> CanonicalPropertyValue {
-    CanonicalScalar::Int(value).into()
-}
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0xb1; 32],
@@ -76,12 +70,18 @@ fn assert_targets(db: &Database<MemVfs>, key: i64, values: [i64; 2]) {
     for (id, value) in IDS.into_iter().zip(values) {
         assert_eq!(
             db.vertex(id).unwrap().unwrap().props,
-            vec![(P, stored(key)), (Q, stored(value))],
+            vec![
+                (P, CanonicalScalar::Int(key).into()),
+                (Q, CanonicalScalar::Int(value).into())
+            ],
         );
     }
     assert_eq!(
         db.vertex(VId(90)).unwrap().unwrap().props,
-        vec![(P, stored(9)), (Q, stored(20))],
+        vec![
+            (P, CanonicalScalar::Int(9).into()),
+            (Q, CanonicalScalar::Int(20).into())
+        ],
     );
 }
 
@@ -374,7 +374,10 @@ fn no_return_creations_keep_statement_coordinates_and_cumulative_creation_caps()
         assert!(db.vertex(VId(100)).unwrap().is_none());
         assert_eq!(
             db.vertex(VId(101)).unwrap().unwrap().props,
-            vec![(P, stored(7)), (Q, stored(5))],
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ],
         );
         assert_targets(&db, 1, [3, 7]);
         assert_eq!(txcx.outstanding_obligations(), 0);

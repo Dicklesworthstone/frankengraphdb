@@ -481,7 +481,8 @@ coverage_of() {
     docs/REMOTE_BATCH_WRITES.md|\
     docs/STUDIO.md|\
     docs/VECTOR_COORDINATE_PROJECTION.md|\
-    docs/cli_graph_only_search.md)       echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
+    docs/cli_graph_only_search.md|\
+    crates/fgdb-cli/QUERY_FED_WRITES.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
     # Mutation-proven 2026-09-13: registered prose passes; appending an
     # unregistered claim marker in an isolated copy fails at this exact path.
     scratchpad/agent-bootstrap-downloads.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT download availability)" ;;

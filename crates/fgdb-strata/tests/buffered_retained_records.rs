@@ -1,7 +1,7 @@
 //! Authenticated Strata histories with several simultaneously retained records.
 //! The test holds returned values, not a replacement graph or decoder model.
-// Buffered scans nest the store's futures past the default recursion limit
-// when a lab test proves them Send (see fgdb-strata's lib.rs).
+// Proving `Send` for the lab future descends the whole buffered-scan and
+// put_root stack, which overflows the default limit of 128.
 #![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;

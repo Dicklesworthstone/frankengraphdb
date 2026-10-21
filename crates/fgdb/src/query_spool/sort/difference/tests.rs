@@ -180,7 +180,7 @@ fn all_small_bags_match_counts_in_both_directions_across_run_boundaries() {
                 code /= 3;
             }
             let make = |offset| {
-                (0..2_usize)
+                (0_usize..2)
                     .rev()
                     .flat_map(|key| std::iter::repeat_n(row(key as i64), counts[offset + key]))
                     .collect::<Vec<_>>()
@@ -466,27 +466,27 @@ fn visitor_failure_and_drop_apply_backpressure_without_consuming_original_runs()
         ));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         calls.store(0, AtomicOrdering::SeqCst);
-        // Block-scoped: the Context is not Send and must not span an await.
+        let mut future = Box::pin(a.visit_difference(
+            &b,
+            &cx,
+            &mut source,
+            &mut scratch,
+            3,
+            100,
+            61,
+            100,
+            u64::MAX,
+            |_, row| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                async move {
+                    pending::<()>().await;
+                    drop(row);
+                    Ok(())
+                }
+            },
+        ));
         {
-            let mut future = Box::pin(a.visit_difference(
-                &b,
-                &cx,
-                &mut source,
-                &mut scratch,
-                3,
-                100,
-                61,
-                100,
-                u64::MAX,
-                |_, row| {
-                    calls.fetch_add(1, AtomicOrdering::SeqCst);
-                    async move {
-                        pending::<()>().await;
-                        drop(row);
-                        Ok(())
-                    }
-                },
-            ));
+            // A Context is not Send: keep it out of the lab future's later awaits.
             let mut task = Context::from_waker(Waker::noop());
             assert!(future.as_mut().poll(&mut task).is_pending());
             assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
@@ -503,6 +503,7 @@ fn visitor_failure_and_drop_apply_backpressure_without_consuming_original_runs()
                 reads
             );
         }
+        drop(future);
         assert_eq!(read(&b, &cx, &mut source).await, rows);
         let (result, changes) =
             collect(&a, &b, &cx, &mut source, &mut scratch, 3, 100, u64::MAX).await;

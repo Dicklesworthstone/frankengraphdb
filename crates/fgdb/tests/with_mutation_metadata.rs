@@ -142,7 +142,6 @@ fn rows(result: QueryResult, names: &[&str]) -> Vec<Vec<GraphValue>> {
         .collect()
 }
 
-// Mirrors Transaction::query_write, which allows the same large error.
 #[allow(clippy::result_large_err)]
 async fn apply(
     db: &mut Database<MemVfs>,

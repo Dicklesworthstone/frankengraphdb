@@ -1380,6 +1380,7 @@ pub(super) fn append_transcript(projection: &[GraphSetProjection], bytes: &mut V
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ProjectionFailure<E> {
     Control(E),
     Arithmetic {
