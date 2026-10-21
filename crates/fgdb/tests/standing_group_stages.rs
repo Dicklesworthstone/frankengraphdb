@@ -13,7 +13,8 @@ use fgdb_gql::{
     GraphSymbolKind, PreparedGraphSet,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalF64, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+    QueryCx, VId,
 };
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -299,23 +300,32 @@ fn conversion_errors_are_not_hidden_by_zero_pages_and_unbounded_sorts_still_refu
             );
         }
         db.write(&commit, seed).await.unwrap();
-        for (text, expected) in [
-            (
-                "MATCH (n:L) WITH SUM(n.q) AS total RETURN total LIMIT 0",
-                GraphIntegerErrorKind::Overflow,
-            ),
-            (
-                "MATCH (n:L) WITH AVG(n.q) AS mean RETURN mean LIMIT 0",
-                GraphIntegerErrorKind::IncompatibleOperands,
-            ),
-        ] {
-            assert!(matches!(
-                db.register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy()),
-                Err(StandingQueryError::Maintenance(
-                    StandingQueryFailure::OutputExpression { error, .. }
-                )) if error.kind == expected
-            ));
-        }
+        let text = "MATCH (n:L) WITH SUM(n.q) AS total RETURN total LIMIT 0";
+        assert!(matches!(
+            db.register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy()),
+            Err(StandingQueryError::Maintenance(
+                StandingQueryFailure::OutputExpression { error, .. }
+            )) if error.kind == GraphIntegerErrorKind::Overflow
+        ));
+        // An AVG of integers is no conversion failure: WITH carries the
+        // binary64 nearest its exact mean, (2^63 - 1 + 1) / 2 = 2^62 here
+        // (fgdb-y255t).
+        let text = "MATCH (n:L) WITH AVG(n.q) AS mean RETURN mean";
+        let handle = db
+            .register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        assert_native(&db, &cx, &handle, text, &GqlParameters::new());
+        let (_, QueryResult::Rows { rows, .. }) =
+            db.standing_native_query(&cx, &handle, delivery()).unwrap()
+        else {
+            panic!("query rows");
+        };
+        assert_eq!(
+            rows,
+            vec![vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Float(CanonicalF64::new(4_611_686_018_427_387_904.0))
+            ))]]
+        );
         let text = "MATCH (n:L) WITH n.p AS bucket,COUNT(*) AS copies RETURN bucket,copies ORDER BY copies";
         assert!(matches!(
             db.register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy()),

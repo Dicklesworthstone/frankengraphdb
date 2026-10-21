@@ -2,8 +2,10 @@
 //!
 //! Bounded typed postfix IR compiles to private linear bytecode. CASE and
 //! COALESCE are lazy. Integer arithmetic remains checked. Scalar Int/Float
-//! arithmetic uses finite binary64 with integer-only rounding; exact aggregate
-//! cells never implicitly convert to float.
+//! arithmetic uses finite binary64 with integer-only rounding; counts and wide
+//! sums never implicitly convert to float. An exact average that arithmetic
+//! or a conversion reads is its correctly rounded binary64 first, as
+//! openCypher's avg is a Float (fgdb-y255t); comparisons keep it exact.
 //! Int/Float comparisons use exact numeric value, not storage type ranks.
 //! Text operations use Unicode scalar positions and UCS_BASIC result collation.
 
@@ -567,6 +569,17 @@ impl ExpressionCell<'_> {
         }
     }
 
+    /// Arithmetic reads an exact average as openCypher's Float: replace it
+    /// with its correctly rounded binary64 (fgdb-y255t, option C). True when
+    /// this cell was an average.
+    fn round_average(&mut self) -> bool {
+        let Self::Average(average) = self else {
+            return false;
+        };
+        *self = CanonicalScalar::Float(average.binary64()).into();
+        true
+    }
+
     fn float(&self) -> Option<fgdb_types::CanonicalF64> {
         match self {
             Self::Scalar(value) => match value.as_ref() {
@@ -891,7 +904,8 @@ impl GraphIntegerExpression {
                 Instruction::Truth(value) => stack.push(boolean_scalar(*value).into()),
                 Instruction::Unary(op) | Instruction::NumericUnary(op) => {
                     let value = stack.last_mut().expect("validated unary stack");
-                    if matches!(self.code[at], Instruction::NumericUnary(_))
+                    let averaged = value.round_average();
+                    if (averaged || matches!(self.code[at], Instruction::NumericUnary(_)))
                         && let Some(result) = numeric::unary(*op, value).map_err(failure)?
                     {
                         *value = result.into();
@@ -917,9 +931,13 @@ impl GraphIntegerExpression {
                     .map_err(failure)?;
                 }
                 Instruction::Binary(op) | Instruction::NumericBinary(op) => {
-                    let right = stack.pop().expect("validated right operand");
+                    let mut right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
-                    if matches!(self.code[at], Instruction::NumericBinary(_)) {
+                    // Arithmetic rounds each average operand once; NULLIF is
+                    // an equality and keeps it exact.
+                    let averaged = *op != GraphIntegerBinary::NullIf
+                        && (left.round_average() | right.round_average());
+                    if averaged || matches!(self.code[at], Instruction::NumericBinary(_)) {
                         if *op == GraphIntegerBinary::NullIf {
                             // Equality stays exact; do not round an integer
                             // merely to decide whether NULLIF should retain it.
@@ -1513,12 +1531,13 @@ fn charge_payload<E>(
 /// is not an i64 literal converts to NULL under toInteger, as openCypher
 /// defines it. Decimal conversion stays exact: toString uses the canonical
 /// fixed-scale spelling and toInteger truncates its scale-18 coefficient
-/// toward zero without a binary64 intermediate. Bytes and exact aggregate
-/// cells remain typed failures.
+/// toward zero without a binary64 intermediate. Bytes remain a typed
+/// failure; an exact average converts as its correctly rounded binary64.
 /// openCypher `base ^ exponent` (TCK Precedence2, Return2 [1]): a float, NULL
-/// when either operand is. A Count, wide sum or average, or a non-number, is
-/// an error. The exponent must be integral (a fractional one is NonInteger,
-/// never a host `powf`, whose last bit differs across platforms).
+/// when either operand is. A Count or wide sum, or a non-number, is an error;
+/// an exact average is its correctly rounded binary64 (fgdb-y255t). The
+/// exponent must be integral (a fractional one is NonInteger, never a host
+/// `powf`, whose last bit differs across platforms).
 ///
 /// An integer base to a non-negative integer power is computed exactly and
 /// rounded once, so `4 ^ 18` is exactly 68719476736.0. Any other integral
@@ -1540,6 +1559,7 @@ fn power(
             CanonicalScalar::Float(value) => Ok(Some((None, *value))),
             _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
         },
+        ExpressionCell::Average(average) => Ok(Some((None, average.binary64()))),
         _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
     };
     let (base, exponent) = (number(base)?, number(exponent)?);
@@ -1600,13 +1620,7 @@ fn binary64(
     Ok(Some(match cell {
         ExpressionCell::Count(value) => integer(i128::from(*value)),
         ExpressionCell::Integer(value) => integer(*value),
-        ExpressionCell::Average(average) => {
-            let mut exact = ExactBinary64Sum::new();
-            exact.add_integer(average.numerator());
-            exact
-                .mean(average.denominator())
-                .ok_or(GraphIntegerErrorKind::IncompatibleOperands)?
-        }
+        ExpressionCell::Average(average) => average.binary64(),
         ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
             CanonicalScalar::Null => return Ok(None),
             CanonicalScalar::Int(value) => integer(i128::from(*value)),
@@ -1685,8 +1699,11 @@ fn convert<E>(
     let number = match cell {
         ExpressionCell::Count(value) => i128::from(*value),
         ExpressionCell::Integer(value) => *value,
-        ExpressionCell::Average(_) => {
-            return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+        // openCypher avg is a Float: convert its correctly rounded binary64
+        // (fgdb-y255t).
+        ExpressionCell::Average(average) => {
+            let float = CanonicalScalar::Float(average.binary64()).into();
+            return convert(&float, to_text, instruction, control);
         }
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
@@ -1836,13 +1853,7 @@ fn numeric<E>(
     let value = match cell {
         ExpressionCell::Count(value) => integer(i128::from(*value)),
         ExpressionCell::Integer(value) => integer(*value),
-        ExpressionCell::Average(average) => {
-            let mut exact = ExactBinary64Sum::new();
-            exact.add_integer(average.numerator());
-            exact
-                .mean(average.denominator())
-                .expect("an exact average has a positive denominator")
-        }
+        ExpressionCell::Average(average) => average.binary64(),
         ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
             CanonicalScalar::Int(value) => integer(i128::from(*value)),

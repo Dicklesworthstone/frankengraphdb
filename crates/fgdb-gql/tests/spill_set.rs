@@ -1314,12 +1314,9 @@ fn complete_group_conversion_and_input_errors_precede_downstream_zero_pages() {
     let graph = Graph::sample();
     for text in [
         "UNWIND [9223372036854775807,1] AS value WITH SUM(value) AS total RETURN 1/(total-total) AS failure LIMIT 0",
-        "UNWIND [1,2] AS value WITH AVG(value) AS mean RETURN mean LIMIT 0",
-        "UNWIND [2,2] AS value WITH AVG(value) AS mean RETURN mean LIMIT 0",
         "UNWIND [{key:1,value:1},{key:2,value:9223372036854775807},{key:2,value:1}] AS record WITH record.key AS key,SUM(record.value) AS total ORDER BY key LIMIT 1 RETURN total",
         "UNWIND [1,0] AS value WITH SUM(1/value) AS total RETURN total LIMIT 0",
         "UNWIND [1,'bad'] AS value WITH SUM(value) AS total RETURN total LIMIT 0",
-        "UNWIND [] AS value RETURN value UNION ALL UNWIND [1,2] AS item WITH AVG(item) AS value RETURN value LIMIT 0",
     ] {
         let query = prepare(text);
         let Err(GqlQueryError::Source(expected)) = graph.native(&query) else {
@@ -1330,6 +1327,35 @@ fn complete_group_conversion_and_input_errors_precede_downstream_zero_pages() {
             Err(SpillSetRowError::Native(expected)),
             "{text}"
         );
+    }
+    // An integer AVG converts to the binary64 nearest its exact mean
+    // (fgdb-y255t), in the staged plan exactly as natively.
+    let mean = |value: f64| {
+        row(vec![GraphValue::Scalar(CanonicalScalar::Float(
+            CanonicalF64::new(value),
+        ))])
+    };
+    for (text, expected) in [
+        (
+            "UNWIND [1,2] AS value WITH AVG(value) AS mean RETURN mean",
+            vec![mean(1.5)],
+        ),
+        (
+            "UNWIND [2,2] AS value WITH AVG(value) AS mean RETURN mean",
+            vec![mean(2.0)],
+        ),
+        (
+            "UNWIND [1,2] AS value WITH AVG(value) AS mean RETURN mean LIMIT 0",
+            vec![],
+        ),
+        (
+            "UNWIND [] AS value RETURN value UNION ALL UNWIND [1,2,2] AS item WITH AVG(item) AS value RETURN value",
+            vec![mean(5.0 / 3.0)],
+        ),
+    ] {
+        let query = prepare(text);
+        assert_eq!(graph.native(&query).unwrap(), expected, "{text}");
+        assert_eq!(staged(&graph, &query).unwrap(), expected, "{text}");
     }
     let empty =
         prepare("UNWIND [] AS value WITH value,COUNT(*) AS copies RETURN 1/0 AS failure LIMIT 0");
@@ -1426,6 +1452,16 @@ fn aggregate_row_conversion_keeps_exact_domains_and_each_host_checkpoint() {
             GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
             GraphValue::Scalar(CanonicalScalar::Null),
         ),
+        // A row has no exact rational: an average is the binary64 nearest
+        // it (fgdb-y255t).
+        (
+            GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(2.0))),
+        ),
+        (
+            GraphAggregateValue::Average(GraphExactAverage::new(-7, 3).unwrap()),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(-7.0 / 3.0))),
+        ),
     ] {
         let complete = GraphAggregateRow::from_group_values(vec![], vec![value]);
         assert_eq!(
@@ -1447,10 +1483,6 @@ fn aggregate_row_conversion_keeps_exact_domains_and_each_host_checkpoint() {
         (
             GraphAggregateValue::Integer(i128::from(i64::MIN) - 1),
             GraphIntegerErrorKind::Overflow,
-        ),
-        (
-            GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
-            GraphIntegerErrorKind::IncompatibleOperands,
         ),
     ] {
         let complete = GraphAggregateRow::from_group_values(vec![], vec![value]);
@@ -1819,7 +1851,7 @@ fn cartesian_children_finish_before_empty_products_and_downstream_zero_pages() {
         "UNWIND [1,0] AS value RETURN 1/value AS bad",
         "UNWIND [[1],2] AS values UNWIND values AS item RETURN item AS bad",
         "UNWIND [9223372036854775807,1] AS value WITH SUM(value) AS bad RETURN bad",
-        "UNWIND [2] AS value WITH AVG(value) AS bad RETURN bad",
+        "UNWIND [2,'bad'] AS value WITH AVG(value) AS bad RETURN bad",
     ] {
         let bad = prepare(text);
         for query in [

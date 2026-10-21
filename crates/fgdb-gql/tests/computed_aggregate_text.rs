@@ -844,6 +844,67 @@ fn reserved_delimited_map_keys_stay_opaque_to_functions_and_composition() {
     );
 }
 
+/// fgdb-y255t, option C: in the aggregate result projection, arithmetic on
+/// an exact average reads the binary64 nearest it, rounded once, and so
+/// does a list that holds it. The bare cell stays the exact average and a
+/// comparison stays exact: 7/3 is below 2.3333333333333335, its nearest
+/// binary64. IEEE operations on exactly representable values are the
+/// independent expectations.
+#[test]
+fn result_arithmetic_reads_an_exact_average_as_its_nearest_binary64() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
+
+    let vertices = [VId(1), VId(2), VId(3)];
+    let mut props = Props::new();
+    for (id, p) in [(1, 1), (2, 3), (3, 3)] {
+        props.insert((VId(id), P), CanonicalScalar::Int(p).into());
+    }
+    let mean = 7.0 / 3.0;
+    let binary64 = |value: f64| {
+        GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+    };
+    let float = |value: f64| GraphAggregateValue::Value(binary64(value));
+    let age = GqlParameters::new().with_int64("age", 12).unwrap();
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN avg(n.p) AS value",
+            GraphAggregateValue::Average(GraphExactAverage::new(7, 3).unwrap()),
+        ),
+        ("MATCH (n) RETURN avg(n.p) * 2 AS value", float(mean * 2.0)),
+        (
+            "MATCH (n) RETURN avg(n.p) + 0.5 AS value",
+            float(mean + 0.5),
+        ),
+        ("MATCH (n) RETURN -avg(n.p) AS value", float(-mean)),
+        // TCK With6 [5]'s expression.
+        (
+            "MATCH (n) RETURN $age + avg(n.p) - 1000 AS value",
+            float(12.0 + mean - 1000.0),
+        ),
+        (
+            "MATCH (n) RETURN [avg(n.p)] AS value",
+            GraphAggregateValue::Value(GraphValue::List(vec![binary64(mean)].into_boxed_slice())),
+        ),
+        (
+            "MATCH (n) RETURN avg(n.p) < 2.3333333333333335 AS value",
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+        ),
+    ] {
+        let parameters = if text.contains("$age") {
+            age.clone()
+        } else {
+            GqlParameters::new()
+        };
+        let plan = PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+        let rows = run(&plan, &vertices, &[], &props).unwrap().value;
+        assert_eq!(rows[0].values(), &[expected], "{text}");
+    }
+}
+
 #[test]
 fn floating_aggregate_having_and_case_compare_exact_counts_sums_and_averages() {
     use fgdb_gql::GraphAggregateValue;

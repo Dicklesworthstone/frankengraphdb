@@ -1067,10 +1067,6 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
                 None,
             ),
             (
-                "UNWIND [2] AS x WITH AVG(x) AS mean RETURN mean LIMIT 0",
-                None,
-            ),
-            (
                 "UNWIND [1,'bad'] AS x WITH SUM(x) AS total RETURN total LIMIT 0",
                 None,
             ),

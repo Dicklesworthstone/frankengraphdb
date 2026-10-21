@@ -347,7 +347,6 @@ fn late_argument_and_output_conversion_errors_survive_limit_zero() {
         "UNWIND [1,2] AS x CREATE (n {p:x}) RETURN sum(10/(2-n.p)) AS broken LIMIT 0",
         "UNWIND [1,'bad'] AS x CREATE (n {p:x}) RETURN sum(n.p) AS broken LIMIT 0",
         "UNWIND [9223372036854775807,1] AS x CREATE (n {p:x}) RETURN sum(n.p) AS wide LIMIT 0",
-        "UNWIND [1,3] AS x CREATE (n {p:x}) RETURN avg(n.p) AS exact LIMIT 0",
     ] {
         let error = create(&prepare(statement), policy(0), || Ok(())).unwrap_err();
         assert!(
@@ -358,6 +357,26 @@ fn late_argument_and_output_conversion_errors_survive_limit_zero() {
             "{statement}: {error:?}"
         );
     }
+    // An integer AVG converts to its row value without failing: openCypher's
+    // Float, the binary64 nearest the exact mean (fgdb-y255t), here 4/3.
+    let exact = "UNWIND [1,1,2] AS x CREATE (n {p:x}) RETURN avg(n.p) AS mean";
+    assert!(
+        create(&prepare(&format!("{exact} LIMIT 0")), policy(0), || Ok(()))
+            .unwrap()
+            .returning()
+            .value
+            .is_empty()
+    );
+    assert_eq!(
+        rows(
+            create(&prepare(exact), policy(1), || Ok(()))
+                .unwrap()
+                .returning()
+        ),
+        vec![vec![GraphValue::Scalar(CanonicalScalar::Float(
+            CanonicalF64::new(4.0 / 3.0)
+        ))]],
+    );
 }
 
 #[test]

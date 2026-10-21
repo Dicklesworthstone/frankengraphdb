@@ -841,8 +841,9 @@ fn expression<'g, E, C>(
     })
 }
 
-/// An aggregate output as an ordinary graph value. Preserve exactness or
-/// fail; never truncate an aggregate into an i64.
+/// An aggregate output as an ordinary graph value. Never truncate an
+/// aggregate into an i64. A graph value has no exact rational: an average
+/// is openCypher's Float, rounded once (fgdb-y255t, option C).
 fn graph_value<E, C>(
     value: GraphAggregateValue,
     column: usize,
@@ -856,8 +857,8 @@ fn graph_value<E, C>(
         GraphAggregateValue::Value(value) => Ok(value),
         GraphAggregateValue::Count(value) => int(i128::from(value)),
         GraphAggregateValue::Integer(value) => int(value),
-        GraphAggregateValue::Average(_) => {
-            Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands))
+        GraphAggregateValue::Average(value) => {
+            Ok(GraphValue::Scalar(CanonicalScalar::Float(value.binary64())))
         }
     }
 }

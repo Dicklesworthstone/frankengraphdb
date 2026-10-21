@@ -70,13 +70,11 @@ pub(in crate::set_ops) fn convert_row<E>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 GraphValue::Scalar(CanonicalScalar::Int(value))
             }
-            // GraphValue has no exact rational variant. Even denominator one
-            // must not silently change the aggregate's declared domain.
-            GraphAggregateValue::Average(_) => {
-                return Err(conversion_error(
-                    column,
-                    GraphIntegerErrorKind::IncompatibleOperands,
-                ));
+            // GraphValue has no exact rational variant: a row carries the
+            // average as openCypher's Float, rounded once (fgdb-y255t).
+            GraphAggregateValue::Average(value) => {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                GraphValue::Scalar(CanonicalScalar::Float(value.binary64()))
             }
         };
         cells.push(value);
@@ -125,8 +123,9 @@ impl PreparedGraphSetAggregate {
     /// and any native output projection are respected; no graph leaf is rerun.
     ///
     /// Counts and sums require an exact Int64 representation. Out-of-range
-    /// values return OutputExpression(Overflow); exact averages return
-    /// OutputExpression(IncompatibleOperands), never a rounded/truncated value.
+    /// values return OutputExpression(Overflow), never a truncated value. An
+    /// exact average becomes its correctly rounded binary64 Float, as
+    /// openCypher's avg is a Float (fgdb-y255t, option C).
     /// MIN/MAX, COLLECT and nulls keep their native bounded GraphValue domain.
     /// execute_governed() remains the unrestricted exact-result interface.
     ///
@@ -305,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_sums_and_rationals_refuse_without_changing_exact_results() {
+    fn wide_sums_refuse_and_rationals_round_once_without_changing_exact_results() {
         for values in [[Some(i64::MAX), Some(1)], [Some(i64::MIN), Some(-1)]] {
             let query = summary(&values);
             let exact = query.execute_governed(policy(), source, || Ok(())).unwrap();
@@ -324,36 +323,42 @@ mod tests {
                 ))
             ));
         }
-        for values in [[Some(1), Some(2)], [Some(2), Some(2)]] {
+        // A row has no exact rational: it carries openCypher's Float, the
+        // binary64 nearest the exact mean (fgdb-y255t). IEEE division of two
+        // exactly representable integers is that nearest binary64.
+        for (values, numerator, denominator) in [
+            (&[Some(1), Some(2)][..], 3, 2),
+            (&[Some(2), Some(2)][..], 2, 1),
+            (&[Some(1), Some(3), Some(3), None][..], 7, 3),
+            (&[Some(-1), Some(-1), Some(2), Some(-2)][..], -1, 2),
+        ] {
             let average = PreparedGraphSetAggregate::prepare(
-                input(&values),
+                input(values),
                 &[],
                 &[GraphAggregate::average_int("mean", 0)],
                 0,
                 None,
             )
             .unwrap();
-            assert!(
+            assert_eq!(
                 average
                     .execute_governed(policy(), source, || Ok(()))
                     .unwrap()
                     .value[0]
                     .values()[0]
-                    .as_average()
-                    .is_some()
+                    .as_average(),
+                crate::GraphExactAverage::new(numerator, denominator)
             );
-            assert!(matches!(
-                average.execute_values_governed(policy(), source, || Ok(())),
-                Err(GqlQueryError::Source(
-                    GraphAggregateError::OutputExpression {
-                        error: GraphIntegerError {
-                            kind: GraphIntegerErrorKind::IncompatibleOperands,
-                            ..
-                        },
-                        ..
-                    }
-                ))
-            ));
+            assert_eq!(
+                average
+                    .execute_values_governed(policy(), source, || Ok(()))
+                    .unwrap()
+                    .value[0]
+                    .values(),
+                &[GraphValue::Scalar(CanonicalScalar::Float(
+                    fgdb_types::CanonicalF64::new(numerator as f64 / denominator as f64)
+                ))]
+            );
         }
     }
 

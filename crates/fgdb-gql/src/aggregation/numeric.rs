@@ -54,6 +54,19 @@ impl GraphExactAverage {
     pub fn compare_integer(self, other: i128) -> Ordering {
         compare_ratios((self.numerator, self.denominator), (other, 1))
     }
+
+    /// The binary64 nearest this exact average, rounded once. Arithmetic on
+    /// an average and a row value that holds one (a WITH alias) read this;
+    /// only a final RETURN cell keeps the exact fraction (owner ruling on
+    /// fgdb-y255t, option C).
+    #[must_use]
+    pub fn binary64(self) -> CanonicalF64 {
+        let mut exact = ExactBinary64Sum::new();
+        exact.add_integer(self.numerator);
+        exact
+            .mean(self.denominator)
+            .expect("an exact average has a positive denominator")
+    }
 }
 
 impl Ord for GraphExactAverage {

@@ -116,10 +116,6 @@ fn shared_row_conversion_preserves_domains_and_every_interruption() {
             GraphAggregateValue::Integer(i128::MIN),
             GraphIntegerErrorKind::Overflow,
         ),
-        (
-            GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
-            GraphIntegerErrorKind::IncompatibleOperands,
-        ),
     ] {
         let row = GraphAggregateRow::from_group_values(
             vec![GraphValue::Scalar(CanonicalScalar::Int(1))],
@@ -132,4 +128,20 @@ fn shared_row_conversion_preserves_domains_and_every_interruption() {
             )) if error.kind == kind
         ));
     }
+    // A row has no exact rational: an average converts to the binary64
+    // nearest it (fgdb-y255t), 2/3 here.
+    let row = GraphAggregateRow::from_group_values(
+        vec![GraphValue::Scalar(CanonicalScalar::Int(1))],
+        vec![GraphAggregateValue::Average(
+            GraphExactAverage::new(2, 3).unwrap(),
+        )],
+    );
+    assert_eq!(
+        row.to_value_row_with_control(&mut |_| Ok::<(), ()>(()))
+            .unwrap()
+            .values()[1],
+        GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
+            2.0 / 3.0
+        )))
+    );
 }

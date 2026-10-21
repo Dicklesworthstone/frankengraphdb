@@ -1913,6 +1913,17 @@ fn external_intermediate_groups_feed_complete_relational_stages() {
                     CanonicalF64::new(2.0),
                 ))]],
             ),
+            // An integer AVG reaches the row as the binary64 nearest its
+            // exact mean, 7/3 (fgdb-y255t).
+            (
+                "UNWIND [1,3,3,NULL] AS x WITH AVG(x) AS mean RETURN mean",
+                2,
+                0,
+                ScanKind::Values,
+                vec![vec![GraphValue::Scalar(CanonicalScalar::Float(
+                    CanonicalF64::new(7.0 / 3.0),
+                ))]],
+            ),
         ] {
             let prepared = prepare(text, &GqlParameters::new());
             let before = view.buffer_stats();
@@ -1979,10 +1990,6 @@ fn external_group_conversion_finishes_before_downstream_filters_expressions_and_
             (
                 "UNWIND [9223372036854775807,1] AS x WITH SUM(x) AS total RETURN total LIMIT 0",
                 GraphIntegerErrorKind::Overflow,
-            ),
-            (
-                "UNWIND [2] AS x WITH AVG(x) AS mean RETURN mean LIMIT 0",
-                GraphIntegerErrorKind::IncompatibleOperands,
             ),
             (
                 "UNWIND [[0,1],[1,9223372036854775807],[1,1]] AS pair WITH pair[0] AS bucket,SUM(pair[1]) AS total RETURN 1/0 AS value LIMIT 0",

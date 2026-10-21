@@ -39,8 +39,9 @@ fn operand(cell: &ExpressionCell<'_>) -> Result<Option<CanonicalF64>, GraphInteg
             CanonicalScalar::Int(value) => Ok(Some(CanonicalF64::from_i64_rounded(*value))),
             _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
         },
-        // Count, wide sums and exact averages are not ordinary scalar Ints.
-        // Reject mixing them with Float rather than silently losing precision.
+        // Counts and wide sums are not ordinary scalar Ints. Reject mixing
+        // them with Float rather than silently losing precision. (An exact
+        // average arrives here already rounded to binary64, fgdb-y255t.)
         _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
     }
 }
@@ -230,6 +231,116 @@ mod tests {
         let refused = expression.evaluate_loaded_with_control(
             1,
             |_| Ok(ExpressionCell::Integer(i128::MAX)),
+            |_| Err(GraphIntegerErrorKind::NonScalar),
+            &mut |_| Ok::<_, ()>(()),
+        );
+        assert!(
+            matches!(refused, Err(GraphIntegerEvaluationError::Value(error))
+            if error.kind == GraphIntegerErrorKind::IncompatibleOperands)
+        );
+    }
+
+    /// fgdb-y255t, option C: arithmetic and conversions read an exact
+    /// average as the binary64 nearest it, rounded once; a comparison still
+    /// reads the exact fraction. IEEE operations on exactly representable
+    /// values are the independent expectations.
+    #[test]
+    fn arithmetic_reads_an_exact_average_as_its_nearest_binary64() {
+        let average = crate::GraphExactAverage::new(7, 3).unwrap();
+        let run = |ops: &[Op]| {
+            GraphIntegerExpression::prepare_scalar(ops)
+                .unwrap()
+                .evaluate_loaded_with_control(
+                    1,
+                    |_| Ok(ExpressionCell::Average(average)),
+                    |_| Err(GraphIntegerErrorKind::NonScalar),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .map(|cell| match cell {
+                    ExpressionCell::Scalar(value) => value.into_owned(),
+                    _ => panic!("arithmetic over an average is a scalar"),
+                })
+                .map_err(|error| match error {
+                    GraphIntegerEvaluationError::Value(error) => error.kind,
+                    GraphIntegerEvaluationError::Control(()) => unreachable!(),
+                })
+        };
+        let mean = 7.0 / 3.0;
+        let column = Op::ScalarColumn(0);
+        for (ops, expected) in [
+            (
+                vec![
+                    column.clone(),
+                    Op::Literal(Some(2)),
+                    Op::Binary(GraphIntegerBinary::Multiply),
+                ],
+                f(mean * 2.0),
+            ),
+            (
+                vec![
+                    column.clone(),
+                    literal(f(0.5)),
+                    Op::Binary(GraphIntegerBinary::Add),
+                ],
+                f(mean + 0.5),
+            ),
+            (
+                vec![
+                    Op::Literal(Some(1000)),
+                    column.clone(),
+                    Op::Binary(GraphIntegerBinary::Subtract),
+                ],
+                f(1000.0 - mean),
+            ),
+            (
+                vec![
+                    column.clone(),
+                    column.clone(),
+                    Op::Binary(GraphIntegerBinary::Divide),
+                ],
+                f(1.0),
+            ),
+            (
+                vec![column.clone(), Op::Unary(GraphIntegerUnary::Negate)],
+                f(-mean),
+            ),
+            (
+                vec![column.clone(), Op::Literal(Some(2)), Op::Power],
+                f(mean * mean),
+            ),
+            (
+                vec![column.clone(), Op::ToText],
+                CanonicalScalar::ucs_basic_text("2.3333333333333335").unwrap(),
+            ),
+            (vec![column.clone(), Op::ToInteger], CanonicalScalar::Int(2)),
+            // 7/3 is below the binary64 nearest it: the comparison is exact.
+            (
+                vec![
+                    column.clone(),
+                    literal(f(mean)),
+                    Op::Compare(IntegerComparison::Less),
+                ],
+                CanonicalScalar::Bool(true),
+            ),
+        ] {
+            assert_eq!(run(&ops), Ok(expected), "{ops:?}");
+        }
+        // Counts and wide sums keep refusing to mix with a Float.
+        let sum = GraphIntegerExpression::prepare_scalar(&[
+            column,
+            Op::ScalarColumn(1),
+            Op::Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap();
+        let refused = sum.evaluate_loaded_with_control(
+            2,
+            |at| {
+                Ok(if at == 0 {
+                    ExpressionCell::Average(average)
+                } else {
+                    ExpressionCell::Count(3)
+                })
+            },
             |_| Err(GraphIntegerErrorKind::NonScalar),
             &mut |_| Ok::<_, ()>(()),
         );
