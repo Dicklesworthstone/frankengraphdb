@@ -34,7 +34,7 @@ fn execute(text: &str) -> (Vec<GraphValueRow>, usize) {
     let edge_p = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     let mut calls = 0;
     let result = bound
-        .execute_governed(
+        .execute_governed_with_elements(
             GqlQueryPolicy::new(1000, 1000, 2_000_000, 2_000_000),
             |pattern, remaining| {
                 calls += 1;
@@ -58,6 +58,21 @@ fn execute(text: &str) -> (Vec<GraphValueRow>, usize) {
                     remaining,
                     || Ok::<_, &'static str>(()),
                 )
+            },
+            |_, _, _| panic!("these laws run no CALL source"),
+            |element, key| {
+                Ok(match (element, key) {
+                    (fgdb_delta_types::ElementId::Vertex(vid), PropertyKeyId(1)) => {
+                        p.get((vid.0 - 1) as usize).cloned()
+                    }
+                    (fgdb_delta_types::ElementId::Vertex(vid), PropertyKeyId(2)) => {
+                        q.get((vid.0 - 1) as usize).cloned()
+                    }
+                    (fgdb_delta_types::ElementId::Edge(_), PropertyKeyId(1)) => {
+                        Some(edge_p.clone())
+                    }
+                    _ => None,
+                })
             },
             || Ok::<_, &'static str>(()),
         )
@@ -136,18 +151,10 @@ fn optional_continuations_group_nullable_local_bindings_not_nullable_carried_cop
             row(vec![GraphValue::Vertex(VId(3)), scalar(0)])
         ]
     );
-    let mut calls = 0;
-    assert!(
-        PreparedGraphSetText::prepare(
-            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH sum(n.p) AS s RETURN s",
-            |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            },
-        )
-        .is_err()
+    assert_eq!(
+        execute("MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH sum(n.p) AS s RETURN s").0,
+        vec![row(vec![scalar(5)])]
     );
-    assert_eq!(calls, 0);
 }
 
 #[test]

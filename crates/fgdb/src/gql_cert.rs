@@ -628,7 +628,7 @@ pub struct NativeProcedureEvidence {
     pub kernel_digest: Digest,
     /// What that code produced and at what cost: Prism's result digest, the
     /// adapter path, projection and work sizes, complexity witness and typed
-    /// BFS direction decisions. The v2 evidence domain excludes root identity.
+    /// traversal direction decisions. The v3 evidence domain excludes root identity.
     pub evidence_digest: Digest,
 }
 
@@ -643,7 +643,7 @@ impl NativeProcedureEvidence {
         kernel.update(&certificate.kernel_source_digest.0);
         update_string(&mut kernel, certificate.numeric_profile);
         let mut evidence = Hasher::new();
-        evidence.update(NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V2);
+        evidence.update(NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V3);
         evidence.update(&certificate.result_digest.0);
         update_string(&mut evidence, certificate.adapter.as_str());
         let witness = &certificate.witness;
@@ -686,6 +686,35 @@ impl NativeProcedureEvidence {
                     decision.benefit_upper,
                     decision.candidate_visits,
                     decision.incoming_visits,
+                ] {
+                    evidence.update(&(number as u64).to_be_bytes());
+                }
+            }
+        } else {
+            evidence.update(&[0]);
+        }
+        if let Some(card) = &certificate.component_decision_card {
+            evidence.update(&[1]);
+            evidence.update(&card.policy_version.to_be_bytes());
+            update_string(&mut evidence, card.fallback);
+            for number in [
+                card.dwell_frontiers,
+                card.pull_cost_multiplier,
+                card.pulls.len(),
+            ] {
+                evidence.update(&(number as u64).to_be_bytes());
+            }
+            for decision in &card.pulls {
+                for number in [
+                    decision.root,
+                    decision.frontier_vertices,
+                    decision.frontier_incidences,
+                    decision.unseen_incidences,
+                    decision.vertices,
+                    decision.benefit_lower,
+                    decision.benefit_upper,
+                    decision.candidate_visits,
+                    decision.incidence_visits,
                 ] {
                     evidence.update(&(number as u64).to_be_bytes());
                 }
@@ -738,7 +767,7 @@ impl NativeResultCertificate {
 const NATIVE_RESULT_CERTIFICATE_VERSION_V1: u8 = 1;
 const NATIVE_RESULT_CERTIFICATE_VERSION_V2: u8 = 2;
 const NATIVE_PROCEDURE_KERNEL_DOMAIN_V1: &[u8] = b"fgdb:native-procedure-kernel:v1";
-const NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V2: &[u8] = b"fgdb:native-procedure-evidence:v2";
+const NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V3: &[u8] = b"fgdb:native-procedure-evidence:v3";
 
 /// Decode error for the versioned portable certificate envelope. Every
 /// refusal is explicit: version, length, magic, or trailing bytes.
@@ -1163,11 +1192,11 @@ mod tests {
     }
 
     #[test]
-    fn procedure_evidence_binds_bfs_decisions_without_binding_the_generation_root() {
+    fn procedure_evidence_binds_traversal_decisions_without_binding_the_generation_root() {
         use fgdb_crypto::{Digest, hash};
         use fgdb_prism::{
-            AdapterPath, BfsDecisionCard, BfsPullDecision, ComplexityWitness, FnxCertificate,
-            SnapshotBinding,
+            AdapterPath, BfsDecisionCard, BfsPullDecision, ComplexityWitness,
+            ComponentDecisionCard, ComponentPullDecision, FnxCertificate, SnapshotBinding,
         };
         use fgdb_types::ids::ObjectId;
 
@@ -1207,6 +1236,23 @@ mod tests {
                     incoming_visits: 0,
                 }],
             }),
+            component_decision_card: Some(ComponentDecisionCard {
+                policy_version: 1,
+                fallback: "component_bfs",
+                dwell_frontiers: 1,
+                pull_cost_multiplier: 2,
+                pulls: vec![ComponentPullDecision {
+                    root: 3,
+                    frontier_vertices: 12,
+                    frontier_incidences: 400,
+                    unseen_incidences: 20,
+                    vertices: 16,
+                    benefit_lower: 364,
+                    benefit_upper: 384,
+                    candidate_visits: 16,
+                    incidence_visits: 11,
+                }],
+            }),
             witness: ComplexityWitness {
                 algorithm: "bfs".to_owned(),
                 complexity_claim: "O(n + m)".to_owned(),
@@ -1217,14 +1263,14 @@ mod tests {
             digest: Digest([6; 32]),
         };
         let actual = super::NativeProcedureEvidence::from_fnx(&certificate);
-        // Independently specified v2 transcript: native evidence retains its
+        // Independently specified v3 transcript: native evidence retains its
         // big-endian u64 integers/text lengths and u16 policy version, without
         // copying Prism's root-bound certificate or projection digest.
         let text = |bytes: &mut Vec<u8>, value: &str| {
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
             bytes.extend_from_slice(value.as_bytes());
         };
-        let mut transcript = b"fgdb:native-procedure-evidence:v2".to_vec();
+        let mut transcript = b"fgdb:native-procedure-evidence:v3".to_vec();
         transcript.extend_from_slice(&[5; 32]);
         text(&mut transcript, "DECODED_CACHE");
         for number in [16_u64, 240, 240, 256, 672, 32, 15, 15] {
@@ -1236,6 +1282,11 @@ mod tests {
         transcript.extend_from_slice(&[1, 0, 1]);
         text(&mut transcript, "top_down");
         for number in [1_u64, 2, 1, 1, 15, 225, 0, 16, 209, 209, 16, 0] {
+            transcript.extend_from_slice(&number.to_be_bytes());
+        }
+        transcript.extend_from_slice(&[1, 0, 1]);
+        text(&mut transcript, "component_bfs");
+        for number in [1_u64, 2, 1, 3, 12, 400, 20, 16, 364, 384, 16, 11] {
             transcript.extend_from_slice(&number.to_be_bytes());
         }
         assert_eq!(actual.evidence_digest, hash(&transcript));
@@ -1278,10 +1329,38 @@ mod tests {
                 "field={at}"
             );
         }
+        let mutations: [fn(&mut ComponentDecisionCard); 14] = [
+            |card| card.policy_version += 1,
+            |card| card.fallback = "different_fallback",
+            |card| card.dwell_frontiers += 1,
+            |card| card.pull_cost_multiplier += 1,
+            |card| card.pulls[0].root += 1,
+            |card| card.pulls[0].frontier_vertices += 1,
+            |card| card.pulls[0].frontier_incidences += 1,
+            |card| card.pulls[0].unseen_incidences += 1,
+            |card| card.pulls[0].vertices += 1,
+            |card| card.pulls[0].benefit_lower += 1,
+            |card| card.pulls[0].benefit_upper += 1,
+            |card| card.pulls[0].candidate_visits += 1,
+            |card| card.pulls[0].incidence_visits += 1,
+            |card| card.pulls.push(card.pulls[0].clone()),
+        ];
+        for (at, mutate) in mutations.into_iter().enumerate() {
+            let mut changed = certificate.clone();
+            mutate(changed.component_decision_card.as_mut().unwrap());
+            let changed = super::NativeProcedureEvidence::from_fnx(&changed);
+            assert_eq!(actual.call_digest, changed.call_digest);
+            assert_eq!(actual.kernel_digest, changed.kernel_digest);
+            assert_ne!(
+                actual.evidence_digest, changed.evidence_digest,
+                "component field={at}"
+            );
+        }
         let mut absent = certificate;
         absent.bfs_decision_card = None;
+        absent.component_decision_card = None;
         transcript.truncate(without_card);
-        transcript.push(0);
+        transcript.extend_from_slice(&[0, 0]);
         let absent = super::NativeProcedureEvidence::from_fnx(&absent);
         assert_eq!(absent.evidence_digest, hash(&transcript));
         assert_eq!(actual.kernel_digest, absent.kernel_digest);

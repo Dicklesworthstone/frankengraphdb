@@ -46,6 +46,79 @@ fn fixture() -> (Vec<VId>, Vec<ProjectionEdge>) {
     )
 }
 
+#[test]
+fn cached_component_degrees_match_final_rows_in_every_projection_direction() {
+    let vertices: Vec<_> = (0..17).map(|i| VId((i as u128) << 64 | 19)).collect();
+    // Outgoing and incoming maxima belong to different vertices. The combined
+    // maximum must therefore come from complete rows, not the sum of maxima.
+    // Raw duplicates and loops exercise reduction and both loop policies.
+    let mut pairs: Vec<_> = (1..=5).map(|i| (0, i)).collect();
+    pairs.extend((8..=12).map(|i| (i, 7)));
+    pairs.extend([(0, 1), (0, 1), (2, 2), (7, 7)]);
+    let edges: Vec<_> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, &(source, target))| ProjectionEdge {
+            eid: EId((i as u128) << 64 | 23),
+            source: vertices[source],
+            target: vertices[target],
+            weight: 1.0,
+        })
+        .collect();
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for parallel_edges in [
+            ParallelEdgePolicy::Sum,
+            ParallelEdgePolicy::Minimum,
+            ParallelEdgePolicy::Maximum,
+            ParallelEdgePolicy::CollapseUnit,
+        ] {
+            for self_loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                let spec = ProjectionSpec {
+                    directedness,
+                    parallel_edges,
+                    self_loops,
+                };
+                let borrowed =
+                    SnapshotGraphView::build(binding(), &vertices, &edges, spec, limits()).unwrap();
+                let owned = SnapshotGraphView::build_owned_with_checkpoint(
+                    binding(),
+                    vertices.clone(),
+                    edges.clone(),
+                    spec,
+                    limits(),
+                    || Ok::<(), Infallible>(()),
+                )
+                .unwrap();
+                let outgoing = (0..vertices.len())
+                    .map(|v| borrowed.neighbors_indices(v).unwrap().len())
+                    .max()
+                    .unwrap();
+                let combined = (0..vertices.len())
+                    .map(|v| {
+                        borrowed.neighbors_indices(v).unwrap().len()
+                            + borrowed.in_neighbors_indices(v).unwrap().len()
+                    })
+                    .max()
+                    .unwrap();
+                for view in [&borrowed, &owned, &borrowed.clone()] {
+                    assert_eq!(view.component_degree_bound(false), outgoing, "{spec:?}");
+                    assert_eq!(view.component_degree_bound(true), combined, "{spec:?}");
+                    assert_eq!(view.digest(), borrowed.digest());
+                }
+            }
+        }
+    }
+    for vertices in [&[][..], &vertices[..]] {
+        let view = SnapshotGraphView::build(binding(), vertices, &[], spec(), limits()).unwrap();
+        assert_eq!(view.component_degree_bound(false), 0);
+        assert_eq!(view.component_degree_bound(true), 0);
+    }
+}
+
 fn scanned_first_negative_visit(view: &SnapshotGraphView) -> Option<usize> {
     let mut visits = 0;
     for node in 0..view.node_count() {

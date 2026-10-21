@@ -2,7 +2,7 @@
 //! Small independent edge-bag enumeration supplies the result oracle; actual
 //! source callbacks execute the governed GLA plans, never precomputed answers.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateBuildError,
@@ -49,7 +49,7 @@ fn run(
 ) -> Result<GqlQueryExecution<GraphAggregateRow>, Fault> {
     let values = SCORES.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
-    query.execute_governed(
+    query.execute_governed_with_elements(
         policy,
         |pattern, remaining| {
             pattern.plan().execute_governed_with_properties(
@@ -67,6 +67,13 @@ fn run(
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )
+        },
+        |_, _, _| panic!("this fixture has no CALL source"),
+        |element, key| {
+            Ok(match element {
+                ElementId::Vertex(vid) if key == P => Some(values[vid.0 as usize - 1].clone()),
+                _ => None,
+            })
         },
         || (checkpoint.borrow_mut())(),
     )
@@ -92,6 +99,28 @@ fn assert_list(value: &GraphAggregateValue, expected: &[i64]) {
         list,
         expected.iter().copied().map(scalar).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn carried_properties_group_after_optional_matching_and_nullable_required_carries() {
+    let rows = execute(
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE a.p < b.p \
+                        RETURN a.p AS score,COUNT(*) AS rows,COUNT(b) AS present ORDER BY score",
+    );
+    assert_eq!(rows.len(), 3);
+    for (row, (score, occurrences, present)) in rows.iter().zip([(1, 3, 3), (2, 2, 2), (3, 1, 0)]) {
+        assert_eq!(row.keys(), &[scalar(score)]);
+        assert_eq!(row.values()[0].as_count(), Some(occurrences));
+        assert_eq!(row.values()[1].as_count(), Some(present));
+    }
+    let rows = execute(
+        "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+                        MATCH (b) RETURN a.p AS score,COUNT(*) AS rows,COUNT(a.p) AS present",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].keys(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
+    assert_eq!(rows[0].values()[0].as_count(), Some(4));
+    assert_eq!(rows[0].values()[1].as_count(), Some(0));
 }
 
 #[test]
@@ -516,11 +545,14 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
         execute("MATCH (n) WITH COUNT(*) AS count MATCH (n) WITH n RETURN COUNT(*) AS rows");
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].values()[0].as_count(), Some(4));
+    let carried =
+        execute("MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS kept RETURN SUM(kept)");
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].values()[0].as_integer(), Some(10));
     for text in [
         "MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(n) AS bad",
         "MATCH (n) WITH n MATCH (n) WITH n AS kept RETURN n,COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows HAVING missing>0",
-        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS bad RETURN SUM(bad)",
     ] {
         let mut calls = 0;
         assert!(

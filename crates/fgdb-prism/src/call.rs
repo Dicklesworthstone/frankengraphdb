@@ -211,7 +211,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit undirected projection; unweighted; isolates retained; component label is minimum member VId",
         complexity: "O(|V| + |E|)",
-        execution_kernel: "fgdb-prism/components-row-cursor-v1",
+        execution_kernel: "fgdb-prism/components-bounded-pull-v1",
     },
     FnxSignature {
         name: "fnx.weakly_connected_components",
@@ -224,7 +224,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit directed projection; successors and predecessors; unweighted; component label is minimum member VId",
         complexity: "O(|V| + |E|)",
-        execution_kernel: "fgdb-prism/weak-components-row-cursor-v1",
+        execution_kernel: "fgdb-prism/weak-components-bounded-pull-v1",
     },
     FnxSignature {
         name: "fnx.strongly_connected_components",

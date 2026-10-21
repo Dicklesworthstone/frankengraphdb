@@ -2,7 +2,10 @@
 //! constructed, including for a hub row. The decoded implementation remains
 //! an independent differential oracle, not a hidden fallback.
 
-use crate::execute::{KernelOutput, KernelValues, hash_bfs_decision_card, hash_result_value};
+use crate::execute::{
+    KernelOutput, KernelValues, hash_bfs_decision_card, hash_component_decision_card,
+    hash_result_value,
+};
 use crate::sealed_control::Control;
 use crate::{
     AdapterPath, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
@@ -928,7 +931,7 @@ fn finish_encoded(
             .push_str("; plus O(p * H * log(1+H)) incoming locator work, p = graph passes");
     }
     let mut hash = Hasher::new();
-    hash.update(b"fgdb:prism:call-certificate:v4");
+    hash.update(b"fgdb:prism:call-certificate:v5");
     hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
     hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
     hash_text(&mut hash, kernel);
@@ -953,6 +956,7 @@ fn finish_encoded(
     hash_text(&mut hash, &witness.algorithm);
     hash_text(&mut hash, &witness.complexity_claim);
     hash_bfs_decision_card(&mut hash, None, checkpoint)?;
+    hash_component_decision_card(&mut hash, None, checkpoint)?;
     checkpoint()?;
     Ok(FnxResult {
         columns,
@@ -974,6 +978,7 @@ fn finish_encoded(
             estimated_work,
             kernel_workspace_bytes: workspace,
             bfs_decision_card: None,
+            component_decision_card: None,
             witness,
             digest: hash.finalize(),
         },

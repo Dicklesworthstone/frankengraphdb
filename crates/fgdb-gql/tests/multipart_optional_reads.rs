@@ -2,7 +2,7 @@
 //! Expected bags below come from explicit multigraph enumeration, not another
 //! query or a second optional matcher. The source fixture never changes mid-run.
 
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
@@ -50,7 +50,7 @@ fn run(
             )]
         })
         .collect();
-    query.execute_governed(
+    query.execute_governed_with_elements(
         policy,
         |pattern, remaining| {
             calls.set(calls.get() + 1);
@@ -75,6 +75,16 @@ fn run(
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )
+        },
+        |_, _, _| panic!("this fixture has no CALL source"),
+        |element, key| {
+            Ok(match element {
+                ElementId::Vertex(vid) => props[vid.0 as usize - 1]
+                    .iter()
+                    .find(|(candidate, _)| *candidate == key)
+                    .map(|(_, value)| value.clone()),
+                _ => None,
+            })
         },
         || (checkpoint.borrow_mut())(),
     )
@@ -407,9 +417,8 @@ fn optional_kind_and_parameters_are_bound_into_the_existing_transcripts() {
 }
 
 #[test]
-fn unsupported_optional_scopes_and_carried_dereferences_refuse_before_catalog() {
+fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
     for text in [
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a.score",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN labels(a) AS labels",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN SIZE(labels(a)) AS size",
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
@@ -427,6 +436,18 @@ fn unsupported_optional_scopes_and_carried_dereferences_refuse_before_catalog() 
         );
         assert_eq!(calls, 0, "{text}");
     }
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a.score AS score ORDER BY score"
+        ),
+        [10, 10, 20, 30, 40]
+            .map(
+                |value| GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                    CanonicalScalar::Int(value)
+                )])
+            )
+            .to_vec()
+    );
     // The guard is not a blanket refusal of properties on OPTIONAL output.
     assert_eq!(
         rows(

@@ -341,7 +341,7 @@ impl<'a> Parser<'a> {
                             unreachable!("graph functions resolve a source column");
                         };
                         offset + input
-                    } else if !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
+                    } else if !matches!(next.kind, TokenKind::Punct(b'('))
                         && let Some(column) =
                             incoming.iter().position(|(name, _)| name.text == word)
                     {
@@ -391,17 +391,6 @@ impl<'a> Parser<'a> {
                         {
                             return Ok(None);
                         }
-                        if optional
-                            && matches!(next.kind, TokenKind::Punct(b'.'))
-                            && incoming.iter().any(|(name, _)| name.text == word)
-                        {
-                            return Err(error(
-                                at,
-                                GraphPatternTextErrorKind::Expected(
-                                    "project carried vertex properties before OPTIONAL MATCH",
-                                ),
-                            ));
-                        }
                         let variable = match aliased {
                             Some(variable) => {
                                 parser.advance()?;
@@ -417,6 +406,23 @@ impl<'a> Parser<'a> {
                         };
                         offset + parser.mutation_projection(&mut head.inputs, variable, property)?
                     };
+                    // A repeated carried field ranks the already projected
+                    // value. In particular DISTINCT a.p ORDER BY a.p must
+                    // not append the a identity: that would split duplicates.
+                    if input < offset && parser.is_punct(b'.') {
+                        let key = parser.lexer.clone().next()?;
+                        if let TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) = key.kind
+                            && let Some(column) = head.outputs[..visible].iter().position(|(_, value)| {
+                                matches!(value, ReadValueTemplate::MapGet { map, key: known, .. }
+                                    if matches!(map.as_ref(), ReadValueTemplate::Column(index) if *index == input)
+                                        && known.as_ref() == key)
+                            })
+                        {
+                            parser.punct(b'.', ".")?;
+                            parser.map_key()?;
+                            return Ok(Some(column));
+                        }
+                    }
                     if let Some(column) = head.outputs.iter().position(|(_, value)| {
                     matches!(value, ReadValueTemplate::Column(index) if *index == input)
                 }) {
