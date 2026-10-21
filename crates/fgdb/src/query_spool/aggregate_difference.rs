@@ -2,13 +2,14 @@
 //! No aggregate is reevaluated; private keys never become delivery identity.
 
 use super::*;
-use crate::query::view::spool::sort::FrameOrder;
-use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
+use crate::query::view::spool::sort::{FrameOrder, Merge};
 use fgdb_gql::algebra::MAX_PATTERN_VERTICES;
+use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 use std::cmp::Ordering;
 
 type DifferenceResult<T> =
     core::result::Result<T, GqlQueryError<NativeAggregateSpoolError, Cancel>>;
+type NextChange = DifferenceResult<Option<(i128, NativeAggregateSpoolRow)>>;
 
 fn source<T>(result: Result<T>) -> DifferenceResult<T> {
     result.map_err(GqlQueryError::Source)
@@ -108,8 +109,14 @@ impl FrameOrder for VisibleOrder<'_> {
         self.admit(columns)?;
         // Decode once, then compare each selected cell at most repetitions
         // times. A repeated large list cannot multiply uncharged comparison.
-        let units = left.len().checked_add(right.len())
-            .and_then(|bytes| self.repetitions.checked_add(1).and_then(|n| bytes.checked_mul(n)))
+        let units = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|bytes| {
+                self.repetitions
+                    .checked_add(1)
+                    .and_then(|n| bytes.checked_mul(n))
+            })
             .ok_or(SpillError::SizeOverflow)?;
         work.charge(units)?;
         let _left_charge = decoded_reservation(&self.pool, work.cx, left, 2)?;
@@ -149,7 +156,10 @@ impl VisibleOrder<'_> {
             .checked_mul(self.repetitions)
             .and_then(|bytes| bytes.checked_add(fixed))
             .ok_or(SpillError::SizeOverflow)?;
-        let mut charge = self.pool.reserve(work.cx, requested).map_err(SpillError::Memory)?;
+        let mut charge = self
+            .pool
+            .reserve(work.cx, requested)
+            .map_err(SpillError::Memory)?;
         let mut cells = Vec::new();
         cells.try_reserve_exact(slots).map_err(|_| {
             SpillError::Memory(MemoryError::AllocationFailed { requested })
@@ -159,11 +169,18 @@ impl VisibleOrder<'_> {
                 .checked_mul(size_of::<GraphAggregateValue>())
                 .and_then(|bytes| bytes.checked_mul(2))
                 .ok_or(SpillError::SizeOverflow)?;
-            charge.grow(work.cx, extra).map_err(SpillError::Memory)?;
+            charge
+                .grow(work.cx, extra)
+                .map_err(SpillError::Memory)?;
         }
         // Admit the total copied payload before the first clone. Native typed
         // comparisons/copies use their bounded row domain, not a new evaluator.
-        work.charge(bytes.len().checked_mul(self.repetitions).ok_or(SpillError::SizeOverflow)?)?;
+        work.charge(
+            bytes
+                .len()
+                .checked_mul(self.repetitions)
+                .ok_or(SpillError::SizeOverflow)?,
+        )?;
         for &slot in self.slots.iter() {
             work.charge(1)?;
             cells.push(Cell::at(&row, slot)?.to_owned());
@@ -177,55 +194,30 @@ impl VisibleOrder<'_> {
     }
 }
 
-fn continue_error(error: NativeAggregateSpoolError, prior: u64, limit: u64) -> NativeAggregateSpoolError {
+fn continue_error(
+    error: NativeAggregateSpoolError,
+    prior: u64,
+    limit: u64,
+) -> NativeAggregateSpoolError {
     match error {
-        NativeAggregateSpoolError::Spool(NativeSpoolError::SortWorkLimit { attempted, .. }) => {
-            match prior.checked_add(attempted) {
-                Some(attempted) => NativeSpoolError::SortWorkLimit { attempted, limit }.into(),
-                None => SpillError::SizeOverflow.into(),
-            }
-        }
+        NativeAggregateSpoolError::Spool(NativeSpoolError::SortWorkLimit {
+            attempted,
+            ..
+        }) => match prior.checked_add(attempted) {
+            Some(attempted) => NativeSpoolError::SortWorkLimit { attempted, limit }.into(),
+            None => SpillError::SizeOverflow.into(),
+        },
         error => error,
     }
 }
 
 impl NativeAggregateSpool {
     /// Visit the exact BAG difference of completed aggregate results, after - self.
-    /// Both inputs must belong to source_file and have matching visible columns,
-    /// RETURN slots and private widths. This does not prove a common query or
-    /// history, grant authority, or reevaluate either aggregate.
-    ///
-    /// Compare the visible RETURN tuple in native GraphAggregateValue order.
-    /// Hidden group keys cannot cause spurious changes; repeated/reordered slots,
-    /// u64 counts, i128 sums, exact averages, NULLs and ordered COLLECT values
-    /// retain their domains. Rank-only changes do not change a result bag.
-    ///
-    /// The existing external sorter and shared difference merge own the runs,
-    /// authenticated readers and signed counting. Neither endpoint nor the final
-    /// difference is collected in memory. The merge retains at most three row
-    /// frames and two pages; comparisons additionally decode two bounded rows.
-    /// Decode and output-copy reservations are acquired before allocation from
-    /// source_file's pool. File pages/sort buffers use their existing pools;
-    /// use a shared parent pool for a combined bound. A callback-owned row keeps
-    /// its reservation until dropped, independently of this operation.
-    ///
-    /// The callback receives a nonzero signed multiplicity and a row with no
-    /// keys: values() is already in columns() order. It is awaited before another
-    /// input is pulled. Counts are never expanded into repeated output rows.
-    /// One max_work_units covers BOTH sorts, validation, decoding, comparisons,
-    /// projection and callback checkpoints. max_changed_rows counts final
-    /// nonzero tuples only; full cancellation can pass a zero row limit.
-    /// max_runs is PER INPUT; file quotas stay cumulative and append-only.
-    /// These are additional comparison budgets, not endpoint query budgets.
-    ///
-    /// Returns (delivered tuples, physical work) only on COMPLETE success.
-    /// Callbacks may already have received a prefix before a late error: stage
-    /// changes until this future succeeds. Error, unwind and dropped in-flight
-    /// work release merge buffers without draining or acknowledging. Retrying
-    /// can repeat callbacks. Pending scratch I/O retains SpillFile's poison
-    /// rule; retire a poisoned file rather than treating drop as rollback.
-    /// The resolver must preserve its pinned scalar artifacts throughout.
-    /// This is not durable resume, cross-branch coverage or authorized DIFF.
+    /// This is the callback facade over difference_stream's single resumable
+    /// merge state machine. Both inputs are fully sorted before the first
+    /// callback, every callback is awaited, and a post-callback checkpoint is
+    /// charged even for the final tuple. A delivered prefix remains provisional
+    /// until this method returns success; retry may repeat callbacks.
     #[allow(clippy::too_many_arguments)]
     pub async fn visit_difference<A, B, F, Fut>(
         &self,
@@ -247,6 +239,86 @@ impl NativeAggregateSpool {
         F: FnMut(i128, NativeAggregateSpoolRow) -> Fut + Send,
         Fut: Future<Output = Result<()>> + Send,
     {
+        let mut cursor = self
+            .difference_stream(
+                after,
+                cx,
+                source_file,
+                scratch,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_changed_rows,
+                max_work_units,
+                resolver,
+            )
+            .await?;
+        while let Some((weight, row)) = cursor.next_inner().await? {
+            source(visitor(weight, row).await)?;
+            // A callback cannot hide interruption by returning success,
+            // including after the final delivered tuple.
+            cursor.visit_completed()?;
+        }
+        Ok((cursor.changed_rows(), cursor.work_units()))
+    }
+
+    /// Compare COMPLETE aggregate results as an exact after-minus-before bag.
+    /// Both spools must belong to source and have the same public columns,
+    /// RETURN slot mapping and private key/aggregate widths. They need not be
+    /// current. This API does not prove common query/history or grant authority.
+    ///
+    /// External sorting and merge compare only the visible native tuple in
+    /// canonical GraphAggregateValue order. Omitted group keys cannot create
+    /// spurious changes; repeated/reordered RETURN slots remain intact. Counts,
+    /// signed i128 sums, reduced exact averages, NULLs and COLLECT lists preserve
+    /// their domains. No float cast, scalar narrowing, new codec or reevaluation
+    /// participates. Rank-only changes are not differences between bags.
+    ///
+    /// Both sorts, validation, decoding, comparisons, projection and pulls share
+    /// max_work_units. max_runs is PER INPUT; file quotas remain cumulative and
+    /// append-only. max_changed_rows counts nonzero final tuples, not occurrences.
+    /// A zero result limit can accept complete cancellation. Quotas describe
+    /// additional comparison work over already completed queries, not their
+    /// execution cost. Native source/evaluator counters are not reset or reused.
+    ///
+    /// Merge retains at most three encoded rows and two pages. Comparison may
+    /// additionally decode two bounded rows. Decoding and output copies reserve
+    /// through source's existing memory pool before allocation; repeated slots
+    /// are conservatively reserved by their maximum reuse count. File pages and
+    /// sort buffers keep their own pools. Use one shared parent for a combined
+    /// bound. Metadata/column handles are shared, not recounted as payloads.
+    ///
+    /// The cursor borrows only scratch, cx and the pinned scalar resolver. Input
+    /// spools, source file, database and query may drop after opening. Returned
+    /// rows have no keys: values() is the complete RETURN tuple in columns()
+    /// order, with a memory reservation lasting as long as the row. Caller-made
+    /// copies use the caller's budget. The resolver must retain the same scalar
+    /// artifacts as ordinary aggregate reads; host-locale substitution is illegal.
+    /// The concrete cursor type is inferred; no private scratch owner is exposed.
+    ///
+    /// Stage all delivered changes until state() is Exhausted. Errors, unwind
+    /// and dropped IN-FLIGHT pulls permanently fuse delivery; unpolled pulls and
+    /// idle cursors perform no I/O. close/drop do not drain or acknowledge.
+    /// Pending scratch I/O keeps SpillFile's poison rule. This is not a durable
+    /// cursor, authorization boundary or cross-branch coverage proof.
+    #[allow(clippy::too_many_arguments, private_interfaces, unnameable_types)]
+    pub async fn difference_stream<'a, A, B>(
+        &self,
+        after: &Self,
+        cx: &'a QueryCx,
+        source_file: &mut SpillFile<A>,
+        scratch: &'a mut SpillFile<B>,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_changed_rows: u64,
+        max_work_units: u64,
+        resolver: Option<&'a (dyn CanonicalScalarResolver + Send + Sync)>,
+    ) -> DifferenceResult<NativeAggregateSpoolDifference<'a, B>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    {
         let mut work = Work {
             cx,
             used: 0,
@@ -256,7 +328,10 @@ impl NativeAggregateSpool {
         if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
             return source(Err(SpillError::InvalidLimits.into()));
         }
-        let width = self.keys.len().checked_add(self.aggregates.len())
+        let width = self
+            .keys
+            .len()
+            .checked_add(self.aggregates.len())
             .ok_or_else(|| GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
         if width == 0
             || width > MAX_PATTERN_VERTICES
@@ -277,7 +352,11 @@ impl NativeAggregateSpool {
             if left.len() != right.len() {
                 return source(invalid());
             }
-            for (a, b) in left.as_bytes().chunks(1024).zip(right.as_bytes().chunks(1024)) {
+            for (a, b) in left
+                .as_bytes()
+                .chunks(1024)
+                .zip(right.as_bytes().chunks(1024))
+            {
                 source(work.charge(a.len()).map_err(Into::into))?;
                 if a != b {
                     return source(invalid());
@@ -310,7 +389,8 @@ impl NativeAggregateSpool {
                 return source(Err(NativeSpoolError::SortRunLimit {
                     required,
                     limit: max_runs,
-                }.into()));
+                }
+                .into()));
             }
         }
         let mut order = VisibleOrder {
@@ -321,48 +401,147 @@ impl NativeAggregateSpool {
             pool: source_file.memory_pool().clone(),
             resolver,
         };
-        // Exactly two completed handles; the sorter owns all variable run state.
+        // Only two fixed result handles, never a variable run/payload catalog.
+        // Avoid storing them in a growable container, even though the count is fixed.
         let mut before_sorted = None;
         for input in [self, after] {
             let prior = work.used;
             let remaining = work.limit.checked_sub(prior).ok_or_else(|| {
                 GqlQueryError::Source(NativeSpoolError::IncompleteCursor.into())
             })?;
-            let (sorted, used) = source(input.inner.sort_with(
-                cx, source_file, scratch, &mut order, run_rows, max_runs,
-                page_bytes, remaining,
-            ).await.map_err(|error| continue_error(error, prior, max_work_units)))?;
-            work.used = prior.checked_add(used)
+            let (sorted, used) = source(
+                input
+                    .inner
+                    .sort_with(
+                        cx,
+                        source_file,
+                        scratch,
+                        &mut order,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        remaining,
+                    )
+                    .await
+                    .map_err(|error| continue_error(error, prior, max_work_units)),
+            )?;
+            work.used = prior
+                .checked_add(used)
                 .ok_or_else(|| GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
             if let Some(before_sorted) = before_sorted.take() {
-                let mut merge = NativeSpoolDifference::<B>::merge_with_order(
-                    &before_sorted, &sorted, order,
-                );
-                let mut changed = 0_u64;
-                while let Some((weight, frame)) = merge.advance(scratch, &mut work).await? {
-                    let next = changed.checked_add(1).ok_or_else(|| {
-                        GqlQueryError::Source(SpillError::SizeOverflow.into())
-                    })?;
-                    GqlExecutionBudget::result_rows(max_changed_rows)
-                        .check(GqlBudgetDimension::ResultRows, next)
-                        .map_err(GqlQueryError::Rows)?;
-                    let row = source(merge.order().project(frame.as_ref(), &mut work))?;
-                    drop(frame);
-                    source(work.charge(1).map_err(Into::into))?;
-                    source(visitor(weight, row).await)?;
-                    changed = next;
-                    // A callback cannot hide interruption by returning
-                    // success, including after the final delivered tuple.
-                    source(work.charge(1).map_err(Into::into))?;
-                }
-                return Ok((changed, work.used));
+                return Ok(NativeAggregateSpoolDifference {
+                    scratch,
+                    columns: Arc::clone(&self.columns),
+                    before: self.snapshot_seq(),
+                    after: after.snapshot_seq(),
+                    merge: Some(Merge::new(&before_sorted, &sorted, order)),
+                    max_changed_rows,
+                    changed: 0,
+                    work,
+                    state: ScanState::Open,
+                });
             }
             before_sorted = Some(sorted);
         }
+        // The fixed two-input loop always returns above after both sorts.
         source(Err(NativeSpoolError::IncompleteCursor.into()))
+    }
+}
+
+/// Backpressured exact aggregate changes. Values in each returned row are
+/// already in public RETURN order; private keys/envelopes are never exposed.
+pub struct NativeAggregateSpoolDifference<'a, B> {
+    scratch: &'a mut SpillFile<B>,
+    columns: Arc<[String]>,
+    before: CommitSeq,
+    after: CommitSeq,
+    merge: Option<Merge<VisibleOrder<'a>>>,
+    max_changed_rows: u64,
+    changed: u64,
+    work: Work<'a>,
+    state: ScanState,
+}
+impl<B> NativeAggregateSpoolDifference<'_, B> {
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn before(&self) -> CommitSeq {
+        self.before
+    }
+    pub fn after(&self) -> CommitSeq {
+        self.after
+    }
+    pub fn state(&self) -> ScanState {
+        self.state
+    }
+    pub fn changed_rows(&self) -> u64 {
+        self.changed
+    }
+    pub fn work_units(&self) -> u64 {
+        self.work.used
+    }
+    pub fn close(&mut self) {
+        self.merge = None;
+        if self.state == ScanState::Open {
+            self.state = ScanState::Closed;
+        }
+    }
+    fn visit_completed(&mut self) -> DifferenceResult<()> {
+        source(self.work.charge(1).map_err(Into::into))
+    }
+}
+impl<B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send> NativeAggregateSpoolDifference<'_, B> {
+    pub fn next_change(&mut self) -> crate::SendFuture<'_, NextChange> {
+        Box::pin(self.next_inner())
+    }
+    async fn next_inner(&mut self) -> NextChange {
+        if self.state != ScanState::Open {
+            return Ok(None);
+        }
+        self.state = ScanState::Failed;
+        let mut merge = self.merge.take().ok_or_else(|| {
+            GqlQueryError::Source(NativeAggregateSpoolError::from(
+                NativeSpoolError::IncompleteCursor,
+            ))
+        })?;
+        let Some((weight, frame)) = merge.advance(self.scratch, &mut self.work).await? else {
+            self.state = ScanState::Exhausted;
+            return Ok(None);
+        };
+        let next = self
+            .changed
+            .checked_add(1)
+            .ok_or_else(|| GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
+        GqlExecutionBudget::result_rows(self.max_changed_rows)
+            .check(GqlBudgetDimension::ResultRows, next)
+            .map_err(GqlQueryError::Rows)?;
+        let row = source(merge.order().project(frame.as_ref(), &mut self.work))?;
+        drop(frame);
+        source(self.work.charge(1).map_err(Into::into))?;
+        // Projection and final admission are inside the same failure boundary.
+        // A decode/clone refusal or unwind cannot restore a partially delivered group.
+        self.changed = next;
+        self.merge = Some(merge);
+        self.state = ScanState::Open;
+        Ok(Some((weight, row)))
+    }
+}
+impl<B> core::fmt::Debug for NativeAggregateSpoolDifference<'_, B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NativeAggregateSpoolDifference")
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .field("changed_rows", &self.changed)
+            .field("state", &self.state)
+            .field("schema_and_values", &"[REDACTED]")
+            .finish()
     }
 }
 
 #[cfg(test)]
 #[path = "aggregate_difference/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "aggregate_difference/pull_tests.rs"]
+mod pull_tests;
