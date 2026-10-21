@@ -5,6 +5,10 @@
 use super::*;
 use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget, GqlQueryError};
 
+#[path = "difference/pull.rs"]
+mod cursor;
+pub use cursor::NativeSpoolDifference;
+
 // Native errors (including scratch/callback refusal) retain their typed source.
 // The public row limit is separate from the sorter's work and file allowances.
 type VisitResult<T> = core::result::Result<T, GqlQueryError<NativeSpoolError, Cancel>>;
@@ -77,6 +81,63 @@ impl NativeResultSpool {
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
         F: FnMut(i128, TrackedBytes) -> Fut + Send,
         Fut: Future<Output = Result<()>> + Send,
+    {
+        let mut cursor = self
+            .difference_stream(
+                after, cx, source, scratch, run_rows, max_runs, page_bytes,
+                max_changed_rows, max_work_units,
+            )
+            .await?;
+        while let Some((weight, row)) = cursor.next_inner().await? {
+            native(visitor(weight, row).await)?;
+            // Preserve the existing post-callback admission, including the
+            // final visitor. Pull delivery has no external callback to admit.
+            cursor.visit_completed()?;
+        }
+        Ok((cursor.changed_rows(), cursor.work_units()))
+    }
+
+    /// Open a resumable pull difference over the SAME external merge used by
+    /// visit_difference. Both complete inputs are sorted before this returns;
+    /// no merge row is prefetched until the first next_change().
+    ///
+    /// The returned cursor borrows only scratch and cx. Source files, input
+    /// spool handles, database, query and parameters may drop after opening.
+    /// Each pull returns one nonzero (signed weight, tracked canonical frame).
+    /// Pauses retain at most two heads and two authenticated pages; counting a
+    /// group additionally holds its representative. It never expands weights.
+    ///
+    /// All limits and schema/type/ownership contracts are visit_difference's,
+    /// including max_runs PER INPUT. Work is cumulative across BOTH sorts and
+    /// all subsequent pulls. A zero changed-row limit admits full cancellation.
+    /// An idle cursor performs no reads, callbacks, writes or extra work.
+    ///
+    /// Only successful exhaustion certifies a complete transition. Stage any
+    /// delivered prefix until then. An error, unwind, or dropped IN-FLIGHT pull
+    /// permanently fails the cursor and releases its merge buffers; subsequent
+    /// pulls return None with state Failed, never a successful completion.
+    /// Dropping an UNPOLLED pull does nothing. close is idempotent and never
+    /// drains, performs I/O, acknowledges, or changes the input spools. Pending
+    /// scratch I/O retains SpillFile's poison rule: retire that owner before
+    /// retrying through new scratch; closing a cursor never clears the poison.
+    /// This remains a privileged ephemeral value-row operation, not a durable
+    /// resume token, common-query proof, aggregate carrier, or authorization.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn difference_stream<'a, A, B>(
+        &self,
+        after: &Self,
+        cx: &'a QueryCx,
+        source: &mut SpillFile<A>,
+        scratch: &'a mut SpillFile<B>,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_changed_rows: u64,
+        max_work_units: u64,
+    ) -> VisitResult<NativeSpoolDifference<'a, B>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     {
         let mut work = Work {
             cx,
@@ -165,16 +226,14 @@ impl NativeResultSpool {
             .await,
         )?;
         work.used = used;
-        merge_difference(
+        Ok(NativeSpoolDifference::new(
             &before,
             &after,
             scratch,
-            &keys.values,
+            keys,
             max_changed_rows,
-            &mut work,
-            &mut visitor,
-        )
-        .await
+            work,
+        ))
     }
 }
 
@@ -189,93 +248,6 @@ async fn pull<B: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     native(input.next(scratch, work.cx).await)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn merge_difference<B, F, Fut>(
-    before: &NativeResultSpool,
-    after: &NativeResultSpool,
-    scratch: &mut SpillFile<B>,
-    keys: &[GraphValueOrder],
-    max_changed_rows: u64,
-    work: &mut Work<'_>,
-    visitor: &mut F,
-) -> VisitResult<(u64, u64)>
-where
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    F: FnMut(i128, TrackedBytes) -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let input = |spool: &NativeResultSpool| {
-        Input::new(
-            Run {
-                pages: spool.run.clone(),
-                rows: spool.row_count(),
-            },
-            spool.max_row_bytes,
-        )
-    };
-    let (mut left, mut right) = (input(before), input(after));
-    let (mut a, mut b) = (
-        pull(&mut left, scratch, work).await?,
-        pull(&mut right, scratch, work).await?,
-    );
-    let mut changed = 0_u64;
-    let width = before.encoded_columns;
-    while a.is_some() || b.is_some() {
-        native(work.charge(1))?;
-        let take_left = match (&a, &b) {
-            (Some(a), Some(b)) => {
-                native(canonical::compare(a.as_ref(), b.as_ref(), keys, width, work))?
-                    != Ordering::Greater
-            }
-            (Some(_), None) => true,
-            _ => false,
-        };
-        let row = if take_left { a.take() } else { b.take() }
-            .ok_or(GqlQueryError::Source(NativeSpoolError::IncompleteCursor))?;
-        let mut weight = if take_left {
-            a = pull(&mut left, scratch, work).await?;
-            -1_i128
-        } else {
-            b = pull(&mut right, scratch, work).await?;
-            1_i128
-        };
-        for (head, input, sign) in [
-            (&mut a, &mut left, -1_i128),
-            (&mut b, &mut right, 1_i128),
-        ] {
-            while let Some(next) = head.as_ref() {
-                native(work.charge(1))?;
-                match native(canonical::compare(next.as_ref(), row.as_ref(), keys, width, work))? {
-                    Ordering::Less => {
-                        return Err(GqlQueryError::Source(SpillError::InvalidRun.into()));
-                    }
-                    Ordering::Greater => break,
-                    Ordering::Equal => {}
-                }
-                weight = weight
-                    .checked_add(sign)
-                    .ok_or(GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
-                // Refund each duplicate BEFORE loading its successor.
-                *head = None;
-                *head = pull(input, scratch, work).await?;
-            }
-        }
-        if weight != 0 {
-            let next = changed
-                .checked_add(1)
-                .ok_or(GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
-            GqlExecutionBudget::result_rows(max_changed_rows)
-                .check(GqlBudgetDimension::ResultRows, next)
-                .map_err(GqlQueryError::Rows)?;
-            native(work.charge(1))?;
-            native(visitor(weight, row).await)?;
-            changed = next;
-            native(work.charge(1))?;
-        }
-    }
-    native(work.charge(1))?;
-    Ok((changed, work.used))
-}
 
 #[cfg(test)]
 #[path = "difference/tests.rs"]
