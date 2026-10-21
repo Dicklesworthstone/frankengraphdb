@@ -441,7 +441,8 @@ impl PreparedGraphWriteProgram {
 
     /// Every statement is one vertex upsert of a single template whose MERGE
     /// keys are pairwise distinct and whose actions write constant values to
-    /// neither a key property nor a key label (fgdb-2l3pt). No row can then
+    /// neither a key property (other than its own key value, as `SET n += row`
+    /// does) nor a key label (fgdb-2l3pt). No row can then
     /// match a vertex another row creates or changes, so evaluating each MERGE
     /// against the entry overlay and staging all rows once in input order is
     /// the sequential program's result. A physical execution choice only: the
@@ -481,8 +482,23 @@ impl PreparedGraphWriteProgram {
                 .chain(upsert.after())
             {
                 let safe = match action {
-                    GraphVertexUpsertAction::SetProperty { key, .. }
-                    | GraphVertexUpsertAction::SetStored { key, .. } => !names.contains(key),
+                    // `MERGE (n {id: row.id}) SET n += row` rewrites the key
+                    // with its own value: the chosen vertex already holds it,
+                    // so no later row's MERGE can observe a change.
+                    GraphVertexUpsertAction::SetProperty {
+                        key: written,
+                        value,
+                    } => {
+                        !names.contains(written)
+                            || key.properties.iter().any(|(name, bytes)| {
+                                name == written
+                                    && value.value().encode().ok().as_deref()
+                                        == Some(bytes.as_slice())
+                            })
+                    }
+                    GraphVertexUpsertAction::SetStored { key: written, .. } => {
+                        !names.contains(written)
+                    }
                     GraphVertexUpsertAction::SetLabel { label, .. } => !key.labels.contains(label),
                     // Reads the target's own state, which another row's staged
                     // effects do not change but this row's earlier ones do.

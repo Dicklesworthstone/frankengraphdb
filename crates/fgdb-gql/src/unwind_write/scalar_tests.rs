@@ -648,6 +648,8 @@ fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequent
         "MERGE (n:Entity {id: row.id}) SET n.p = row.p",
         "MERGE (n:Entity {id: row.id}) ON CREATE SET n.p = row.p ON MATCH SET n.name = 'seen'",
         "MERGE (n:Entity {id: row.id}) SET n:Other",
+        // The row map rewrites the key with its own value.
+        "MERGE (n:Entity {id: row.id}) SET n += row",
     ] {
         let bound = bind(tail, &distinct);
         assert!(bound.program().freezes_vertex_upsert_input(), "{tail}");
