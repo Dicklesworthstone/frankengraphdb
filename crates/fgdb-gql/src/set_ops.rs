@@ -1031,7 +1031,7 @@ impl PreparedGraphSet {
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut seeded: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
-            &[fgdb_delta_types::VId],
+            &[fgdb_types::VId],
             GqlQueryPolicy,
         )
             -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,

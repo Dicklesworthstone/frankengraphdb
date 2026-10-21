@@ -15,7 +15,8 @@ use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphSetValue,
 };
-use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, VId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_types::VId;
 
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
