@@ -9,6 +9,9 @@ use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget, GqlQueryError};
 mod cursor;
 pub use cursor::NativeSpoolDifference;
 
+#[path = "difference/historical.rs"]
+mod historical;
+
 // Native errors (including scratch/callback refusal) retain their typed source.
 // The public row limit is separate from the sorter's work and file allowances.
 type VisitResult<T> = core::result::Result<T, GqlQueryError<NativeSpoolError, Cancel>>;
@@ -139,9 +142,37 @@ impl NativeResultSpool {
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     {
+        self.difference_continuing(
+            after, cx, source, scratch, run_rows, max_runs, page_bytes,
+            max_changed_rows, max_work_units, 0,
+        )
+        .await
+    }
+
+    // Historical query execution already spent part of this SAME physical
+    // allowance on endpoint ordering/windows. Standalone spool differences
+    // enter with zero and retain their existing counters and public contract.
+    #[allow(clippy::too_many_arguments)]
+    async fn difference_continuing<'a, A, B>(
+        &self,
+        after: &Self,
+        cx: &'a QueryCx,
+        source: &mut SpillFile<A>,
+        scratch: &'a mut SpillFile<B>,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_changed_rows: u64,
+        max_work_units: u64,
+        prior_work: u64,
+    ) -> VisitResult<NativeSpoolDifference<'a, B>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    {
         let mut work = Work {
             cx,
-            used: 0,
+            used: prior_work,
             limit: max_work_units,
         };
         native(work.charge(1))?;
