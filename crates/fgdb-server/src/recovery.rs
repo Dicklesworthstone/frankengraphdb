@@ -6,6 +6,9 @@
 //! reopens through Chronicle. It never replays a client statement. A failed or
 //! interrupted recovery leaves the slot fenced; there is no retry loop.
 
+mod subscriptions;
+pub(crate) use subscriptions::OwnedSubscription;
+
 use crate::commits::CommitSignal;
 use asupersync::Cx;
 use asupersync::runtime::TaskHandle;
@@ -43,6 +46,8 @@ struct State {
     stopping: bool,
     failure: Option<String>,
     published: Option<WeakEmbeddedReadView>,
+    retired: Option<Box<subscriptions::Retirement>>,
+    released_subscriptions: u64,
 }
 
 struct Gate {
@@ -243,6 +248,8 @@ impl DatabaseSlot {
                     stopping: false,
                     failure: None,
                     published: Some(published),
+                    retired: None,
+                    released_subscriptions: 0,
                 }),
                 signal,
             }),
@@ -351,7 +358,7 @@ impl DatabaseSlot {
 
     pub(crate) async fn write(&self, cx: &Cx) -> Result<WriteGuard<'_>, Unavailable> {
         let generation = self.generation()?;
-        let guard = self
+        let mut guard = self
             .shared
             .database
             .write(cx)
@@ -361,6 +368,14 @@ impl DatabaseSlot {
         if guard.is_none() {
             return Err(Unavailable::Fenced);
         }
+        // Admission cannot race ahead of queued cleanup and mistake a cap on
+        // live registrations for a lifetime cap. The host worker also drains
+        // these obligations when no request follows a disconnect.
+        self.shared.release_subscriptions(
+            cx,
+            guard.as_mut().expect("admitted database slot"),
+            generation.value,
+        )?;
         Ok(WriteGuard {
             guard,
             shared: &self.shared,
@@ -521,13 +536,20 @@ impl Drop for WorkerExit {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Maintenance {
+    Recover,
+    Retire(u64),
+    Stop,
+}
+
 async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
     let mut watcher = shared.gate.signal.watcher();
     loop {
         let needed = poll_fn(|task| {
             loop {
                 if cx.checkpoint().is_err() {
-                    return Poll::Ready(false);
+                    return Poll::Ready(Maintenance::Stop);
                 }
                 {
                     let state = shared
@@ -536,10 +558,13 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
                         .read()
                         .unwrap_or_else(PoisonError::into_inner);
                     if state.phase == Phase::Recovering && state.active == 0 {
-                        return Poll::Ready(true);
+                        return Poll::Ready(Maintenance::Recover);
+                    }
+                    if state.phase == Phase::Ready && state.retired.is_some() {
+                        return Poll::Ready(Maintenance::Retire(state.generation));
                     }
                     if state.active == 0 && (state.stopping || state.phase == Phase::Fenced) {
-                        return Poll::Ready(false);
+                        return Poll::Ready(Maintenance::Stop);
                     }
                 }
                 if !watcher.poll_changed(task) {
@@ -548,9 +573,36 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
             }
         })
         .await;
-        if !needed {
+        if matches!(needed, Maintenance::Stop) {
             exit.finished = cx.checkpoint().is_ok();
             return;
+        }
+        if let Maintenance::Retire(generation) = needed {
+            let Ok(mut guard) = shared.database.write(cx).await else {
+                return;
+            };
+            let ready = {
+                let state = shared
+                    .gate
+                    .state
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner);
+                current(&state, generation).is_ok()
+            };
+            if ready {
+                let Some(database) = guard.as_mut() else {
+                    shared.failed("subscription cleanup has no database handle".to_owned());
+                    exit.finished = true;
+                    return;
+                };
+                if let Err(error) = shared.release_subscriptions(cx, database, generation) {
+                    exit.finished = error == Unavailable::Fenced;
+                    return;
+                }
+            }
+            // A writer may have fenced the generation while this task waited
+            // for its lock. Re-evaluate recovery instead of touching new state.
+            continue;
         }
         let candidate = match shared.database.write(cx).await {
             Ok(mut guard) => guard.take(),
@@ -578,23 +630,28 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
             .expect("recovery returns a healthy database")
             .downgrade();
         *guard = Some(recovered);
-        // Registrations belong to the consumed database. Old consumers never
-        // decrement this count, so their later closure cannot spend new slots.
-        shared.subscriptions.store(0, Ordering::Release);
-        let previous = {
+        // The old registry was consumed. Clear its queued obligations before
+        // making the replacement available; late old drops cannot refund it.
+        let (previous, retired) = {
             let mut state = shared
                 .gate
                 .state
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
+            let released = shared.subscriptions.swap(0, Ordering::AcqRel);
+            state.released_subscriptions = state
+                .released_subscriptions
+                .saturating_add(released as u64);
+            let retired = state.retired.take();
             state.phase = Phase::Ready;
-            if state.stopping {
+            let previous = if state.stopping {
                 state.published.take()
             } else {
                 state.published.replace(published)
-            }
+            };
+            (previous, retired)
         };
-        drop(previous);
+        drop((previous, retired));
         drop(guard);
         shared.gate.signal.committed();
     }

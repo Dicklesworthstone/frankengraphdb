@@ -19,7 +19,7 @@
 
 use super::*;
 use fgdb::{
-    NativeSubscription, NativeSubscriptionSetup, PreparedNativeRead, QueryValue,
+    NativeSubscriptionSetup, PreparedNativeRead, QueryValue,
     StandingQueryError, StandingQueryFailure, SubscribeError, SubscriptionBatch, SubscriptionError,
 };
 use fgdb_gql::algebra::GraphValue;
@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const REPLAY_RETENTION: [usize; 3] = [1024, 100_000, 1 << 22];
 
 pub(crate) struct Subscription {
-    pub(crate) consumer: NativeSubscription,
+    pub(crate) consumer: crate::recovery::OwnedSubscription,
     pub(crate) columns: Vec<String>,
     pub(crate) generation: Generation,
     admitted: QueryLimits,
@@ -465,14 +465,14 @@ pub(crate) async fn subscribe(
     {
         return Err(Refusal::new(
             ErrorCode::Budget,
-            "this database's subscription registrations are exhausted until reopen",
+            "this database's live subscription registration limit is reached",
         ));
     }
     let mut registration = Registration {
         count: &db.subscriptions,
         accepted: false,
     };
-    let (consumer, (columns, initial)) = prepared.subscribe_replaying(
+    let (consumer, (columns, initial)) = prepared.subscribe_scoped(
         &mut guard,
         &query,
         &parameters,
@@ -506,6 +506,10 @@ pub(crate) async fn subscribe(
             ))
         },
     )?;
+    // The terminal obligation is installed before returning to transport.
+    // Every exit, including a dropped connection future, returns it to the
+    // host worker; no producer/replay handle is ever exposed by this owner.
+    let consumer = generation.own_subscription(consumer);
     registration.accepted = true;
     Ok(Subscription {
         consumer,

@@ -107,6 +107,35 @@ impl NativeSubscription {
         })
     }
 
+    /// Host-owned terminal cleanup after a request has ended or lost authority.
+    /// This performs the SAME private-owner release as close_and_release, but
+    /// bounds its metadata-only work from the registry already owned by the
+    /// host. It does not need to renew an expired client's query allowance.
+    ///
+    /// At most N slots are validated, N retirement slots reserved and N suffix
+    /// slots inspected. The finite 3*N+1 work and N scratch ceilings cover that
+    /// existing release transaction, not graph reads, maintenance or delivery.
+    /// Foreign/shared ownership still refuses. Cancellation still preserves
+    /// the registration: supervisors must use their own live cleanup context
+    /// and retain the consumer until release succeeds or its database retires.
+    pub fn close_and_release_for_shutdown<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+    ) -> Result<usize, SubscriptionError> {
+        let overflow = || {
+            SubscriptionError::from(StandingQueryError::Delivery(
+                StandingQueryFailure::ScratchBudget,
+            ))
+        };
+        let slots = u64::try_from(database.standing_queries.len()).map_err(|_| overflow())?;
+        let work = slots
+            .checked_mul(3)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(overflow)?;
+        self.close_and_release(database, cx, GqlQueryPolicy::new(0, 0, work, slots))
+    }
+
     /// Explicitly close this delivery position and reclaim its PRIVATE source
     /// circuit and replay cache. Returns the number of registry nodes released;
     /// repeating a successful call on the same database returns zero.
@@ -250,3 +279,76 @@ impl<'a> Release<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    #[test]
+    fn host_cleanup_retires_real_nodes_and_cancelled_cleanup_keeps_them_retryable() {
+        let ((), report) = run_async_under_lab(0x79a0_04f1, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let mut database = Database::open_memory(
+                &contexts.commit(),
+                crate::DatabaseKeys::new(
+                    [0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32],
+                ),
+            ).await.unwrap();
+            let params = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare_subscription(
+                &cx, "SUBSCRIBE TO RETURN 7 AS value", &params,
+                fgdb_gql::RelationBind::new(),
+            ).unwrap();
+            let setup = || NativeSubscriptionSetup {
+                maintenance: GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
+                delivery: GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
+                retention: [4, 1000, 100_000],
+            };
+            let (mut consumer, batch) = prepared.subscribe_scoped(
+                &mut database, &cx, &params, setup(),
+                |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+            ).unwrap();
+            let count = database.standing_queries.len();
+            assert!(count >= 2);
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &observed).unwrap(), count);
+            assert!(database.standing_queries.is_empty());
+            assert!(consumer.is_closed());
+            assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &cx).unwrap(), 0);
+            assert_eq!(batch.rows().len(), 1); // caller's accepted frame survives
+            assert!(probe.calls() > 1);
+            for stop in 1..=probe.calls() {
+                let (mut consumer, _) = prepared.subscribe_scoped(
+                    &mut database, &cx, &params, setup(),
+                    |_, _| Ok::<_, SubscriptionError>(()),
+                ).unwrap();
+                let control = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let interrupted = cx.with_checkpoint_probe(Arc::clone(&control));
+                assert!(consumer.close_and_release_for_shutdown(&mut database, &interrupted).is_err());
+                assert_eq!(control.calls(), stop);
+                assert_eq!(database.standing_queries.len(), count);
+                assert!(!consumer.is_closed());
+                assert!(consumer.can_release_registration());
+                assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &cx).unwrap(), count);
+                assert!(database.standing_queries.is_empty());
+            }
+            let (mut shared, _) = prepared.subscribe_scoped(
+                &mut database, &cx, &params, setup(),
+                |_, _| Ok::<_, SubscriptionError>(()),
+            ).unwrap();
+            let _ = shared.handle(); // even an un-cloned escape prohibits reuse
+            assert!(matches!(
+                shared.close_and_release_for_shutdown(&mut database, &cx),
+                Err(SubscriptionError::SharedRegistration)
+            ));
+            assert_eq!(database.standing_queries.len(), count);
+            assert!(!shared.is_closed());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

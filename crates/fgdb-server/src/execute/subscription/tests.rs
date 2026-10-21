@@ -254,7 +254,7 @@ fn replay_retention_gap_uses_one_bounded_replacement_baseline() {
         let mut guard = db.db.write(&root).await.unwrap();
         let generation = guard.generation();
         let (mut consumer, baseline) = prepared
-            .subscribe_replaying(
+            .subscribe_scoped(
                 &mut guard,
                 &query,
                 &params,
@@ -277,6 +277,8 @@ fn replay_retention_gap_uses_one_bounded_replacement_baseline() {
             .unwrap()
             .predicates()
             .limits();
+        db.subscriptions.fetch_add(1, Ordering::AcqRel);
+        let consumer = generation.own_subscription(consumer);
         let mut subscription = Subscription {
             consumer,
             columns: vec!["n".into()],
