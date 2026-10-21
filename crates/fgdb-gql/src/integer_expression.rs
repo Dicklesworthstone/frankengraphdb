@@ -179,6 +179,19 @@ pub enum GraphIntegerOp {
     /// compiled once, at preparation (fgdb regex profile 1).
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
+    /// SUBSTRING(text, start) without a length: every character from the
+    /// 1-based start on, clamped as SUBSTRING clamps (fgdb-20foe).
+    SubstringFrom,
+    /// openCypher left(text, length) and right(text, length): the first or
+    /// last `length` characters (Unicode scalars), or all of a shorter text.
+    /// A negative length is InvalidSubstring (fgdb-20foe).
+    Left,
+    Right,
+    /// openCypher replace(text, search, replacement): every non-overlapping
+    /// occurrence, left to right. An empty search matches at every character
+    /// boundary, both ends included, as Java's String.replace does for
+    /// Neo4j (fgdb-20foe).
+    Replace,
     Concat,
     StartsWith,
     EndsWith,
@@ -289,6 +302,10 @@ impl GraphIntegerOp {
                 bytes.extend_from_slice(source);
             }
             Self::Substring => bytes.push(21),
+            Self::SubstringFrom => bytes.push(40),
+            Self::Left => bytes.push(41),
+            Self::Right => bytes.push(42),
+            Self::Replace => bytes.push(43),
             Self::Concat => bytes.push(22),
             Self::StartsWith => bytes.push(23),
             Self::EndsWith => bytes.push(24),
@@ -339,6 +356,10 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
+            Self::SubstringFrom => f.write_str("SubstringFrom"),
+            Self::Left => f.write_str("Left"),
+            Self::Right => f.write_str("Right"),
+            Self::Replace => f.write_str("Replace"),
             Self::Concat => f.write_str("Concat"),
             Self::StartsWith => f.write_str("StartsWith"),
             Self::EndsWith => f.write_str("EndsWith"),
@@ -634,6 +655,10 @@ enum Instruction {
     Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
+    SubstringFrom,
+    Left,
+    Right,
+    Replace,
     Concat,
     StartsWith,
     EndsWith,
@@ -1118,13 +1143,18 @@ impl GraphIntegerExpression {
                     };
                     *left = result.into();
                 }
-                Instruction::Substring => {
-                    let length = stack.pop().expect("validated substring length");
+                Instruction::Substring | Instruction::SubstringFrom => {
+                    let length = matches!(op, Instruction::Substring)
+                        .then(|| stack.pop().expect("validated substring length"));
                     let start = stack.pop().expect("validated substring start");
                     let value = stack.last_mut().expect("validated substring text");
                     let text = value.text().map_err(failure)?;
                     let start = start.integer().map_err(failure)?;
-                    let length = length.integer().map_err(failure)?;
+                    // Without a length, SUBSTRING runs to the end of the text.
+                    let length = match length {
+                        Some(length) => length.integer().map_err(failure)?,
+                        None => Some(i128::MAX),
+                    };
                     if length.is_some_and(|length| length < 0) {
                         return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
                     }
@@ -1151,6 +1181,70 @@ impl GraphIntegerExpression {
                         } else {
                             CanonicalScalar::Null
                         };
+                    *value = result.into();
+                }
+                Instruction::Left | Instruction::Right => {
+                    let length = stack.pop().expect("validated left/right length");
+                    let value = stack.last_mut().expect("validated left/right text");
+                    let text = value.text().map_err(failure)?;
+                    let length = length.integer().map_err(failure)?;
+                    if length.is_some_and(|length| length < 0) {
+                        return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
+                    }
+                    let result = if let (Some(text), Some(length)) = (text, length) {
+                        charge_payload(text.len(), false, control)?;
+                        // A length beyond any text keeps all of it.
+                        let length = usize::try_from(length).unwrap_or(usize::MAX);
+                        let kept = if matches!(op, Instruction::Left) {
+                            let end = text
+                                .char_indices()
+                                .nth(length)
+                                .map_or(text.len(), |(byte, _)| byte);
+                            &text[..end]
+                        } else if length == 0 {
+                            ""
+                        } else {
+                            let begin = text
+                                .char_indices()
+                                .rev()
+                                .nth(length - 1)
+                                .map_or(0, |(byte, _)| byte);
+                            &text[begin..]
+                        };
+                        make_text(kept, at, control)?
+                    } else {
+                        CanonicalScalar::Null
+                    };
+                    *value = result.into();
+                }
+                Instruction::Replace => {
+                    let replacement = stack.pop().expect("validated replacement text");
+                    let search = stack.pop().expect("validated search text");
+                    let value = stack.last_mut().expect("validated replaced text");
+                    let text = value.text().map_err(failure)?;
+                    let search = search.text().map_err(failure)?;
+                    let replacement = replacement.text().map_err(failure)?;
+                    let result = if let (Some(text), Some(search), Some(replacement)) =
+                        (text, search, replacement)
+                    {
+                        // Counting the occurrences is one scan; it sizes the
+                        // result, reserved before the second scan builds it.
+                        charge_payload(text.len(), false, control)?;
+                        charge_payload(search.len(), false, control)?;
+                        charge_payload(replacement.len(), false, control)?;
+                        let count = text.matches(search).count();
+                        let size = count
+                            .checked_mul(replacement.len())
+                            .and_then(|added| {
+                                (text.len() - count * search.len()).checked_add(added)
+                            })
+                            .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                        charge_payload(text.len(), false, control)?;
+                        charge_payload(size, true, control)?;
+                        make_text(&text.replace(search, replacement), at, control)?
+                    } else {
+                        CanonicalScalar::Null
+                    };
                     *value = result.into();
                 }
                 Instruction::InList { members } => {
@@ -1331,6 +1425,10 @@ impl GraphIntegerExpression {
                     bytes.extend_from_slice(source);
                 }
                 Instruction::Substring => bytes.push(21),
+                Instruction::SubstringFrom => bytes.push(40),
+                Instruction::Left => bytes.push(41),
+                Instruction::Right => bytes.push(42),
+                Instruction::Replace => bytes.push(43),
                 Instruction::Concat => bytes.push(22),
                 Instruction::StartsWith => bytes.push(23),
                 Instruction::EndsWith => bytes.push(24),

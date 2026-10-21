@@ -429,6 +429,260 @@ fn size_of_a_text_aggregate_counts_characters_in_the_result_projection() {
     assert!(run(&CanonicalScalar::Int(42)).is_err());
 }
 
+/// fgdb-20foe: openCypher left, right, replace and length(text), and the
+/// two-argument SUBSTRING. Positions count Unicode scalars, as CHAR_LENGTH
+/// and SUBSTRING do. SUBSTRING keeps this engine's 1-based start with or
+/// without a length (openCypher's substring is 0-based: fgdb-qkeq2). NULL in
+/// any argument is NULL and a negative length is InvalidSubstring. Each
+/// filters in WHERE, reads WITH aliases, runs in the aggregate result
+/// projection, and charges the text it reads and builds.
+#[test]
+fn opencypher_left_right_replace_length_and_two_argument_substring() {
+    // Five scalars: é, the crab, a, a combining acute accent, b.
+    let input = text("é🦀a\u{301}b");
+    for (expression, expected) in [
+        ("left(n.text, 2)", text("é🦀")),
+        ("right(n.text, 2)", text("\u{301}b")),
+        ("left(n.text, 0)", text("")),
+        ("right(n.text, 0)", text("")),
+        ("left(n.text, 5)", input.clone()),
+        ("right(n.text, 9)", input.clone()),
+        ("LEFT('hello', 2)", text("he")),
+        ("Right('hello', 2)", text("lo")),
+        ("replace('hello', 'e', 'x')", text("hxllo")),
+        ("replace('banana', 'an', 'AN')", text("bANANa")),
+        // Non-overlapping occurrences, left to right.
+        ("replace('aaa', 'aa', 'b')", text("ba")),
+        ("replace(n.text, '🦀', 'crab')", text("écraba\u{301}b")),
+        ("replace('abc', 'b', '')", text("ac")),
+        ("replace('abc', 'x', 'y')", text("abc")),
+        // An empty search matches at every character boundary, both ends
+        // included, as Java's String.replace does for Neo4j.
+        ("replace('abc', '', '-')", text("-a-b-c-")),
+        ("replace('é🦀', '', '-')", text("-é-🦀-")),
+        ("replace('', '', '-')", text("-")),
+        ("length(n.text)", CanonicalScalar::Int(5)),
+        ("length('hello')", CanonicalScalar::Int(5)),
+        ("length('') + 1", CanonicalScalar::Int(1)),
+        ("length(left(n.text, 3))", CanonicalScalar::Int(3)),
+        ("substring('hello', 2)", text("ello")),
+        ("SUBSTRING('hello' FROM 4)", text("lo")),
+        ("substring(n.text, 2)", text("🦀a\u{301}b")),
+        ("substring('hello', 0)", text("hello")),
+        ("substring('hello', -3)", text("hello")),
+        ("substring('hello', 9)", text("")),
+        // The results are static text: `+` concatenates them.
+        ("left(upper(n.text), 1) + right('xyz', 1)", text("Éz")),
+        ("replace('a', 'a', 'b') + substring('xyz', 3)", text("bz")),
+    ] {
+        assert_eq!(scalar(expression, &input), expected, "{expression}");
+    }
+    // length(text) and two-argument SUBSTRING are the existing programs.
+    for (cypher, gql) in [
+        ("length(n.text)", "CHAR_LENGTH(n.text)"),
+        ("substring(n.text, 2)", "SUBSTRING(n.text FROM 2)"),
+    ] {
+        assert_eq!(
+            prepare(&format!("MATCH (n) RETURN {cypher} AS value")).canonical_bytes(),
+            prepare(&format!("MATCH (n) RETURN {gql} AS value")).canonical_bytes(),
+            "{cypher}"
+        );
+    }
+    assert_ne!(
+        prepare("MATCH (n) RETURN left(n.text, 2) AS value").canonical_bytes(),
+        prepare("MATCH (n) RETURN right(n.text, 2) AS value").canonical_bytes()
+    );
+    for expression in [
+        "left(NULL, 1)",
+        "left('a', NULL)",
+        "right(NULL, 1)",
+        "right('a', NULL)",
+        "replace(NULL, 'a', 'b')",
+        "replace('a', NULL, 'b')",
+        "replace('a', 'a', NULL)",
+        "length(NULL)",
+        "substring(NULL, 1)",
+        "substring('a', NULL)",
+    ] {
+        assert_eq!(
+            scalar(expression, &input),
+            CanonicalScalar::Null,
+            "{expression}"
+        );
+    }
+    for expression in [
+        "left(n.text, 1)",
+        "right(n.text, 1)",
+        "replace(n.text, 'a', 'b')",
+        "replace('a', n.text, 'b')",
+        "replace('a', 'a', n.text)",
+        "length(n.text)",
+        "substring(n.text, 1)",
+    ] {
+        assert_eq!(
+            scalar(expression, &CanonicalScalar::Null),
+            CanonicalScalar::Null,
+            "{expression}"
+        );
+    }
+    for expression in ["left(n.text, -1)", "right(n.text, -1)"] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(
+            matches!(
+                execute(&query, &input, policy()),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    error: fgdb_gql::GraphIntegerError {
+                        kind: fgdb_gql::GraphIntegerErrorKind::InvalidSubstring,
+                        ..
+                    },
+                    ..
+                }))
+            ),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "left(1, 1)",
+        "right('a', 'b')",
+        "left('a', TRUE)",
+        "replace('a', 1, 'b')",
+        "replace(1, 'a', 'b')",
+        "length(1)",
+        "substring(1, 1)",
+        "substring('a', 'b')",
+    ] {
+        let statement = format!("MATCH (n) RETURN {expression} AS value");
+        let error = PreparedGraphSetText::prepare(&statement, symbols).expect_err(&statement);
+        assert!(
+            matches!(
+                error.kind,
+                fgdb_gql::GraphSetTextErrorKind::IntegerExpression(
+                    fgdb_gql::GraphIntegerBuildError::OperandType { .. }
+                )
+            ),
+            "{statement}: {error:?}"
+        );
+    }
+    // The graph pattern's WHERE and a WITH's WHERE and RETURN admit them.
+    for (statement, rows) in [
+        (
+            "MATCH (n) WHERE left(n.text, 1) = 'é' RETURN n.text AS value",
+            1,
+        ),
+        (
+            "MATCH (n) WHERE right(n.text, 1) = 'é' RETURN n.text AS value",
+            0,
+        ),
+        (
+            "MATCH (n) WHERE length(n.text) = 5 RETURN n.text AS value",
+            1,
+        ),
+        (
+            "MATCH (n) WHERE length(n.text) > 5 RETURN n.text AS value",
+            0,
+        ),
+        (
+            "MATCH (n) WHERE substring(n.text, 5) = 'b' RETURN n.text AS value",
+            1,
+        ),
+        (
+            "MATCH (n) WHERE replace(n.text, 'b', '') = 'é🦀a\u{301}' RETURN n.text AS value",
+            1,
+        ),
+        (
+            "MATCH (n) WITH n.text AS t WHERE left(t, 2) = 'é🦀' AND length(t) = 5 \
+             RETURN replace(t, 'b', 'B') AS value",
+            1,
+        ),
+    ] {
+        let result = execute(&prepare(statement), &input, policy()).unwrap();
+        assert_eq!(result.value.len(), rows, "{statement}");
+    }
+    let carried = prepare(
+        "MATCH (n) WITH n.text AS t RETURN replace(t, 'b', 'B') AS r, length(t) AS c, \
+         right(t, 3) AS tail, substring(t, 4) AS rest",
+    );
+    assert_eq!(
+        execute(&carried, &input, policy()).unwrap().value[0].values(),
+        &[
+            fgdb_gql::algebra::GraphValue::Scalar(text("é🦀a\u{301}B")),
+            fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(5)),
+            fgdb_gql::algebra::GraphValue::Scalar(text("a\u{301}b")),
+            fgdb_gql::algebra::GraphValue::Scalar(text("\u{301}b")),
+        ]
+    );
+    // The aggregate result projection runs the same instructions.
+    let stored = CanonicalPropertyValue::from(input.clone());
+    let grouped = fgdb_gql::PreparedGraphAggregateText::prepare(
+        "MATCH (n) RETURN left(MIN(n.text), 2) AS l, length(MIN(n.text)) AS c, \
+         replace(MAX(n.text), 'b', 'B') AS r, substring(MIN(n.text), 4) AS s",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+    .execute_governed(
+        1,
+        [VId(1)],
+        [],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(Some(&stored)),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    let values: Vec<_> = grouped.value[0]
+        .values()
+        .iter()
+        .map(|value| value.as_value().cloned())
+        .collect();
+    let value = |scalar| Some(fgdb_gql::algebra::GraphValue::Scalar(scalar));
+    assert_eq!(
+        values,
+        vec![
+            value(text("é🦀")),
+            value(CanonicalScalar::Int(5)),
+            value(text("é🦀a\u{301}B")),
+            value(text("\u{301}b")),
+        ]
+    );
+    // replace reserves the text it builds before building it, and left
+    // charges the text it reads: only the replacement's or input's length
+    // differs between each pair.
+    let short = prepare("MATCH (n) RETURN length(replace(n.text, 'a', 'ß')) AS value");
+    let long = prepare(&format!(
+        "MATCH (n) RETURN length(replace(n.text, 'a', '{}')) AS value",
+        "ß".repeat(128)
+    ));
+    let small = execute(&short, &input, policy()).unwrap();
+    let large = execute(&long, &input, policy()).unwrap();
+    assert_eq!(
+        large.value[0].values()[0].as_scalar(),
+        Some(&CanonicalScalar::Int(132))
+    );
+    assert!(large.evaluator.work_units > small.evaluator.work_units);
+    assert!(large.evaluator.scratch_entries > small.evaluator.scratch_entries);
+    let scratch_cap = GqlQueryPolicy::new(100, 100, 1_000_000, small.evaluator.scratch_entries);
+    assert!(execute(&short, &input, scratch_cap).is_ok());
+    assert!(matches!(
+        execute(&long, &input, scratch_cap),
+        Err(GqlQueryError::Evaluator(_))
+    ));
+    let read = prepare("MATCH (n) RETURN left(n.text, 1) AS value");
+    let plain = prepare("MATCH (n) RETURN n.text AS value");
+    let work = |query: &PreparedGraphSet, input: &CanonicalScalar| {
+        execute(query, input, policy())
+            .unwrap()
+            .evaluator
+            .work_units
+    };
+    let (short, long) = (text("x"), text(&"x".repeat(1024)));
+    assert_eq!(
+        (work(&read, &long) - work(&plain, &long)) - (work(&read, &short) - work(&plain, &short)),
+        1024 / 64 - 1
+    );
+}
+
 /// fgdb-j687q: openCypher `+` concatenates when either operand is statically
 /// text, compiling to the same program `||` does, in RETURN and WHERE and
 /// through chains. An operand of unknown type keeps integer addition, and a

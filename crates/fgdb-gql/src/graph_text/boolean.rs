@@ -525,6 +525,14 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(true);
                     }
+                    // `length(<expression>)` of text; `length(p)` of a lone
+                    // name keeps the path predicate reading (fgdb-20foe).
+                    if !after_dot
+                        && word.eq_ignore_ascii_case("LENGTH")
+                        && Self::length_argument(lexer.clone())? == Some(None)
+                    {
+                        return Ok(true);
+                    }
                     if !after_dot
                         && operand_end
                         && ["STARTS", "ENDS", "CONTAINS"]

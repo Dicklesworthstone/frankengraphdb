@@ -63,6 +63,10 @@ fn static_text(root: Option<&ParsedOp>) -> bool {
                 | GraphIntegerOp::Lower
                 | GraphIntegerOp::Trim
                 | GraphIntegerOp::Substring
+                | GraphIntegerOp::SubstringFrom
+                | GraphIntegerOp::Left
+                | GraphIntegerOp::Right
+                | GraphIntegerOp::Replace
                 | GraphIntegerOp::Concat
                 | GraphIntegerOp::ToText
                 | GraphIntegerOp::IdentityColumn { text: true, .. }
@@ -1650,6 +1654,44 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether an openCypher `length(...)` call at the current token counts
+    /// the characters of text, as CHAR_LENGTH (fgdb-20foe). Any argument but
+    /// one lone name does, and so does a list element. Any other lone name
+    /// does unless it names a path: a MATCH path, a path a WITH carried for
+    /// a length read, or a row column of paths. Those stay with the
+    /// graph-function readers, which answer the path's hop count. Nothing is
+    /// consumed. Out of line: integer_unary repeats once per nested
+    /// parenthesis.
+    #[inline(never)]
+    fn text_length_call(
+        &self,
+        columns: &ExpressionColumns<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("LENGTH") {
+            return Ok(false);
+        }
+        let Some(argument) = Self::length_argument(self.lexer.clone())? else {
+            return Ok(false);
+        };
+        let Some(name) = argument else {
+            return Ok(true);
+        };
+        if self.elements.contains(&name) {
+            return Ok(true);
+        }
+        let carried = self.boundary_reads.as_ref().is_some_and(|boundary| {
+            (boundary.functions.iter())
+                .any(|&(read, function, _)| read == name && function == GraphPathFunction::Length)
+        });
+        let row_path = match columns {
+            ExpressionColumns::Row(schema) => schema.iter().any(|(column, kind)| {
+                column.text == name && *kind == crate::GraphSetColumnType::Path
+            }),
+            _ => false,
+        };
+        Ok(!self.syntax.names_path(name) && !carried && !row_path)
+    }
+
     /// openCypher pi() and e(), just after their `(`: the binary64 nearest
     /// each constant. False, with nothing consumed, for any other function.
     /// Out of line: integer_unary repeats once per nested parenthesis.
@@ -1748,9 +1790,10 @@ impl<'a> Parser<'a> {
         if self.null_graph_function(program, at)? {
             return Ok(());
         }
-        let function = if crate::graph_text::SCALAR_FUNCTIONS
+        let function = if (crate::graph_text::SCALAR_FUNCTIONS
             .iter()
             .any(|name| self.is_word(name))
+            || self.text_length_call(columns)?)
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let TokenKind::Word(name) = self.current.kind else {
@@ -1784,7 +1827,7 @@ impl<'a> Parser<'a> {
                 Some(GraphIntegerOp::ToInteger)
             } else if function.eq_ignore_ascii_case("TOBOOLEAN") {
                 Some(GraphIntegerOp::ToBoolean)
-            } else if spelled(["CHAR_LENGTH", "SIZE"]) {
+            } else if spelled(["CHAR_LENGTH", "SIZE"]) || function.eq_ignore_ascii_case("LENGTH") {
                 Some(GraphIntegerOp::CharLength)
             } else {
                 None
@@ -1807,6 +1850,10 @@ impl<'a> Parser<'a> {
                     self.punct(b',', ", or FROM")?;
                 }
                 self.scalar_boolean(columns, depth + 1, program)?;
+                // Without a length (FOR), the rest of the text (fgdb-20foe).
+                if self.take(b')')? {
+                    return emit(program, ParsedOp::Bound(GraphIntegerOp::SubstringFrom), at);
+                }
                 if sql {
                     self.word("FOR")?;
                 } else {
@@ -1829,6 +1876,23 @@ impl<'a> Parser<'a> {
             if function.eq_ignore_ascii_case("ATAN2") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(GraphIntegerOp::Atan2), at);
+            }
+            // openCypher left/right(text, length), replace(text, search,
+            // replacement) (fgdb-20foe).
+            if spelled(["LEFT", "RIGHT"]) {
+                self.punct(b')', ")")?;
+                let op = if function.eq_ignore_ascii_case("LEFT") {
+                    GraphIntegerOp::Left
+                } else {
+                    GraphIntegerOp::Right
+                };
+                return emit(program, ParsedOp::Bound(op), at);
+            }
+            if function.eq_ignore_ascii_case("REPLACE") {
+                self.punct(b',', ",")?;
+                self.scalar_boolean(columns, depth + 1, program)?;
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(GraphIntegerOp::Replace), at);
             }
             emit(program, ParsedOp::Coalesce, at)?;
             while self.take(b',')? {

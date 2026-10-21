@@ -129,8 +129,11 @@ fn prepare_root(
             | Op::Atan2
             | Op::StartsWith
             | Op::EndsWith
-            | Op::Contains => 2,
-            Op::Case | Op::Substring => 3,
+            | Op::Contains
+            | Op::SubstringFrom
+            | Op::Left
+            | Op::Right => 2,
+            Op::Case | Op::Substring | Op::Replace => 3,
             Op::InList { members } => members.checked_add(1).ok_or_else(missing)?,
             Op::SimpleCase { alternatives } => {
                 if *alternatives == 0 {
@@ -180,12 +183,15 @@ fn prepare_root(
                 | Op::StartsWith
                 | Op::EndsWith
                 | Op::Contains
-                | Op::Matches(_) => Some(Kind::Text),
-                Op::Substring => Some(if position == 0 {
-                    Kind::Text
-                } else {
-                    Kind::Integer
-                }),
+                | Op::Matches(_)
+                | Op::Replace => Some(Kind::Text),
+                Op::Substring | Op::SubstringFrom | Op::Left | Op::Right => {
+                    Some(if position == 0 {
+                        Kind::Text
+                    } else {
+                        Kind::Integer
+                    })
+                }
                 _ => None,
             };
             if expected.is_some_and(|expected| !expected.accepts(nodes[child].kind)) {
@@ -302,9 +308,16 @@ fn prepare_root(
             | Op::Contains
             | Op::Matches(_)
             | Op::ToBoolean => Kind::Boolean,
-            Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
-                Kind::Text
-            }
+            Op::Upper
+            | Op::Lower
+            | Op::Trim
+            | Op::Substring
+            | Op::SubstringFrom
+            | Op::Left
+            | Op::Right
+            | Op::Replace
+            | Op::Concat
+            | Op::ToText => Kind::Text,
             Op::Numeric(GraphNumericFunction::Sign) => Kind::Integer,
             Op::Numeric(_) | Op::Power | Op::Atan2 => Kind::Float,
             _ => Kind::Integer,
@@ -371,7 +384,8 @@ fn prepare_root(
         // from the result kind: CHAR_LENGTH still consumes text.
         for (position, &child) in children.iter().enumerate() {
             let integer_operand = matches!(op, Op::Unary(_) | Op::Binary(_))
-                || matches!(op, Op::Substring) && position != 0;
+                || matches!(op, Op::Substring | Op::SubstringFrom | Op::Left | Op::Right)
+                    && position != 0;
             if integer_operand {
                 let normalized = match &nodes[child].op {
                     Op::ScalarColumn(column) if !numeric_arithmetic => Some(Op::Column(*column)),
@@ -486,6 +500,9 @@ fn prepare_root(
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
                     Op::Contains => Some(Instruction::Contains),
+                    Op::SubstringFrom => Some(Instruction::SubstringFrom),
+                    Op::Left => Some(Instruction::Left),
+                    Op::Right => Some(Instruction::Right),
                     _ => None,
                 };
                 if let Some(op) = binary {
@@ -505,9 +522,10 @@ fn prepare_root(
                     Op::Scalar(value) => code.push(Instruction::Scalar(value.clone())),
                     Op::Literal(value) => code.push(Instruction::Literal(*value)),
                     Op::Truth(value) => code.push(Instruction::Truth(*value)),
-                    Op::Substring | Op::InList { .. } => {
+                    Op::Substring | Op::Replace | Op::InList { .. } => {
                         tasks.push(Task::Emit(match &node.op {
                             Op::InList { members } => Instruction::InList { members: *members },
+                            Op::Replace => Instruction::Replace,
                             _ => Instruction::Substring,
                         }));
                         tasks.extend(node.children.iter().rev().map(|&child| Task::Visit(child)));
@@ -553,7 +571,10 @@ fn prepare_root(
                     | Op::Atan2
                     | Op::StartsWith
                     | Op::EndsWith
-                    | Op::Contains => unreachable!("operator emitted above"),
+                    | Op::Contains
+                    | Op::SubstringFrom
+                    | Op::Left
+                    | Op::Right => unreachable!("operator emitted above"),
                 }
             }
             Task::Emit(op) => code.push(op),

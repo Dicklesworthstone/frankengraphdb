@@ -38,8 +38,9 @@ pub const MAX_GRAPH_TEXT_TOKENS: usize = 24_576;
 /// character count. A leading SIZE(...) row value keeps the list-or-text
 /// Size node instead. The Boolean lowering lookahead and the compiler read
 /// this one table, so a name cannot be known to one and not the other. PI()
-/// and E() take no argument; ATAN2 takes two.
-const SCALAR_FUNCTIONS: [&str; 36] = [
+/// and E() take no argument; ATAN2, LEFT and RIGHT take two, REPLACE three.
+/// LENGTH is not here: `text_length_call` tells text's length from a path's.
+const SCALAR_FUNCTIONS: [&str; 39] = [
     "ABS",
     "TOFLOAT",
     "FLOOR",
@@ -71,6 +72,9 @@ const SCALAR_FUNCTIONS: [&str; 36] = [
     "TOLOWER",
     "TRIM",
     "SUBSTRING",
+    "LEFT",
+    "RIGHT",
+    "REPLACE",
     "CHAR_LENGTH",
     "SIZE",
     "TOSTRING",
@@ -1061,6 +1065,24 @@ impl<'a> Parser<'a> {
     fn source_name(&self, at: usize, end: usize) -> Name<'a> {
         let text = self.lexer.text.get(at..end).unwrap_or("").trim_end();
         Name { text, at }
+    }
+    /// The argument of an openCypher `length(...)` call (fgdb-20foe), read
+    /// through `after`, a look-ahead lexer just past a `length` word: `None`
+    /// when no call opens. A whole argument of one name is `Some(Some(name))`,
+    /// which only its scope can type: a path has a hop count, text a
+    /// character count. Any other argument is text's: `Some(None)`.
+    fn length_argument(
+        mut after: Lexer<'a>,
+    ) -> Result<Option<Option<&'a str>>, GraphPatternTextError> {
+        if !matches!(after.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let TokenKind::Word(name) = after.next()?.kind else {
+            return Ok(Some(None));
+        };
+        Ok(Some(
+            matches!(after.next()?.kind, TokenKind::Punct(b')')).then_some(name),
+        ))
     }
     fn is_word(&self, word: &str) -> bool {
         matches!(self.current.kind, TokenKind::Word(actual) if actual.eq_ignore_ascii_case(word))
