@@ -218,10 +218,9 @@ fn hidden_groups_consolidate_visible_rows_and_repeated_slots_keep_native_order()
                 let (before, after) = (make(0, 0), make(2, 100));
                 let a = seed(&cx, &mut source_file, CommitSeq(1), &before, &slots).await;
                 let b = seed(&cx, &mut source_file, CommitSeq(2), &after, &slots).await;
-                for (left, right, before, after) in [
-                    (&a, &b, &before, &after),
-                    (&b, &a, &after, &before),
-                ] {
+                for (left, right, before, after) in
+                    [(&a, &b, &before, &after), (&b, &a, &after, &before)]
+                {
                     let mut cursor = left
                         .difference_stream(
                             right,
@@ -259,9 +258,7 @@ fn exact_shared_work_row_limits_and_duplicate_payloads_larger_than_the_pool() {
         let text = GraphAggregateValue::Value(GraphValue::Scalar(
             CanonicalScalar::ucs_basic_text(&"value-é".repeat(128)).unwrap(),
         ));
-        let before = (0..100)
-            .map(|i| row(i, text.clone()))
-            .collect::<Vec<_>>();
+        let before = (0..100).map(|i| row(i, text.clone())).collect::<Vec<_>>();
         let after = (0..99)
             .map(|i| row(i + 1000, text.clone()))
             .chain([row(2000, GraphAggregateValue::Integer(i128::MIN))])
@@ -473,12 +470,7 @@ fn real_historical_aggregate_spools_match_query_diff_after_writer_and_templates_
         .await
         .unwrap();
         let mut batch = crate::WriteBatch::new(RelationId(1));
-        for (id, p, q) in [
-            (1, i64::MAX, 0),
-            (2, i64::MAX, 0),
-            (3, 1, 1),
-            (4, 2, 1),
-        ] {
+        for (id, p, q) in [(1, i64::MAX, 0), (2, i64::MAX, 0), (3, 1, 1), (4, 2, 1)] {
             batch.create_vertex(
                 VId(id),
                 vec![],
@@ -492,21 +484,13 @@ fn real_historical_aggregate_spools_match_query_diff_after_writer_and_templates_
         let before = db.read_session().unwrap();
         let mut batch = crate::WriteBatch::new(RelationId(1));
         batch.delete_vertex(VId(2));
-        batch.set_vertex_property(
-            VId(3),
-            PropertyKeyId(1),
-            Some(CanonicalScalar::Int(3)),
-        );
+        batch.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
         let last = db.write(&contexts.commit(), batch).await.unwrap();
         let after = db.read_session().unwrap();
         drop(db);
         let resolver = |kind, name: &str| match (kind, name) {
-            (GraphSymbolKind::Property, "p") => {
-                Some(GraphSymbol::Property(PropertyKeyId(1)))
-            }
-            (GraphSymbolKind::Property, "q") => {
-                Some(GraphSymbol::Property(PropertyKeyId(2)))
-            }
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
         };
         let policy = GqlQueryPolicy::new(100_000, 100_000, 100_000_000, 100_000_000);
@@ -521,14 +505,7 @@ fn real_historical_aggregate_spools_match_query_diff_after_writer_and_templates_
             let prepared =
                 PreparedNativeRead::prepare(text, &GqlParameters::new(), resolver).unwrap();
             let expected = prepared
-                .diff_in_view(
-                    &after,
-                    &cx,
-                    &GqlParameters::new(),
-                    first,
-                    last,
-                    policy,
-                )
+                .diff_in_view(&after, &cx, &GqlParameters::new(), first, last, policy)
                 .unwrap();
             let expected: Bag = expected
                 .changes()

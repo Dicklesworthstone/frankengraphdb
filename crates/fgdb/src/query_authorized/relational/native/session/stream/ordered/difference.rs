@@ -77,7 +77,9 @@ fn private_policy(mut policy: GqlQueryPolicy) -> GqlQueryPolicy {
     policy
 }
 fn remainder(limit: u64, used: u64) -> Result<u64> {
-    limit.checked_sub(used).ok_or(NativeSpoolError::IncompleteCursor)
+    limit
+        .checked_sub(used)
+        .ok_or(NativeSpoolError::IncompleteCursor)
 }
 fn after_policy(mut policy: GqlQueryPolicy, first: &NativeResultSpool) -> Result<GqlQueryPolicy> {
     if let Some(limit) = policy.rows.max_snapshot_records() {
@@ -170,29 +172,65 @@ where
         F: FnMut(i128, TrackedBytes) -> Fut + Send + 'q,
         Fut: Future<Output = Result<()>> + Send + 'q,
     {
-        let Self { session, scratch, destination, limits } = self;
+        let Self {
+            session,
+            scratch,
+            destination,
+            limits,
+        } = self;
         let limits = *limits;
         let state = session.state.as_mut().ok_or_else(|| {
-            authorized(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+            authorized(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ))
         })?;
-        let State { view, capability, branch, policy, clock, last_now_ms, .. } = state;
-        let mut guard = PinGuard { pin: view, armed: true };
+        let State {
+            view,
+            capability,
+            branch,
+            policy,
+            clock,
+            last_now_ms,
+            ..
+        } = state;
+        let mut guard = PinGuard {
+            pin: view,
+            armed: true,
+        };
         let opened = open(
             guard.pin.as_ref().ok_or_else(|| {
-                authorized(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+                authorized(QueryError::Authorization(
+                    AuthorizationError::ExecutionStopped,
+                ))
             })?,
-            capability, clock, last_now_ms, cx, branch, &session.owner, prepared,
-            params, *policy,
+            capability,
+            clock,
+            last_now_ms,
+            cx,
+            branch,
+            &session.owner,
+            prepared,
+            params,
+            *policy,
             |native, params, _| {
                 refuse_element_identity(native.statement())?;
-                if !matches!(native, PreparedNativeRead::Pattern(_) | PreparedNativeRead::Set(_)) {
-                    return Err(QueryError::StreamingUnsupported { facade: native.facade_class() });
+                if !matches!(
+                    native,
+                    PreparedNativeRead::Pattern(_) | PreparedNativeRead::Set(_)
+                ) {
+                    return Err(QueryError::StreamingUnsupported {
+                        facade: native.facade_class(),
+                    });
                 }
                 bind_ordered(native, params, before)
             },
             |(plan, tail, _, columns, pull), view, cx, execution, policy| {
-                view.snapshot.check_frontier(before).map_err(QueryError::Read)?;
-                view.snapshot.check_frontier(after).map_err(QueryError::Read)?;
+                view.snapshot
+                    .check_frontier(before)
+                    .map_err(QueryError::Read)?;
+                view.snapshot
+                    .check_frontier(after)
+                    .map_err(QueryError::Read)?;
                 execution.borrow_mut().reserve_work(limits.max_sort_work)?;
                 let second_plan = match &plan {
                     RowPlan::Vertex(plan) => RowPlan::Vertex(plan.clone()),
@@ -200,11 +238,27 @@ where
                 };
                 let second_pull = pull.clone();
                 let first = Endpoint {
-                    input: pending(plan, pull, before, view, cx, execution.clone(), limits.max_input_rows)?,
+                    input: pending(
+                        plan,
+                        pull,
+                        before,
+                        view,
+                        cx,
+                        execution.clone(),
+                        limits.max_input_rows,
+                    )?,
                     tail: tail.clone(),
                 };
                 let second = Endpoint {
-                    input: pending(second_plan, second_pull, after, view, cx, execution.clone(), limits.max_input_rows)?,
+                    input: pending(
+                        second_plan,
+                        second_pull,
+                        after,
+                        view,
+                        cx,
+                        execution.clone(),
+                        limits.max_input_rows,
+                    )?,
                     tail,
                 };
                 execution.borrow_mut().checkpoint()?;
@@ -212,45 +266,80 @@ where
             },
         );
         let (first, second, columns, policy, execution) = match opened {
-            Ok(opened) => { guard.armed = false; opened }
-            Err(error) => { guard.armed = terminal_error(&error); return Err(authorized(error)); }
+            Ok(opened) => {
+                guard.armed = false;
+                opened
+            }
+            Err(error) => {
+                guard.armed = terminal_error(&error);
+                return Err(authorized(error));
+            }
         };
         Ok(Box::pin(async move {
             let future = async {
                 let input_policy = private_policy(policy);
                 let (first, used) = ordered_input(
-                    cx, columns.clone(), (first.input)(input_policy), first.tail,
-                    input_policy, &mut *scratch, &mut *destination, limits.run_rows,
-                    limits.max_runs, limits.page_bytes, limits.max_row_bytes, limits.max_sort_work,
-                ).await?;
+                    cx,
+                    columns.clone(),
+                    (first.input)(input_policy),
+                    first.tail,
+                    input_policy,
+                    &mut *scratch,
+                    &mut *destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    limits.max_sort_work,
+                )
+                .await?;
                 let input_policy = after_policy(input_policy, &first)?;
                 let allowance = remainder(limits.max_sort_work, used)?;
                 let (second, spent) = ordered_input(
-                    cx, columns.clone(), (second.input)(input_policy), second.tail,
-                    input_policy, &mut *scratch, &mut *destination, limits.run_rows,
-                    limits.max_runs, limits.page_bytes, limits.max_row_bytes, allowance,
-                ).await?;
+                    cx,
+                    columns.clone(),
+                    (second.input)(input_policy),
+                    second.tail,
+                    input_policy,
+                    &mut *scratch,
+                    &mut *destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    allowance,
+                )
+                .await?;
                 if first.snapshot_seq() != before || second.snapshot_seq() != after {
                     return Err(NativeSpoolError::IncompleteCursor);
                 }
                 let allowance = remainder(allowance, spent)?;
-                first.visit_difference(
-                    &second, cx, destination, scratch, limits.run_rows, limits.max_runs,
-                    limits.page_bytes, policy.rows.max_result_rows().unwrap_or(u64::MAX),
-                    allowance,
-                    |weight, row| {
-                        // Drop the mutex guard BEFORE invoking application code.
-                        let admission = execution.borrow_mut().deliver(1).map_err(authorized);
-                        let callback = admission.map(|()| visitor(weight, row));
-                        let execution = execution.clone();
-                        async move {
-                            let outcome = callback?.await;
-                            // A callback cannot hide retirement behind its own error.
-                            execution.borrow_mut().checkpoint().map_err(authorized)?;
-                            outcome
-                        }
-                    },
-                ).await.map_err(difference_error)?;
+                first
+                    .visit_difference(
+                        &second,
+                        cx,
+                        destination,
+                        scratch,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        policy.rows.max_result_rows().unwrap_or(u64::MAX),
+                        allowance,
+                        |weight, row| {
+                            // Drop the mutex guard BEFORE invoking application code.
+                            let admission = execution.borrow_mut().deliver(1).map_err(authorized);
+                            let callback = admission.map(|()| visitor(weight, row));
+                            let execution = execution.clone();
+                            async move {
+                                let outcome = callback?.await;
+                                // A callback cannot hide retirement behind its own error.
+                                execution.borrow_mut().checkpoint().map_err(authorized)?;
+                                outcome
+                            }
+                        },
+                    )
+                    .await
+                    .map_err(difference_error)?;
                 Ok(columns)
             };
             checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await

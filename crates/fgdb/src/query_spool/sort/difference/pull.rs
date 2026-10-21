@@ -278,11 +278,9 @@ impl<O: FrameOrder> Merge<O> {
                         Ordering::Greater => break,
                         Ordering::Equal => {}
                     }
-                    weight = weight
-                        .checked_add(sign)
-                        .ok_or_else(|| {
-                            GqlQueryError::Source(O::Error::from(SpillError::SizeOverflow))
-                        })?;
+                    weight = weight.checked_add(sign).ok_or_else(|| {
+                        GqlQueryError::Source(O::Error::from(SpillError::SizeOverflow))
+                    })?;
                     // Release this duplicate BEFORE reading its successor.
                     *head = None;
                     *head = pull(input, scratch, work)

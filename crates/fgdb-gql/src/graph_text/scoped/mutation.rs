@@ -152,10 +152,12 @@ fn action_templates<'a>(
                     // Replacement-map entries also reach this lowering. Keep
                     // declared lists (including typed NULL) on the native
                     // value binder, not the scalar-only ParameterProperty arm.
-                    Some(value @ ReadValueTemplate::Parameter {
-                        null_type: crate::GraphSetColumnType::List,
-                        ..
-                    }) => MutationActionTemplate::CompositeProperty { target, key, value },
+                    Some(
+                        value @ ReadValueTemplate::Parameter {
+                            null_type: crate::GraphSetColumnType::List,
+                            ..
+                        },
+                    ) => MutationActionTemplate::CompositeProperty { target, key, value },
                     Some(ReadValueTemplate::Parameter {
                         index: parameter, ..
                     }) => MutationActionTemplate::ParameterProperty {

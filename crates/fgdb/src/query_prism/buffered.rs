@@ -222,7 +222,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         staged_bytes: &mut usize,
     ) -> Result<Vec<VId>, Error> {
         let mut vertices = Vec::new();
-        let mut scan = self.partition.vertex_scan(cx, as_of).map_err(read_failure)?;
+        let mut scan = self
+            .partition
+            .vertex_scan(cx, as_of)
+            .map_err(read_failure)?;
         while let Some(candidate) = scan
             .next_candidate_with(cx, &mut |event| {
                 control(match event {

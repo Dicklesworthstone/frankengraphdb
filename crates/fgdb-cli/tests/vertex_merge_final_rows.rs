@@ -60,9 +60,10 @@ impl Outcome {
         assert_eq!(string(field(self.terminal(), "event")), "result");
         assert_eq!(string(field(self.terminal(), "kind")), kind);
         assert_eq!(
-            self.events.iter().filter(|event| {
-                matches!(string(field(event, "event")), "result" | "error")
-            }).count(),
+            self.events
+                .iter()
+                .filter(|event| { matches!(string(field(event, "event")), "result" | "error") })
+                .count(),
             1,
         );
         self
@@ -71,7 +72,12 @@ impl Outcome {
     #[track_caller]
     fn refused(&self) -> &str {
         assert_eq!(self.code, 3, "{:?}\n{}", self.events, self.stderr);
-        assert_eq!(self.events.len(), 2, "no buffered prefix: {:?}", self.events);
+        assert_eq!(
+            self.events.len(),
+            2,
+            "no buffered prefix: {:?}",
+            self.events
+        );
         assert_eq!(string(field(&self.events[0], "event")), "invocation");
         assert_eq!(string(field(self.terminal(), "event")), "error");
         assert_eq!(string(field(self.terminal(), "class")), "query");
@@ -83,7 +89,8 @@ impl Outcome {
     }
 
     fn rows(&self) -> Vec<Vec<Json>> {
-        self.events.iter()
+        self.events
+            .iter()
             .filter(|event| string(field(event, "event")) == "row")
             .map(|event| match field(event, "cells") {
                 Json::Array(cells) => cells.clone(),
@@ -110,22 +117,35 @@ impl Fixture {
     fn new(name: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
             "fgdb-cli-merge-final-{name}-{}-{now}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir(&root).unwrap();
         let keys = root.join("keys");
-        std::fs::write(&keys, format!(
-            "{}\n{}\n{}\n", "51".repeat(32), "52".repeat(32), "53".repeat(32),
-        )).unwrap();
+        std::fs::write(
+            &keys,
+            format!(
+                "{}\n{}\n{}\n",
+                "51".repeat(32),
+                "52".repeat(32),
+                "53".repeat(32),
+            ),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let fixture = Self { database: root.join("db"), keys };
+        let fixture = Self {
+            database: root.join("db"),
+            keys,
+        };
         fixture.run("create", &[]).success("created");
         fixture
     }
@@ -137,8 +157,18 @@ impl Fixture {
             .arg("--key-file")
             .arg(&self.keys)
             .args([
-                "--label", "Person=1", "--label", "City=2", "--label", "Extra=3",
-                "--property", "bornIn=1", "--property", "name=2", "--property", "seen=3",
+                "--label",
+                "Person=1",
+                "--label",
+                "City=2",
+                "--label",
+                "Extra=3",
+                "--property",
+                "bornIn=1",
+                "--property",
+                "name=2",
+                "--property",
+                "seen=3",
             ])
             .args(args)
             .output()
@@ -148,23 +178,28 @@ impl Fixture {
         Outcome {
             code: output.status.code().expect("no signal"),
             stderr: String::from_utf8(output.stderr).unwrap(),
-            events: stdout.lines().map(|line| parse_json(line, 10_000, 65_536).unwrap()).collect(),
+            events: stdout
+                .lines()
+                .map(|line| parse_json(line, 10_000, 65_536).unwrap())
+                .collect(),
         }
     }
 
     fn state(&self) -> (u64, Vec<Vec<Json>>) {
-        let read = self.run("query", &[
-            "MATCH (n) RETURN n,n.bornIn AS origin,n.name AS name,n.seen AS seen ORDER BY n",
-        ]);
+        let read = self.run(
+            "query",
+            &["MATCH (n) RETURN n,n.bornIn AS origin,n.name AS name,n.seen AS seen ORDER BY n"],
+        );
         read.success("rows");
         (read.seq(), read.rows())
     }
 
     #[track_caller]
     fn cities(&self, expected: &[(&str, i64)]) {
-        let read = self.run("query", &[
-            "MATCH (c:City) RETURN c.name AS name,c.seen AS seen ORDER BY name,seen",
-        ]);
+        let read = self.run(
+            "query",
+            &["MATCH (c:City) RETURN c.name AS name,c.seen AS seen ORDER BY name,seen"],
+        );
         read.success("rows");
         let rows = read.rows();
         assert_eq!(rows.len(), expected.len());
@@ -199,33 +234,54 @@ fn single_statement_merge_groups_pages_and_plain_writes_keep_every_occurrence() 
     assert_eq!(plain.seq(), before + 3);
     fixture.cities(&[("Paris", 6), ("Rome", 3)]);
 
-    let unwound = fixture.run("write", &[
-        "--max-result-rows", "1",
-        "UNWIND ['Paris','Rome','Paris'] AS city MERGE (c:City {name:city}) \
+    let unwound = fixture.run(
+        "write",
+        &[
+            "--max-result-rows",
+            "1",
+            "UNWIND ['Paris','Rome','Paris'] AS city MERGE (c:City {name:city}) \
          ON CREATE SET c.seen=1 ON MATCH SET c.seen=c.seen+1 \
          RETURN count(c) AS total,sum(c.seen) AS seen",
-    ]);
+        ],
+    );
     unwound.success("written").integer_rows(&[&[3, 20]]);
     assert_eq!(unwound.seq(), before + 4);
     fixture.cities(&[("Paris", 8), ("Rome", 4)]);
 
     let expected = fixture.state();
     fixture.run("compact", &[]).success("compacted");
-    assert_eq!(fixture.state(), expected, "independent reopen after compaction");
+    assert_eq!(
+        fixture.state(),
+        expected,
+        "independent reopen after compaction"
+    );
 }
 
 #[test]
 fn transaction_merge_sees_earlier_creates_and_updates_all_existing_matches() {
     let fixture = Fixture::new("staged");
-    fixture.run("write", &[
-        "CREATE (:City {name:'Paris',seen:4}),(:City {name:'Paris',seen:7}),\
+    fixture
+        .run(
+            "write",
+            &[
+                "CREATE (:City {name:'Paris',seen:4}),(:City {name:'Paris',seen:7}),\
          (:City {name:'Tokyo',seen:99})",
-    ]).success("written");
+            ],
+        )
+        .success("written");
     let before = fixture.state().0;
     let grouped = format!("{MERGE} RETURN count(c) AS total,sum(c.seen) AS seen");
-    let result = fixture.run("transaction", &[
-        "--max-result-rows", "1", "--write", PEOPLE, "--write", &grouped,
-    ]);
+    let result = fixture.run(
+        "transaction",
+        &[
+            "--max-result-rows",
+            "1",
+            "--write",
+            PEOPLE,
+            "--write",
+            &grouped,
+        ],
+    );
     result.success("committed").integer_rows(&[&[5, 31]]);
     assert_eq!(result.seq(), before + 1, "one commit for both writes");
     fixture.cities(&[("Paris", 6), ("Paris", 9), ("Rome", 1), ("Tokyo", 99)]);
@@ -245,9 +301,17 @@ fn late_return_refusal_discards_earlier_transaction_writes_and_buffered_rows() {
         ("RETURN 1/(c.seen-1) AS bad LIMIT 0", false),
     ] {
         let second = format!("{MERGE} {tail}");
-        let failure = fixture.run("transaction", &[
-            "--max-result-rows", "1", "--write", FIRST, "--write", &second,
-        ]);
+        let failure = fixture.run(
+            "transaction",
+            &[
+                "--max-result-rows",
+                "1",
+                "--write",
+                FIRST,
+                "--write",
+                &second,
+            ],
+        );
         let message = failure.refused();
         assert!(message.contains("transaction step 2"), "{message}");
         assert_eq!(message.contains("ResultRows"), row_refusal, "{message}");
@@ -256,9 +320,17 @@ fn late_return_refusal_discards_earlier_transaction_writes_and_buffered_rows() {
     // Both steps succeed with the same types and source; no refusal can pass
     // merely because the prefix or whole statement was never executable.
     let second = format!("{MERGE} RETURN count(c) AS total,sum(c.seen) AS seen");
-    let retry = fixture.run("transaction", &[
-        "--max-result-rows", "1", "--write", FIRST, "--write", &second,
-    ]);
+    let retry = fixture.run(
+        "transaction",
+        &[
+            "--max-result-rows",
+            "1",
+            "--write",
+            FIRST,
+            "--write",
+            &second,
+        ],
+    );
     retry.success("committed").integer_rows(&[&[99], &[3, 5]]);
     assert_eq!(retry.seq(), before.0 + 1);
     fixture.cities(&[("Paris", 2), ("Rome", 1)]);

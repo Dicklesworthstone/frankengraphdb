@@ -639,9 +639,8 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
                 .write()
                 .unwrap_or_else(PoisonError::into_inner);
             let released = shared.subscriptions.swap(0, Ordering::AcqRel);
-            state.released_subscriptions = state
-                .released_subscriptions
-                .saturating_add(released as u64);
+            state.released_subscriptions =
+                state.released_subscriptions.saturating_add(released as u64);
             let retired = state.retired.take();
             state.phase = Phase::Ready;
             let previous = if state.stopping {

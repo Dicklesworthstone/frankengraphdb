@@ -161,17 +161,15 @@ impl VisibleOrder<'_> {
             .reserve(work.cx, requested)
             .map_err(SpillError::Memory)?;
         let mut cells = Vec::new();
-        cells.try_reserve_exact(slots).map_err(|_| {
-            SpillError::Memory(MemoryError::AllocationFailed { requested })
-        })?;
+        cells
+            .try_reserve_exact(slots)
+            .map_err(|_| SpillError::Memory(MemoryError::AllocationFailed { requested }))?;
         if cells.capacity() > slots {
             let extra = (cells.capacity() - slots)
                 .checked_mul(size_of::<GraphAggregateValue>())
                 .and_then(|bytes| bytes.checked_mul(2))
                 .ok_or(SpillError::SizeOverflow)?;
-            charge
-                .grow(work.cx, extra)
-                .map_err(SpillError::Memory)?;
+            charge.grow(work.cx, extra).map_err(SpillError::Memory)?;
         }
         // Admit the total copied payload before the first clone. Native typed
         // comparisons/copies use their bounded row domain, not a new evaluator.
@@ -200,13 +198,12 @@ fn continue_error(
     limit: u64,
 ) -> NativeAggregateSpoolError {
     match error {
-        NativeAggregateSpoolError::Spool(NativeSpoolError::SortWorkLimit {
-            attempted,
-            ..
-        }) => match prior.checked_add(attempted) {
-            Some(attempted) => NativeSpoolError::SortWorkLimit { attempted, limit }.into(),
-            None => SpillError::SizeOverflow.into(),
-        },
+        NativeAggregateSpoolError::Spool(NativeSpoolError::SortWorkLimit { attempted, .. }) => {
+            match prior.checked_add(attempted) {
+                Some(attempted) => NativeSpoolError::SortWorkLimit { attempted, limit }.into(),
+                None => SpillError::SizeOverflow.into(),
+            }
+        }
         error => error,
     }
 }
@@ -406,9 +403,10 @@ impl NativeAggregateSpool {
         let mut before_sorted = None;
         for input in [self, after] {
             let prior = work.used;
-            let remaining = work.limit.checked_sub(prior).ok_or_else(|| {
-                GqlQueryError::Source(NativeSpoolError::IncompleteCursor.into())
-            })?;
+            let remaining = work
+                .limit
+                .checked_sub(prior)
+                .ok_or_else(|| GqlQueryError::Source(NativeSpoolError::IncompleteCursor.into()))?;
             let (sorted, used) = source(
                 input
                     .inner

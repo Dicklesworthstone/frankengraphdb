@@ -50,7 +50,10 @@ fn policy(results: u64) -> GraphInsertPolicy {
 }
 
 fn prepare(text: &str) -> PreparedGraphWriteChain {
-    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap(), "{text}");
+    assert!(
+        PreparedGraphWriteChainText::is_chain(text).unwrap(),
+        "{text}"
+    );
     PreparedGraphWriteChainText::prepare(text, R, symbols)
         .expect(text)
         .bind_parameters(&GqlParameters::new())
@@ -60,13 +63,20 @@ fn prepare(text: &str) -> PreparedGraphWriteChain {
 fn seed() -> WriteBatch {
     let mut batch = WriteBatch::new(R);
     for (id, key) in [(101, 1), (102, 1), (103, 2)] {
-        batch.create_vertex(VId(id), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(key))]);
+        batch.create_vertex(
+            VId(id),
+            vec![LabelId(1)],
+            vec![(P, CanonicalScalar::Int(key))],
+        );
     }
     for (id, key, value) in [(VId(1), 1, 4), (WIDE, 1, 7), (VId(9), 9, 99)] {
         batch.create_vertex(
             id,
             vec![LabelId(2)],
-            vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+            vec![
+                (P, CanonicalScalar::Int(key)),
+                (Q, CanonicalScalar::Int(value)),
+            ],
         );
     }
     batch
@@ -74,14 +84,22 @@ fn seed() -> WriteBatch {
 
 fn allocate(next: &AtomicU64, request: GraphInsertRequest) -> Result<ElementId, ()> {
     assert!(matches!(request, GraphInsertRequest::Vertex { .. }));
-    Ok(ElementId::Vertex(VId(u128::from(next.fetch_add(1, Ordering::Relaxed)))))
+    Ok(ElementId::Vertex(VId(u128::from(
+        next.fetch_add(1, Ordering::Relaxed),
+    ))))
 }
 
 fn assert_targets<V: asupersync::fs::Vfs + Clone>(db: &Database<V>, actions: bool, created: VId) {
-    for (id, value) in [(VId(1), if actions { 6 } else { 4 }), (WIDE, if actions { 9 } else { 7 })] {
+    for (id, value) in [
+        (VId(1), if actions { 6 } else { 4 }),
+        (WIDE, if actions { 9 } else { 7 }),
+    ] {
         assert_eq!(
             db.vertex(id).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(value))],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Int(value))
+            ],
         );
     }
     assert_eq!(
@@ -108,14 +126,19 @@ fn final_groups_and_pages_do_not_limit_match_unwind_or_owned_inputs() {
             for actions in [false, true] {
                 for (tail, limit, expected) in [
                     ("RETURN count(n) AS total", 1, vec![vec![int(5)]]),
-                    ("RETURN DISTINCT n.p AS p ORDER BY p SKIP 1 LIMIT 1", 1, vec![vec![int(2)]]),
+                    (
+                        "RETURN DISTINCT n.p AS p ORDER BY p SKIP 1 LIMIT 1",
+                        1,
+                        vec![vec![int(2)]],
+                    ),
                     ("RETURN n.p AS p LIMIT 0", 0, vec![]),
                 ] {
                     let vfs = MemVfs::new().unwrap();
                     let path = vfs.database_dir();
-                    let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
-                        .await
-                        .unwrap();
+                    let mut db =
+                        Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+                            .await
+                            .unwrap();
                     db.write(&contexts.commit(), seed()).await.unwrap();
                     let before = db.frontier().unwrap();
                     let text = format!(
@@ -127,18 +150,25 @@ fn final_groups_and_pages_do_not_limit_match_unwind_or_owned_inputs() {
                     let mut transaction = db.begin(&contexts.txn()).unwrap();
                     let (stats, rows, receipt) = transaction
                         .execute_graph_write_chain_governed(
-                            &mut db, &contexts.query(), &chain, policy(limit),
+                            &mut db,
+                            &contexts.query(),
+                            &chain,
+                            policy(limit),
                             |request| allocate(&next, request),
                         )
                         .unwrap_or_else(|error| panic!("{text}: {error:?}"));
-                    let actual: Vec<_> = rows.value.iter().map(|row| row.values().to_vec()).collect();
+                    let actual: Vec<_> =
+                        rows.value.iter().map(|row| row.values().to_vec()).collect();
                     assert_eq!(actual, expected, "{text}");
                     assert_eq!(stats.selection.result_rows, expected.len() as u64);
                     assert_eq!(receipt.stats().selection.result_rows, expected.len() as u64);
                     assert_eq!(stats.created_vertices, 1 + extra_creations);
                     assert_eq!(next.load(Ordering::Relaxed), 1_001 + extra_creations);
                     assert_eq!(db.frontier().unwrap(), before);
-                    transaction.finish(&mut db, &contexts.commit()).await.unwrap();
+                    transaction
+                        .finish(&mut db, &contexts.commit())
+                        .await
+                        .unwrap();
                     assert_eq!(db.frontier().unwrap().0, before.0 + 1);
                     assert_eq!(db.vertices().unwrap().len() as u64, 7 + extra_creations);
                     let created = VId(1_000 + u128::from(extra_creations));
@@ -162,7 +192,9 @@ fn final_groups_and_pages_do_not_limit_match_unwind_or_owned_inputs() {
 fn final_row_refusal_and_limit_zero_data_error_preserve_the_prior_prefix() {
     let ((), report) = run_async_under_lab(0xc4a2_1002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         db.write(&contexts.commit(), seed()).await.unwrap();
         let before = db.frontier().unwrap();
         let mut transaction = db.begin(&contexts.txn()).unwrap();
@@ -178,7 +210,10 @@ fn final_row_refusal_and_limit_zero_data_error_preserve_the_prior_prefix() {
             let text = format!("MATCH (s:Seed) MERGE (n:Target {{p:s.p}}) {ACTIONS} {tail}");
             let error = transaction
                 .execute_graph_write_chain_governed(
-                    &mut db, &contexts.query(), &prepare(&text), policy(limit),
+                    &mut db,
+                    &contexts.query(),
+                    &prepare(&text),
+                    policy(limit),
                     |request| allocate(&next, request),
                 )
                 .expect_err("the final projection must refuse after all five occurrences");
@@ -186,7 +221,8 @@ fn final_row_refusal_and_limit_zero_data_error_preserve_the_prior_prefix() {
                 assert!(matches!(error, GqlQueryError::Rows(error)
                     if error.dimension == GqlBudgetDimension::ResultRows && error.observed == 5));
             } else {
-                assert!(matches!(error,
+                assert!(matches!(
+                    error,
                     GqlQueryError::Source(GraphWriteChainError::VertexMerge(
                         GraphVertexMergeRowsQueryError::Returning(_)
                     ))
@@ -196,20 +232,30 @@ fn final_row_refusal_and_limit_zero_data_error_preserve_the_prior_prefix() {
             assert_eq!(transaction.vertices(&db).unwrap().len(), 7);
             assert_eq!(db.frontier().unwrap(), before);
         }
-        assert_eq!(next.load(Ordering::Relaxed), 1_002, "failed creations spend IDs");
+        assert_eq!(
+            next.load(Ordering::Relaxed),
+            1_002,
+            "failed creations spend IDs"
+        );
         let accepted = prepare(&format!(
             "MATCH (s:Seed) MERGE (n:Target {{p:s.p}}) {ACTIONS} \
              RETURN count(n) AS total,sum(n.q) AS value"
         ));
         let (_, result, _) = transaction
             .execute_graph_write_chain_governed(
-                &mut db, &contexts.query(), &accepted, policy(1),
+                &mut db,
+                &contexts.query(),
+                &accepted,
+                policy(1),
                 |request| allocate(&next, request),
             )
             .unwrap();
         assert_eq!(result.value.len(), 1);
         assert_eq!(result.value[0].values(), &[int(5), int(40)]);
-        transaction.finish(&mut db, &contexts.commit()).await.unwrap();
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert!(db.vertex(VId(500)).unwrap().is_some());
         assert!(db.vertex(VId(1_000)).unwrap().is_none());
@@ -228,7 +274,9 @@ fn private_occurrences_still_spend_snapshot_work_scratch_and_creation_limits() {
         let query = prepare(&format!(
             "MATCH (s:Seed) MERGE (n:Target {{p:s.p}}) {ACTIONS} RETURN count(n) AS total"
         ));
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         db.write(&contexts.commit(), seed()).await.unwrap();
         let before = db.frontier().unwrap();
         let mut transaction = db.begin(&contexts.txn()).unwrap();
@@ -247,7 +295,10 @@ fn private_occurrences_still_spend_snapshot_work_scratch_and_creation_limits() {
             }
             let error = transaction
                 .execute_graph_write_chain_governed(
-                    &mut db, &contexts.query(), &query, budget,
+                    &mut db,
+                    &contexts.query(),
+                    &query,
+                    budget,
                     |request| allocate(&next, request),
                 )
                 .expect_err("only final-result admission moves out of the private input");
@@ -266,12 +317,18 @@ fn private_occurrences_still_spend_snapshot_work_scratch_and_creation_limits() {
         }
         let (_, result, _) = transaction
             .execute_graph_write_chain_governed(
-                &mut db, &contexts.query(), &query, policy(1),
+                &mut db,
+                &contexts.query(),
+                &query,
+                policy(1),
                 |request| allocate(&next, request),
             )
             .unwrap();
         assert_eq!(result.value[0].values(), &[int(5)]);
-        transaction.finish(&mut db, &contexts.commit()).await.unwrap();
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
         assert_targets(&db, true, VId(1_000));
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });

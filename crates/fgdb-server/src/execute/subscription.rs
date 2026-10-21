@@ -19,8 +19,8 @@
 
 use super::*;
 use fgdb::{
-    NativeSubscriptionSetup, PreparedNativeRead, QueryValue,
-    StandingQueryError, StandingQueryFailure, SubscribeError, SubscriptionBatch, SubscriptionError,
+    NativeSubscriptionSetup, PreparedNativeRead, QueryValue, StandingQueryError,
+    StandingQueryFailure, SubscribeError, SubscriptionBatch, SubscriptionError,
 };
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlExecutionBudget, GqlQueryPolicy};

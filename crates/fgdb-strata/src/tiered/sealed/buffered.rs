@@ -13,9 +13,15 @@ fn buffered_error(error: BufferedReadError) -> SealedError {
         }
         BufferedReadError::BeyondPublication { .. } => SealedError::InvalidFloor,
         BufferedReadError::SizeOverflow => SealedError::SizeOverflow,
-        BufferedReadError::Limit { resource, requested, limit } => {
-            SealedError::Limit { resource, requested, limit }
-        }
+        BufferedReadError::Limit {
+            resource,
+            requested,
+            limit,
+        } => SealedError::Limit {
+            resource,
+            requested,
+            limit,
+        },
         other => SealedError::BufferedSource(Box::new(other)),
     }
 }
@@ -64,14 +70,15 @@ impl<V: Vfs> BufferedPartition<V> {
                 .await
                 .map_err(buffered_error)?;
             cx.checkpoint().map_err(SealedError::Interrupted)?;
-            let compacted = crate::compact::compact_with_props(
-                &source.blocks, &source.properties, floor,
-            ).map_err(SealedError::History)?;
+            let compacted =
+                crate::compact::compact_with_props(&source.blocks, &source.properties, floor)
+                    .map_err(SealedError::History)?;
             drop(source);
             let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
             checkpoint()?;
             let image = image::build(compacted, limits, &mut checkpoint)?;
             SealedPartition::finish_scoped(scope, Some(relation), image, limits, &mut checkpoint)
-        }).await
+        })
+        .await
     }
 }

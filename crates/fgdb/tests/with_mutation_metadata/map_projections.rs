@@ -366,14 +366,11 @@ fn computed_detach_targets_refuse_relationship_reads_before_catalog_access() {
         ] {
             let statement = format!("{prefix} {tail}");
             let mut calls = 0;
-            let result = PreparedGraphMutationQueryText::prepare(
-                &statement,
-                R,
-                |kind, name: &str| {
+            let result =
+                PreparedGraphMutationQueryText::prepare(&statement, R, |kind, name: &str| {
                     calls += 1;
                     Catalog.resolve_symbol(kind, name)
-                },
-            );
+                });
             let Err(error) = result else {
                 panic!("post-cascade relationship read admitted: {statement}");
             };
@@ -407,14 +404,11 @@ fn path_alias_and_mixed_computed_detach_targets_keep_the_cascade_guard() {
         for output in ["edge.p", "edge{.*}"] {
             let statement = format!("{prefix} RETURN {output} AS value");
             let mut calls = 0;
-            let result = PreparedGraphMutationQueryText::prepare(
-                &statement,
-                R,
-                |kind, name: &str| {
+            let result =
+                PreparedGraphMutationQueryText::prepare(&statement, R, |kind, name: &str| {
                     calls += 1;
                     Catalog.resolve_symbol(kind, name)
-                },
-            );
+                });
             let Err(error) = result else {
                 panic!("computed cascade escaped: {statement}");
             };
@@ -463,7 +457,9 @@ fn computed_detach_keeps_explicit_prewrite_values_and_persists_its_cascade() {
             let frontier = db.frontier().unwrap();
             db.compact(commit).await.unwrap();
             drop(db);
-            let db = Database::open_with_vfs(commit, vfs, &path, keys()).await.unwrap();
+            let db = Database::open_with_vfs(commit, vfs, &path, keys())
+                .await
+                .unwrap();
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertex(VId(BASE + 1)).unwrap().is_none());
             assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
@@ -592,9 +588,8 @@ fn explicitly_deleted_computed_targets_keep_runtime_metadata_checks() {
                 db.vertices().unwrap(),
                 db.edges().unwrap(),
             );
-            let statement = format!(
-                "MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN {output} AS value LIMIT 0"
-            );
+            let statement =
+                format!("MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN {output} AS value LIMIT 0");
             // The compiler must not confuse a plain DELETE with a cascade or
             // reject all metadata merely because the target is computed.
             PreparedGraphMutationQueryText::prepare(&statement, R, Catalog)
@@ -615,12 +610,9 @@ fn explicitly_deleted_computed_targets_keep_runtime_metadata_checks() {
                 before
             );
 
-            let control = format!(
-                "MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN 1 AS done LIMIT 0"
-            );
-            let result = apply(&mut db, commit, cx, txcx, &control, 0)
-                .await
-                .unwrap();
+            let control =
+                format!("MATCH (a)-[r:R]->(b) WITH a,r {action} RETURN 1 AS done LIMIT 0");
+            let result = apply(&mut db, commit, cx, txcx, &control, 0).await.unwrap();
             assert!(rows(result, &["done"]).is_empty());
             assert_eq!(db.vertex(VId(BASE + 1)).unwrap().is_none(), detaches);
             assert!(db.vertex(VId(BASE + 2)).unwrap().is_some());

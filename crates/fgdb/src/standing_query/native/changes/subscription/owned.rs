@@ -295,52 +295,81 @@ mod shutdown_tests {
             let mut database = Database::open_memory(
                 &contexts.commit(),
                 crate::DatabaseKeys::new(
-                    [0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32],
+                    [0xa1; 32],
+                    DatabaseSecurityNamespaceId([0xa2; 32]),
+                    [0xa3; 32],
                 ),
-            ).await.unwrap();
+            )
+            .await
+            .unwrap();
             let params = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare_subscription(
-                &cx, "SUBSCRIBE TO RETURN 7 AS value", &params,
+                &cx,
+                "SUBSCRIBE TO RETURN 7 AS value",
+                &params,
                 fgdb_gql::RelationBind::new(),
-            ).unwrap();
+            )
+            .unwrap();
             let setup = || NativeSubscriptionSetup {
                 maintenance: GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
                 delivery: GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
                 retention: [4, 1000, 100_000],
             };
-            let (mut consumer, batch) = prepared.subscribe_scoped(
-                &mut database, &cx, &params, setup(),
-                |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
-            ).unwrap();
+            let (mut consumer, batch) = prepared
+                .subscribe_scoped(&mut database, &cx, &params, setup(), |_, batch| {
+                    Ok::<_, SubscriptionError>(Arc::clone(batch))
+                })
+                .unwrap();
             let count = database.standing_queries.len();
             assert!(count >= 2);
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
-            assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &observed).unwrap(), count);
+            assert_eq!(
+                consumer
+                    .close_and_release_for_shutdown(&mut database, &observed)
+                    .unwrap(),
+                count
+            );
             assert!(database.standing_queries.is_empty());
             assert!(consumer.is_closed());
-            assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &cx).unwrap(), 0);
+            assert_eq!(
+                consumer
+                    .close_and_release_for_shutdown(&mut database, &cx)
+                    .unwrap(),
+                0
+            );
             assert_eq!(batch.rows().len(), 1); // caller's accepted frame survives
             assert!(probe.calls() > 1);
             for stop in 1..=probe.calls() {
-                let (mut consumer, _) = prepared.subscribe_scoped(
-                    &mut database, &cx, &params, setup(),
-                    |_, _| Ok::<_, SubscriptionError>(()),
-                ).unwrap();
+                let (mut consumer, _) = prepared
+                    .subscribe_scoped(&mut database, &cx, &params, setup(), |_, _| {
+                        Ok::<_, SubscriptionError>(())
+                    })
+                    .unwrap();
                 let control = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let interrupted = cx.with_checkpoint_probe(Arc::clone(&control));
-                assert!(consumer.close_and_release_for_shutdown(&mut database, &interrupted).is_err());
+                assert!(
+                    consumer
+                        .close_and_release_for_shutdown(&mut database, &interrupted)
+                        .is_err()
+                );
                 assert_eq!(control.calls(), stop);
                 assert_eq!(database.standing_queries.len(), count);
                 assert!(!consumer.is_closed());
                 assert!(consumer.can_release_registration());
-                assert_eq!(consumer.close_and_release_for_shutdown(&mut database, &cx).unwrap(), count);
+                assert_eq!(
+                    consumer
+                        .close_and_release_for_shutdown(&mut database, &cx)
+                        .unwrap(),
+                    count
+                );
                 assert!(database.standing_queries.is_empty());
             }
-            let (mut shared, _) = prepared.subscribe_scoped(
-                &mut database, &cx, &params, setup(),
-                |_, _| Ok::<_, SubscriptionError>(()),
-            ).unwrap();
+            let (mut shared, _) = prepared
+                .subscribe_scoped(&mut database, &cx, &params, setup(), |_, _| {
+                    Ok::<_, SubscriptionError>(())
+                })
+                .unwrap();
             let _ = shared.handle(); // even an un-cloned escape prohibits reuse
             assert!(matches!(
                 shared.close_and_release_for_shutdown(&mut database, &cx),

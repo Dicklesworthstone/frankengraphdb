@@ -131,7 +131,11 @@ impl Shared {
         let query = crate::query_cx(&contexts);
         loop {
             let item = {
-                let mut state = self.gate.state.write().unwrap_or_else(PoisonError::into_inner);
+                let mut state = self
+                    .gate
+                    .state
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let Some(mut item) = state.retired.take() else {
                     return Ok(());
                 };
@@ -173,10 +177,16 @@ impl Shared {
             // cannot reset the counter while this database lock is held.
             drop(owned.retirement.take());
             let refunded = {
-                let mut state = self.gate.state.write().unwrap_or_else(PoisonError::into_inner);
+                let mut state = self
+                    .gate
+                    .state
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let refunded = self
                     .subscriptions
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_sub(1))
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        count.checked_sub(1)
+                    })
                     .is_ok();
                 if refunded {
                     state.released_subscriptions = state.released_subscriptions.saturating_add(1);

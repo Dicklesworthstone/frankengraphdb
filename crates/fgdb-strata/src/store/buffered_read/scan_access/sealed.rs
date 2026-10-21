@@ -37,8 +37,13 @@ impl<V: Vfs> BufferedPartition<V> {
         for descriptor in &self.blocks {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
             advance(&mut work, 1, maximum)?;
-            if descriptor.summary.is_some_and(|summary| summary.relation == relation) {
-                count = count.checked_add(1).ok_or(BufferedReadError::SizeOverflow)?;
+            if descriptor
+                .summary
+                .is_some_and(|summary| summary.relation == relation)
+            {
+                count = count
+                    .checked_add(1)
+                    .ok_or(BufferedReadError::SizeOverflow)?;
                 incidences = incidences
                     .checked_add(descriptor.rows)
                     .ok_or(BufferedReadError::SizeOverflow)?;
@@ -61,22 +66,36 @@ impl<V: Vfs> BufferedPartition<V> {
             properties: Vec::new(),
             _charges: Vec::new(),
         };
-        source.blocks.try_reserve_exact(count)
+        source
+            .blocks
+            .try_reserve_exact(count)
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        source.properties.try_reserve_exact(count)
+        source
+            .properties
+            .try_reserve_exact(count)
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        let charge_count = count.checked_add(1).ok_or(BufferedReadError::SizeOverflow)?;
-        source._charges.try_reserve_exact(charge_count)
+        let charge_count = count
+            .checked_add(1)
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        source
+            ._charges
+            .try_reserve_exact(charge_count)
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        let allocated = source.blocks.capacity()
+        let allocated = source
+            .blocks
+            .capacity()
             .checked_mul(size_of::<Vec<AdjacencyEntry>>())
             .and_then(|bytes| {
-                source.properties.capacity()
+                source
+                    .properties
+                    .capacity()
                     .checked_mul(size_of::<Option<BlockProps>>())
                     .and_then(|extra| bytes.checked_add(extra))
             })
             .and_then(|bytes| {
-                source._charges.capacity()
+                source
+                    ._charges
+                    .capacity()
                     .checked_mul(size_of::<MemoryCharge>())
                     .and_then(|extra| bytes.checked_add(extra))
             })
@@ -88,7 +107,10 @@ impl<V: Vfs> BufferedPartition<V> {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
             advance(&mut work, 1, maximum)?;
             let descriptor = self.blocks[at];
-            if !descriptor.summary.is_some_and(|summary| summary.relation == relation) {
+            if !descriptor
+                .summary
+                .is_some_and(|summary| summary.relation == relation)
+            {
                 continue;
             }
             advance(&mut work, descriptor.rows, maximum)?;
@@ -102,10 +124,11 @@ impl<V: Vfs> BufferedPartition<V> {
                 .block_controlled(cx, at, Admission::ScanBypass, &mut observe)
                 .await
                 .map_err(source_error)?;
-            let BufferedValue { value: (entries, properties), _charge } = retained::block(
-                BufferedValue::from_reserved(image, charge),
-                &mut observe,
-            ).map_err(source_error)?;
+            let BufferedValue {
+                value: (entries, properties),
+                _charge,
+            } = retained::block(BufferedValue::from_reserved(image, charge), &mut observe)
+                .map_err(source_error)?;
             source.blocks.push(entries);
             source.properties.push(properties);
             source._charges.push(_charge);

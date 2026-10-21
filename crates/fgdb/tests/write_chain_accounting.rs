@@ -39,11 +39,18 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 fn policy(rows: u64, work: u64, scratch: u64) -> GraphInsertPolicy {
-    GraphInsertPolicy::new(GqlQueryPolicy::new(10_000, rows, work, scratch), 1_000, 1_000)
+    GraphInsertPolicy::new(
+        GqlQueryPolicy::new(10_000, rows, work, scratch),
+        1_000,
+        1_000,
+    )
 }
 
 fn prepare(text: &str) -> PreparedGraphWriteChain {
-    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap(), "{text}");
+    assert!(
+        PreparedGraphWriteChainText::is_chain(text).unwrap(),
+        "{text}"
+    );
     PreparedGraphWriteChainText::prepare(text, R, symbols)
         .expect(text)
         .bind_parameters(&GqlParameters::new())
@@ -149,7 +156,9 @@ fn chain_counters_equal_complete_native_steps_not_write_prefixes() {
         ] {
             let chain = prepare(&text);
             let expected = reference(&chain);
-            let mut database = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut database = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             let basis = database.frontier().unwrap();
             let mut transaction = database.begin(&contexts.txn()).unwrap();
             let next = AtomicU64::new(1_000);
@@ -179,7 +188,10 @@ fn chain_counters_equal_complete_native_steps_not_write_prefixes() {
                 );
                 assert_eq!(expected.vertices, 6);
             }
-            transaction.finish(&mut database, &contexts.commit()).await.unwrap();
+            transaction
+                .finish(&mut database, &contexts.commit())
+                .await
+                .unwrap();
             assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
             assert_eq!(database.vertices().unwrap().len() as u64, expected.vertices);
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -195,8 +207,13 @@ fn exact_complete_budgets_pass_and_one_below_restores_the_staged_prefix() {
         for text in [GROUPED.to_owned(), format!("{GROUPED} LIMIT 0")] {
             let chain = prepare(&text);
             let expected = reference(&chain);
-            for dimension in [GlaLimitDimension::WorkUnits, GlaLimitDimension::ScratchEntries] {
-                let mut database = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            for dimension in [
+                GlaLimitDimension::WorkUnits,
+                GlaLimitDimension::ScratchEntries,
+            ] {
+                let mut database = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
                 let basis = database.frontier().unwrap();
                 let mut transaction = database.begin(&contexts.txn()).unwrap();
                 let mut prefix = WriteBatch::new(R);
@@ -219,7 +236,9 @@ fn exact_complete_budgets_pass_and_one_below_restores_the_staged_prefix() {
                         |request| allocate(&next, request),
                     )
                     .expect_err("a later step cannot reuse work spent by an earlier WITH");
-                assert!(matches!(error, GqlQueryError::Evaluator(limit) if limit.dimension == dimension));
+                assert!(
+                    matches!(error, GqlQueryError::Evaluator(limit) if limit.dimension == dimension)
+                );
                 assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
                 assert_eq!(transaction.vertices(&database).unwrap().len(), 1);
                 assert_eq!(database.frontier().unwrap(), basis);
@@ -241,9 +260,15 @@ fn exact_complete_budgets_pass_and_one_below_restores_the_staged_prefix() {
                     .unwrap();
                 assert_eq!(stats.evaluator, expected.full);
                 assert_eq!(result.value, expected.rows);
-                transaction.finish(&mut database, &contexts.commit()).await.unwrap();
+                transaction
+                    .finish(&mut database, &contexts.commit())
+                    .await
+                    .unwrap();
                 assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
-                assert_eq!(database.vertices().unwrap().len() as u64, expected.vertices + 1);
+                assert_eq!(
+                    database.vertices().unwrap().len() as u64,
+                    expected.vertices + 1
+                );
                 assert_eq!(contexts.txn().outstanding_obligations(), 0);
             }
         }

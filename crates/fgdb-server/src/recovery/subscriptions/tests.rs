@@ -1,8 +1,8 @@
 //! Real private native circuits, the server admission cap and its host worker.
 use super::*;
-use crate::execute::{poll, subscribe, Refusal};
+use crate::execute::{Refusal, poll, subscribe};
 use crate::recovery::tests::{served, settled, vertex};
-use crate::{Server, Served};
+use crate::{Served, Server};
 use asupersync::lab::run_async_under_lab;
 use fgdb_protocol::body::{Execute, ExecuteMode, WireValue};
 use fgdb_warden::Restriction;
@@ -27,13 +27,15 @@ fn cap(server: &mut Server, count: usize) {
 
 async fn released(db: &Served, expected: usize) {
     let mut watcher = db.commits.watcher();
-    poll_fn(|task| loop {
-        assert!(matches!(db.db.status(), DatabaseStatus::Ready { .. }));
-        if db.subscriptions.load(Ordering::Acquire) == expected {
-            return Poll::Ready(());
-        }
-        if !watcher.poll_changed(task) {
-            return Poll::Pending;
+    poll_fn(|task| {
+        loop {
+            assert!(matches!(db.db.status(), DatabaseStatus::Ready { .. }));
+            if db.subscriptions.load(Ordering::Acquire) == expected {
+                return Poll::Ready(());
+            }
+            if !watcher.poll_changed(task) {
+                return Poll::Pending;
+            }
         }
     })
     .await;
@@ -49,13 +51,22 @@ fn two_hundred_reconnects_reuse_a_single_live_slot_and_keep_the_cap() {
             // No intervening cleanup call: admission itself must not race the
             // worker and mistake its pending retirement for a lifetime cap.
             let mut active = success(subscribe(&root, db, &token, &request()).await);
-            assert_eq!(server.subscription_counts(&root, "test"), Some((1, completed)));
-            let refusal = subscribe(&root, db, &token, &request()).await.err().unwrap();
+            assert_eq!(
+                server.subscription_counts(&root, "test"),
+                Some((1, completed))
+            );
+            let refusal = subscribe(&root, db, &token, &request())
+                .await
+                .err()
+                .unwrap();
             assert_eq!(refusal.code, ErrorCode::Budget);
             let initial = success(poll(&root, db, &token, &mut active).await).unwrap();
             assert!(initial.batch.is_snapshot());
             if completed % 2 == 0 {
-                active.consumer.acknowledge(initial.batch.receipt()).unwrap();
+                active
+                    .consumer
+                    .acknowledge(initial.batch.receipt())
+                    .unwrap();
                 active.consumer.close();
                 active.consumer.close();
                 assert!(matches!(
@@ -118,13 +129,22 @@ fn interior_release_preserves_other_producers_and_receipt_isolation() {
             Err(SubscriptionError::InvalidReceipt)
         ));
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let at = db.db.write(&root).await.unwrap()
-            .write(&contexts.commit(), vertex(9)).await.unwrap();
+        let at = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(9))
+            .await
+            .unwrap();
         let change = success(poll(&root, db, &token, &mut survivor).await).unwrap();
         assert_eq!(change.batch.frontier(), at);
         assert_eq!(change.entries, [(1, vec![WireValue::Vertex(9)])]);
         assert!(!change.batch.is_snapshot());
-        survivor.consumer.acknowledge(change.batch.receipt()).unwrap();
+        survivor
+            .consumer
+            .acknowledge(change.batch.receipt())
+            .unwrap();
         drop(next);
         drop(survivor);
         released(db, 0).await;
@@ -148,10 +168,18 @@ fn recovery_consumes_queued_old_state_and_late_old_drop_cannot_refund_new_slots(
         // it before this deliberately induced authoritative recovery.
         drop(queued);
         let prepared = guard.prepare_atomic_writes(vec![vertex(7)]).unwrap();
-        let error = guard.commit_prepared_with_crash(
-            &contexts.commit(), prepared, Some(fgdb::CrashPoint::AfterMarkerBeforeD2),
-        ).await.unwrap_err();
-        assert_eq!(crate::execute::write_refusal(&error).code, ErrorCode::OutcomeUnknown);
+        let error = guard
+            .commit_prepared_with_crash(
+                &contexts.commit(),
+                prepared,
+                Some(fgdb::CrashPoint::AfterMarkerBeforeD2),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::execute::write_refusal(&error).code,
+            ErrorCode::OutcomeUnknown
+        );
         drop(guard);
         assert_eq!(db.db.status(), DatabaseStatus::Recovering { generation: 2 });
         drop(operation);
@@ -174,17 +202,29 @@ fn retirement_needs_no_live_client_grant_and_failed_maintenance_is_releasable() 
     let ((), report) = run_async_under_lab(0x79a0_0405, |root| async move {
         let (server, token, _) = served(&root, "subscription-release-authority").await;
         let db = &server.databases["test"];
-        let bounded = token.attenuate(Restriction::MaxWork(4096)).unwrap()
-            .attenuate(Restriction::MaxNodes(64)).unwrap();
+        let bounded = token
+            .attenuate(Restriction::MaxWork(4096))
+            .unwrap()
+            .attenuate(Restriction::MaxNodes(64))
+            .unwrap();
         let mut failed = success(subscribe(&root, db, &bounded, &request()).await);
         let initial = success(poll(&root, db, &bounded, &mut failed).await).unwrap();
-        failed.consumer.acknowledge(initial.batch.receipt()).unwrap();
+        failed
+            .consumer
+            .acknowledge(initial.batch.receipt())
+            .unwrap();
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let mut batch = vertex(1);
         for id in 2..=200 {
             batch.create_vertex(fgdb_types::VId(id), vec![], vec![]);
         }
-        db.db.write(&root).await.unwrap().write(&contexts.commit(), batch).await.unwrap();
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
         let error = poll(&root, db, &token, &mut failed).await.err().unwrap();
         assert_eq!(error.code, ErrorCode::Budget);
         drop(failed);
@@ -202,7 +242,7 @@ fn retirement_needs_no_live_client_grant_and_failed_maintenance_is_releasable() 
 
 #[test]
 fn dropped_outer_future_and_unwind_transfer_cleanup_without_an_async_destructor() {
-    use std::future::{pending, Future};
+    use std::future::{Future, pending};
     let ((), report) = run_async_under_lab(0x79a0_0406, |root| async move {
         let (server, token, _) = served(&root, "subscription-release-abandoned").await;
         let db = &server.databases["test"];
@@ -218,14 +258,18 @@ fn dropped_outer_future_and_unwind_transfer_cleanup_without_an_async_destructor(
             } else {
                 Poll::Pending
             }
-        }).await;
+        })
+        .await;
         drop(future);
         released(db, 0).await;
         let active = success(subscribe(&root, db, &token, &request()).await);
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _owned = active;
-            panic!("injected adapter unwind");
-        })).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _owned = active;
+                panic!("injected adapter unwind");
+            }))
+            .is_err()
+        );
         released(db, 0).await;
         assert_eq!(server.subscription_counts(&root, "test"), Some((0, 2)));
         server.join_database_workers(&root).await;
