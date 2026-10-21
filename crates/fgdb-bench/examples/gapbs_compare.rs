@@ -8,7 +8,7 @@
 //!   --output /tmp/fgdb-gapbs-hub
 //! cargo run --release -p fgdb-bench --example gapbs_compare -- \
 //!   --gapbs ../gapbs --graph email-Eu-core.txt --vertices 1005 \
-//!   --source 0 --trials 5 --output /tmp/fgdb-gapbs-email
+//!   --source 0 --trials 6 --sealed --output /tmp/fgdb-gapbs-email
 //! ```
 //!
 //! Pass `--build-note 'profile and per-package --config overrides'` when using
@@ -46,6 +46,19 @@
 //! Both engines run in every paired trial, with alternating order. Raw samples
 //! and empirical quantiles describe this machine, not an activated §17 gate,
 //! a fitted tail, a server/authorization benchmark, or external-memory parity.
+//!
+//! Optional `--sealed` adds a separate end-to-end series that cycles through six
+//! orders of read-only checkpoint preparation, the previous writable-open/seal
+//! path, and live GAPBS. It includes opening, preparation, certified execution,
+//! complete output encoding, and release; it checks all rows, source identity,
+//! projection/result digests and populations. Both sealed paths keep production
+//! default source/image/projection admissions (including the raw source cap),
+//! so opting in can refuse a graph admitted by the decoded-only comparison.
+//! The old/new sealed comparison is a maintenance comparison, not a competitor
+//! win. OS caches are ordinary warm caches, and no RSS or cold-start claim is made.
+//! Release covers the native result, projection and resident writer. Canonical
+//! verification rows remain until the paired check; constructing and encoding
+//! that comparison copy is timed, while paired verification and logging are not.
 
 #![forbid(unsafe_code)]
 
@@ -54,8 +67,8 @@ use fgdb::{Database, WriteBatch};
 use fgdb_bench::{KNOWS, keys};
 use fgdb_delta_types::LabelId;
 use fgdb_prism::{
-    FnxCallSpec, FnxParameters, FnxReadOptions, FnxResult, FnxValue, GraphView, ParallelEdgePolicy,
-    SelfLoopPolicy, SnapshotGraphView,
+    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxValue, GraphView,
+    ParallelEdgePolicy, SelfLoopPolicy, SnapshotGraphView,
 };
 use fgdb_types::{CommitCx, EId, PurposeContexts, QueryCx, VId};
 use std::collections::BTreeMap;
@@ -71,7 +84,7 @@ type Metrics = BTreeMap<String, u128>;
 
 const USAGE: &str = "gapbs_compare --gapbs CHECKOUT --output NEW_DIRECTORY \
     (--graph FILE --vertices N | --fixture smoke|sparse|hub [--vertices N]) \
-    [--source 0] [--trials 5] [--threads 1] [--build-note TEXT]";
+    [--source 0] [--trials 5] [--threads 1] [--build-note TEXT] [--sealed]";
 
 #[derive(Debug)]
 struct Config {
@@ -84,13 +97,22 @@ struct Config {
     trials: usize,
     threads: usize,
     build_note: String,
+    sealed: bool,
 }
 
 impl Config {
     fn parse(arguments: impl Iterator<Item = String>) -> Result<Self> {
         let mut arguments = arguments;
         let mut values = BTreeMap::new();
+        let mut sealed = false;
         while let Some(key) = arguments.next() {
+            if key == "--sealed" {
+                if sealed {
+                    return Err("repeated --sealed option".into());
+                }
+                sealed = true;
+                continue;
+            }
             if ![
                 "--gapbs",
                 "--output",
@@ -151,6 +173,7 @@ impl Config {
             trials,
             threads,
             build_note,
+            sealed,
         })
     }
 }
@@ -610,6 +633,259 @@ fn database_sample(
     Ok((values, query_ns, certificate.edges))
 }
 
+struct SealedSample {
+    values: Vec<i64>,
+    total_ns: u128,
+    arcs: usize,
+    projection_digest: String,
+    result_digest: String,
+}
+
+/// Each sample times opening, image preparation, native answer and their release.
+/// Only the canonical verification copy remains for the later paired check.
+/// No resident database or projection cache is retained outside the timer.
+#[allow(clippy::too_many_arguments)]
+async fn sealed_sample(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    algorithm: &str,
+    prefix: &str,
+    writable: bool,
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    log: &mut impl Write,
+) -> Result<SealedSample> {
+    let call = FnxCallSpec::bind(&statement(algorithm, config.source), &FnxParameters::new())?;
+    let mut options = FnxReadOptions::whole_graph_for(&call, None);
+    options.selection.relation = Some(KNOWS);
+    options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+    options.projection.self_loops = SelfLoopPolicy::Drop;
+    let memory = FnxMemoryLimits {
+        max_kernel_workspace_bytes: 64 * 1024 * 1024,
+        max_result_bytes: 64 * 1024 * 1024,
+    };
+    let all_started = Instant::now();
+    let started = Instant::now();
+    let mut resident = None;
+    let graph = if writable {
+        let database = Database::open(commit, database_path, keys()).await?;
+        let graph = database
+            .prism_sealed_projection_with_source_limits(
+                query,
+                options.as_of,
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+                Default::default(),
+                Default::default(),
+            )
+            .await?;
+        resident = Some(database);
+        graph
+    } else {
+        Database::open_prism_sealed_projection(
+            commit,
+            query,
+            database_path,
+            keys(),
+            options,
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+    };
+    let prepare_ns = started.elapsed().as_nanos();
+    if graph.node_count() != config.vertices
+        || graph.binding().root != expected.0
+        || graph.binding().as_of != expected.1
+    {
+        return Err("sealed sample changed the source generation or vertex population".into());
+    }
+    let started = Instant::now();
+    let result = call.execute_sealed(query, &graph, options.execution_limits, memory)?;
+    let execute_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let values = canonical_rows(&result, algorithm, config.vertices)?;
+    write_rows(&config.output.join(format!("{prefix}.rows")), &values)?;
+    let encoding_ns = started.elapsed().as_nanos();
+    let arcs = result.certificate.edges;
+    let projection_digest = format!("{:?}", result.certificate.projection_digest);
+    let result_digest = format!("{:?}", result.certificate.result_digest);
+    let kernel = result.certificate.execution_kernel;
+    let kernel_bytes = result.certificate.kernel_workspace_bytes;
+    let rows = result.rows.len();
+    let started = Instant::now();
+    drop(result);
+    drop(graph);
+    drop(resident);
+    let release_ns = started.elapsed().as_nanos();
+    let total_ns = all_started.elapsed().as_nanos();
+    emit(
+        log,
+        "sealed_database_sample",
+        &[
+            ("sample", prefix.to_owned()),
+            ("algorithm", algorithm.to_owned()),
+            (
+                "preparation",
+                if writable {
+                    "writable-open-plus-seal"
+                } else {
+                    "read-only-checkpoint-seal"
+                }
+                .to_owned(),
+            ),
+            ("open_and_prepare_ns", prepare_ns.to_string()),
+            ("execute_and_certify_ns", execute_ns.to_string()),
+            ("complete_result_encoding_ns", encoding_ns.to_string()),
+            ("release_ns", release_ns.to_string()),
+            ("release_scope", "native result, projection and resident writer; canonical verification rows retained for the paired check".to_owned()),
+            ("open_through_release_ns", total_ns.to_string()),
+            ("source_root", format!("{:?}", expected.0)),
+            ("as_of", expected.1.0.to_string()),
+            ("projected_arcs", arcs.to_string()),
+            ("result_rows", rows.to_string()),
+            ("kernel", kernel.to_owned()),
+            ("kernel_workspace_bytes", kernel_bytes.to_string()),
+            ("projection_digest", projection_digest.clone()),
+            ("result_digest", result_digest.clone()),
+            (
+                "budgets",
+                "production default source/image/projection; 64 MiB kernel and result each"
+                    .to_owned(),
+            ),
+            (
+                "correctness",
+                "pending paired and live-GAPBS comparison".to_owned(),
+            ),
+        ],
+    )?;
+    Ok(SealedSample {
+        values,
+        total_ns,
+        arcs,
+        projection_digest,
+        result_digest,
+    })
+}
+
+async fn sealed_trials(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    log: &mut impl Write,
+) -> Result<()> {
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for algorithm in ["bfs", "wcc"] {
+        let mut read_only_times = Vec::new();
+        let mut writable_times = Vec::new();
+        let mut gapbs_times = Vec::new();
+        for trial in 0..config.trials {
+            let order = ORDERS[trial % ORDERS.len()];
+            let mut read_only = None;
+            let mut writable = None;
+            let mut oracle = None;
+            let oracle_prefix = format!("{algorithm}-{trial}-sealed-series-gapbs");
+            for participant in order {
+                match participant {
+                    0 | 1 => {
+                        let legacy = participant == 1;
+                        let prefix = format!(
+                            "{algorithm}-{trial}-sealed-{}",
+                            if legacy { "writable" } else { "readonly" }
+                        );
+                        let sample = sealed_sample(
+                            config,
+                            commit,
+                            query,
+                            database_path,
+                            algorithm,
+                            &prefix,
+                            legacy,
+                            expected,
+                            log,
+                        )
+                        .await?;
+                        if legacy {
+                            writable = Some(sample);
+                        } else {
+                            read_only = Some(sample);
+                        }
+                    }
+                    _ => oracle = Some(run_oracle(config, algorithm, &oracle_prefix, false)?),
+                }
+            }
+            let read_only = read_only.ok_or("read-only sample missing")?;
+            let writable = writable.ok_or("writable sample missing")?;
+            if read_only.values != writable.values
+                || read_only.arcs != writable.arcs
+                || read_only.projection_digest != writable.projection_digest
+                || read_only.result_digest != writable.result_digest
+            {
+                return Err("read-only and writable sealed preparations disagree".into());
+            }
+            let (oracle, rows) = oracle.ok_or("live GAPBS sample missing")?;
+            let metrics =
+                oracle_metrics(&String::from_utf8(oracle.stdout)?, oracle.status.success())?;
+            if metrics["vertices"] != config.vertices as u128
+                || metrics["arcs"] != read_only.arcs as u128
+            {
+                return Err("live GAPBS and sealed populations differ".into());
+            }
+            compare_rows(&read_only.values, BufReader::new(File::open(rows)?))?;
+            let gapbs_ns = metrics["input_ns"]
+                + metrics["csr_ns"]
+                + metrics["kernel_ns"]
+                + metrics["encoding_ns"];
+            emit(
+                log,
+                "sealed_triplet_verification",
+                &[
+                    ("algorithm", algorithm.to_owned()),
+                    ("trial", trial.to_string()),
+                    ("order", order.map(|actor| ["readonly", "writable", "gapbs"][actor]).join(",")),
+                    ("correctness", "all rows and populations match; sealed identities match; live GAPBS verifier PASS".to_owned()),
+                    ("read_only_open_through_release_ns", read_only.total_ns.to_string()),
+                    ("writable_open_through_release_ns", writable.total_ns.to_string()),
+                    ("gapbs_input_through_result_ns", gapbs_ns.to_string()),
+                    ("gapbs_verification_ns", metrics["verification_ns"].to_string()),
+                    ("comparison_scope", "old/new sealed is maintenance; live GAPBS has independently reported phases".to_owned()),
+                ],
+            )?;
+            read_only_times.push(read_only.total_ns);
+            writable_times.push(writable.total_ns);
+            gapbs_times.push(gapbs_ns);
+        }
+        summary(
+            log,
+            &format!("{algorithm}:readonly-sealed-open-through-release"),
+            &mut read_only_times,
+        )?;
+        summary(
+            log,
+            &format!("{algorithm}:writable-sealed-open-through-release"),
+            &mut writable_times,
+        )?;
+        summary(
+            log,
+            &format!("{algorithm}:sealed-series-gapbs-input-through-result"),
+            &mut gapbs_times,
+        )?;
+    }
+    Ok(())
+}
+
 fn summary(log: &mut impl Write, name: &str, values: &mut [u128]) -> Result<()> {
     values.sort_unstable();
     let quantile = |percent: usize| values[(values.len() * percent).div_ceil(100) - 1];
@@ -787,6 +1063,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ("source", config.source.to_string()),
             ("trials", config.trials.to_string()),
             ("gapbs_threads", config.threads.to_string()),
+            ("sealed_end_to_end_enabled", config.sealed.to_string()),
             (
                 "filesystem_cache",
                 "input read during setup; ordinary OS cache; no cold-cache measurement".to_owned(),
@@ -949,6 +1226,14 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             &format!("{algorithm}:gapbs-input-through-result"),
             &mut gapbs_samples,
         )?;
+    }
+    if config.sealed {
+        let expected = (database.partition_root()?.0, database.frontier()?);
+        // The incumbent needs its own writer lease; no earlier resident image
+        // or cached projection is retained outside either sample's preparation.
+        drop(previous);
+        drop(database);
+        sealed_trials(&config, &commit, &query, &database_path, expected, &mut log).await?;
     }
     emit(
         &mut log,
