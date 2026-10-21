@@ -390,6 +390,7 @@ The tracked JSONL cannot be imported (finding 7), and the integration session ho
 ### Evening follow-up (2026-10-20)
 
 The remote stream kept landing never-compiled commits after this check: 9 more by `92e83e49` (18:14) and 23 more by `d9ce976b` (21:32). This session fixed what blocked every other writer, using Linux evidence. Every tree was rebuilt with `git am` on css, and its tree hash matched. The six fixes were pushed as `d9ce976b..a74ce364`. The feature defects were left to their owners.
+At `d064e8c2` (`origin/main` after these pushes and one more stream commit), `cargo check --workspace --all-targets --all-features` and workspace clippy (`-D warnings`) exit 0 on css. That is the first green check and clippy since `92e83e49`. rustfmt is at 623 hunks and rising.
 
 - **What broke, and where:**
   - **At `b3b6e1db` (20:10):** `cargo check --workspace --all-targets` failed with 11 errors in five targets, and fixing them exposed a twelfth:
@@ -419,7 +420,7 @@ The remote stream kept landing never-compiled commits after this check: 9 more b
   - the four CLI contract failures (not re-run).
 - **The pattern:** four times in five hours, a never-compiled commit broke compile for every writer. Each fix took one or two lines. This is the cost the 2026-09-22 staging rule exists to remove (`kqglu`, `.5`).
 - **Handoff channel:** Agent Mail on the Mac reported health `red` (its latest full integrity check failed) and listed no agents for this project, so it cannot carry the handoff. The bead specs follow as an appendix instead, with the landing command.
-- **Gate portability (R11, updated):** the Mac's cargo-deny 0.20 moved `--config` to the top level, and 0.19 (css) rejects that form. The dependency-policy controls therefore fail on a usage error on the Mac.
+- **Gate portability (R11, partly done):** the Mac's cargo-deny 0.20 moved `--config` to the top level, and 0.19 (css) rejects that form, so the dependency-policy controls failed on a usage error on the Mac. Fixed at `a1302335`: the gate now asks the binary which form it takes, and runs 6/0 on both hosts. The `/proc` liveness probe and the proof-lane traps remain.
 
 ### Appendix: the 2026-10-20 bead specs and landing script
 
@@ -915,6 +916,7 @@ None of these models is in the repository. When the Rust lands, the only evidenc
   - The real scans still pass.
   - css has 0.19.4, which rejects the top-level form (`cargo deny --config X check` exits 2), so neither spelling works on both versions.
   - Fix: probe `cargo deny --help` for a top-level `--config` and place the flag accordingly, or pin the cargo-deny version the gate accepts and report UNRUN otherwise.
+  - **Done at a1302335 (2026-10-20 evening):** the gate probes the binary and places `--config` accordingly. It now exits 0 with 6/0 on both the Mac (0.20.2; it was 3/3 before) and css (0.19.4).
 - **On Linux (css) the same gates run** (10 PASS). But `g0_proof_lanes` fails there because `lean` is not installed. So no single host currently runs every gate green.
 
 ##### Why it matters
