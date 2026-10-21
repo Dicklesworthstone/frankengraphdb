@@ -12,6 +12,8 @@ use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
+mod write_input;
+
 impl PreparedGraphSet {
     /// Join two complete, independently scoped relations with a frozen schema,
     /// kind, equality keys and optional ON predicate. `RowJoinSpec::new` builds

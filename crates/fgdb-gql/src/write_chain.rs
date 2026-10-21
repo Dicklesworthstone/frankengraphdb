@@ -13,6 +13,8 @@
 //! write before the next reads its rows, all inside one atomic workspace,
 //! under one cumulative allowance.
 
+mod read;
+
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
 use crate::mutation_text::{EdgeMergeReturnTemplate, PreparedGraphVertexMergeRowsText};
@@ -89,6 +91,7 @@ impl core::fmt::Display for GraphWriteChainTextError {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
         }
     }
 }
@@ -98,6 +101,7 @@ impl core::error::Error for GraphWriteChainTextError {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
+            Self::Read(error) => Some(error),
         }
     }
 }
@@ -109,6 +113,9 @@ pub enum GraphWriteChainError<E, A> {
     Insert(GraphInsertQueryError<E, A>),
     EdgeMerge(GraphEdgeMergeQueryError<E, A>),
     VertexMerge(crate::GraphVertexMergeRowsQueryError<E, A>),
+    /// A correlated read after the complete write prefix. The host keeps the
+    /// same statement rollback guard until this continuation succeeds.
+    Read(crate::GraphSetExecutionError<E>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphWriteChainError<E, A>
