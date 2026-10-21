@@ -215,12 +215,15 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs() {
         // The materialized and folded paths share the exact selected-pair walk.
         // Complete both original children first; even LIMIT 0 cannot hide a
         // late source or child-expression failure. Never retain the joined bag.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
+        let right = match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+            Some(rows) => rows,
+            None => run(right, source, meter, operand)?,
+        };
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         selected_cross::visit_with_context(
             &left,

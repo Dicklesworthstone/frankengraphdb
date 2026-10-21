@@ -68,9 +68,12 @@ where
                 )?);
             }
         }
-    } else if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    } else if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs() {
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
+        let right = match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+            Some(rows) => rows,
+            None => run(right, source, meter, operand)?,
+        };
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         selected_cross::visit_with_context(
             &left,

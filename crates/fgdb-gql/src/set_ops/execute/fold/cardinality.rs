@@ -177,12 +177,16 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    let size = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    let size = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()
+    {
         // Complete the original scoped inputs before cardinality reduction.
         // Pure equality runs count by range length; residuals evaluate borrowed
         // candidates. Neither path allocates a joined row or repeats a source.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
+        let right = match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+            Some(rows) => rows,
+            None => run(right, source, meter, operand)?,
+        };
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         let mut size = Amount::ZERO;
         selected_cross::count_with_context(
