@@ -86,6 +86,14 @@ fn params(source: i64, eligible: &[i64]) -> GqlParameters {
         .unwrap()
 }
 
+/// Prepare with the arguments' own parameter types: $eligible is a List, and
+/// an undeclared parameter keeps the Int64 interpretation, so binding the List
+/// would refuse (ParameterTypeMismatch) before the law reached its subject.
+fn typed(text: &str, parameters: &GqlParameters) -> PreparedGraphSetText {
+    let declarations: Vec<_> = parameters.parameter_types().collect();
+    PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, symbols).unwrap()
+}
+
 fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
     match result {
         QueryResult::Rows { rows, .. } => rows,
@@ -115,7 +123,7 @@ fn native_demand_reads_only_reached_vertices_and_rebinds_one_template() {
         // Three vertices in the reached component, versus 1,028 in the source.
         let tight = GqlQueryPolicy::new(3, 10, 10_000_000, 100_000);
         let text = statement("demand");
-        let template = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+        let template = typed(&text, &params(1, &[3]));
         for source in [1, 2] {
             let parameters = params(source, &[3]);
             let bound = template.bind_parameters(&parameters).unwrap();
@@ -168,8 +176,7 @@ fn reported_source_scratch_and_output_capacity_replay_at_exact_limits() {
             let text =
                 statement("demand").replace("candidates => 1, k => 1", "candidates => 4, k => 4");
             let parameters = params(1, &eligible);
-            let bound = PreparedGraphSetText::prepare(&text, symbols)
-                .unwrap()
+            let bound = typed(&text, &parameters)
                 .bind_parameters(&parameters)
                 .unwrap();
             let baseline = db
@@ -471,7 +478,7 @@ fn transaction_native_demand_uses_a_bounded_reached_source_and_fresh_overlay_eac
         // overlay directory. Exact counts are read back from the native meter.
         let tight = GqlQueryPolicy::new(8, 10, 10_000_000, 100_000);
         let text = statement("demand").replace("eligible =>", "label => 'Node', eligible =>");
-        let prepared = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+        let prepared = typed(&text, &params(1, &[11]));
         for source in [1, 2] {
             let parameters = params(source, &[11]);
             let bound = prepared.bind_parameters(&parameters).unwrap();
@@ -554,9 +561,9 @@ fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_re
         let mut db = open(&c.commit(), false).await;
         for (source, eligible) in [(1, vec![3]), (9, vec![]), (999, vec![])] {
             let text = statement("demand");
-            let bound = PreparedGraphSetText::prepare(&text, symbols)
-                .unwrap()
-                .bind_parameters(&params(source, &eligible))
+            let parameters = params(source, &eligible);
+            let bound = typed(&text, &parameters)
+                .bind_parameters(&parameters)
                 .unwrap();
             // Fresh transactions, so an earlier read cannot warm the witness
             // set and make a deliberately short allowance spuriously succeed.

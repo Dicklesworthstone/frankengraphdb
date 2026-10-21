@@ -82,10 +82,18 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                         if limit_zero { " LIMIT 0" } else { "" },
                     );
                     let parameters = parameters(&[2, 1, 2, 99], empty);
-                    let bound = PreparedGraphSetText::prepare(&text, symbols)
-                        .unwrap()
-                        .bind_parameters(&parameters)
-                        .unwrap();
+                    // Prepare with the arguments' own types: $seeds and
+                    // $eligible are Lists, and an undeclared parameter keeps
+                    // the Int64 interpretation, so binding would refuse.
+                    let declarations: Vec<_> = parameters.parameter_types().collect();
+                    let bound = PreparedGraphSetText::prepare_with_parameter_types(
+                        &text,
+                        &declarations,
+                        symbols,
+                    )
+                    .unwrap()
+                    .bind_parameters(&parameters)
+                    .unwrap();
                     // Fresh transaction witnesses for every invocation. A
                     // baseline call must not warm a short-budget attempt.
                     let mut execute = |allowance| {

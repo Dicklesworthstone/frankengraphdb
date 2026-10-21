@@ -990,26 +990,23 @@ mod independent_edges {
             let mut retired = WriteBatch::new(R);
             retired.delete_edge(EId(13));
             db.write(&c.commit(), retired).await.unwrap();
-            let value = PreparedGraphInsertText::prepare(
+            // $value is a Bytes scalar: declare it at preparation. Undeclared,
+            // it keeps the Int64 interpretation and binding refuses the bytes.
+            let bytes = GqlParameters::new()
+                .with_scalar("value", CanonicalScalar::bytes(vec![0x5a; 20_000]).unwrap())
+                .unwrap();
+            let declarations: Vec<_> = bytes.parameter_types().collect();
+            let value = PreparedGraphInsertText::prepare_with_parameter_types(
                 "MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:R {p:$value}]->(n)",
                 R,
+                &declarations,
                 symbols,
             )
             .unwrap();
             for mode in 0..6 {
                 let mut statements = loops(3).statements().to_vec();
                 if mode == 3 {
-                    statements[1] = value
-                        .bind_parameters(
-                            &GqlParameters::new()
-                                .with_scalar(
-                                    "value",
-                                    CanonicalScalar::bytes(vec![0x5a; 20_000]).unwrap(),
-                                )
-                                .unwrap(),
-                        )
-                        .unwrap()
-                        .into();
+                    statements[1] = value.bind_parameters(&bytes).unwrap().into();
                 } else if mode == 4 {
                     statements[1] =
                         program(&["MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:R {p:1/0}]->(n)"])
