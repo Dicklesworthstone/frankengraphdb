@@ -24,8 +24,8 @@ mod branch;
 mod spool;
 pub use spool::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
-    PreparedBufferedAggregate, PreparedBufferedOrder,
+    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolDifference,
+    NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input};
 

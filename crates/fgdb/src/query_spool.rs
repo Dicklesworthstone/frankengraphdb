@@ -20,7 +20,7 @@ pub use aggregate::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
     NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
-pub use sort::PreparedBufferedOrder;
+pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};
 pub(crate) use sort::ordered_input;
 
 #[derive(Debug)]
