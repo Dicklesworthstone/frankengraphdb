@@ -444,7 +444,7 @@ fn bind_ordered(
             (bound.pattern().clone(), bound.as_of())
         }
         // `MATCH (n) RETURN 1 AS value ORDER BY value` (fgdb-7xqxb): a set
-        // over one vertex scan projects each scanned row, then the external
+        // over one vertex scan projects each row, then the external
         // sort applies the set's own ORDER BY and page.
         PreparedNativeRead::Set(set) => {
             let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
@@ -881,3 +881,6 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> AuthorizedSpoolCursor<'_, F>
 #[cfg(test)]
 #[path = "ordered/tests.rs"]
 mod tests;
+
+#[path = "ordered/difference.rs"]
+mod difference;
