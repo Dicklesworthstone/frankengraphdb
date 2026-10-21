@@ -1,20 +1,24 @@
-//! Bounded decoded Prism projections over authenticated buffered source cursors.
+//! Bounded Prism projections over authenticated buffered source cursors.
 //! Source payloads stay in the extent pool; only selected IDs and scalar weights
-//! transfer to the existing in-core builder. No resident Snapshot is opened.
+//! transfer to the existing builders. Sealed projections retain compressed
+//! adjacency rather than decoded CSR. No resident Snapshot is opened.
 
 use super::{BufferedReadError, BufferedReadView};
 use crate::gql_exec::source::SourceEvent;
 use crate::query::{prism_source_control, push_prism_staged};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
-    FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection,
-    FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
-    ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
+    FnxSealedReadError, FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError,
+    ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView,
+    SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
+    SnapshotGraphView,
 };
 use fgdb_strata::store::{BufferedScanError, BufferedScanEvent};
 use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_strata::tiered::edge_scan::BufferedEdgeScanEvent;
-use fgdb_types::{CommitSeq, QueryCx};
+use fgdb_strata::tiered::sealed::SealedLimits;
+use fgdb_types::{CommitSeq, QueryCx, VId};
 
 type Cancel = Box<asupersync::error::Error>;
 type Error = FnxReadError<BufferedReadError, Cancel>;
@@ -85,6 +89,172 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         .await
     }
 
+    /// Execute the registered compressed kernel over this already-admitted
+    /// buffered generation. No writer, resident Snapshot, root reopen or
+    /// decoded-adjacency fallback is constructed. Unsupported algorithms and
+    /// directions refuse before vertex or edge payloads are faulted.
+    ///
+    /// Vertex selection uses options.source_limits; Strata's source walk uses
+    /// this view's pool/work limits and max_source_incidences for selected RAW
+    /// histories. Image, projection, kernel and result limits remain separate.
+    /// These bounds do not claim a spillable compactor or whole-operation RSS
+    /// ceiling. The result certificate names this view's root and requested cut.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_fnx_sealed(
+        &mut self,
+        cx: &QueryCx,
+        call: &FnxCallSpec,
+        options: FnxReadOptions,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+    ) -> Result<FnxReadResult, FnxSealedReadError<BufferedReadError, Cancel>> {
+        cx.with_restriction_async(async {
+            cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+            call.validate_sealed_projection(options.projection.directedness)
+                .map_err(FnxSealedReadError::Execution)?;
+            let graph = self
+                .prism_sealed_projection_at(
+                    cx,
+                    options.as_of.unwrap_or(self.frontier()),
+                    options.selection,
+                    options.projection,
+                    options.projection_limits,
+                    options.source_limits,
+                    sealing,
+                    max_source_incidences,
+                )
+                .await?;
+            let result = call
+                .execute_sealed(cx, &graph, options.execution_limits, memory)
+                .map_err(FnxSealedReadError::Execution)?;
+            Ok(FnxReadResult::bind_selection(result, options.selection))
+        })
+        .await
+    }
+
+    /// Build a reusable sealed projection from this view's opaque Strata
+    /// admission. The shared historical vertex cursor includes isolates and
+    /// applies the label selection at exactly as_of. Strata then faults only
+    /// the selected relation and runs its existing compactor/image encoder;
+    /// initial buffered open already proved the complete source root.
+    ///
+    /// The caller cannot substitute a root claim or decoded source rows. Both
+    /// vertex selection and the sealed anchor belong to this pinned generation,
+    /// even if another handle advances or compacts the database meanwhile.
+    /// Refusal returns no partial projection, leaves this reader usable, and
+    /// never heals a missing/lagging checkpoint through a writable open.
+    /// The owned image may outlive the view. Its storage has the existing
+    /// sealing/projection allowances, not the source pool's lifetime charge.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prism_sealed_projection_at(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+    ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
+        cx.with_restriction_async(async {
+            cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+            let relation = selection.relation.ok_or(FnxSealedReadError::Projection(
+                SealedProjectionError::RelationRequired,
+            ))?;
+            let mut control = prism_source_control(cx, source_limits);
+            let mut staged_bytes = 0;
+            let vertices = self
+                .select_prism_vertices(
+                    cx,
+                    as_of,
+                    selection,
+                    limits,
+                    source_limits,
+                    &mut control,
+                    &mut staged_bytes,
+                )
+                .await?;
+            let partition = self
+                .partition
+                .seal_relation(cx, as_of, relation, sealing, max_source_incidences)
+                .await
+                .map_err(FnxSealedReadError::Seal)?;
+            let scope = partition.anchor().scope();
+            let root = self.partition.root();
+            if scope.source_root != self.partition_root()
+                || scope.publication != self.frontier()
+                || scope.graph != root.graph
+                || scope.branch != root.branch
+                || scope.partition != root.partition
+            {
+                return Err(FnxSealedReadError::SourceMismatch);
+            }
+            SealedGraphView::build(
+                cx,
+                &partition,
+                &vertices,
+                SealedProjectionSpec {
+                    as_of,
+                    selection,
+                    projection: spec,
+                },
+                limits,
+            )
+            .map_err(FnxSealedReadError::Projection)
+        })
+        .await
+    }
+
+    /// One vertex-selection implementation for decoded and sealed adapters.
+    /// Keep the decoded path's event order and cumulative two-scan allowance.
+    #[allow(clippy::too_many_arguments)]
+    async fn select_prism_vertices(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        selection: FnxSelection,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Error>,
+        staged_bytes: &mut usize,
+    ) -> Result<Vec<VId>, Error> {
+        let mut vertices = Vec::new();
+        let mut scan = self.partition.vertex_scan(cx, as_of).map_err(read_failure)?;
+        while let Some(candidate) = scan
+            .next_candidate_with(cx, &mut |event| {
+                control(match event {
+                    BufferedScanEvent::Work => SourceEvent::Work,
+                    BufferedScanEvent::Identity(_) => SourceEvent::ScratchEntry,
+                })
+            })
+            .await
+            .map_err(scan_failure)?
+        {
+            let Some(row) = candidate.row else {
+                continue;
+            };
+            control(SourceEvent::Work)?;
+            if selection
+                .vertex_label
+                .is_some_and(|label| row.labels.binary_search(&label).is_err())
+            {
+                continue;
+            }
+            debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
+            push_prism_staged(
+                &mut vertices,
+                row.vid,
+                "vertices",
+                limits.max_vertices,
+                staged_bytes,
+                source_limits.max_staging_bytes,
+            )?;
+        }
+        Ok(vertices)
+    }
+
     /// Prepare a reusable decoded projection from buffered historical cursors.
     /// Visible selected vertices, including isolates, precede the canonical EId
     /// scan. Relation and both endpoint selections precede weight observation;
@@ -124,43 +294,17 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             };
             let mut control = prism_source_control(cx, source_limits);
             let mut staged_bytes = 0;
-            let mut vertices = Vec::new();
-            {
-                let mut scan = self
-                    .partition
-                    .vertex_scan(cx, as_of)
-                    .map_err(read_failure)?;
-                while let Some(candidate) = scan
-                    .next_candidate_with(cx, &mut |event| {
-                        control(match event {
-                            BufferedScanEvent::Work => SourceEvent::Work,
-                            BufferedScanEvent::Identity(_) => SourceEvent::ScratchEntry,
-                        })
-                    })
-                    .await
-                    .map_err(scan_failure)?
-                {
-                    let Some(row) = candidate.row else {
-                        continue;
-                    };
-                    control(SourceEvent::Work)?;
-                    if selection
-                        .vertex_label
-                        .is_some_and(|label| row.labels.binary_search(&label).is_err())
-                    {
-                        continue;
-                    }
-                    debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
-                    push_prism_staged(
-                        &mut vertices,
-                        row.vid,
-                        "vertices",
-                        limits.max_vertices,
-                        &mut staged_bytes,
-                        source_limits.max_staging_bytes,
-                    )?;
-                }
-            }
+            let vertices = self
+                .select_prism_vertices(
+                    cx,
+                    as_of,
+                    selection,
+                    limits,
+                    source_limits,
+                    &mut control,
+                    &mut staged_bytes,
+                )
+                .await?;
             let mut edges = Vec::new();
             {
                 let mut scan = match selection.relation {
