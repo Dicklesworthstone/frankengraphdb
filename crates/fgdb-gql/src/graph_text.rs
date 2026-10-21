@@ -27,7 +27,10 @@ use std::collections::BTreeMap;
 
 /// Definition admission, not execution work or a promise of cheap matching.
 pub const MAX_GRAPH_TEXT_BYTES: usize = 65_536;
-pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
+/// At least two bytes a token on average, so a statement at the token limit
+/// still fits the byte limit with room to spare. 24576 admits the openCypher
+/// TCK's largest single statement, Create4 [2] (about 16,400 tokens).
+pub const MAX_GRAPH_TEXT_TOKENS: usize = 24_576;
 
 /// Scalar function names the shared expression compiler accepts before `(`.
 /// TOUPPER, TOLOWER and SIZE are the openCypher spellings of UPPER, LOWER and
