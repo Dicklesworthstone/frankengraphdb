@@ -101,8 +101,8 @@ impl<'a> Parser<'a> {
         ) {
             return Ok(None);
         }
-        let row = |name: Name<'a>, property: Option<Name<'a>>| {
-            if property.is_some() || self.elements.contains(&name.text) {
+        let row = |name: Name<'a>| {
+            if self.elements.contains(&name.text) {
                 None
             } else {
                 self.read_row_bindings
@@ -125,18 +125,16 @@ impl<'a> Parser<'a> {
                         .and_then(|(edge, _)| edge.variable)
                 })
         };
-        let (row, variable, property, normalized) = match (
-            row(left, left_property),
-            graph(left),
-            row(right, right_property),
-            graph(right),
-        ) {
-            (Some(row), None, None, Some(variable)) => (row, variable, right_property, comparison),
-            (None, Some(variable), Some(row), None) => {
-                (row, variable, left_property, reversed(comparison))
-            }
-            _ => return Ok(None),
-        };
+        let (row_first, variable, property, normalized) =
+            match (row(left), graph(left), row(right), graph(right)) {
+                (Some(_), None, None, Some(variable)) => {
+                    (true, variable, right_property, comparison)
+                }
+                (None, Some(variable), Some(_), None) => {
+                    (false, variable, left_property, reversed(comparison))
+                }
+                _ => return Ok(None),
+            };
         self.capacity(
             self.predicates,
             MAX_PATTERN_PREDICATES,
@@ -145,17 +143,30 @@ impl<'a> Parser<'a> {
         if property.is_some() {
             self.require_property_variable(variable)?;
         }
+        // Dotted imported operands are evaluated once per LEFT occurrence by
+        // the same native MapGet projection used for equality/map keys. They
+        // must never read the optional join's nullable RIGHT copy.
+        let row = if row_first {
+            let row = self
+                .imported_row_field()?
+                .expect("lookahead proved an imported comparison operand");
+            self.comparison()?;
+            Some(row)
+        } else {
+            None
+        };
         self.name()?;
-        if left_property.is_some() {
+        if property.is_some() {
             self.punct(b'.', ".")?;
             self.name()?;
         }
-        self.comparison()?;
-        self.name()?;
-        if right_property.is_some() {
-            self.punct(b'.', ".")?;
-            self.name()?;
-        }
+        let row = if let Some(row) = row {
+            row
+        } else {
+            self.comparison()?;
+            self.imported_row_field()?
+                .expect("lookahead proved an imported comparison operand")
+        };
         self.predicates += 1;
         Ok(Some(RowComparison {
             variable,

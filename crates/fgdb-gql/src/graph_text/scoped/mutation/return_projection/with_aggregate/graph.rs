@@ -1,5 +1,6 @@
-//! A real graph-to-row input for the first aggregate WITH of a MATCH part.
-//! The shared row aggregate parser consumes the original WITH, not rewritten
+//! A real graph-to-row input for the first aggregate WITH of a MATCH part,
+//! or the implied WITH * before its aggregate RETURN.
+//! The shared row aggregate parser consumes the original clause, not rewritten
 //! text. Property reads remain ordinary source projections, subject to the
 //! same graph-source authorization and null-extension boundaries.
 
@@ -51,7 +52,7 @@ fn scope_end(word: &str, previous: Option<TokenKind<'_>>) -> bool {
 }
 
 impl<'a> Parser<'a> {
-    /// Leave WITH unconsumed and expose only native graph bindings plus the
+    /// Leave WITH/RETURN unconsumed and expose only native graph bindings plus the
     /// properties named by THIS grouping clause, or by the grouping's own
     /// WHERE, pages and RETURN through a binding it keeps as a bare key
     /// (`grouped_reads`). The hidden fields are visible only as
@@ -169,13 +170,49 @@ impl<'a> Parser<'a> {
                     if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                         let property = lookahead.next()?;
                         if let TokenKind::Word(key) = property.kind {
-                            if optional && incoming.iter().any(|(name, _)| name.text == word) {
-                                return Err(expected(
-                                    token.at,
-                                    "project carried vertex properties before OPTIONAL MATCH",
+                            if let Some(column) =
+                                incoming.iter().position(|(name, _)| name.text == word)
+                                && !reads.iter().any(|&(owner, property, _)| {
+                                    owner == word && property.text == key
+                                })
+                            {
+                                // Grouping's ordinary row parser addresses
+                                // hidden property cells. Compute this one from
+                                // the preserved LEFT identity, never from a
+                                // nullable re-matched RIGHT binding.
+                                self.capacity(
+                                    outputs.len(),
+                                    MAX_PATTERN_VERTICES,
+                                    crate::algebra::PatternLimitDimension::Columns,
+                                )?;
+                                let name = HIDDEN_NAMES
+                                    .iter()
+                                    .copied()
+                                    .find(|name| {
+                                        outputs.iter().all(|(output, _)| output.text != *name)
+                                    })
+                                    .ok_or_else(|| {
+                                        expected(token.at, "bounded grouping property reads")
+                                    })?;
+                                let value = self.map_get(ReadValueTemplate::Column(column), key);
+                                outputs.push((
+                                    Name {
+                                        text: name,
+                                        at: token.at,
+                                    },
+                                    value,
+                                ));
+                                reads.push((
+                                    word,
+                                    Name {
+                                        text: key,
+                                        at: property.at,
+                                    },
+                                    outputs.len() - 1,
                                 ));
                             }
                             if let Some(&variable) = bindings.iter().find(|name| name.text == word)
+                                && !incoming.iter().any(|(name, _)| name.text == word)
                                 && !reads.iter().any(|&(owner, property, _)| {
                                     owner == word && property.text == key
                                 })

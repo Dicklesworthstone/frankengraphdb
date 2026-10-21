@@ -3,7 +3,7 @@
 //! graph leaf joined BEFORE its projection/filter/page, never an AST evaluator.
 //! OPTIONAL continuations use the same left-join kernel: correlation is part
 //! of matching, and only new bindings are null-extended. Carried values stay
-//! on the left. Project their properties before entering an optional part.
+//! on the left, including property reads through their pinned identities.
 
 use super::*;
 use crate::row_join::{RowJoinKind, RowJoinSpec};
@@ -37,6 +37,7 @@ impl UnresolvedReadInput<'_> {
                 .iter()
                 .map(|part| {
                     1 + usize::from(part.input.projection.is_some())
+                        + 2 * usize::from(!part.input.row_fields.is_empty())
                         + part
                             .input
                             .pipeline
@@ -139,13 +140,12 @@ fn admit_head(
 }
 
 fn join_spec(
-    incoming: &RowSchema<'_>,
+    left: &[GraphSetColumnType],
     inputs: &[Projection<'_>],
     keys: &[(usize, usize)],
     comparisons: &[(usize, usize, IntegerComparison)],
     at: usize,
 ) -> Result<RowJoinSpec, GraphSetTextError> {
-    let left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
     let right: Vec<_> = inputs.iter().map(projection_type).collect();
     let typed_keys = !keys.is_empty()
         && keys.iter().all(|&(l, r)| {
@@ -157,9 +157,9 @@ fn join_spec(
                     ))
         });
     let spec = if typed_keys {
-        RowJoinSpec::new(&left, &right, keys)
+        RowJoinSpec::new(left, &right, keys)
     } else {
-        RowJoinSpec::cross(&left, &right).and_then(|spec| {
+        RowJoinSpec::cross(left, &right).and_then(|spec| {
             if keys.is_empty() {
                 return Ok(spec);
             }
@@ -341,8 +341,10 @@ impl<'a> Parser<'a> {
 
     /// Carried vertices whose properties the part starting at this MATCH
     /// reads (`a.p`) although its own pattern does not bind them, in
-    /// first-read order. The part ends at the next top-level WITH or set
-    /// operation. A part that names a path, a node binding of the same name
+    /// first-read order. Predicate reads end at the next top-level WITH,
+    /// RETURN or set operation. RETURN reads the carried identity directly;
+    /// re-matching it would discard a NULL carried from an earlier OPTIONAL.
+    /// A part that names a path, a node binding of the same name
     /// and a comprehension or quantifier local are left to the ordinary
     /// compiler. Nothing is consumed.
     fn carried_property_reads(
@@ -369,7 +371,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(word)
                     if depth == 0
                         && !after_dot
-                        && (["UNION", "EXCEPT", "INTERSECT"]
+                        && (["RETURN", "UNION", "EXCEPT", "INTERSECT"]
                             .iter()
                             .any(|clause| word.eq_ignore_ascii_case(clause))
                             || (word.eq_ignore_ascii_case("WITH")
@@ -465,15 +467,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.parse_match_prefix()?;
-        // A continuation owns a separate ON join, not the leading-row
-        // product. Until that owner projects computed keys, require callers
-        // to expose them explicitly in WITH rather than losing a predicate.
-        if !self.read_row_fields.is_empty() {
-            return Err(expected(
-                at,
-                "projected row fields in WITH before a MATCH continuation",
-            ));
-        }
+        let row_fields = core::mem::take(&mut self.read_row_fields);
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
@@ -586,20 +580,18 @@ impl<'a> Parser<'a> {
         let mut head = if kind.is_none() {
             self.graph_projection_head()?
         } else if implicit_star {
-            let outputs = self.star_outputs(incoming, &mut inputs)?;
-            GraphProjectionHead {
-                with: true,
-                plain: false,
-                inputs,
-                outputs,
-            }
+            // The same graph-to-row aggregate head owns carried properties
+            // in WITH and in an implicit WITH * before aggregate RETURN.
+            self.with_graph_head(incoming, inputs, optional)?
         } else {
             self.multipart_head(incoming, inputs, optional)?
         };
         // graph_projection_head numbers its graph inputs from zero; a
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
-        self.hoist_boundary_reads(&mut head, offset)?;
+        if !implicit_star {
+            self.hoist_boundary_reads(&mut head, offset)?;
+        }
         let graph_page = if head.with {
             None
         } else {
@@ -620,7 +612,13 @@ impl<'a> Parser<'a> {
         // A continuation joins its incoming relation even when its schema is
         // empty; column count is not evidence that there was no earlier part.
         let join = if let Some(kind) = kind {
-            Some(join_spec(incoming, &head.inputs, &keys, &comparisons, at)?.with_kind(kind))
+            let mut left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+            let field_types: Vec<_> = row_fields
+                .iter()
+                .map(|value| value.column_type(&left, &self.syntax.parameters))
+                .collect();
+            left.extend(field_types);
+            Some(join_spec(&left, &head.inputs, &keys, &comparisons, at)?.with_kind(kind))
         } else {
             None
         };
@@ -660,6 +658,13 @@ impl<'a> Parser<'a> {
         if aggregate && self.is_word("RETURN") {
             terminal = true;
         }
+        if !row_fields.is_empty() {
+            self.capacity(
+                incoming.len() + head.inputs.len() + row_fields.len() - 1,
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+        }
         // The surrounding set parser owns terminal ORDER BY/SKIP/LIMIT. Every
         // page before a continuation was already consumed by row_pipeline_prefix.
         self.syntax.columns = head
@@ -692,7 +697,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: incoming.iter().map(|(_, kind)| *kind).collect(),
                 correlations: keys,
-                row_fields: Vec::new(),
+                row_fields,
             },
             next,
             terminal,
@@ -772,18 +777,10 @@ impl<'a> Parser<'a> {
                         }
                         return Ok(None);
                     }
-                    if !matches!(next.kind, TokenKind::Punct(b'.'))
-                        && let Some(column) = incoming.iter().position(|(name, _)| name.text == word)
+                    if let Some(column) = incoming.iter().position(|(name, _)| name.text == word)
                     {
                         parser.advance()?;
                         return Ok(Some(column));
-                    }
-                    if optional && matches!(next.kind, TokenKind::Punct(b'.'))
-                        && incoming.iter().any(|(name, _)| name.text == word)
-                    {
-                        return Err(error(parser.current.at, GraphPatternTextErrorKind::Expected(
-                            "project carried vertex properties before OPTIONAL MATCH",
-                        )));
                     }
                     let graph = parser.visible_graph_bindings().any(|name| name.text == word);
                     if !graph { return Ok(None); }
@@ -888,6 +885,9 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
+            let imported_width = input.column_types().len();
+            input = source.bind_row_fields(input, values)?;
+            let left_width = input.column_types().len();
             let right = source
                 .selection
                 .as_ref()
@@ -899,6 +899,28 @@ impl BoundReadInput {
                     offset: source.return_at,
                     kind: GraphSetTextErrorKind::SetBuild(kind),
                 })?;
+            if !source.row_fields.is_empty() {
+                // ON may address private computed LEFT keys. Remove them
+                // before public projection/DISTINCT, restoring the original
+                // incoming + graph ordinals without changing bag occurrences.
+                let projection = (0..imported_width)
+                    .chain(left_width..input.column_types().len())
+                    .enumerate()
+                    .map(|(output, column)| {
+                        GraphSetProjection::new(
+                            format!("__fg_match_input_{output}"),
+                            GraphSetValue::Column(column),
+                        )
+                    })
+                    .collect();
+                input =
+                    input
+                        .project_ordered_output(projection)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: source.return_at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
+            }
             if let Some(projection) = &source.projection {
                 input = super::super::bind_projection(
                     input,

@@ -165,20 +165,41 @@ fn imported_map_field_errors_and_cancellation_do_not_become_empty_answers() {
         Err(GqlQueryError::Interrupted(41))
     ));
     let calls = Cell::new(0);
+    let continued = PreparedGraphSetText::prepare(
+        "UNWIND [{p:1}] AS row WITH row MATCH (n {p:row.p}) RETURN n",
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(calls.get(), 1, "one shared property symbol contract");
+    assert_eq!(
+        run(
+            &continued,
+            &[CanonicalScalar::Int(1), CanonicalScalar::Int(2)],
+            wide(),
+            &mut || Ok(())
+        )
+        .unwrap()
+        .value,
+        vec![GraphValueRow::from_owned_values(vec![
+            fgdb_gql::algebra::GraphValue::Vertex(VId(0))
+        ])]
+    );
+    let continued_invalid = prepare(
+        "UNWIND [{key:{p:1}},{key:2}] AS row WITH row MATCH (n {p:row.key.p}) RETURN n LIMIT 0",
+    );
     assert!(
-        PreparedGraphSetText::prepare(
-            "UNWIND [{p:1}] AS row WITH row MATCH (n {p:row.p}) RETURN n",
-            |kind, name| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            },
+        run(
+            &continued_invalid,
+            &[CanonicalScalar::Int(1)],
+            wide(),
+            &mut || Ok(())
         )
         .is_err()
-    );
-    assert_eq!(
-        calls.get(),
-        0,
-        "continuations cannot lose an unowned computed join key"
     );
     // The existing continuation owner remains available after an explicit
     // projection, including its original ordering and scope boundary.
@@ -460,7 +481,9 @@ fn named_with_expressions_and_parenthesized_variables_preserve_results() {
     ] {
         let query = prepare(text);
         assert_eq!(query.columns(), ["value"], "{text}");
-        let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+        let rows = run_reading(&query, &values, wide(), &mut || Ok(()), true)
+            .unwrap()
+            .value;
         assert_eq!(
             ints(&rows, 0),
             [Some(1), Some(2), Some(2), Some(3)],
@@ -1089,11 +1112,35 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
             "{text}"
         );
     }
-    // fgdb-dhcfo: a required later MATCH part re-matches the carried vertex
-    // by identity, so `kept.p` reads that vertex's own value. The rows equal
-    // the two-pattern MATCH.
+    // fgdb-dhcfo: a RETURN-only carried read uses the host's pinned element
+    // reader and does not add a graph binding merely to read a property.
+    // The pattern-only adapter cannot perform that read: its documented
+    // typed refusal must not become a guessed NULL, even beneath LIMIT 0.
+    for suffix in ["", " LIMIT 0"] {
+        let carried = prepare(&format!(
+            "MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v ORDER BY v{suffix}"
+        ));
+        assert!(matches!(
+            run(&carried, &values, wide(), &mut || Ok(())),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                error: fgdb_gql::GraphIntegerError {
+                    kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
+                    ..
+                },
+                ..
+            }))
+        ));
+    }
     assert_eq!(
-        rows("MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v ORDER BY v"),
+        run_reading(
+            &prepare("MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v ORDER BY v"),
+            &values,
+            wide(),
+            &mut || Ok(()),
+            true
+        )
+        .unwrap()
+        .value,
         rows("MATCH (n), (m) RETURN n.p AS v ORDER BY v")
     );
 }

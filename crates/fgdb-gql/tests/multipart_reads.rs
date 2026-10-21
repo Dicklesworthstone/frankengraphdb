@@ -1,6 +1,6 @@
 //! Native multi-part reads execute real GLA leaves through one governed source.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
@@ -43,9 +43,20 @@ fn run(
     GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
+    run_reading(query, policy, checkpoint, false)
+}
+fn run_reading(
+    query: &PreparedGraphSet,
+    policy: GqlQueryPolicy,
+    checkpoint: &mut impl FnMut() -> Result<(), usize>,
+    fail_elements: bool,
+) -> Result<
+    GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
+> {
     let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
-    query.execute_governed(
+    query.execute_governed_with_elements(
         policy,
         |pattern, remaining| {
             pattern.plan().execute_governed_with_properties(
@@ -63,6 +74,16 @@ fn run(
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )
+        },
+        |_, _, _| panic!("this fixture has no CALL source"),
+        |element, key| {
+            if fail_elements {
+                return Err("element-read-error");
+            }
+            Ok(match element {
+                ElementId::Vertex(vid) if key == P => Some(values[vid.0 as usize - 1].clone()),
+                _ => None,
+            })
         },
         || (checkpoint.borrow_mut())(),
     )
@@ -539,15 +560,8 @@ fn a_carried_vertex_property_read_after_a_later_match_re_matches_it_by_identity(
         execute("MATCH (a) WITH a MATCH (b) RETURN a.p AS x, b.p AS y ORDER BY x, y").len(),
         16
     );
-    // OPTIONAL stays refused: a read through a re-matched vertex would be
-    // NULL on a null-extended row although the carried vertex is not.
-    assert!(
-        PreparedGraphSetText::prepare(
-            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p > a.p RETURN a.p AS x, b.p AS y",
-            symbols
-        )
-        .is_err()
-    );
+    // OPTIONAL reads the carried identity on the LEFT, including its value
+    // on an unmatched row. The independent bag oracle below covers it.
     // A binding the WITH dropped is still unknown after the next MATCH.
     assert!(
         PreparedGraphSetText::prepare(
@@ -556,4 +570,258 @@ fn a_carried_vertex_property_read_after_a_later_match_re_matches_it_by_identity(
         )
         .is_err()
     );
+}
+
+fn nullable_pair(left: Option<i64>, right: Option<i64>) -> GraphValueRow {
+    GraphValueRow::from_owned_values(
+        [left, right]
+            .map(|value| {
+                GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+            })
+            .to_vec(),
+    )
+}
+
+#[test]
+fn carried_properties_are_optional_on_operands_with_exact_bag_and_null_semantics() {
+    let scores = [1_i64, 2, 2, 3];
+    for (operator, reverse) in [
+        ("=", "="),
+        ("<>", "<>"),
+        ("!=", "!="),
+        ("<", ">"),
+        (">", "<"),
+        ("<=", ">="),
+        (">=", "<="),
+    ] {
+        let mut expected = Vec::new();
+        for a in scores {
+            let mut matched = false;
+            for b in scores {
+                let keep = match operator {
+                    "=" => a == b,
+                    "<>" | "!=" => a != b,
+                    "<" => a < b,
+                    ">" => a > b,
+                    "<=" => a <= b,
+                    ">=" => a >= b,
+                    _ => unreachable!(),
+                };
+                if keep {
+                    expected.push((a, Some(b)));
+                    matched = true;
+                }
+            }
+            if !matched {
+                expected.push((a, None));
+            }
+        }
+        expected.sort_by_key(|&(a, b)| (a, b.unwrap_or(i64::MAX)));
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(a, b)| nullable_pair(Some(a), b))
+            .collect();
+        for predicate in [format!("a.p {operator} b.p"), format!("b.p {reverse} a.p")] {
+            let text = format!(
+                "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE {predicate} \
+                 RETURN a.p AS x,b.p AS y ORDER BY x,y"
+            );
+            assert_eq!(execute(&text), expected, "{text}");
+        }
+    }
+    assert_eq!(
+        execute(
+            "MATCH (a) WITH a OPTIONAL MATCH (b {p:a.p}) RETURN a.p AS x,b.p AS y ORDER BY x,y"
+        ),
+        [(1, 1), (2, 2), (2, 2), (2, 2), (2, 2), (3, 3)]
+            .map(|(a, b)| nullable_pair(Some(a), Some(b)))
+            .to_vec()
+    );
+    // Private computed map keys use the same join path; NULL/absence never
+    // satisfies equality, and duplicate left occurrences are not deduplicated.
+    assert_eq!(
+        execute(
+            "UNWIND [{p:2},{p:2},{p:NULL},{}] AS row WITH row \
+                 OPTIONAL MATCH (b {p:row.p}) RETURN row.p AS x,b.p AS y ORDER BY x,y"
+        ),
+        [(Some(2), Some(2)); 4]
+            .into_iter()
+            .chain([(None, None); 2])
+            .map(|(a, b)| nullable_pair(a, b))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn null_carried_bindings_survive_later_required_and_optional_parts() {
+    for kind in ["MATCH", "OPTIONAL MATCH"] {
+        let text = format!(
+            "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+             {kind} (b) RETURN a.p AS x,b.p AS y ORDER BY y"
+        );
+        assert_eq!(
+            execute(&text),
+            [1, 2, 2, 3].map(|b| nullable_pair(None, Some(b))).to_vec(),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+                 OPTIONAL MATCH (b) WHERE a.p < b.p RETURN a.p AS x,b.p AS y"
+        ),
+        vec![nullable_pair(None, None)]
+    );
+    // Explicitly matching the carried NULL remains a failed required match.
+    assert!(
+        execute(
+            "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+                     MATCH (a) RETURN a.p AS x"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn carried_property_grouping_keeps_nulls_and_completed_optional_occurrences() {
+    assert_eq!(
+        execute(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE a.p < b.p \
+                 WITH a.p AS score,COUNT(b) AS matched RETURN score,matched ORDER BY score"
+        ),
+        [(1, 3), (2, 2), (3, 0)]
+            .map(|(score, count)| nullable_pair(Some(score), Some(count)))
+            .to_vec()
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+                 MATCH (b) WITH a.p AS score,COUNT(*) AS rows RETURN score,rows"
+        ),
+        vec![nullable_pair(None, Some(4))]
+    );
+}
+
+#[test]
+fn carried_property_ordering_shadowing_and_private_columns_keep_the_visible_scope() {
+    let query = prepare("MATCH (a) WITH a OPTIONAL MATCH (b {p:a.p}) RETURN *");
+    assert_eq!(query.columns(), &["a", "b"]);
+    assert!(
+        run(&query, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+            .iter()
+            .all(|row| row.len() == 2)
+    );
+    let values = |text: &str| {
+        execute(text)
+            .into_iter()
+            .map(|row| row.get(0).unwrap().as_scalar().cloned().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        values(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p>a.p \
+                RETURN a.p AS x ORDER BY a.p DESC"
+        ),
+        [3, 2, 2, 1, 1, 1].map(CanonicalScalar::Int).to_vec()
+    );
+    for page in ["ORDER BY x", "ORDER BY a.p"] {
+        assert_eq!(
+            values(&format!(
+                "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p>a.p \
+                             RETURN DISTINCT a.p AS x {page}"
+            )),
+            [1, 2, 3].map(CanonicalScalar::Int).to_vec()
+        );
+    }
+    assert_eq!(
+        values(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p>a.p \
+                RETURN b.p AS a ORDER BY a"
+        ),
+        [2, 2, 3, 3, 3]
+            .map(CanonicalScalar::Int)
+            .into_iter()
+            .chain([CanonicalScalar::Null])
+            .collect::<Vec<_>>()
+    );
+    for text in [
+        "MATCH (a) WITH a.p AS x OPTIONAL MATCH (b) RETURN a.p",
+        "MATCH (a) WITH a OPTIONAL MATCH (b {p:a.p}) RETURN __fg_match_key_1",
+        "MATCH (a) WITH a OPTIONAL MATCH (b {p:a.p}) RETURN __fg_match_input_0",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0);
+    }
+}
+
+#[test]
+fn carried_property_join_preserves_every_checkpoint_and_element_source_refusal() {
+    let text = "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE a.p>b.p \
+                RETURN a.p AS x,b.p AS y ORDER BY x,y";
+    let query = prepare(text);
+    let mut calls = 0;
+    let measured = run(&query, wide(), &mut || {
+        calls += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..4 {
+        let mut limits = caps;
+        limits[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                &mut || Ok(())
+            )
+            .is_err()
+        );
+    }
+    for stop in 1..=calls {
+        let mut seen = 0;
+        let result = run(&query, wide(), &mut || {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
+        assert_eq!(seen, stop);
+    }
+    for suffix in ["", " LIMIT 0"] {
+        let failure = run_reading(
+            &prepare(&format!("{text}{suffix}")),
+            wide(),
+            &mut || Ok(()),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{failure:?}").contains("element-read-error"),
+            "{failure:?}"
+        );
+    }
 }
