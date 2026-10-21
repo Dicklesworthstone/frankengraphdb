@@ -251,3 +251,64 @@ fn constant_values_stay_constant_actions_and_only_computed_values_compile_to_exp
     }
     assert_ne!(constant.canonical_bytes(), computed.canonical_bytes());
 }
+
+#[test]
+fn map_assignments_are_their_per_key_assignments() {
+    // fgdb-0s2pq: `n += {key: value, ...}` in any vertex MERGE SET clause is
+    // exactly the assignments `n.key = value`, in entry order.
+    let args = GqlParameters::new()
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("m", 100)
+        .unwrap();
+    for (map, keys) in [
+        (
+            "MERGE (n:Person {p:$p}) ON MATCH SET n += {q: $m} ON CREATE SET n += {q: 2}, n:Created",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n.q = $m ON CREATE SET n.q = 2, n:Created",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) SET n += {q: $m, p: 1}",
+            "MERGE (n:Person {p:$p}) SET n.q = $m, n.p = 1",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n += {q: n.q + $m}",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n.q = n.q + $m",
+        ),
+    ] {
+        let bind = |text: &str| {
+            PreparedGraphVertexUpsertText::prepare(text, R, symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameters(&args)
+                .unwrap()
+                .canonical_bytes()
+        };
+        assert_eq!(bind(map), bind(keys), "{map}");
+    }
+    for text in [
+        "MERGE (n:Person {p:1}) SET n += {}",
+        "MERGE (n:Person {p:1}) SET n += {q: 1, q: 2}",
+        // A map parameter has no keys at preparation.
+        "MERGE (n:Person {p:1}) SET n += $m",
+    ] {
+        assert!(
+            PreparedGraphVertexUpsertText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
+    }
+    // A map entry and a plain assignment of one field are a duplicate field,
+    // refused by the typed definition as `n.q=1, n.q=2` is.
+    let failed = PreparedGraphVertexUpsertText::prepare(
+        "MERGE (n:Person {p:1}) SET n += {q: 1}, n.q = 2",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap_err();
+    assert!(matches!(
+        failed.kind,
+        GraphVertexUpsertTextErrorKind::UpsertBuild(
+            fgdb_gql::GraphVertexUpsertBuildError::DuplicateProperty { .. }
+        )
+    ));
+}

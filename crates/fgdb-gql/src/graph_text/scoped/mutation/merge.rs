@@ -328,18 +328,7 @@ impl<'a> Parser<'a> {
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<(), GraphVertexUpsertTextError> {
         loop {
-            if target.len() >= crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
-                return Err(GraphVertexUpsertTextError {
-                    offset: self.current.at,
-                    kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
-                        crate::GraphVertexUpsertBuildError::TooManyActions {
-                            branch,
-                            limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
-                            observed: target.len() + 1,
-                        },
-                    ),
-                });
-            }
+            self.upsert_capacity(target.len(), branch)?;
             let actual = self.name()?;
             if actual.text != variable.text {
                 return Err(error(
@@ -352,122 +341,19 @@ impl<'a> Parser<'a> {
                 ParsedUpsertAction::Label {
                     label: self.schema_name()?,
                 }
+            } else if self.take(b'+')? {
+                // `n += {key: value, ...}` (fgdb-0s2pq): one ordinary property
+                // assignment per entry, under the same action limit.
+                self.upsert_map(variable, target, branch, row)?;
+                if !self.take(b',')? {
+                    break;
+                }
+                continue;
             } else {
                 self.punct(b'.', "property or label assignment")?;
                 let key = self.schema_name()?;
                 self.punct(b'=', "=")?;
-                let at = self.current.at;
-                // A vertex MERGE step's right-hand side that reads its row
-                // and not the MERGE vertex (`prop.name`, `xs + [y]`) is the
-                // shared value compiler's value over the row, written as
-                // CREATE writes it (fgdb-cpny9).
-                let row_value = match row {
-                    Some(row) => match self.value_reads(row, Some(variable.text))? {
-                        (true, false) => Some(self.merge_row_value(row)?),
-                        _ => None,
-                    },
-                    None => None,
-                };
-                if let Some(value) = row_value {
-                    ParsedUpsertAction::RowValue { key, value, at }
-                } else if self.set_value_is_list()? {
-                    // A constant list (`['a', 'b']`, `$tags`) is a stored List
-                    // (fgdb-k3nub), evaluated once when the statement binds.
-                    // One built from the MERGE vertex's own fields is not yet.
-                    let mut inputs = Vec::new();
-                    let value = self.read_graph_value(&mut inputs, 0)?;
-                    if !inputs.is_empty() {
-                        return Err(GraphVertexUpsertTextError {
-                            offset: at,
-                            kind: GraphVertexUpsertTextErrorKind::Query(
-                                GraphPatternTextErrorKind::Expected(
-                                    "a list value of literals and parameters",
-                                ),
-                            ),
-                        });
-                    }
-                    ParsedUpsertAction::Property {
-                        key,
-                        value: VertexUpsertValueTemplate::Composite { value, at },
-                    }
-                } else {
-                    let mut inputs: Vec<UpsertInput<'a>> = Vec::new();
-                    let operand = self.resolved_predicate(&mut |parser| {
-                        let TokenKind::Word(word) = parser.current.kind else {
-                            return Ok(None);
-                        };
-                        let next = parser.lexer.clone().next()?.kind;
-                        // A vertex MERGE step's row (fgdb-cpny9): `a.key` of an
-                        // element it carries is that row's hidden read, and a
-                        // scalar column reads by name.
-                        let column = match row {
-                            Some(row) if word != variable.text => parser.merge_row_column(row)?,
-                            _ => None,
-                        };
-                        let input = if let Some(column) = column {
-                            UpsertInput::Column(column)
-                        } else {
-                            if !matches!(next, TokenKind::Punct(b'.')) {
-                                return Ok(None);
-                            }
-                            let source = parser.name()?;
-                            if source.text != variable.text {
-                                return Err(error(
-                                    source.at,
-                                    GraphPatternTextErrorKind::Expected(
-                                        "the MERGE vertex variable",
-                                    ),
-                                ));
-                            }
-                            parser.punct(b'.', ".")?;
-                            UpsertInput::Property(parser.schema_name()?)
-                        };
-                        if let Some(column) = inputs.iter().position(|known| match (known, input) {
-                            (UpsertInput::Property(old), UpsertInput::Property(new)) => {
-                                old.text == new.text
-                            }
-                            (UpsertInput::Column(old), UpsertInput::Column(new)) => *old == new,
-                            _ => false,
-                        }) {
-                            return Ok(Some(column));
-                        }
-                        parser.capacity(
-                            inputs.len(),
-                            MAX_PATTERN_VERTICES,
-                            crate::algebra::PatternLimitDimension::Columns,
-                        )?;
-                        inputs.push(input);
-                        Ok(Some(inputs.len() - 1))
-                    })?;
-                    match operand {
-                        Operand::Literal(value) => ParsedUpsertAction::Property {
-                            key,
-                            value: VertexUpsertValueTemplate::Bound(value),
-                        },
-                        Operand::Number(Number::Literal(value)) => ParsedUpsertAction::Property {
-                            key,
-                            value: VertexUpsertValueTemplate::Bound(scalar(value, at)?),
-                        },
-                        Operand::Number(Number::Parameter(index)) => ParsedUpsertAction::Property {
-                            key,
-                            value: VertexUpsertValueTemplate::Parameter { index, at },
-                        },
-                        Operand::Column(column) => ParsedUpsertAction::Expression {
-                            key,
-                            inputs,
-                            program: vec![MutationIntegerTemplateOp::Bound(
-                                crate::GraphIntegerOp::ScalarColumn(column),
-                            )],
-                            at,
-                        },
-                        Operand::Integer { program, at } => ParsedUpsertAction::Expression {
-                            key,
-                            inputs,
-                            program,
-                            at,
-                        },
-                    }
-                }
+                self.upsert_value(variable, key, row)?
             };
             target.push(action);
             if !self.take(b',')? {
@@ -475,6 +361,186 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    fn upsert_capacity(
+        &self,
+        actions: usize,
+        branch: GraphVertexUpsertBranch,
+    ) -> Result<(), GraphVertexUpsertTextError> {
+        if actions >= crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
+            return Err(GraphVertexUpsertTextError {
+                offset: self.current.at,
+                kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
+                    crate::GraphVertexUpsertBuildError::TooManyActions {
+                        branch,
+                        limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+                        observed: actions + 1,
+                    },
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// `+= {key: value, ...}` after the MERGE vertex: each entry is exactly
+    /// the assignment `n.key = value`, in entry order.
+    fn upsert_map(
+        &mut self,
+        variable: Name<'a>,
+        target: &mut Vec<ParsedUpsertAction<'a>>,
+        branch: GraphVertexUpsertBranch,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<(), GraphVertexUpsertTextError> {
+        self.punct(b'=', "=")?;
+        let at = self.current.at;
+        self.punct(b'{', "literal property map after +=")?;
+        if self.is_punct(b'}') {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("a property in SET += map"),
+            )
+            .into());
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        loop {
+            self.upsert_capacity(target.len(), branch)?;
+            let key = self.schema_name()?;
+            if !keys.insert(key.text) {
+                return Err(error(
+                    key.at,
+                    GraphPatternTextErrorKind::Expected("distinct property keys in SET += map"),
+                )
+                .into());
+            }
+            self.punct(b':', ":")?;
+            let action = self.upsert_value(variable, key, row)?;
+            target.push(action);
+            if self.take(b'}')? {
+                break;
+            }
+            self.punct(b',', ", or }")?;
+        }
+        Ok(())
+    }
+
+    /// The right-hand side of `n.key = value`.
+    fn upsert_value(
+        &mut self,
+        variable: Name<'a>,
+        key: Name<'a>,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<ParsedUpsertAction<'a>, GraphVertexUpsertTextError> {
+        let at = self.current.at;
+        // A vertex MERGE step's right-hand side that reads its row
+        // and not the MERGE vertex (`prop.name`, `xs + [y]`) is the
+        // shared value compiler's value over the row, written as
+        // CREATE writes it (fgdb-cpny9).
+        let row_value = match row {
+            Some(row) => match self.value_reads(row, Some(variable.text))? {
+                (true, false) => Some(self.merge_row_value(row)?),
+                _ => None,
+            },
+            None => None,
+        };
+        Ok(if let Some(value) = row_value {
+            ParsedUpsertAction::RowValue { key, value, at }
+        } else if self.set_value_is_list()? {
+            // A constant list (`['a', 'b']`, `$tags`) is a stored List
+            // (fgdb-k3nub), evaluated once when the statement binds.
+            // One built from the MERGE vertex's own fields is not yet.
+            let mut inputs = Vec::new();
+            let value = self.read_graph_value(&mut inputs, 0)?;
+            if !inputs.is_empty() {
+                return Err(GraphVertexUpsertTextError {
+                    offset: at,
+                    kind: GraphVertexUpsertTextErrorKind::Query(
+                        GraphPatternTextErrorKind::Expected(
+                            "a list value of literals and parameters",
+                        ),
+                    ),
+                });
+            }
+            ParsedUpsertAction::Property {
+                key,
+                value: VertexUpsertValueTemplate::Composite { value, at },
+            }
+        } else {
+            let mut inputs: Vec<UpsertInput<'a>> = Vec::new();
+            let operand = self.resolved_predicate(&mut |parser| {
+                let TokenKind::Word(word) = parser.current.kind else {
+                    return Ok(None);
+                };
+                let next = parser.lexer.clone().next()?.kind;
+                // A vertex MERGE step's row (fgdb-cpny9): `a.key` of an
+                // element it carries is that row's hidden read, and a
+                // scalar column reads by name.
+                let column = match row {
+                    Some(row) if word != variable.text => parser.merge_row_column(row)?,
+                    _ => None,
+                };
+                let input = if let Some(column) = column {
+                    UpsertInput::Column(column)
+                } else {
+                    if !matches!(next, TokenKind::Punct(b'.')) {
+                        return Ok(None);
+                    }
+                    let source = parser.name()?;
+                    if source.text != variable.text {
+                        return Err(error(
+                            source.at,
+                            GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                        ));
+                    }
+                    parser.punct(b'.', ".")?;
+                    UpsertInput::Property(parser.schema_name()?)
+                };
+                if let Some(column) = inputs.iter().position(|known| match (known, input) {
+                    (UpsertInput::Property(old), UpsertInput::Property(new)) => {
+                        old.text == new.text
+                    }
+                    (UpsertInput::Column(old), UpsertInput::Column(new)) => *old == new,
+                    _ => false,
+                }) {
+                    return Ok(Some(column));
+                }
+                parser.capacity(
+                    inputs.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                inputs.push(input);
+                Ok(Some(inputs.len() - 1))
+            })?;
+            match operand {
+                Operand::Literal(value) => ParsedUpsertAction::Property {
+                    key,
+                    value: VertexUpsertValueTemplate::Bound(value),
+                },
+                Operand::Number(Number::Literal(value)) => ParsedUpsertAction::Property {
+                    key,
+                    value: VertexUpsertValueTemplate::Bound(scalar(value, at)?),
+                },
+                Operand::Number(Number::Parameter(index)) => ParsedUpsertAction::Property {
+                    key,
+                    value: VertexUpsertValueTemplate::Parameter { index, at },
+                },
+                Operand::Column(column) => ParsedUpsertAction::Expression {
+                    key,
+                    inputs,
+                    program: vec![MutationIntegerTemplateOp::Bound(
+                        crate::GraphIntegerOp::ScalarColumn(column),
+                    )],
+                    at,
+                },
+                Operand::Integer { program, at } => ParsedUpsertAction::Expression {
+                    key,
+                    inputs,
+                    program,
+                    at,
+                },
+            }
+        })
     }
 }
 
