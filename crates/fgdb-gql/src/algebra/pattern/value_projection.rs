@@ -210,17 +210,18 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
-    /// The visible column holding the identity of this pattern's one vertex
-    /// root, when every other binding is reached from it (fgdb-2acff): one
-    /// vertex scan, then only selections, expansions, edge uniqueness and
-    /// path captures, under the canonical unpaged tail. Restricting the root
-    /// to a set of identities then keeps exactly those roots' rows, and skips
-    /// no expression or probe that could raise an error on another root: none
-    /// of these operators can fail, and no second scan starts elsewhere.
+    /// The visible column holding the identity of this pattern's slot-0
+    /// vertex, when every other binding is reached from it (fgdb-2acff): one
+    /// vertex scan, or one edge scan binding slot 0 to one of its ends, then
+    /// only selections, expansions, edge uniqueness and path captures, under
+    /// the canonical unpaged tail. Restricting slot 0 to a set of identities then
+    /// keeps exactly those roots' rows, and skips no expression or probe that
+    /// could raise an error on another root: none of these operators can
+    /// fail, and no second scan starts elsewhere.
     /// Definition-only, like the factor shape: no allocation or callback.
     pub(crate) fn seeded_root_column(&self) -> Option<usize> {
         let [
-            GlaOperator::ScanVertices,
+            scan,
             body @ ..,
             GlaOperator::OrderByValues,
             GlaOperator::Limit {
@@ -238,7 +239,10 @@ impl PreparedGraphPattern<GraphValueRow> {
         let Some((GlaOperator::ProjectValues { columns }, matching)) = body.split_last() else {
             return None;
         };
-        if !matching.iter().all(|operator| {
+        if !matches!(
+            scan,
+            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. }
+        ) || !matching.iter().all(|operator| {
             matches!(
                 operator,
                 GlaOperator::Select { .. }

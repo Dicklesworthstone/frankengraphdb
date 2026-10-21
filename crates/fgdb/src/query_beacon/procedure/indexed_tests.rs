@@ -680,9 +680,11 @@ fn identity_seeded_call_root_expands_only_from_the_returned_vertices() {
             .collect();
         found.sort_unstable();
         assert_eq!(found, [60, 180]);
-        // The closure: the two hits, their two successors and the two edges,
-        // not the 64 vertices and 63 edges a scan admits.
-        assert_eq!(result.rows.snapshot_records, 6);
+        // The one-hop pattern is edge-rooted: the seeds' adjacency admits
+        // the two R edges leaving the hits, and their endpoint rows hydrate
+        // without a record, as for a predicate-bound edge root. The scan
+        // admitted all 63 edges.
+        assert_eq!(result.rows.snapshot_records, 2);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

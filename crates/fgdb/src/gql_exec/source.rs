@@ -3255,6 +3255,7 @@ pub(crate) fn bound_edges<'a, E, Row>(
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
     indexed_only: bool,
+    seeds: Option<&[VId]>,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Vec<BorrowedEdge<'a>>>, E> {
     use fgdb_gql::algebra::{GlaDirection, GlaOperator};
@@ -3272,8 +3273,14 @@ pub(crate) fn bound_edges<'a, E, Row>(
     if steps.is_none() && hops.is_none() {
         return Ok(None);
     }
-    let Some((slot, predicates)) = initial_root_predicates(prefix, 2) else {
-        return Ok(None);
+    // Seeds from a leading bag bind slot 0 by identity (fgdb-2acff), in place
+    // of a root predicate's candidates.
+    let (slot, predicates) = match seeds {
+        Some(_) => (0, None),
+        None => match initial_root_predicates(prefix, 2) {
+            Some((slot, predicates)) => (slot, Some(predicates)),
+            None => return Ok(None),
+        },
     };
     let lookup_direction = if slot == 0 {
         *direction
@@ -3286,8 +3293,15 @@ pub(crate) fn bound_edges<'a, E, Row>(
     };
     let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
     let mut frontier = std::collections::BTreeSet::new();
-    let Some(roots) = root_candidates(snapshot, predicates, as_of, indexed_only, control)? else {
-        return Ok(None);
+    let roots = match (seeds, predicates) {
+        (Some(seeds), _) => seeds.to_vec(),
+        (None, Some(predicates)) => {
+            match root_candidates(snapshot, predicates, as_of, indexed_only, control)? {
+                Some(roots) => roots,
+                None => return Ok(None),
+            }
+        }
+        (None, None) => return Ok(None),
     };
     let hops = match (steps, hops) {
         (Some(steps), _) => {
@@ -4192,14 +4206,15 @@ fn root_endpoint_roles<Row>(
     Some((*relation, source, destination))
 }
 
-/// A vertex-rooted plan restricted to the root identities a leading bag
-/// carries (fgdb-2acff). A plan reading no edges admits each seed by one
+/// A plan restricted to the slot-0 identities a leading bag carries
+/// (fgdb-2acff). A vertex plan reading no edges admits each seed by one
 /// point lookup charged as one record, as a bound closure charges each
-/// reached vertex; a seed without a visible row adds no row. A plan whose
-/// other bindings are flat steps from the root admits the seeds' per-slot
-/// closure. Any other shape returns None before charging anything, and the
-/// caller keeps the ordinary admission. The rows are the complete plan's
-/// rows for those roots: every selection still runs on each binding.
+/// reached vertex; a seed without a visible row adds no row. A vertex plan
+/// whose other bindings are flat steps from the root admits the seeds'
+/// per-slot closure, and an edge-rooted plan visits the seeds' adjacency
+/// through bound_edges. Any other shape returns None before charging
+/// anything, and the caller keeps the ordinary admission. The rows are the
+/// complete plan's rows for those roots: every selection still runs.
 pub(super) fn admit_seeded<'a, E, Row>(
     snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
@@ -4208,12 +4223,20 @@ pub(super) fn admit_seeded<'a, E, Row>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<BorrowedTables<'a>>, E> {
     use fgdb_gql::algebra::GlaOperator;
+    if logical.scans_edges() {
+        // An edge-rooted plan whose slot 0 the seeds bind visits only the
+        // seeds' adjacency, as a predicate-bound root does in bound_edges.
+        if !matches!(
+            logical.operators().first(),
+            Some(GlaOperator::ScanEdges { .. })
+        ) {
+            return Ok(None);
+        }
+        return admit_edge_rooted(snapshot, logical, as_of, Some(seeds), control).map(Some);
+    }
     let Some((GlaOperator::ScanVertices, rest)) = logical.operators().split_first() else {
         return Ok(None);
     };
-    if logical.scans_edges() {
-        return Ok(None);
-    }
     if logical.reads_edges() {
         // Seeded roots followed by flat steps admit their per-slot closure,
         // exactly as an indexed root does in bound_vertex_closure, with the
@@ -4276,7 +4299,6 @@ pub(super) fn admit<'a, E, Row>(
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<BorrowedTables<'a>, E> {
-    use fgdb_gql::algebra::GlaOperator;
     if !logical.scans_edges() && logical.reads_edges() {
         // A bound root followed by flat steps (a quantified reach from one
         // vertex, a vertex-first chain) admits its per-slot closure and only
@@ -4330,7 +4352,21 @@ pub(super) fn admit<'a, E, Row>(
             edges,
         });
     }
-    let edges = match bound_edges(snapshot, logical, as_of, false, control)? {
+    admit_edge_rooted(snapshot, logical, as_of, None, control)
+}
+
+/// The admission of an edge-scanning plan: its bound or scanned edges, then
+/// the vertex rows it reads. `seeds` bind slot 0 by identity (fgdb-2acff);
+/// a shape bound_edges cannot serve from them scans every edge instead.
+fn admit_edge_rooted<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    seeds: Option<&[VId]>,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<BorrowedTables<'a>, E> {
+    use fgdb_gql::algebra::GlaOperator;
+    let edges = match bound_edges(snapshot, logical, as_of, false, seeds, control)? {
         Some(edges) => edges,
         None => scan_edges(&snapshot.blocks, &snapshot.block_props, as_of, control)?,
     };

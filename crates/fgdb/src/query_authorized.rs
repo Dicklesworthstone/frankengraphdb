@@ -697,7 +697,7 @@ impl<'a> Tables<'a> {
                 tables.admit_vertex(row, predicates, node, control)?;
             }
         } else {
-            let Some(edges) = source::bound_edges(snapshot, plan, at, true, scan)? else {
+            let Some(edges) = source::bound_edges(snapshot, plan, at, true, None, scan)? else {
                 return Ok(None);
             };
             // The owner source hydrates only the endpoint rows a plan reads;
