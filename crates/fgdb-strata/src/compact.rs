@@ -174,18 +174,22 @@ pub fn compact_vertex_patches(
     patches: &[crate::vertex::VertexPatchRows],
     floor: CommitSeq,
 ) -> Result<(Vec<crate::vertex::VertexPatchRows>, usize), crate::vertex::VertexPatchError> {
-    let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), crate::vertex::VertexRow> =
+    // Borrow publication rows until restatements and the visibility floor
+    // have selected the retained winners. Cloning large property payloads only
+    // to replace or discard them needlessly amplifies maintenance work.
+    let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), &crate::vertex::VertexRow> =
         BTreeMap::new();
     let mut seen = 0usize;
     for rows in patches {
         for row in rows {
             seen += 1;
-            statements.insert((row.vid, row.created_at), row.clone());
+            statements.insert((row.vid, row.created_at), row);
         }
     }
     let retained: Vec<crate::vertex::VertexRow> = statements
         .into_values()
         .filter(|row| row.retired_at.is_none_or(|r| r.0 > floor.0))
+        .cloned()
         .collect();
     let superseded = seen - retained.len();
     let mut packed = crate::vertex::pack_rows(retained)?;
@@ -301,6 +305,62 @@ mod tests {
     use fgdb_delta_types::RelationId;
     use fgdb_types::{EId, VId};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn borrowed_vertex_winners_preserve_all_retained_cuts_and_property_versions() {
+        use crate::vertex::{VertexRow, encode_patch, merge_all_vertices, pack_rows};
+        use fgdb_delta_types::{LabelId, PropertyKeyId};
+        use fgdb_types::CanonicalScalar;
+        let mut patches = Vec::new();
+        let count = 67usize;
+        for publication in 0..4 {
+            let rows = (0..count)
+                .map(|at| VertexRow {
+                    vid: VId((1u128 << 127) | ((at as u128) << 64) | at as u128),
+                    birth_ordinal: at as u64,
+                    created_at: CommitSeq(if publication < 2 { 1 } else { 3 }),
+                    retired_at: if publication == 1 {
+                        Some(CommitSeq(3))
+                    } else if publication == 3 && at % 2 == 0 {
+                        Some(CommitSeq(6))
+                    } else {
+                        None
+                    },
+                    labels: vec![LabelId(1), LabelId(3)],
+                    props: vec![(
+                        PropertyKeyId(2),
+                        CanonicalScalar::bytes(vec![if publication < 2 { 1 } else { 3 }; 127 + at])
+                            .expect("bounded payload")
+                            .into(),
+                    )],
+                })
+                .collect();
+            patches.extend(pack_rows(rows).expect("valid publication"));
+        }
+        let seen: usize = patches.iter().map(|rows| rows.len()).sum();
+        for floor in [0, 1, 3, 6, 8] {
+            let (packed, superseded) =
+                compact_vertex_patches(&patches, CommitSeq(floor)).expect("valid history");
+            let kept: usize = packed.iter().map(|rows| rows.len()).sum();
+            assert_eq!(superseded, seen - kept);
+            for cut in floor..=8 {
+                assert_eq!(
+                    merge_all_vertices(&patches, CommitSeq(cut)),
+                    merge_all_vertices(&packed, CommitSeq(cut)),
+                    "floor={floor} cut={cut}"
+                );
+            }
+            for rows in &packed {
+                assert!(
+                    encode_patch(rows).expect("canonical patch").len() as u64
+                        <= crate::store::MAX_STORED_OBJECT_BYTES
+                );
+            }
+            let twice = compact_vertex_patches(&packed, CommitSeq(floor)).expect("fixed point");
+            assert_eq!(twice.0, packed);
+            assert_eq!(twice.1, 0);
+        }
+    }
 
     fn entry(dst: u128) -> AdjacencyEntry {
         version(dst, 1, None)
