@@ -11,6 +11,8 @@ use std::cmp::Ordering;
 // resolve from query_spool/, as a mod.rs's would. Name them explicitly.
 #[path = "sort/canonical.rs"]
 mod canonical;
+#[path = "sort/difference.rs"]
+mod difference;
 #[path = "sort/prepared.rs"]
 mod prepared;
 pub use prepared::PreparedBufferedOrder;
