@@ -182,38 +182,10 @@ fn equal<E>(
             }
             Ok(Some(computed) == *scalar)
         }
-        (Value::Stored(left), Value::Stored(right)) => {
-            charge_stored(left, control)?;
-            charge_stored(right, control)?;
-            Ok(left == right)
-        }
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
         (Value::Delete(left), Value::Delete(right)) => Ok(left == right),
         // A List never equals a scalar, and a field holds one kind of value.
         _ => Ok(false),
-    }
-}
-
-/// One unit per collection node plus every scalar's payload, as the scalars
-/// would be charged one by one.
-fn charge_stored<E>(
-    value: &CanonicalPropertyValue,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<(), E> {
-    match value {
-        CanonicalPropertyValue::Scalar(scalar) => charge_payload(scalar, control),
-        CanonicalPropertyValue::List(list) => {
-            control(GlaExecutionEvent::Work)?;
-            list.values()
-                .iter()
-                .try_for_each(|value| charge_stored(value, control))
-        }
-        CanonicalPropertyValue::Map(map) => {
-            control(GlaExecutionEvent::Work)?;
-            map.entries()
-                .iter()
-                .try_for_each(|entry| charge_stored(entry.value(), control))
-        }
     }
 }
 
@@ -908,10 +880,6 @@ fn execute_erased<E, C>(
             (target, Field::Property(key), Value::Computed(value)) => {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
                 property_intent(target, key, Some(CanonicalPropertyValue::Scalar(value)))
-            }
-            // Charged when the List was copied into the proposal.
-            (target, Field::Property(key), Value::Stored(value)) => {
-                property_intent(target, key, Some(value))
             }
             (target, Field::Property(key), Value::Stored(value)) => {
                 GraphMutationIntent::StoredProperty { target, key, value }
