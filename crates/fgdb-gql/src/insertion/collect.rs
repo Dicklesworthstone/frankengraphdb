@@ -3,6 +3,8 @@
 //! Standalone creation supplies one zero-column occurrence to these same phases;
 //! it never fabricates a public GraphValueRow or calls a graph-source adapter.
 
+mod stored;
+
 use super::*;
 use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use crate::insertion_query::GraphInsertBinding;
@@ -155,14 +157,16 @@ fn charge_stored<E, A, C>(
 }
 
 // A computed or input value as the stored field a CREATE writes
-// (fgdb-k3nub). A scalar or a list of storable values is written as is.
-// A map, a graph element or a value beyond the canonical collection bounds
-// is an input-schema refusal, never a silent truncation.
+// (fgdb-k3nub). Reserve the complete copy before the canonical conversion:
+// converting a list clones its leaves even when the expression owns them.
+// Maps, graph elements and values beyond the canonical bounds still refuse.
 fn written<E, A, C>(
     value: &GraphValue,
     row: usize,
     column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
 ) -> ResultOf<CanonicalPropertyValue, E, A, C> {
+    stored::reserve(value, row, column, control)?;
     value
         .to_written_property()
         .ok_or(GqlQueryError::Source(GraphInsertError::InputSchema {
@@ -204,15 +208,15 @@ fn fields<E, A, C>(
     {
         control(GlaExecutionEvent::Work)?;
         // Use the same scalar/CASE VM as mutation, RETURN and aggregation.
-        // Computed values already own their charged payload; move, never copy.
+        // Computed scalars move; a collection's storage conversion copies its
+        // payload and must reserve that second ownership before conversion.
         let value = match expression.value() {
             GraphSetValue::Column(column) => match row.values()[*column].as_scalar() {
                 Some(scalar) => scalar,
                 // A list column (an UNWIND of lists, a collected list) is a
                 // stored list field (fgdb-k3nub).
                 None => {
-                    let stored = written(&row.values()[*column], row_at, *column)?;
-                    charge_stored(&stored, control)?;
+                    let stored = written(&row.values()[*column], row_at, *column, control)?;
                     result.push((*key, stored));
                     continue;
                 }
@@ -224,8 +228,7 @@ fn fields<E, A, C>(
                 // edge, path or map is an input-schema refusal, never a silent
                 // truncation.
                 None => {
-                    let stored = written(value, row_at, property)?;
-                    charge_stored(&stored, control)?;
+                    let stored = written(value, row_at, property, control)?;
                     result.push((*key, stored));
                     continue;
                 }
@@ -271,9 +274,9 @@ fn fields<E, A, C>(
                     })?;
                 let value = match value {
                     GraphValue::Scalar(value) => CanonicalPropertyValue::Scalar(value),
-                    value => written(&value, row_at, property)?,
+                    value => written(&value, row_at, property, control)?,
                 };
-                // Computed values already own their charged payload.
+                // The field cell is separate from any copied list payload.
                 control(GlaExecutionEvent::ScratchEntry)?;
                 result.push((*key, value));
                 continue;
