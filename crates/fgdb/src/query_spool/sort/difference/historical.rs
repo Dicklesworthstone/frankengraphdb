@@ -275,3 +275,6 @@ where
 #[cfg(test)]
 #[path = "historical/tests.rs"]
 mod tests;
+
+#[path = "historical/buffered.rs"]
+mod buffered;
