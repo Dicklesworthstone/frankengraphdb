@@ -1189,3 +1189,110 @@ fn text_batches_refuse_bad_final_arguments_returning_and_execution_without_a_pre
         }
     });
 }
+
+#[test]
+fn session_writes_commit_the_capability_decision_digest_and_owner_writes_stay_zero() {
+    // fgdb-g9af0 / FG-INV-20: a session's text and batch writes (the fgdbd
+    // EXECUTE Write and EXECUTE_BATCH paths) run as authorized programs, and
+    // their CommitMarker carries the digest of the decision that admitted
+    // them. Before, only the native staging path bound it; programs
+    // committed zeros.
+    lab(0xac20, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let zero = fgdb_crypto::Digest([0u8; 32]);
+        let mut owner = WriteBatch::new(R);
+        owner.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(0))]);
+        let owner_seq = db.write(&commit, owner).await.unwrap();
+
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let expected = fgdb_crypto::hash(
+            &issuer
+                .verify_at(&token, "host-branch", NOW)
+                .unwrap()
+                .begin_write_at("host-branch", NOW)
+                .unwrap()
+                .canonical_decision_bytes(),
+        );
+        assert_ne!(expected, zero);
+        let attenuated = token
+            .attenuate(fgdb_warden::Restriction::MaxNodes(50))
+            .unwrap();
+        let mut committed = Vec::new();
+        for (token, text, batch) in [
+            (&token, "CREATE (:Visible {p: 1})", false),
+            (
+                &token,
+                "MATCH (n:Visible) WHERE n.p = $key SET n.q = $value",
+                true,
+            ),
+            (&attenuated, "CREATE (:Visible {p: 3})", false),
+        ] {
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let (_, completion) = if batch {
+                session
+                    .query_batch_stats(&query, text, &[arguments(0, 5), arguments(1, 6)])
+                    .await
+                    .unwrap()
+            } else {
+                session
+                    .query_stats(&query, text, &GqlParameters::new())
+                    .await
+                    .unwrap()
+            };
+            let EmbeddedTxnCompletion::WriteCommitted { commit_seq } = completion else {
+                panic!("{text} wrote")
+            };
+            drop(session);
+            committed.push(commit_seq);
+        }
+        let digests = |db: &Database<MemVfs>| -> Vec<_> {
+            core::iter::once(owner_seq)
+                .chain(committed.iter().copied())
+                .map(|seq| {
+                    db.commit_authorization_decision_digest(seq)
+                        .unwrap()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let written = digests(&db);
+        // The owner write keeps zeros. One capability gives one digest across
+        // statement kinds and the batch path; attenuation changes it.
+        assert_eq!(written[0], zero);
+        assert_eq!(written[1], expected);
+        assert_eq!(written[2], expected);
+        assert_ne!(written[3], zero);
+        assert_ne!(written[3], expected);
+
+        // Scrub verifies every published capsule, and recovery reads the same
+        // authenticated markers back.
+        let summary = db.scrub(&commit).await.unwrap();
+        assert!(summary.lost.is_empty() && summary.repaired.is_empty());
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(digests(&db), written);
+    });
+}

@@ -458,6 +458,7 @@ impl<V: Vfs + Clone> Database<V> {
                 // Both public APIs build their final value here. There is no
                 // allocation, optional-receipt unwrap or auth check after commit.
                 let receipt = receipt(workspace.transaction(), self, execution, stats, receipts)?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {

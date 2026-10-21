@@ -249,6 +249,7 @@ impl<V: Vfs + Clone> Database<V> {
                         })
                     })
                     .map_err(source)?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -615,6 +616,7 @@ mod all_targets {
                             })
                         })
                         .map_err(staging)?;
+                    execution.bind_decision(workspace.transaction());
                     let completion = workspace
                         .transaction()
                         .complete_controlled(self, commit_cx, None, false, || {

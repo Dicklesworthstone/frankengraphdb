@@ -253,6 +253,7 @@ impl<V: Vfs + Clone> Database<V> {
                         })
                     })
                     .map_err(source)?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {

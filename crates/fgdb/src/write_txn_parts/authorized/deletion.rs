@@ -188,6 +188,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut execution,
                     returning,
                 )?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {

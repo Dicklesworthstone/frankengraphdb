@@ -268,6 +268,7 @@ impl<V: Vfs + Clone> Database<V> {
                         })
                     })
                     .map_err(query_source)?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -354,6 +355,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut execution,
                     true,
                 )?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {

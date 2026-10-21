@@ -62,6 +62,17 @@ struct Execution<'cx, 'permit, Clock> {
     clock: Clock,
 }
 impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
+    /// FG-INV-20: the transaction's CommitMarker carries the digest of the
+    /// capability decision that admitted its effects (fgdb-g9af0). Every
+    /// authorized path binds it before completion; native staging binds it
+    /// on the first staged row. The first binding stands.
+    fn bind_decision(&self, transaction: &mut WriteTxn) {
+        if transaction.authorization_decision_digest.is_none() {
+            transaction.authorization_decision_digest =
+                Some(fgdb_crypto::hash(&self.permit.canonical_decision_bytes()));
+        }
+    }
+
     fn work(&mut self, amount: u64) -> Result<(), WriteTxnError> {
         self.cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
         self.permit
@@ -233,11 +244,7 @@ fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
     row: PendingRow,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
-    if transaction.authorization_decision_digest.is_none() {
-        transaction.authorization_decision_digest = Some(fgdb_crypto::hash(
-            &execution.permit.canonical_decision_bytes(),
-        ));
-    }
+    execution.bind_decision(transaction);
     // Native staging replays the entire intent prefix. Charge that logical
     // input work, not merely one unit for a growing quadratic preparation.
     let prefix = u64::try_from(transaction.staged.len())
@@ -441,6 +448,7 @@ impl<V: Vfs + Clone> Database<V> {
                         )?;
                     }
                 }
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, true, || execution.checkpoint())
