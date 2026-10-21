@@ -264,6 +264,13 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
         sources: usize,
         checkpoint: &mut impl FnxMeter<C>,
     ) -> Result<Self, FnxExecutionError<C>> {
+        if W == 0 {
+            // Each scalar source owns n consecutive nonzero distance codes.
+            // Public admission already bounds n*n; keep the worker's exact
+            // span checked before any allocation as well.
+            n.checked_mul(sources)
+                .ok_or(FnxExecutionError::SizeOverflow)?;
+        }
         let mut worker = Self {
             first_source,
             scores: filled(sources, 0.0, checkpoint)?,
@@ -283,7 +290,7 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
         checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
         worker.queue = reserve(n)?;
         if W == 0 {
-            worker.distance = filled(n, usize::MAX, checkpoint)?;
+            worker.distance = filled(n, 0, checkpoint)?;
         } else {
             worker.seen = filled(n, [0; W], checkpoint)?;
             worker.frontier = filled(n, [0; W], checkpoint)?;
@@ -340,12 +347,19 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
     ) -> Result<(), WorkerError> {
         let n = graph.node_count();
         for at in 0..self.scores.len() {
-            fill(&mut self.distance, usize::MAX, live)?;
+            // A worker runs its assigned sources once, in order. Codes from
+            // earlier sources are below this source's interval, so no graph-
+            // sized clear or second visited array is needed. Subtracting its
+            // first code restores the exact hop count before any arithmetic.
+            let first_distance = at
+                .checked_mul(n)
+                .and_then(|start| start.checked_add(1))
+                .ok_or(WorkerError::SizeOverflow)?;
             live.step()?;
             self.queue.clear();
             let source = self.first_source + at;
             self.queue.push(source);
-            self.distance[source] = 0;
+            self.distance[source] = first_distance;
             self.queue_peak = self.queue_peak.max(1);
             let mut head = 0;
             let mut sum_dist = 0usize;
@@ -354,7 +368,10 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
                 live.step()?;
                 let vertex = self.queue[head];
                 head += 1;
-                let distance = self.distance[vertex];
+                let code = self.distance[vertex];
+                let distance = code
+                    .checked_sub(first_distance)
+                    .ok_or(WorkerError::InvalidProjection)?;
                 if HARMONIC {
                     if distance > 0 {
                         harmonic += 1.0 / distance as f64;
@@ -364,7 +381,7 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
                         .checked_add(distance)
                         .ok_or(WorkerError::SizeOverflow)?;
                 }
-                let next_distance = distance.checked_add(1).ok_or(WorkerError::SizeOverflow)?;
+                let next_distance = code.checked_add(1).ok_or(WorkerError::SizeOverflow)?;
                 let mut row = graph
                     .neighbors_indices(vertex)
                     .ok_or(WorkerError::InvalidProjection)?;
@@ -372,7 +389,7 @@ impl<const W: usize, const HARMONIC: bool> Worker<W, HARMONIC> {
                     let count = live.take(row.len())?;
                     let (admitted, rest) = row.split_at(count);
                     for &neighbor in admitted {
-                        if self.distance[neighbor] == usize::MAX {
+                        if self.distance[neighbor] < first_distance {
                             self.distance[neighbor] = next_distance;
                             self.queue.push(neighbor);
                             self.queue_peak = self.queue_peak.max(self.queue.len() - head);

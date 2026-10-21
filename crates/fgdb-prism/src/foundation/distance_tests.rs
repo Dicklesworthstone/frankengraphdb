@@ -267,6 +267,146 @@ fn source_and_batch_boundaries_match_an_independent_distance_set_witness() {
 }
 
 #[test]
+fn scalar_source_epochs_separate_interleaved_components_without_changing_score_bits() {
+    // Each path's vertices occupy three distant ordinal ranges. Consecutive
+    // sources leave noncontiguous old visit codes, and later sources revisit
+    // components traversed much earlier by the worker.
+    let components = 173;
+    let edges: Vec<_> = (0..components)
+        .flat_map(|root| {
+            [
+                (root, root + components),
+                (root + components, root + 2 * components),
+            ]
+        })
+        .collect();
+    let graph = graph(3 * components + 2, &edges);
+    assert_eq!(lane_width(&graph, &mut Unstoppable).unwrap().0, 0);
+    for threads in [1, 4] {
+        assert_oracle::<0, false>(&graph, threads);
+        assert_oracle::<0, true>(&graph, threads);
+    }
+    let reference = copied(&graph);
+    let close = fnx_algorithms::closeness_centrality(&reference);
+    let harmonic = fnx_algorithms::harmonic_centrality(&reference);
+    for (actual, expected, nodes) in [
+        (
+            run::<false, Infallible>(&graph, &mut Unstoppable)
+                .unwrap()
+                .0,
+            close.scores,
+            close.witness.nodes_touched,
+        ),
+        (
+            run::<true, Infallible>(&graph, &mut Unstoppable).unwrap().0,
+            harmonic.scores,
+            harmonic.witness.nodes_touched,
+        ),
+    ] {
+        assert_eq!(
+            bits(&actual),
+            expected
+                .iter()
+                .map(|score| score.score.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(actual.witness.nodes_touched, nodes);
+    }
+}
+
+#[test]
+fn isolated_scalar_sources_take_linear_live_work_and_keep_the_same_workspace() {
+    fn check<const HARMONIC: bool>(graph: &SnapshotGraphView) {
+        let n = graph.node_count();
+        let mut worker = Worker::<0, HARMONIC>::new(n, 0, n, &mut Unstoppable).unwrap();
+        let workspace = worker.bytes::<Infallible>().unwrap();
+        let mut polls = 0;
+        worker
+            .run(graph, &mut || {
+                polls += 1;
+                true
+            })
+            .unwrap();
+        assert!(worker.scores.iter().all(|score| score.to_bits() == 0));
+        assert_eq!(worker.nodes_touched, n);
+        assert_eq!(worker.edges_scanned, 0);
+        assert_eq!(worker.queue_peak, 1);
+        assert_eq!(worker.bytes::<Infallible>().unwrap(), workspace);
+        // A generous linear operation bound catches graph-sized clearing per
+        // source without pinning the exact number of bookkeeping operations.
+        assert!(polls <= (4 * n).div_ceil(ARITHMETIC_RUN) + 2);
+    }
+    let graph = graph(16_385, &[]);
+    check::<false>(&graph);
+    check::<true>(&graph);
+}
+
+#[test]
+fn scalar_epochs_can_cancel_inside_a_later_source_without_clearing_old_visits() {
+    let n = 8195;
+    let reached = n - 1;
+    let graph = graph(
+        n,
+        &(1..reached).map(|target| (0, target)).collect::<Vec<_>>(),
+    );
+    let mut worker = Worker::<0, true>::new(n, 0, 2, &mut Unstoppable).unwrap();
+    // The first hub traversal finishes. Source one then reaches the hub from
+    // a leaf. Refuse inside that hub row while both source epochs are present.
+    let first_source_work = 1 + reached + 2 * (reached - 1);
+    let second_before_hub = 4; // Source initialization, leaf pop/arc, hub pop.
+    let granted = (first_source_work + second_before_hub).div_ceil(ARITHMETIC_RUN) * ARITHMETIC_RUN;
+    let stop = granted / ARITHMETIC_RUN + 1;
+    let mut polls = 0;
+    let result = worker.run(&graph, &mut || {
+        assert!(polls < stop, "no live request follows refusal");
+        polls += 1;
+        polls != stop
+    });
+    assert_eq!(result, Err(WorkerError::Stopped));
+    assert_eq!(polls, stop);
+    assert_eq!(worker.scores, [(reached - 1) as f64, 0.0]);
+    assert_eq!(worker.nodes_touched, reached);
+    assert_eq!(
+        worker.edges_scanned,
+        2 * (reached - 1) + 1 + granted - first_source_work - second_before_hub
+    );
+    let current = worker.distance.iter().filter(|&&code| code > n).count();
+    let prior = worker
+        .distance
+        .iter()
+        .filter(|&&code| code > 0 && code <= n)
+        .count();
+    assert_eq!(current, worker.queue.len());
+    assert!(current > 2 && current < reached);
+    assert_eq!(current + prior, reached);
+    assert_eq!(worker.distance[n - 1], 0, "the isolate stays unvisited");
+}
+
+#[test]
+fn scalar_epoch_codes_bound_each_source_and_refuse_overflow_before_allocation() {
+    let graph = graph(3, &[(0, 1), (1, 2)]);
+    let mut worker = Worker::<0, false>::new(3, 0, 3, &mut Unstoppable).unwrap();
+    worker.run(&graph, &mut || true).unwrap();
+    // The final source owns codes 7..=9. The far endpoint reaches the exact
+    // admitted maximum, and subtracting seven recovers hop lengths 2, 1, 0.
+    assert_eq!(worker.distance, [9, 8, 7]);
+    assert_eq!(
+        worker
+            .scores
+            .iter()
+            .map(|score| score.to_bits())
+            .collect::<Vec<_>>(),
+        oracle::<false>(&graph, 0).0
+    );
+    for n in [usize::MAX / 2 + 1, usize::MAX] {
+        let result = Worker::<0, false>::new(n, 0, 2, &mut || -> Result<(), Infallible> {
+            panic!("an overflowing epoch span must refuse before allocating or polling")
+        });
+        assert!(matches!(result, Err(FnxExecutionError::SizeOverflow)));
+    }
+}
+
+#[test]
 fn lane_policy_is_stable_and_declines_disconnected_and_high_diameter_inputs() {
     for n in [499, 500, 513, 4097] {
         let star = graph(n, &(1..n).map(|target| (0, target)).collect::<Vec<_>>());
@@ -566,12 +706,13 @@ fn serial_paths_and_probe_propagate_every_live_refusal_without_another_call() {
             .collect::<Vec<_>>(),
     );
     let grouped = graph(513, &[]);
-    for arm in 0..4 {
+    for arm in 0..5 {
         let invoke = |cut: &mut Cut| -> Result<(), FnxExecutionError<usize>> {
             match arm {
                 0 => run_scheduled::<0, false, usize>(&small, cut, 1).map(|_| ()),
                 1 => run_scheduled::<2, true, usize>(&small, cut, 1).map(|_| ()),
                 2 => run_scheduled::<1, true, usize>(&grouped, cut, 1).map(|_| ()),
+                3 => run_scheduled::<0, true, usize>(&grouped, cut, 1).map(|_| ()),
                 _ => lane_width(&large, cut).map(|_| ()),
             }
         };
