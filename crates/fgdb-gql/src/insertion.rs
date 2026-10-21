@@ -520,6 +520,10 @@ impl PreparedGraphInsert {
     /// Relational inputs, procedures and returning-query stages are not part
     /// of this proof. Native projected values name pattern-bound vertices;
     /// they cannot hide a read through a supplied edge identity.
+    ///
+    /// The answer is the edges' own relation, not the statement coordinate:
+    /// the coordinate places created vertices, and this profile creates none.
+    /// The host stages every edge group under its edge relation either way.
     #[must_use]
     pub fn independent_edge_append_relation(&self) -> Option<RelationId> {
         use crate::algebra::ValueProjection;
@@ -527,9 +531,9 @@ impl PreparedGraphInsert {
         let Input::Pattern(selection) = &self.input else {
             return None;
         };
+        let relation = self.edges.first()?.relation;
         if !self.vertices.is_empty()
-            || self.edges.is_empty()
-            || self.edges.iter().any(|edge| edge.relation != self.relation)
+            || self.edges.iter().any(|edge| edge.relation != relation)
             || selection.plan().reads_edges()
             || !selection.value_columns().iter().all(|column| {
                 matches!(
@@ -543,7 +547,7 @@ impl PreparedGraphInsert {
         {
             return None;
         }
-        Some(self.relation)
+        Some(relation)
     }
 
     pub(crate) fn return_property_keys(

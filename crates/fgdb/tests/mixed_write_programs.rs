@@ -1543,4 +1543,116 @@ mod independent_edges {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+
+    #[test]
+    fn edges_outside_the_write_coordinate_keep_the_independent_profile() {
+        // A host writes under its own coordinate (the CLI defaults to relation
+        // 1) while CREATE names the edge relation. The coordinate places only
+        // created vertices, so the edge relation keys the profile.
+        let ((), report) = run_async_under_lab(0x6d17_0106, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let other = RelationId(2);
+            let step = || {
+                PreparedGraphInsertText::prepare(
+                    "MATCH (a:Base),(b:Base) WHERE a.p=10 AND b.p=20 CREATE (a)-[:S {p:b.p}]->(b)",
+                    R,
+                    |kind: GraphSymbolKind, name: &str| {
+                        if kind == GraphSymbolKind::Relation && name == "S" {
+                            Some(GraphSymbol::Relation(other))
+                        } else {
+                            symbols(kind, name)
+                        }
+                    },
+                )
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+            };
+            assert_eq!(step().independent_edge_append_relation(), Some(other));
+            let steps = |count: usize| {
+                PreparedGraphWriteProgram::prepare((0..count).map(|_| step().into()).collect())
+                    .unwrap()
+            };
+            // (new, incumbent) evaluator work for 2, 4 and 8 statements.
+            let mut work = Vec::new();
+            for count in [2, 4, 8] {
+                let query = steps(count);
+                let mut old_txn = db.begin(&c.txn()).unwrap();
+                let old = incumbent(
+                    &mut old_txn,
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let new = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        policy(),
+                        identity,
+                    )
+                    .unwrap();
+                compare_receipts(&new, &old);
+                assert_eq!(new.stats().created_edges, count as u64);
+                assert_eq!(
+                    txn.staged_effect_digest().unwrap(),
+                    old_txn.staged_effect_digest().unwrap()
+                );
+                assert_eq!(txn.edges(&db).unwrap(), old_txn.edges(&db).unwrap());
+                work.push((
+                    new.stats().evaluator.work_units,
+                    old.stats().evaluator.work_units,
+                ));
+                old_txn.abort();
+                txn.abort();
+            }
+            // Every independent statement reads the same unchanged vertex
+            // domain, so each one adds the same work. The incumbent's overlay
+            // also walks every earlier statement's staged edge.
+            let step_work = |pick: fn(&(u64, u64)) -> u64| {
+                (
+                    pick(&work[1]) - pick(&work[0]),
+                    pick(&work[2]) - pick(&work[1]),
+                )
+            };
+            let (four, eight) = step_work(|pair| pair.0);
+            assert_eq!(eight, 2 * four, "independent work per statement: {work:?}");
+            let (four, eight) = step_work(|pair| pair.1);
+            assert!(eight > 2 * four, "incumbent work per statement: {work:?}");
+
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.execute_graph_write_program_returning_governed(
+                &mut db,
+                &c.query(),
+                &steps(2),
+                policy(),
+                identity,
+            )
+            .unwrap();
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let relations: Vec<_> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .map(|coordinate| coordinate.relation)
+                .collect();
+            assert_eq!(relations, vec![other]);
+            for eid in [EId(100_000), EId(110_000)] {
+                let edge = db.edge(eid).unwrap().unwrap();
+                assert_eq!(edge.entry.relation, other);
+                assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(2)));
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(20).into())]);
+            }
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
