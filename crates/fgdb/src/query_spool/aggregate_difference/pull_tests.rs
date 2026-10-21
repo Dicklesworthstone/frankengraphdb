@@ -405,19 +405,22 @@ fn pending_io_and_unwind_fuse_delivery_without_clearing_the_file_poison() {
                 state.pending_read = !panic;
                 state.panic_read = panic;
             }
-            let mut future = cursor.next_change();
-            let mut task = Context::from_waker(Waker::noop());
-            if panic {
-                assert!(
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        future.as_mut().poll(&mut task)
-                    }))
-                    .is_err()
-                );
-            } else {
-                assert!(future.as_mut().poll(&mut task).is_pending());
+            // The polled future and its Context (not Send) end before the
+            // next await, so the lab task stays Send.
+            {
+                let mut future = cursor.next_change();
+                let mut task = Context::from_waker(Waker::noop());
+                if panic {
+                    assert!(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            future.as_mut().poll(&mut task)
+                        }))
+                        .is_err()
+                    );
+                } else {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
             }
-            drop(future);
             assert_eq!(cursor.state(), ScanState::Failed);
             let reads = backing.0.lock().unwrap().reads;
             assert!(cursor.next_change().await.unwrap().is_none());

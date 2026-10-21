@@ -562,10 +562,13 @@ fn callback_errors_preserve_identity_but_cannot_hide_retirement_or_unwind() {
                     }))
                 })
                 .unwrap();
-            let mut task = Context::from_waker(Waker::noop());
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                future.as_mut().poll(&mut task)
-            }));
+            // The Context is not Send: end it before the next await.
+            let outcome = {
+                let mut task = Context::from_waker(Waker::noop());
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    future.as_mut().poll(&mut task)
+                }))
+            };
             drop(future);
             if mode == 2 {
                 assert!(outcome.is_err());

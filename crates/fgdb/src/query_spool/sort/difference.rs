@@ -7,6 +7,7 @@ use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget, GqlQueryError};
 
 #[path = "difference/pull.rs"]
 mod cursor;
+pub(in crate::query::view::spool) use cursor::Merge;
 pub use cursor::NativeSpoolDifference;
 
 #[path = "difference/historical.rs"]

@@ -514,37 +514,41 @@ fn callback_backpressure_retained_output_and_callback_failure_release_merge_stat
             .collect::<Vec<_>>();
         let b = seed(&cx, &mut source, CommitSeq(2), &rows, &slots).await;
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let mut future = Box::pin(a.visit_difference(
-            &b,
-            &cx,
-            &mut source,
-            &mut scratch,
-            2,
-            100,
-            61,
-            100,
-            u64::MAX,
-            None,
-            |_, row| {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async move {
-                    std::future::pending::<()>().await;
-                    drop(row);
-                    Ok(())
-                }
-            },
-        ));
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(future.as_mut().poll(&mut task).is_pending());
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let reads = (src.0.lock().unwrap().reads, dst.0.lock().unwrap().reads);
-        assert!(pool.used() > 0);
-        assert!(future.as_mut().poll(&mut task).is_pending());
-        assert_eq!(
-            (src.0.lock().unwrap().reads, dst.0.lock().unwrap().reads),
-            reads
-        );
-        drop(future);
+        // The manually polled future and its Context (not Send) end before
+        // the next await, so the lab task stays Send.
+        {
+            let mut future = Box::pin(a.visit_difference(
+                &b,
+                &cx,
+                &mut source,
+                &mut scratch,
+                2,
+                100,
+                61,
+                100,
+                u64::MAX,
+                None,
+                |_, row| {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        std::future::pending::<()>().await;
+                        drop(row);
+                        Ok(())
+                    }
+                },
+            ));
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let reads = (src.0.lock().unwrap().reads, dst.0.lock().unwrap().reads);
+            assert!(pool.used() > 0);
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert_eq!(
+                (src.0.lock().unwrap().reads, dst.0.lock().unwrap().reads),
+                reads
+            );
+            drop(future);
+        }
         assert_eq!(pool.used(), 0);
         assert!(!source.is_poisoned() && !scratch.is_poisoned());
         calls.store(0, std::sync::atomic::Ordering::SeqCst);
