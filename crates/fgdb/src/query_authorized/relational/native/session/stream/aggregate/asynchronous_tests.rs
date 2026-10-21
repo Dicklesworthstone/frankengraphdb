@@ -163,8 +163,11 @@ fn dropping_pending_input_fuses_the_cursor_and_releases_the_session_pin() {
         let issuer = authority();
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let args = GqlParameters::new();
+        // Each input must still be scanning at the first poll. A direct
+        // `n.p < 0` is now answered from the range candidates in one poll, so
+        // the vertex input compares an expression no candidate source reads.
         for text in [
-            "MATCH (n) WHERE n.p < 0 RETURN COUNT(*) AS count",
+            "MATCH (n) WHERE n.p + 0 < 0 RETURN COUNT(*) AS count",
             "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(*) AS count",
         ] {
             let mut session = db
