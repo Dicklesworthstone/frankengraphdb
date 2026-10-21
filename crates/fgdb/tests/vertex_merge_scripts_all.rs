@@ -63,12 +63,18 @@ fn assert_targets(db: &Database<MemVfs>, key: i64, values: [i64; 2]) {
     for (id, value) in IDS.into_iter().zip(values) {
         assert_eq!(
             db.vertex(id).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+            vec![
+                (P, CanonicalScalar::Int(key).into()),
+                (Q, CanonicalScalar::Int(value).into())
+            ],
         );
     }
     assert_eq!(
         db.vertex(VId(90)).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(20))],
+        vec![
+            (P, CanonicalScalar::Int(9).into()),
+            (Q, CanonicalScalar::Int(20).into())
+        ],
     );
 }
 
@@ -271,7 +277,10 @@ fn no_return_creations_keep_statement_coordinates_and_cumulative_creation_caps()
         assert!(db.vertex(VId(100)).unwrap().is_none());
         assert_eq!(
             db.vertex(VId(101)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(5))],
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ],
         );
         assert_targets(&db, 1, [3, 7]);
         assert_eq!(txcx.outstanding_obligations(), 0);

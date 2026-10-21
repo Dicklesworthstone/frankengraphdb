@@ -105,11 +105,11 @@ fn duplicate_keys_see_prior_creates_but_new_source_rows_are_not_reread() {
         assert_eq!(db.vertices().unwrap().len(), 8);
         for (id, p, q) in [(100, 1, 11), (102, 2, 10)] {
             assert_eq!(db.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q))]);
+                vec![(P, CanonicalScalar::Int(p).into()), (Q, CanonicalScalar::Int(q).into())]);
         }
         for id in [101, 103, 104] {
             assert_eq!(db.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(99))]);
+                vec![(P, CanonicalScalar::Int(9).into()), (Q, CanonicalScalar::Int(99).into())]);
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -172,7 +172,7 @@ fn staged_source_and_late_program_failure_preserve_prefix_coordinates_and_spent_
         }
         for (id, p) in [(102, 1), (103, 2)] {
             assert_eq!(db.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(5))]);
+                vec![(P, CanonicalScalar::Int(p).into()), (Q, CanonicalScalar::Int(5).into())]);
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -279,7 +279,12 @@ fn late_bad_input_never_allocates_and_empty_input_keeps_lifecycle_and_noop_contr
         ).unwrap_err();
         assert!(matches!(error, Error::Preflight(WriteTxnError::WrongDatabase)));
         txn.abort();
-        let error = txn.execute_graph_query_write_governed(
+        // `abort` consumes the transaction, so executing after it is already
+        // impossible at compile time. Close an empty workspace through the
+        // non-consuming `finish` and check the runtime refusal instead.
+        let mut closed = db.begin(&txcx).unwrap();
+        closed.finish(&mut db, &commit).await.unwrap();
+        let error = closed.execute_graph_query_write_governed(
             &mut db, &cx, &empty, zero, 0, |_| Err::<ElementId, ()>(()),
         ).unwrap_err();
         assert!(matches!(error, Error::Preflight(WriteTxnError::Finished)));
@@ -299,7 +304,7 @@ fn late_bad_input_never_allocates_and_empty_input_keeps_lifecycle_and_noop_contr
         assert_eq!(result.stats.created_vertices, 1);
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.vertices().unwrap().len(), 1);
-        assert_eq!(db.vertices().unwrap()[0].props, vec![(P, CanonicalScalar::Int(4))]);
+        assert_eq!(db.vertices().unwrap()[0].props, vec![(P, CanonicalScalar::Int(4).into())]);
         let before_match = db.frontier().unwrap();
         let (result, completion) = db.execute_graph_query_write_autocommit_engine_governed(
             &txcx, &cx, &commit, &one, policy(), 1,
@@ -407,7 +412,7 @@ fn failed_autocommit_aborts_the_entire_batch_and_a_later_execution_can_commit() 
         assert!(db.vertex(VId(101)).unwrap().is_none());
         for (id, p) in [(102, 1), (103, 2)] {
             assert_eq!(db.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(5))]);
+                vec![(P, CanonicalScalar::Int(p).into()), (Q, CanonicalScalar::Int(5).into())]);
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

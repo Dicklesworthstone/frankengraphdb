@@ -54,7 +54,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// read-only and creates no marker commit. A staging failure explicitly
     /// aborts; a finish failure preserves its native durability classification.
     /// No successful prefix or transaction-local receipt escapes an error.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     pub async fn execute_graph_query_write_autocommit_governed<A>(
         &mut self,
         txcx: &TxnCx,
@@ -93,7 +93,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// The autocommit path with database-owned identities. This is the same
     /// transaction lifecycle and cumulative execution policy as the explicit
     /// allocator path, not a separate bulk writer or a per-row retry loop.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     pub async fn execute_graph_query_write_autocommit_engine_governed(
         &mut self,
         txcx: &TxnCx,
@@ -298,7 +298,7 @@ mod query_write_autocommit_tests {
             let commit = contexts.commit();
             let cx = contexts.query();
             let txcx = contexts.txn();
-            let db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut other = Database::open_memory(&commit, keys()).await.unwrap();
             let prepared = query("RETURN 1 AS key", "CREATE (c:City {name:$key})");
             let mut transaction = db.begin(&txcx).unwrap();

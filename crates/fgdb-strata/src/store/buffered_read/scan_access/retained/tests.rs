@@ -37,7 +37,7 @@ fn scalar_row() -> EdgePropertyRow {
 
 #[test]
 fn retained_edges_account_scalar_and_property_vector_capacities() {
-    let ((), report) = run_async_under_lab(0x7c6_01, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c601, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let parent = MemoryPool::new(WORKSPACE, 0).unwrap();
         let pool = parent.child(WORKSPACE, 0).unwrap();
@@ -67,7 +67,7 @@ fn retained_edges_account_scalar_and_property_vector_capacities() {
 
 #[test]
 fn retained_vertices_include_unused_label_capacity() {
-    let ((), report) = run_async_under_lab(0x7c6_02, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c602, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut labels = Vec::with_capacity(64);
@@ -96,7 +96,7 @@ fn retained_vertices_include_unused_label_capacity() {
 
 #[test]
 fn retained_blocks_include_all_nested_vectors_without_changing_locators() {
-    let ((), report) = run_async_under_lab(0x7c6_03, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c603, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut entries = Vec::with_capacity(16);
@@ -125,7 +125,7 @@ fn retained_blocks_include_all_nested_vectors_without_changing_locators() {
 
 #[test]
 fn collection_images_keep_full_admission_instead_of_guessing_capacities() {
-    let ((), report) = run_async_under_lab(0x7c6_04, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c604, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut children = Vec::with_capacity(128);
@@ -156,7 +156,7 @@ fn collection_images_keep_full_admission_instead_of_guessing_capacities() {
 
 #[test]
 fn every_retention_control_failure_refunds_the_whole_candidate() {
-    let ((), report) = run_async_under_lab(0x7c6_05, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c605, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut count = 0;
@@ -198,7 +198,7 @@ fn every_retention_control_failure_refunds_the_whole_candidate() {
 
 #[test]
 fn undersized_prepaid_reservation_refuses_without_an_unaccounted_owner() {
-    let ((), report) = run_async_under_lab(0x7c6_06, |root| async move {
+    let ((), report) = run_async_under_lab(0x7c606, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(64, 0).unwrap();
         // Inline test payload: no unadmitted heap allocation is introduced.

@@ -3,6 +3,7 @@
 // preparation then stages all proposals, without rewalking a growing prefix.
 
 impl WriteTxn {
+    #[allow(clippy::type_complexity)]
     fn execute_frozen_vertex_updates_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,

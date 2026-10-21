@@ -155,7 +155,10 @@ fn native_upsert_freezes_targets_and_charges_all_actions_before_acceptance() {
         for (id, q) in IDS.into_iter().zip([8, 16]) {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(q))],
+                vec![
+                    (P, CanonicalScalar::Int(2).into()),
+                    (Q, CanonicalScalar::Int(q).into())
+                ],
             );
         }
         assert!(db.vertex(VId(90)).unwrap().is_some());

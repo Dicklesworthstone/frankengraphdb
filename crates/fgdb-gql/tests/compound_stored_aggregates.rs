@@ -11,7 +11,7 @@ use fgdb_gql::{
     PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQueryText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalText, EId, VId};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -210,7 +210,9 @@ fn stored_nonnumeric_values_fail_at_execution_even_beneath_limit_zero() {
             template.bind_parameters(&arguments).unwrap()
         };
         for bad in [
-            GraphValue::Scalar(CanonicalScalar::Text("not numeric".into())),
+            GraphValue::Scalar(CanonicalScalar::Text(
+                CanonicalText::new_ucs_basic("not numeric").unwrap(),
+            )),
             boolean(true),
             GraphValue::List(vec![int(2)].into_boxed_slice()),
         ] {
