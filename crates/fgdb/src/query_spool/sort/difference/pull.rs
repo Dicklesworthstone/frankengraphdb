@@ -15,7 +15,7 @@ pub struct NativeSpoolDifference<'a, B> {
     columns: Arc<[String]>,
     before: CommitSeq,
     after: CommitSeq,
-    merge: Option<Merge>,
+    merge: Option<Merge<ValueOrder>>,
     max_changed_rows: u64,
     changed: u64,
     work: Work<'a>,
@@ -25,17 +25,51 @@ pub struct NativeSpoolDifference<'a, B> {
 // Keys and every retained row/page are owned together. next_change takes this
 // owner OUT of the cursor before any callback/await. Cancellation or unwind
 // therefore drops all traversal state and cannot resume a half-counted group.
-struct Merge {
+pub(in crate::query::view::spool) struct Merge<O> {
     left: Input,
     right: Input,
     a: Option<TrackedBytes>,
     b: Option<TrackedBytes>,
-    keys: ChargedVec<GraphValueOrder>,
+    order: O,
     initialized: bool,
     width: usize,
 }
 
+// Only the comparison domain varies. Value rows retain the same canonical
+// comparator and accounting transcript; exact aggregate delivery uses its
+// visible RETURN tuple instead of comparing private envelope/group columns.
+struct ValueOrder(ChargedVec<GraphValueOrder>);
+impl FrameOrder for ValueOrder {
+    type Error = NativeSpoolError;
+
+    fn admit(&mut self, columns: usize) -> Result<()> {
+        validate_order(&self.0.values, columns)
+    }
+    fn validate(&mut self, row: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
+        canonical::validate(row, columns, work)
+    }
+    fn compare(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> Result<Ordering> {
+        canonical::compare(left, right, &self.0.values, columns, work)
+    }
+}
+
 impl<'a, B> NativeSpoolDifference<'a, B> {
+    // Hosts supplying another exact row domain enter the SAME counting and
+    // authenticated-input machine, without exporting physical merge internals.
+    pub(in crate::query::view::spool) fn merge_with_order<O: FrameOrder>(
+        before: &NativeResultSpool,
+        after: &NativeResultSpool,
+        order: O,
+    ) -> Merge<O> {
+        Merge::new(before, after, order)
+    }
+
     pub(super) fn new(
         before: &NativeResultSpool,
         after: &NativeResultSpool,
@@ -44,29 +78,12 @@ impl<'a, B> NativeSpoolDifference<'a, B> {
         max_changed_rows: u64,
         work: Work<'a>,
     ) -> Self {
-        let input = |spool: &NativeResultSpool| {
-            Input::new(
-                Run {
-                    pages: spool.run.clone(),
-                    rows: spool.row_count(),
-                },
-                spool.max_row_bytes,
-            )
-        };
         Self {
             scratch,
             columns: Arc::clone(&before.columns),
             before: before.snapshot_seq(),
             after: after.snapshot_seq(),
-            merge: Some(Merge {
-                left: input(before),
-                right: input(after),
-                a: None,
-                b: None,
-                keys,
-                initialized: false,
-                width: before.encoded_columns,
-            }),
+            merge: Some(Merge::new(before, after, ValueOrder(keys))),
             max_changed_rows,
             changed: 0,
             work,
@@ -161,29 +178,66 @@ impl<B> core::fmt::Debug for NativeSpoolDifference<'_, B> {
     }
 }
 
-impl Merge {
-    async fn advance<B: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+type MergeResult<T, E> = core::result::Result<T, GqlQueryError<E, Cancel>>;
+
+fn merge_native<T, E: From<NativeSpoolError>>(result: Result<T>) -> MergeResult<T, E> {
+    result.map_err(|error| GqlQueryError::Source(error.into()))
+}
+
+impl<O: FrameOrder> Merge<O> {
+    pub(in crate::query::view::spool) fn new(
+        before: &NativeResultSpool,
+        after: &NativeResultSpool,
+        order: O,
+    ) -> Self {
+        let input = |spool: &NativeResultSpool| {
+            Input::new(
+                Run {
+                    pages: spool.run.clone(),
+                    rows: spool.row_count(),
+                },
+                spool.max_row_bytes,
+            )
+        };
+        Self {
+            left: input(before),
+            right: input(after),
+            a: None,
+            b: None,
+            order,
+            initialized: false,
+            width: before.encoded_columns,
+        }
+    }
+
+    pub(in crate::query::view::spool) fn order(&mut self) -> &mut O {
+        &mut self.order
+    }
+
+    pub(in crate::query::view::spool) async fn advance<
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    >(
         &mut self,
         scratch: &mut SpillFile<B>,
         work: &mut Work<'_>,
-    ) -> NextChange {
+    ) -> MergeResult<Option<Change>, O::Error> {
         if !self.initialized {
-            self.a = pull(&mut self.left, scratch, work).await?;
-            self.b = pull(&mut self.right, scratch, work).await?;
+            self.a = pull(&mut self.left, scratch, work)
+                .await
+                .map_err(|error| error.map_source(O::Error::from))?;
+            self.b = pull(&mut self.right, scratch, work)
+                .await
+                .map_err(|error| error.map_source(O::Error::from))?;
             self.initialized = true;
         }
-        let keys = &self.keys.values;
         while self.a.is_some() || self.b.is_some() {
-            native(work.charge(1))?;
+            merge_native::<_, O::Error>(work.charge(1))?;
             let take_left = match (&self.a, &self.b) {
                 (Some(a), Some(b)) => {
-                    native(canonical::compare(
-                        a.as_ref(),
-                        b.as_ref(),
-                        keys,
-                        self.width,
-                        work,
-                    ))? != Ordering::Greater
+                    self.order
+                        .compare(a.as_ref(), b.as_ref(), self.width, work)
+                        .map_err(GqlQueryError::Source)?
+                        != Ordering::Greater
                 }
                 (Some(_), None) => true,
                 _ => false,
@@ -193,12 +247,18 @@ impl Merge {
             } else {
                 self.b.take()
             }
-            .ok_or(GqlQueryError::Source(NativeSpoolError::IncompleteCursor))?;
+            .ok_or_else(|| {
+                GqlQueryError::Source(O::Error::from(NativeSpoolError::IncompleteCursor))
+            })?;
             let mut weight = if take_left {
-                self.a = pull(&mut self.left, scratch, work).await?;
+                self.a = pull(&mut self.left, scratch, work)
+                    .await
+                    .map_err(|error| error.map_source(O::Error::from))?;
                 -1_i128
             } else {
-                self.b = pull(&mut self.right, scratch, work).await?;
+                self.b = pull(&mut self.right, scratch, work)
+                    .await
+                    .map_err(|error| error.map_source(O::Error::from))?;
                 1_i128
             };
             for (head, input, sign) in [
@@ -206,14 +266,12 @@ impl Merge {
                 (&mut self.b, &mut self.right, 1_i128),
             ] {
                 while let Some(next) = head.as_ref() {
-                    native(work.charge(1))?;
-                    match native(canonical::compare(
-                        next.as_ref(),
-                        row.as_ref(),
-                        keys,
-                        self.width,
-                        work,
-                    ))? {
+                    merge_native::<_, O::Error>(work.charge(1))?;
+                    match self
+                        .order
+                        .compare(next.as_ref(), row.as_ref(), self.width, work)
+                        .map_err(GqlQueryError::Source)?
+                    {
                         Ordering::Less => {
                             return Err(GqlQueryError::Source(SpillError::InvalidRun.into()));
                         }
@@ -222,17 +280,21 @@ impl Merge {
                     }
                     weight = weight
                         .checked_add(sign)
-                        .ok_or(GqlQueryError::Source(SpillError::SizeOverflow.into()))?;
+                        .ok_or_else(|| {
+                            GqlQueryError::Source(O::Error::from(SpillError::SizeOverflow))
+                        })?;
                     // Release this duplicate BEFORE reading its successor.
                     *head = None;
-                    *head = pull(input, scratch, work).await?;
+                    *head = pull(input, scratch, work)
+                        .await
+                        .map_err(|error| error.map_source(O::Error::from))?;
                 }
             }
             if weight != 0 {
                 return Ok(Some((weight, row)));
             }
         }
-        native(work.charge(1))?;
+        merge_native::<_, O::Error>(work.charge(1))?;
         Ok(None)
     }
 }

@@ -2,6 +2,11 @@
 //! Payload bytes cost bytes; only actual nodes cost GraphValue-sized slots.
 use super::*;
 
+// Accounted adaptation of complete aggregate results uses this same decoder
+// admission, including the additional public-tuple copies held by a consumer.
+#[path = "aggregate_difference.rs"]
+mod difference;
+
 /// Predecode reservation: typed slots and actual variable payloads, plus bounded
 /// scalar decoder overlap (notably zoned timestamp's temporary identifier).
 /// A second factor admits vector capacity/compaction overlap. Decoder semantic
