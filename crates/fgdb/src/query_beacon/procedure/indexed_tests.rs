@@ -621,6 +621,73 @@ fn identity_seeded_call_root_reads_only_the_returned_vertices() {
 }
 
 #[test]
+fn identity_seeded_call_root_expands_only_from_the_returned_vertices() {
+    // fgdb-2acff: `YIELD node MATCH (node)-[:R]->(m)` walks from the hits'
+    // closure instead of admitting every vertex and edge.
+    let ((), report) = run_async_under_lab(0xbeac_2ad0, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+                .await
+                .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..64_i64 {
+            let text = if matches!(id, 5 | 17) {
+                "needle background"
+            } else {
+                "background"
+            };
+            batch.create_vertex(
+                VId(id as u128),
+                vec![LabelId(1)],
+                vec![
+                    (TEXT, CanonicalScalar::ucs_basic_text(text).unwrap()),
+                    (X, CanonicalScalar::Int(id * 10)),
+                ],
+            );
+        }
+        // A chain 0 -> 1 -> ... -> 63: each hit has exactly one R successor.
+        for id in 0..63_u128 {
+            batch.add_edge(EId(id), VId(id), VId(id + 1), vec![]);
+        }
+        db.write(&c.commit(), batch).await.unwrap();
+        db.register_beacon_index(
+            &c.query(),
+            &Options::text(TEXT),
+            fgdb_beacon::read::ReadPolicy::default(),
+        )
+        .unwrap();
+        let params = GqlParameters::new();
+        let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            candidates => 2, k => 2) YIELD node MATCH (node)-[:R]->(m) RETURN m.x AS x";
+        let crate::PreparedNativeRead::Set(prepared) =
+            crate::PreparedNativeRead::prepare(statement, &params, maintained_graph_symbols)
+                .unwrap()
+        else {
+            panic!("hybrid CALL must prepare as a relational source");
+        };
+        let bound = prepared.bind_parameters(&params).unwrap();
+        let result = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
+        let mut found: Vec<i64> = result
+            .value
+            .iter()
+            .map(|row| match &row.values()[0] {
+                GraphValue::Scalar(CanonicalScalar::Int(x)) => *x,
+                _ => panic!("m.x is an integer"),
+            })
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, [60, 180]);
+        // The closure: the two hits, their two successors and the two edges,
+        // not the 64 vertices and 63 edges a scan admits.
+        assert_eq!(result.rows.snapshot_records, 6);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties() {
     let ((), report) = run_async_under_lab(0xbeac_3711, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

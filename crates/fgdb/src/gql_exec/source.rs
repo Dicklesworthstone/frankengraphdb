@@ -4192,12 +4192,14 @@ fn root_endpoint_roles<Row>(
     Some((*relation, source, destination))
 }
 
-/// A single-root vertex plan restricted to the root identities a leading bag
-/// carries (fgdb-2acff). Each seed is one point lookup charged as one record,
-/// as a bound closure charges each reached vertex; a seed without a visible
-/// row adds no row. Any other shape returns None before charging anything,
-/// and the caller keeps the ordinary admission. The rows are the complete
-/// plan's rows for those roots: the selections still run on each one.
+/// A vertex-rooted plan restricted to the root identities a leading bag
+/// carries (fgdb-2acff). A plan reading no edges admits each seed by one
+/// point lookup charged as one record, as a bound closure charges each
+/// reached vertex; a seed without a visible row adds no row. A plan whose
+/// other bindings are flat steps from the root admits the seeds' per-slot
+/// closure. Any other shape returns None before charging anything, and the
+/// caller keeps the ordinary admission. The rows are the complete plan's
+/// rows for those roots: every selection still runs on each binding.
 pub(super) fn admit_seeded<'a, E, Row>(
     snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
@@ -4209,20 +4211,46 @@ pub(super) fn admit_seeded<'a, E, Row>(
     let Some((GlaOperator::ScanVertices, rest)) = logical.operators().split_first() else {
         return Ok(None);
     };
-    if logical.scans_edges()
-        || logical.reads_edges()
-        || !rest.iter().all(|operator| match operator {
-            GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
-            GlaOperator::Project { .. }
-            | GlaOperator::ProjectValues { .. }
-            | GlaOperator::Distinct
-            | GlaOperator::OrderByVertexId
-            | GlaOperator::OrderByValues
-            | GlaOperator::OrderByValueColumns { .. }
-            | GlaOperator::Limit { .. } => true,
-            _ => false,
-        })
-    {
+    if logical.scans_edges() {
+        return Ok(None);
+    }
+    if logical.reads_edges() {
+        // Seeded roots followed by flat steps admit their per-slot closure,
+        // exactly as an indexed root does in bound_vertex_closure, with the
+        // same fallback when the walk would outgrow a scan.
+        let Some(steps) = bound_edge_steps(rest, 1).filter(|steps| !steps.is_empty()) else {
+            return Ok(None);
+        };
+        let Some((edges, reached)) =
+            slot_closure(snapshot, as_of, None, seeds.to_vec(), &steps, control)?
+        else {
+            return Ok(None);
+        };
+        let mut vertices = Vec::new();
+        for &vid in &reached {
+            control(SourceEvent::SnapshotRecord)?;
+            if let Some(row) = find_vertex(snapshot, vid, as_of, control)? {
+                control(SourceEvent::ScratchEntry)?;
+                vertices.push(row);
+            }
+        }
+        return Ok(Some(BorrowedTables {
+            snapshot_records: reached.len() as u64 + edges.len() as u64,
+            vertices,
+            edges,
+        }));
+    }
+    if !rest.iter().all(|operator| match operator {
+        GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+        GlaOperator::Project { .. }
+        | GlaOperator::ProjectValues { .. }
+        | GlaOperator::Distinct
+        | GlaOperator::OrderByVertexId
+        | GlaOperator::OrderByValues
+        | GlaOperator::OrderByValueColumns { .. }
+        | GlaOperator::Limit { .. } => true,
+        _ => false,
+    }) {
         return Ok(None);
     }
     let mut vertices = Vec::new();

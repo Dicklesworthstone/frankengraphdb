@@ -211,16 +211,14 @@ impl PreparedGraphPattern<GraphValueRow> {
     }
 
     /// The visible column holding the identity of this pattern's one vertex
-    /// root, when the pattern reads nothing else (fgdb-2acff): one vertex
-    /// scan, its label/property selections, and cells of that same vertex,
-    /// under the canonical unpaged tail. Restricting the root to a set of
-    /// identities then keeps exactly those identities' rows, and skips no
-    /// expression, probe or edge that could raise an error on another root.
+    /// root, when every other binding is reached from it (fgdb-2acff): one
+    /// vertex scan, then only selections, expansions, edge uniqueness and
+    /// path captures, under the canonical unpaged tail. Restricting the root
+    /// to a set of identities then keeps exactly those roots' rows, and skips
+    /// no expression or probe that could raise an error on another root: none
+    /// of these operators can fail, and no second scan starts elsewhere.
     /// Definition-only, like the factor shape: no allocation or callback.
     pub(crate) fn seeded_root_column(&self) -> Option<usize> {
-        if self.variable_count != 1 || self.edge_count != 0 {
-            return None;
-        }
         let [
             GlaOperator::ScanVertices,
             body @ ..,
@@ -237,23 +235,25 @@ impl PreparedGraphPattern<GraphValueRow> {
             Some((GlaOperator::Distinct, body)) => body,
             _ => body,
         };
-        let Some((GlaOperator::ProjectValues { columns }, selections)) = body.split_last() else {
+        let Some((GlaOperator::ProjectValues { columns }, matching)) = body.split_last() else {
             return None;
         };
-        let root = BindingSlot(0);
-        if !selections
+        if !matching.iter().all(|operator| {
+            matches!(
+                operator,
+                GlaOperator::Select { .. }
+                    | GlaOperator::Expand { .. }
+                    | GlaOperator::VarLengthExpand { .. }
+                    | GlaOperator::DifferentEdges { .. }
+                    | GlaOperator::CapturePath { .. }
+            )
+        }) || columns
             .iter()
-            .all(|operator| matches!(operator, GlaOperator::Select { slot, .. } if *slot == root))
-            || !columns.iter().all(|column| match column {
-                ValueProjection::Vertex { slot }
-                | ValueProjection::Property { slot, .. }
-                | ValueProjection::Labels { slot }
-                | ValueProjection::Properties { slot } => *slot == root,
-                _ => false,
-            })
+            .any(|column| matches!(column, ValueProjection::Collected { .. }))
         {
             return None;
         }
+        let root = BindingSlot(0);
         let visible = self.logical.visible_columns.unwrap_or(columns.len());
         columns[..visible]
             .iter()
