@@ -567,6 +567,7 @@ impl PreparedGraphWriteScript {
             program.freeze_constant_vertex_update_input();
         }
         program.freeze_vertex_upsert_input();
+        program.freeze_edge_merge_input();
         let batch = BoundGraphWriteScriptBatch {
             program,
             argument_sets: arguments.len(),

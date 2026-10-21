@@ -358,6 +358,7 @@ pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
     frozen_vertex_update_input: bool,
     frozen_vertex_upsert_input: bool,
+    frozen_edge_merge_input: bool,
 }
 impl core::fmt::Debug for PreparedGraphWriteProgram {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -395,6 +396,7 @@ impl PreparedGraphWriteProgram {
             statements: statements.into_boxed_slice(),
             frozen_vertex_update_input: false,
             frozen_vertex_upsert_input: false,
+            frozen_edge_merge_input: false,
         })
     }
     #[must_use]
@@ -513,6 +515,52 @@ impl PreparedGraphWriteProgram {
             }
         }
         self.frozen_vertex_upsert_input = true;
+        true
+    }
+
+    /// Every statement is a directed relationship MERGE of one shape whose
+    /// two endpoints are independent equality-keyed vertex scans, and the
+    /// endpoint key tuples are pairwise distinct (fgdb-2l3pt). A row's
+    /// candidate endpoint pairs then belong to no other row, so no row's
+    /// existence check can see another row's new relationship, and endpoint
+    /// selections read no relationship at all: evaluating every MERGE
+    /// against the entry overlay and staging once in input order is the
+    /// sequential program's result. A physical choice only, like the others.
+    #[must_use]
+    pub const fn freezes_edge_merge_input(&self) -> bool {
+        self.frozen_edge_merge_input
+    }
+
+    pub(crate) fn freeze_edge_merge_input(&mut self) -> bool {
+        if self.statements.len() <= 1
+            || self.frozen_vertex_update_input
+            || self.frozen_vertex_upsert_input
+        {
+            return false;
+        }
+        let mut shape = None;
+        let mut keys = std::collections::BTreeSet::new();
+        for statement in &self.statements {
+            let GraphWriteStatement::EdgeMerge(merge) = statement else {
+                return false;
+            };
+            let Some(key) = merge.endpoint_key() else {
+                return false;
+            };
+            let current = (
+                merge.relation(),
+                key.shape().map(|(labels, keys)| (labels.to_vec(), keys)),
+            );
+            match &shape {
+                Some(known) if *known == current => {}
+                Some(_) => return false,
+                None => shape = Some(current),
+            }
+            if !keys.insert(key) {
+                return false;
+            }
+        }
+        self.frozen_edge_merge_input = true;
         true
     }
 

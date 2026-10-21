@@ -1,7 +1,8 @@
-// The UNWIND compiler admits two profiles here: vertex field updates, and
-// vertex upserts with pairwise distinct MERGE keys (fgdb-2l3pt). Every
-// selection and RHS uses the real transaction overlay at entry; one ordered
-// preparation then stages all proposals, without rewalking a growing prefix.
+// Batch binders admit three profiles here: vertex field updates, vertex
+// upserts with pairwise distinct MERGE keys, and directed relationship MERGEs
+// with pairwise distinct endpoint keys (fgdb-2l3pt). Every selection and RHS
+// uses the real transaction overlay at entry; one ordered preparation then
+// stages all proposals, without rewalking a growing prefix.
 
 impl WriteTxn {
     #[allow(clippy::type_complexity)]
@@ -325,6 +326,110 @@ impl WriteTxn {
                             .map_err(|error| GraphWriteStepError::VertexUpsert(staging(error)))?;
                     }
                     Ok(stats)
+                },
+                || cx.checkpoint(),
+            );
+            let stats = result.map_err(|error| match (deferred_error_at, error) {
+                (
+                    Some(statement),
+                    GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
+                        source,
+                        ..
+                    }),
+                ) => GraphMutationProgramError::Statement { statement, source }.into(),
+                (_, error) => error,
+            })?;
+            workspace.accept();
+            Ok((stats, receipts))
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn execute_frozen_edge_merges_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        mut allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::GraphWriteProgramStats,
+            Vec<fgdb_gql::GraphWriteStepReceipt>,
+        ),
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertRequest;
+        use fgdb_gql::{
+            GqlQueryError, GraphEdgeMergeError, GraphMutationProgramError,
+            GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteStatement,
+            GraphWriteStepError, GraphWriteStepStats,
+        };
+        debug_assert!(program.freezes_edge_merge_input());
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            workspace.txn.program_multi_relation = true;
+            let mut batches = Vec::new();
+            let mut receipts = Vec::new();
+            let mut deferred_error_at = None;
+            let staging = |error| GqlQueryError::Source(GraphEdgeMergeError::Source(error));
+            let result = program.execute_governed(
+                policy,
+                |statement, input, remaining| {
+                    let GraphWriteStatement::EdgeMerge(merge) = input else {
+                        return Err(GraphWriteStepError::EdgeMerge(staging(
+                            WriteTxnError::UnsupportedAtomicMutation,
+                        )));
+                    };
+                    // Every row resolves its endpoints and existing
+                    // relationships against the entry overlay; its creation
+                    // waits for the one ordered staging below.
+                    let proposal = workspace
+                        .txn
+                        .collect_graph_edge_merge_proposal::<fgdb_gql::GraphWriteStepReceipt, V, A>(
+                            database,
+                            cx,
+                            merge,
+                            remaining.edge_merge_policy(),
+                            None,
+                            |row| {
+                                allocate(GraphWriteIdentityRequest {
+                                    statement,
+                                    request: GraphInsertRequest::Edge { row, edge: 0 },
+                                })
+                            },
+                        )
+                        .map_err(GraphWriteStepError::EdgeMerge)?;
+                    receipts.push(proposal.outcome);
+                    if let Some(batch) = proposal.creation {
+                        batches.push((statement, batch));
+                    }
+                    if statement + 1 == program.statements().len() && !batches.is_empty() {
+                        // Admit every row's values first, so a refusal names
+                        // its own row, not the last one where staging happens.
+                        for (origin, batch) in &batches {
+                            cx.checkpoint()
+                                .map_err(GqlQueryError::Interrupted)
+                                .map_err(GraphWriteStepError::EdgeMerge)?;
+                            if let Err(error) = database.admit_write_values(batch) {
+                                deferred_error_at = Some(*origin);
+                                return Err(GraphWriteStepError::EdgeMerge(staging(
+                                    WriteTxnError::Write(error),
+                                )));
+                            }
+                        }
+                        workspace
+                            .txn
+                            .write_ordered(
+                                database,
+                                core::mem::take(&mut batches)
+                                    .into_iter()
+                                    .map(|(_, batch)| batch)
+                                    .collect(),
+                            )
+                            .map_err(|error| GraphWriteStepError::EdgeMerge(staging(error)))?;
+                    }
+                    Ok(GraphWriteStepStats::EdgeMerge(proposal.stats))
                 },
                 || cx.checkpoint(),
             );

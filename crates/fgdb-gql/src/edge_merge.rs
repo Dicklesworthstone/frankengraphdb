@@ -203,6 +203,36 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
     }
 }
 
+/// One endpoint's selection: its labels and property equality values
+/// (canonical encodings, kinds included), both sorted.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EdgeMergeSlotKey {
+    pub(crate) labels: Vec<fgdb_delta_types::LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, Vec<u8>)>,
+}
+
+/// Both endpoints' equality keys (PreparedGraphEdgeMerge::endpoint_key).
+/// Two MERGEs of one shape (same relation, labels and property keys) whose
+/// keys differ select disjoint endpoint pairs: a vertex holds one value per
+/// property, so it can satisfy at most one of two distinct equalities.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EdgeMergeEndpointKey {
+    pub(crate) source: EdgeMergeSlotKey,
+    pub(crate) destination: EdgeMergeSlotKey,
+}
+
+impl EdgeMergeEndpointKey {
+    /// The labels and property keys, without values.
+    pub(crate) fn shape(&self) -> [(&[fgdb_delta_types::LabelId], Vec<PropertyKeyId>); 2] {
+        [&self.source, &self.destination].map(|slot| {
+            (
+                slot.labels.as_slice(),
+                slot.properties.iter().map(|(key, _)| *key).collect(),
+            )
+        })
+    }
+}
+
 /// Where the endpoint rows come from.
 #[derive(Clone, PartialEq, Eq)]
 enum Input {
@@ -456,6 +486,78 @@ impl PreparedGraphEdgeMerge {
     #[must_use]
     pub fn properties(&self) -> &[(PropertyKeyId, GqlScalarParameter)] {
         &self.properties
+    }
+
+    /// The equality keys of a directed MERGE whose MATCH is two independent
+    /// vertex scans, each selected only by labels and non-null property
+    /// equalities, as `MATCH (a:N {id: $s}), (b:N {id: $d})` is (fgdb-2l3pt).
+    /// Anything else (a relationship read, another predicate, an undirected
+    /// or self-loop MERGE, a row relation input) is `None`.
+    pub(crate) fn endpoint_key(&self) -> Option<EdgeMergeEndpointKey> {
+        use crate::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+        let Input::Pattern(selection) = &self.input else {
+            return None;
+        };
+        if self.undirected || selection.plan().reads_edges() {
+            return None;
+        }
+        let mut slots: Vec<EdgeMergeSlotKey> = Vec::new();
+        for operator in selection.plan().operators() {
+            match operator {
+                GlaOperator::ScanVertices => slots.push(EdgeMergeSlotKey::default()),
+                GlaOperator::Select { slot, predicates } => {
+                    let key = slots.get_mut(slot.ordinal() as usize)?;
+                    for predicate in predicates {
+                        match predicate {
+                            VertexPredicate::HasLabel(label) => key.labels.push(*label),
+                            VertexPredicate::IntegerProperty {
+                                key: property,
+                                comparison: IntegerComparison::Equal,
+                                value,
+                            } => key
+                                .properties
+                                .push((*property, CanonicalScalar::Int(*value).encode().ok()?)),
+                            VertexPredicate::ScalarProperty {
+                                key: property,
+                                predicate,
+                            } if predicate.comparison() == IntegerComparison::Equal
+                                && !matches!(predicate.value(), CanonicalScalar::Null) =>
+                            {
+                                key.properties
+                                    .push((*property, predicate.value().encode().ok()?));
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+                GlaOperator::ProjectValues { .. }
+                | GlaOperator::Distinct
+                | GlaOperator::OrderByValues
+                | GlaOperator::Limit { .. } => {}
+                _ => return None,
+            }
+        }
+        let slot = |column: usize| match selection.value_columns().get(column)? {
+            ValueProjection::Vertex { slot } => Some(slot.ordinal() as usize),
+            _ => None,
+        };
+        let (source, destination) = (slot(self.source)?, slot(self.destination)?);
+        if source == destination {
+            return None;
+        }
+        let mut key = |slot: usize| {
+            let mut key = slots.get_mut(slot).map(core::mem::take)?;
+            if key.properties.is_empty() {
+                return None;
+            }
+            key.labels.sort_unstable();
+            key.properties.sort_unstable();
+            Some(key)
+        };
+        Some(EdgeMergeEndpointKey {
+            source: key(source)?,
+            destination: key(destination)?,
+        })
     }
 
     #[must_use]

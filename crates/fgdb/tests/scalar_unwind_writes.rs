@@ -2047,3 +2047,133 @@ fn a_row_map_assigned_with_plus_equals_writes_its_keys_and_keeps_other_fields() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn a_distinct_endpoint_edge_merge_batch_stages_once_and_keeps_the_sequential_answer() {
+    // fgdb-2l3pt: `MATCH (a {id: row.s}), (b {id: row.d}) MERGE (a)-[:R]->(b)`
+    // with pairwise distinct (s, d) is evaluated against the entry overlay
+    // and staged once. Before, each row re-walked every earlier row's staged
+    // relationship, and the CLI's work allowance refused 4000 rows at 2196.
+    let ((), report) = run_async_under_lab(0x7363_2a3f, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let merge = "UNWIND $rows AS row MATCH (a:Entity {id: row.s}), (b:Entity {id: row.d}) \
+                     MERGE (a)-[:R]->(b)";
+        fn allocate(
+            issued: &AtomicU64,
+        ) -> impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, Infallible> + '_ {
+            move |request| {
+                let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                Ok(match request.request {
+                    GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                    GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                })
+            }
+        }
+        let mut records = Vec::new();
+        for rows in [1000_i64, 2000, 4000] {
+            let target = |id: i64| (id * 7 + 1) % rows;
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 0..rows {
+                seed.create_vertex(
+                    VId(1_000_000 + id as u128),
+                    vec![ENTITY],
+                    vec![(ID, CanonicalScalar::Int(id))],
+                );
+            }
+            // Every even row's relationship already exists.
+            for id in (0..rows).step_by(2) {
+                seed.add_edge(
+                    EId(5_000_000 + id as u128),
+                    VId(1_000_000 + id as u128),
+                    VId(1_000_000 + target(id) as u128),
+                    vec![],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let input = args(
+                (0..rows)
+                    .map(|id| object(vec![("s", int(id)), ("d", int(target(id)))]))
+                    .collect(),
+            );
+            let issued = AtomicU64::new(0);
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    merge,
+                    &input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                        0,
+                        0,
+                        rows as u64,
+                    ),
+                    allocate(&issued),
+                )
+                .unwrap_or_else(|error| panic!("{rows} rows: {error:?}"));
+            let QueryResult::Write { receipt, .. } = result else {
+                panic!("a RETURN-less write returns its receipt")
+            };
+            assert_eq!(receipt.stats().completed_statements, rows as usize);
+            assert_eq!(receipt.stats().created_edges, rows as u64 / 2);
+            assert_eq!(issued.load(Ordering::Relaxed), rows as u64 / 2);
+            records.push(receipt.stats().selection.snapshot_records);
+            txn.finish(&mut db, &commit).await.unwrap();
+            // One relationship per row's pair, the seeded ones kept.
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), rows as usize);
+            let mut pairs = std::collections::BTreeSet::new();
+            for edge in &edges {
+                assert!(pairs.insert((edge.entry.src, edge.entry.dst)), "{edge:?}");
+            }
+        }
+        // Each row reads the same bounded records whatever the batch size.
+        assert_eq!(records[1], 2 * records[0], "{records:?}");
+        assert_eq!(records[2], 4 * records[0], "{records:?}");
+
+        // A repeated pair keeps the sequential program: the second row
+        // matches the relationship the first created.
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1_i64, 2] {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(id))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let issued = AtomicU64::new(0);
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.query_write(
+            &mut db,
+            &cx,
+            merge,
+            &args(vec![
+                object(vec![("s", int(1)), ("d", int(2))]),
+                object(vec![("s", int(1)), ("d", int(2))]),
+            ]),
+            symbols,
+            R,
+            GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000),
+                0,
+                0,
+                2,
+            ),
+            allocate(&issued),
+        )
+        .unwrap();
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(issued.load(Ordering::Relaxed), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -704,6 +704,35 @@ impl WriteTxn {
     ) -> EdgeMergeOutputResult<Output, A> {
         use fgdb_gql::{GqlQueryError, GraphEdgeMergeError};
         let infrastructure = |error| GqlQueryError::Source(GraphEdgeMergeError::Source(error));
+        let proposal = self.collect_graph_edge_merge_proposal::<Output, V, A>(
+            database, cx, merge, policy, owned, allocate,
+        )?;
+        if let Some(batch) = proposal.creation {
+            // The collector's final checkpoint already preceded staging.
+            // Preserve the native adapter's atomic write and error carrier.
+            cx.with_restriction(|| self.write(database, batch))
+                .map_err(infrastructure)?;
+        }
+        Ok((proposal.stats, proposal.outcome, proposal.selected))
+    }
+
+    /// Everything [`Self::execute_graph_edge_merge_output_governed`] does
+    /// except staging the creation, which a frozen MERGE program does once
+    /// for all its statements (fgdb-2l3pt).
+    fn collect_graph_edge_merge_proposal<Output: EdgeMergeOutput, V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        merge: &fgdb_gql::PreparedGraphEdgeMerge,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        allocate: impl FnMut(usize) -> Result<ElementId, A>,
+    ) -> Result<
+        EdgeMergeProposal<Output>,
+        TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::{GqlQueryError, GraphEdgeMergeError};
+        let infrastructure = |error| GqlQueryError::Source(GraphEdgeMergeError::Source(error));
 
         self.ensure_database(database).map_err(infrastructure)?;
         let live = database
@@ -731,7 +760,7 @@ impl WriteTxn {
         }
 
         cx.with_restriction(|| {
-            let proposal = collect_edge_merge_output(
+            collect_edge_merge_output(
                 merge,
                 policy,
                 |allowance| {
@@ -751,13 +780,7 @@ impl WriteTxn {
                 },
                 allocate,
                 || cx.checkpoint(),
-            )?;
-            if let Some(batch) = proposal.creation {
-                // The collector's final checkpoint already preceded staging.
-                // Preserve the native adapter's atomic write and error carrier.
-                self.write(database, batch).map_err(infrastructure)?;
-            }
-            Ok((proposal.stats, proposal.outcome, proposal.selected))
+            )
         })
     }
 }

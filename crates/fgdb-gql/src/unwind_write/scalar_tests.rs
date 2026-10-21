@@ -833,3 +833,69 @@ fn row_maps_assigned_with_plus_equals_lower_to_one_field_per_key() {
             .unwrap()
     );
 }
+
+#[test]
+fn distinct_endpoint_edge_merges_freeze_and_every_other_edge_merge_batch_stays_sequential() {
+    // fgdb-2l3pt: a directed relationship MERGE between two equality-keyed
+    // vertex scans stages once when the endpoint key tuples are pairwise
+    // distinct; before, each row re-walked every earlier row's staged edge,
+    // and the CLI's work allowance refused a 4000-row batch at row 2196.
+    let pairs = |pairs: &[(i64, i64)]| {
+        rows(
+            pairs
+                .iter()
+                .map(|(s, d)| object(vec![("s", int(*s)), ("d", int(*d))]))
+                .collect(),
+        )
+    };
+    let bind = |tail: &str, input: &GqlParameters| {
+        GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}"))
+            .unwrap()
+            .bind(input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"))
+    };
+    let distinct = pairs(&[(1, 2), (2, 3), (3, 1)]);
+    // Directed: a reversed pair is another tuple.
+    let swapped = pairs(&[(1, 2), (2, 1)]);
+    for tail in [
+        "MATCH (a:Entity {id: row.s}), (b:Entity {id: row.d}) MERGE (a)-[:R]->(b)",
+        "MATCH (a:Entity {id: row.s}), (b:Entity {id: row.d}) MERGE (a)-[:R {p: row.s}]->(b)",
+        "MATCH (a:Entity {id: row.s}), (b:Entity {id: row.d}) MERGE (b)<-[:R]-(a)",
+    ] {
+        for input in [&distinct, &swapped] {
+            let bound = bind(tail, input);
+            assert!(bound.program().freezes_edge_merge_input(), "{tail}");
+            assert!(!bound.program().freezes_vertex_upsert_input(), "{tail}");
+        }
+        // A repeated pair must see the first row's relationship.
+        assert!(
+            !bind(tail, &pairs(&[(1, 2), (1, 2)]))
+                .program()
+                .freezes_edge_merge_input(),
+            "{tail}"
+        );
+        assert!(
+            !bind(tail, &pairs(&[(1, 2)]))
+                .program()
+                .freezes_edge_merge_input(),
+            "{tail}"
+        );
+    }
+    for tail in [
+        // Undirected: (1, 2) and (2, 1) name the same relationship.
+        "MATCH (a:Entity {id: row.s}), (b:Entity {id: row.d}) MERGE (a)-[:R]-(b)",
+        // The endpoint selection reads relationships another row may create.
+        "MATCH (a:Entity {id: row.s})-[:R]->(c), (b:Entity {id: row.d}) MERGE (a)-[:R]->(b)",
+        // A range is not an equality key.
+        "MATCH (a:Entity), (b:Entity {id: row.d}) WHERE a.id > row.s MERGE (a)-[:R]->(b)",
+    ] {
+        // A shape the adapter refuses stages nothing either.
+        let bound = GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}"))
+            .ok()
+            .and_then(|definition| definition.bind(&distinct, RelationId(1), symbols).ok());
+        assert!(
+            bound.is_none_or(|bound| !bound.program().freezes_edge_merge_input()),
+            "{tail}"
+        );
+    }
+}
