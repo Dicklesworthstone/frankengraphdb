@@ -13,6 +13,10 @@
 //! allowances with --query results. All RETURN expressions and output admission
 //! precede the sole completion boundary; LIMIT affects rows, never effects.
 //! Other write steps retain their multi-statement programs.
+//! A --write with --from-query runs its read-once/bind-all batch in this SAME
+//! transaction. The source sees earlier staged writes. One source statement
+//! and every expanded script statement count toward the existing 64-statement
+//! cap; savepoint rollback never refunds this execution admission.
 //!
 //! --savepoint, --rollback-to and --release steps drive WriteTxn's savepoints.
 //! Names follow its rules: case-sensitive, a reused name shadows the older one
@@ -21,6 +25,7 @@
 //! --rollback, the rows and records they buffered; their reads remain conflict
 //! witnesses and identities they issued are not reclaimed.
 
+use super::query_write::{self, PreparedQueryWrite, QueryWriteOptions};
 use super::write_returning::{self, Returning};
 use super::{
     Failure, Options, cell, execution_failure, human_value, parameter, quoted, value_cell,
@@ -62,6 +67,7 @@ pub(super) struct Step {
     /// GQL text for a query or write; the savepoint name otherwise.
     text: String,
     pub(super) raw_params: Vec<(String, String)>,
+    query_write: QueryWriteOptions,
 }
 impl Step {
     pub(super) fn new(kind: StepKind, text: String) -> Self {
@@ -69,11 +75,21 @@ impl Step {
             kind,
             text,
             raw_params: Vec::new(),
+            query_write: QueryWriteOptions::default(),
         }
     }
     /// Only GQL steps bind parameters.
     pub(super) fn takes_params(&self) -> bool {
         SavepointOp::of(self.kind).is_none()
+    }
+
+    pub(super) fn set_query_write_flag(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
+        if self.kind != StepKind::Write {
+            return Err(Failure::usage(
+                "transaction query-fed flags must follow --write",
+            ));
+        }
+        self.query_write.set(flag, raw)
     }
 }
 
@@ -89,6 +105,12 @@ pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
     let mut live: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
     for step in steps {
+        step.query_write.validate(false)?;
+        if step.query_write.enabled() && step.kind != StepKind::Write {
+            return Err(Failure::usage(
+                "transaction query-fed flags must follow --write",
+            ));
+        }
         if step.text.trim().is_empty() {
             return Err(Failure::usage("transaction step must not be empty"));
         }
@@ -112,11 +134,14 @@ pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
             }
             StepKind::Query | StepKind::Write => {}
         }
-        for size in std::iter::once(step.text.len()).chain(
-            step.raw_params
-                .iter()
-                .flat_map(|(name, value)| [name.len(), value.len()]),
-        ) {
+        for size in [step.text.len(), step.query_write.input_bytes()]
+            .into_iter()
+            .chain(
+                step.raw_params
+                    .iter()
+                    .flat_map(|(name, value)| [name.len(), value.len()]),
+            )
+        {
             bytes = bytes
                 .checked_add(size)
                 .ok_or_else(|| Failure::usage("transaction input limit exceeded"))?;
@@ -144,6 +169,7 @@ impl Default for Limits {
 enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
     Write(Box<BoundNativeGraphWrite>),
+    QueryWrite(Box<PreparedQueryWrite>),
     Returning(Returning),
     /// A --savepoint, --rollback-to or --release step and its name.
     Savepoint(SavepointOp, String),
@@ -193,6 +219,20 @@ fn prepare(
                     .map_err(Failure::query)?;
             }
             if step.kind == StepKind::Write {
+                if let Some(query) = query_write::prepare_statement(
+                    &step.text,
+                    &params,
+                    &step.query_write,
+                    options,
+                )? {
+                    // Reserve this source and all later fixed statements now.
+                    // The actual expansion is admitted at execution, before
+                    // source rows bind or any dependent script can stage.
+                    statements = statements
+                        .checked_add(1)
+                        .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
+                    return Ok(PreparedStep::QueryWrite(Box::new(query)));
+                }
                 // Native token framing, never substring matching or a failed
                 // read retried as a write. Each step keeps its own argument map.
                 if let Some(query) =
@@ -453,7 +493,9 @@ async fn run_with_limits<V: Vfs + Clone>(
     crash: Option<fgdb::CrashPoint>,
 ) -> Result<(), Failure> {
     let cx = contexts.query();
-    let (steps, statements) = prepare(options, resolver, &cx)?;
+    // Fixed statements and one source per feed were reserved by preparation.
+    // Expanded writes are added cumulatively, never refunded by savepoints.
+    let (steps, mut statements) = prepare(options, resolver, &cx)?;
     let mut txn = db.begin(&contexts.txn()).map_err(execution_failure)?;
     let basis = txn.basis().0;
     let mut output = BufferedOutput {
@@ -510,6 +552,37 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .checked_add(added)
                             .filter(|n| *n <= limits.rows)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
+                    }
+                    PreparedStep::QueryWrite(query) => {
+                        let remaining = MAX_STATEMENTS
+                            .checked_sub(statements)
+                            .ok_or_else(|| {
+                                Failure::query("transaction exceeds 64 native statements")
+                            })?;
+                        let execution =
+                            query.execute_in_transaction(&mut txn, db, &cx, remaining)?;
+                        let added = execution.stats.completed_statements;
+                        statements = statements
+                            .checked_add(added)
+                            .filter(|total| *total <= MAX_STATEMENTS)
+                            .ok_or_else(|| {
+                                Failure::query("transaction exceeds 64 native statements")
+                            })?;
+                        // The source was reserved during preparation. Report
+                        // it with this step's expansion, not as delivered rows.
+                        // Savepoint rollback removes this record, but neither
+                        // it nor --rollback refunds the statement allowance.
+                        if robot {
+                            output.line(&format!(
+                                r#"{{"v":1,"event":"statement","index":{},"kind":"write","view":"transaction_local","basis":{basis},"statements":{}}}"#,
+                                index + 1, added + 1,
+                            ))?;
+                        } else {
+                            output.line(&format!(
+                                "statement {}: {} source row(s), {} staged write statement(s)",
+                                index + 1, execution.input_rows, added,
+                            ))?;
+                        }
                     }
                     PreparedStep::Write(bound) => {
                         let stats = txn
@@ -649,6 +722,8 @@ async fn run_with_limits<V: Vfs + Clone>(
         })
 }
 
+#[cfg(test)]
+mod query_write_tests;
 #[cfg(test)]
 mod returning_tests;
 #[cfg(test)]

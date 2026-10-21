@@ -263,7 +263,7 @@ weak and strong components, triangles, clustering_coefficient, degree_centrality
 core_number and eigenvector_centrality through compressed cursors. Degree, core
 and eigenvector require an undirected loop-free projection. Core peeling keeps
 four integer vectors and opens each row once. Eigenvector iteration keeps two
-score vectors and the registered 100-round, 1e-6 convergence law; neither kernel
+score vectors with the registered 100-round, 1e-6 convergence law; neither kernel
 builds decoded adjacency. --graph-relation is required; unsupported procedures
 refuse before storage opens.
 This mode opens a writer to build a temporary authenticated image of one pinned
@@ -300,8 +300,9 @@ search runs Beacon retrieval over an EXPLICIT projection of one committed sequen
     (as --param e=vector:<x,y,...> writes; the vector length must match)
   both lanes: exact reciprocal-rank fusion of --candidates hits per lane (default --k);
     a fusion of the two candidate sets, not an exhaustive hybrid answer
-  graph lane: --expand-from <vid,...> --max-hops <n> [--expand-relation <relation>]
-    [--expand-direction out|in|both] [--include-seeds true|false] [--graph-candidates N]
+  graph lane: --expand-from <vid,...> with an explicit --max-hops <n> expands from those seeds
+    [--expand-relation <relation>] [--expand-direction out|in|both]
+    [--include-seeds true|false] [--graph-candidates N]
     [--graph-weight N], fused as a third lane with the text and/or vector lanes
   --k bounds the hits (default 10); --vertex-label restricts the corpus.
   --eligible <vid,...> restricts endpoints before every candidate limit; omitted means all,
@@ -333,16 +334,25 @@ write --from-query '<read RETURN ...>' '<write script>' evaluates the source
 once and binds each projected row by name to the script's parameters. --param
 binds the SOURCE only; project a global value to pass it into the script.
 --feed-type name=type declares a SCRIPT parameter: int64, uint64, int, text,
-bool, null, float, decimal or bytes. Undeclared script parameters retain native
-inference (usually int64); no value-based inference or scalar coercion occurs.
+bool, null, float, decimal, bytes, list or map. Undeclared script parameters retain
+native inference (usually int64); no value-based inference or scalar coercion occurs.
+Collections retain native bounds; a NULL collection stays NULL, not an empty value.
 --max-batch-statements bounds the TOTAL expanded statements, not each row,
 and cannot exceed the native batch ceiling. Zero permits only empty input.
 One transaction and one source/work/scratch/selection allowance cover the read,
 binding and all script instances. Duplicate rows remain separate invocations;
 later MERGEs see earlier creates, but the source is never rerun. Empty input
 closes read-only without a marker. --rows and script RETURN are not supported
-in this profile; flags apply only to write, not transaction/remote/query.
-Only after completion does result kind=written report seq, records and statements.
+in this profile; query and remote reject these flags.
+Only after standalone completion does kind=written report seq, records and statements.
+transaction --write '<script>' --from-query '<read>' uses the preceding write step.
+Its --param values bind that step's source; --feed-type declarations do not leak.
+Sources read the current staged graph, and savepoints rewind effects and output.
+One source statement plus every expanded script statement counts toward the
+existing 64-statement invocation cap, even after savepoint rollback. Batch limits
+are intersected with remaining capacity; an oversized source refuses, not truncates.
+Source text and feed flags count toward the transaction's 1 MiB input allowance.
+Only the final transaction result completes delivery; source rows are not output.
 This is bounded in-memory composition, not streaming input or a byte-memory cap.
 Robot stdout: versioned NDJSON; errors include message strings in diagnostics.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
@@ -582,7 +592,7 @@ fn bind_symbol(map: &mut BTreeMap<String, u32>, name: &str, id: u32) -> Result<(
 /// A bindings file's bytes, at most one past the parser's ceiling, so a
 /// mistaken path to a huge file is refused without reading it whole. A FIFO
 /// or device is refused BEFORE it is opened: opening a FIFO blocks until a
-/// writer appears.
+/// writer appears, so the handle check below would never run.
 async fn read_bindings_bytes(path: &std::path::Path) -> Result<Vec<u8>, Failure> {
     use asupersync::io::AsyncReadExt as _;
     let named = asupersync::fs::metadata(path).await.map_err(Failure::io)?;
@@ -762,10 +772,19 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--rows" if command == "write" && rows.is_none() => {
                     rows = Some(value.clone());
                 }
-                flag if command == "write"
+                flag if matches!(command, "write" | "transaction")
                     && query_write::QueryWriteOptions::FLAGS.contains(&flag) =>
                 {
-                    query_write.set(flag, value)?;
+                    if command == "transaction" {
+                        steps
+                            .last_mut()
+                            .ok_or_else(|| {
+                                Failure::usage("transaction query-fed flags must follow --write")
+                            })?
+                            .set_query_write_flag(flag, value)?;
+                    } else {
+                        query_write.set(flag, value)?;
+                    }
                 }
                 "--certify-to" if command == "query" && certify_to.is_none() => {
                     certify_to = Some(PathBuf::from(value));

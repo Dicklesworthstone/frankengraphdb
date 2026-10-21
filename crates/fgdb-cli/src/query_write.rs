@@ -7,13 +7,13 @@
 
 use super::{Failure, Options, decimal_usize, emit, execution_failure};
 use asupersync::fs::Vfs;
-use fgdb::Database;
-use fgdb_gql::query_write::PreparedGraphQueryWrite;
+use fgdb::{Database, WriteTxn};
+use fgdb_gql::query_write::{GraphQueryWriteExecution, PreparedGraphQueryWrite};
 use fgdb_gql::{
     GqlParameterType, GqlParameterValue, GqlParameters, GraphWriteProgramPolicy,
     PreparedGraphSetText, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalarKind, EmbeddedTxnCompletion, PurposeContexts};
+use fgdb_types::{CanonicalScalarKind, EmbeddedTxnCompletion, PurposeContexts, QueryCx};
 use std::io::Write;
 
 pub(super) struct QueryWriteOptions {
@@ -23,6 +23,7 @@ pub(super) struct QueryWriteOptions {
     // values validate declarations only and never become source/write arguments.
     names: GqlParameters,
     max_statements: Option<usize>,
+    input_bytes: usize,
 }
 
 impl Default for QueryWriteOptions {
@@ -32,6 +33,7 @@ impl Default for QueryWriteOptions {
             declarations: Vec::new(),
             names: GqlParameters::new(),
             max_statements: None,
+            input_bytes: 0,
         }
     }
 }
@@ -44,7 +46,17 @@ impl QueryWriteOptions {
         self.source.is_some()
     }
 
+    /// Original flag values, including type spellings and decimal limits.
+    /// Ordered transactions include these bytes in their whole-input cap.
+    pub(super) const fn input_bytes(&self) -> usize {
+        self.input_bytes
+    }
+
     pub(super) fn set(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
+        let input_bytes = self
+            .input_bytes
+            .checked_add(raw.len())
+            .ok_or_else(|| Failure::usage("query-fed input size overflow"))?;
         match flag {
             "--from-query" => {
                 if self.source.is_some() {
@@ -96,6 +108,7 @@ impl QueryWriteOptions {
             }
             _ => return Err(Failure::usage("unknown query-fed write flag")),
         }
+        self.input_bytes = input_bytes;
         Ok(())
     }
 
@@ -119,26 +132,60 @@ pub(super) struct PreparedQueryWrite {
     max_statements: usize,
 }
 
+impl PreparedQueryWrite {
+    /// Stage in the caller's transaction, never an inner autocommit. The
+    /// remaining invocation capacity narrows, but never widens, the caller's
+    /// expanded-statement cap. Source and writes keep one native allowance.
+    pub(super) fn execute_in_transaction<V: Vfs + Clone>(
+        &self,
+        transaction: &mut WriteTxn,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        remaining_statements: usize,
+    ) -> Result<GraphQueryWriteExecution, Failure> {
+        transaction
+            .execute_graph_query_write_engine_governed(
+                database,
+                cx,
+                &self.query,
+                self.policy,
+                self.max_statements.min(remaining_statements),
+            )
+            .map_err(execution_failure)
+    }
+}
+
 /// Prepare both native definitions before opening writable graph storage.
 /// Actual source rows necessarily bind later, inside the same transaction as
 /// their writes. No failed definition is retried as an ordinary write script.
 pub(super) fn prepare(options: &Options) -> Result<Option<PreparedQueryWrite>, Failure> {
-    let config = &options.query_write;
-    config.validate(options.rows.is_some())?;
+    options.query_write.validate(options.rows.is_some())?;
+    prepare_statement(&options.text, &options.params, &options.query_write, options)
+}
+
+/// Each ordered write step owns both definitions, its source parameters and
+/// its script declarations. Only the catalog and execution limits are shared.
+pub(super) fn prepare_statement(
+    statement: &str,
+    params: &GqlParameters,
+    config: &QueryWriteOptions,
+    options: &Options,
+) -> Result<Option<PreparedQueryWrite>, Failure> {
+    config.validate(false)?;
     let Some(source) = config.source.as_deref() else {
         return Ok(None);
     };
     // Preserve full resolver metadata (reverse names and pinned time zones),
     // not a closure that supplies only forward symbol resolution.
     let mut resolver = options;
-    let source_types: Vec<_> = options.params.parameter_types().collect();
+    let source_types: Vec<_> = params.parameter_types().collect();
     let source = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
         source,
         &source_types,
         &mut resolver,
     )
     .map_err(Failure::query)?
-    .bind_parameters(&options.params)
+    .bind_parameters(params)
     .map_err(Failure::query)?;
     let declarations: Vec<_> = config
         .declarations
@@ -146,7 +193,7 @@ pub(super) fn prepare(options: &Options) -> Result<Option<PreparedQueryWrite>, F
         .map(|(name, kind)| (name.as_str(), *kind))
         .collect();
     let script = PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
-        &options.text,
+        statement,
         options.coordinate,
         &declarations,
         &mut resolver,
