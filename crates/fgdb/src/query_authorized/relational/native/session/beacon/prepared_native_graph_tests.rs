@@ -596,16 +596,16 @@ fn graph_call_cancellation_and_late_errors_never_publish_a_prefix_or_poison_reus
                 .execute_beacon_index(&c.query(), &index, &bad, &params)
                 .is_err()
         );
+        // A graph-only statement reads no `$x`.
+        let graph_only = parameters(false, &[VId(0)], &[HIGH]);
         let zero = session
             .prepare(
                 &c.query(),
                 &format!("{}RETURN node LIMIT 0", call(false, false, false, "out")),
-                &params,
+                &graph_only,
             )
             .unwrap();
         let invalid = GqlParameters::new()
-            .with_int64("x", 0)
-            .unwrap()
             .with_list("seeds", vec![GraphValue::Vertex(VId(0))])
             .unwrap()
             .with_list(
@@ -621,7 +621,7 @@ fn graph_call_cancellation_and_late_errors_never_publish_a_prefix_or_poison_reus
         assert!(
             rows(
                 session
-                    .execute_beacon_index(&c.query(), &index, &zero, &params)
+                    .execute_beacon_index(&c.query(), &index, &zero, &graph_only)
                     .unwrap()
             )
             .is_empty()
