@@ -6,8 +6,9 @@ use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphInsertQueryBatch,
-    GraphInsertQueryError, GraphSymbol, GraphSymbolKind, PreparedGraphEdgeMergeQueryText,
+    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateError,
+    GraphInsertQueryBatch, GraphInsertQueryError, GraphIntegerError, GraphIntegerErrorKind,
+    GraphSetExecutionError, GraphSymbol, GraphSymbolKind, PreparedGraphEdgeMergeQueryText,
     PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQueryText,
 };
@@ -73,22 +74,58 @@ fn rows(batch: &GraphInsertQueryBatch) -> Vec<Vec<GraphValue>> {
         .collect()
 }
 
+/// An AVG of integers is an exact rational, which has no ordinary row value.
+/// A write group refuses it at checked row conversion, before any compound
+/// expression runs, exactly as a standalone write AVG or a native WITH AVG.
+fn refuses_exact_average(result: ResultBatch, column: usize) -> bool {
+    let Err(GqlQueryError::Source(GraphInsertQueryError::Returning(
+        GraphSetExecutionError::Aggregate(error),
+    ))) = result
+    else {
+        return false;
+    };
+    matches!(
+        *error,
+        GraphAggregateError::OutputExpression {
+            column: found,
+            error: GraphIntegerError {
+                kind: GraphIntegerErrorKind::IncompatibleOperands,
+                ..
+            },
+        } if found == column
+    )
+}
+
 #[test]
 fn stored_numeric_compound_summaries_preserve_occurrences_distinct_and_nulls() {
     let query = prepare(
         "UNWIND [1,3,3,NULL] AS x CREATE (n {p:x}) \
          RETURN sum(n.p)+count(*) AS total, \
-         sum(DISTINCT n.p)+count(n.p) AS unique_total, \
-         avg(n.p)>2 AS above, avg(DISTINCT n.p)=2 AS exact",
+         sum(DISTINCT n.p)+count(n.p) AS unique_total",
     );
     let batch = execute(&query, 1).unwrap();
-    assert_eq!(
-        rows(&batch),
-        vec![vec![int(11), int(7), boolean(true), boolean(true)]]
-    );
+    assert_eq!(rows(&batch), vec![vec![int(11), int(7)]]);
     assert_eq!(batch.insertion().stats().created_vertices, 4);
     assert_eq!(batch.returning().rows.result_rows, 1);
     assert_eq!(batch.returning().rows.snapshot_records, 0);
+    // Binary64 means keep the occurrence, DISTINCT and NULL laws: 7/3 > 2,
+    // while the distinct mean is exactly 2.
+    let floating = prepare(
+        "UNWIND [1.0,3.0,3.0,NULL] AS x CREATE (n {p:x}) \
+         RETURN avg(n.p)>2 AS above, avg(DISTINCT n.p)=2 AS exact",
+    );
+    assert_eq!(
+        rows(&execute(&floating, 1).unwrap()),
+        vec![vec![boolean(true), boolean(true)]]
+    );
+    // Integer means refuse at the first average, summary column 4.
+    let exact = prepare(
+        "UNWIND [1,3,3,NULL] AS x CREATE (n {p:x}) \
+         RETURN sum(n.p)+count(*) AS total, \
+         sum(DISTINCT n.p)+count(n.p) AS unique_total, \
+         avg(n.p)>2 AS above, avg(DISTINCT n.p)=2 AS exact",
+    );
+    assert!(refuses_exact_average(execute(&exact, 1), 4));
 }
 
 #[test]
@@ -113,13 +150,14 @@ fn compound_stored_float_summaries_keep_exact_native_accumulation_and_aliases() 
 
 #[test]
 fn compound_stored_write_with_feeds_native_tail_without_limiting_creations() {
+    // Binary64 inputs: an integer AVG refuses at row conversion, as above.
     let query = prepare(
-        "UNWIND [1,3,3,NULL] AS x CREATE (n {p:x}) \
+        "UNWIND [1.0,3.0,3.0,NULL] AS x CREATE (n {p:x}) \
          WITH sum(n.p)+count(*) AS total, avg(n.p)>2 AS high \
          WHERE total>0 RETURN total*2 AS doubled, high",
     );
     let batch = execute(&query, 1).unwrap();
-    assert_eq!(rows(&batch), vec![vec![int(22), boolean(true)]]);
+    assert_eq!(rows(&batch), vec![vec![float(22.0), boolean(true)]]);
     assert_eq!(batch.insertion().stats().created_vertices, 4);
     let filtered = prepare(
         "UNWIND [1,3,3,NULL] AS x CREATE (n {p:x}) \
@@ -198,7 +236,10 @@ fn static_nonnumeric_aggregate_domains_still_refuse_before_catalog_access() {
 
 #[test]
 fn stored_nonnumeric_values_fail_at_execution_even_beneath_limit_zero() {
-    for function in ["sum", "avg"] {
+    // The control must succeed on the same template, so each refusal below is
+    // caused by its late value. AVG's control is binary64: an integer mean
+    // is itself refused, which LIMIT 0 does not hide either.
+    for (function, numeric) in [("sum", int(3)), ("avg", float(3.0))] {
         let text = format!(
             "UNWIND $items AS x CREATE (n {{p:x}}) RETURN {function}(n.p)+1 AS value LIMIT 0"
         );
@@ -221,9 +262,12 @@ fn stored_nonnumeric_values_fail_at_execution_even_beneath_limit_zero() {
                 Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
             ));
         }
-        let batch = execute(&bind(int(3)), 0).unwrap();
+        let batch = execute(&bind(numeric), 0).unwrap();
         assert!(batch.returning().value.is_empty());
         assert_eq!(batch.insertion().stats().created_vertices, 2);
+        if function == "avg" {
+            assert!(refuses_exact_average(execute(&bind(int(3)), 0), 0));
+        }
     }
 }
 

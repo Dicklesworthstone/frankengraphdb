@@ -424,7 +424,9 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
     for text in [
         "CREATE (n:Item {p:1}) RETURN sum(n)",
         "CREATE (n:Item {p:1}) RETURN count(DISTINCT *)",
-        "CREATE (n:Item {p:1}) RETURN sum(n.p)+1",
+        // A compound summary is a valid form (cd3f2a84); an identity is
+        // still never a numeric argument, inside a compound item or not.
+        "CREATE (n:Item {p:1}) RETURN sum(n)+1",
         "CREATE (n:Item {p:1}) RETURN count(*) AS same,max(n.p) AS same",
         // rand() in an aggregate's argument is a non-constant expression.
         "CREATE (n:Item {p:1}) RETURN count(rand())",
