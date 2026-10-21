@@ -102,9 +102,8 @@ impl History {
                 ))?;
             end = frame.frontier;
         }
-        let start = usize::try_from(at.0 - self.retained_after().0).map_err(|_| {
-            StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta)
-        })?;
+        let start = usize::try_from(at.0 - self.retained_after().0)
+            .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
         if start.checked_add(ticks) != Some(self.frames.len()) {
             return Err(StandingQueryError::Delivery(
                 StandingQueryFailure::InvalidDelta,

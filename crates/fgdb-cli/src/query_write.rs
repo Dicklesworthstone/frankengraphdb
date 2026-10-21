@@ -37,8 +37,7 @@ impl Default for QueryWriteOptions {
 }
 
 impl QueryWriteOptions {
-    pub(super) const FLAGS: &[&str] =
-        &["--from-query", "--feed-type", "--max-batch-statements"];
+    pub(super) const FLAGS: &[&str] = &["--from-query", "--feed-type", "--max-batch-statements"];
 
     pub(super) fn enabled(&self) -> bool {
         self.source.is_some()
@@ -104,7 +103,9 @@ impl QueryWriteOptions {
             ));
         }
         if self.enabled() && has_rows {
-            return Err(Failure::usage("--from-query cannot be combined with --rows"));
+            return Err(Failure::usage(
+                "--from-query cannot be combined with --rows",
+            ));
         }
         Ok(())
     }

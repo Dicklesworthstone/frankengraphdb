@@ -10,8 +10,8 @@ use fgdb_gql::{
     GraphWriteIdentityRequest, GraphWriteProgramPolicy,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx,
-    TxnCx, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx,
+    VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -60,7 +60,10 @@ fn rows(result: QueryResult, names: &[&str]) -> Vec<Vec<GraphValue>> {
     };
     assert_eq!(
         columns,
-        names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>()
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
     );
     rows.into_iter()
         .map(|row| {

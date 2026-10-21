@@ -126,8 +126,8 @@ mod query_write_autocommit_tests {
     use fgdb_gql::algebra::GraphValue;
     use fgdb_gql::query_write::{GraphQueryWriteExecutionError, PreparedGraphQueryWrite};
     use fgdb_gql::{
-        GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
-        GraphWriteProgramPolicy, PreparedGraphSet, PreparedGraphSetText, PreparedGraphWriteScript,
+        GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
+        PreparedGraphSet, PreparedGraphSetText, PreparedGraphWriteScript,
     };
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
@@ -187,7 +187,12 @@ mod query_write_autocommit_tests {
             );
             let (execution, _) = db
                 .execute_graph_query_write_autocommit_engine_governed(
-                    &txcx, &cx, &commit, &prepared, policy(), 3,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &prepared,
+                    policy(),
+                    3,
                 )
                 .await
                 .unwrap();
@@ -205,10 +210,13 @@ mod query_write_autocommit_tests {
                 .value;
             assert_eq!(rows.len(), 2);
             for (row, expected) in rows.iter().zip([(1, 2), (2, 1)]) {
-                assert_eq!(row.values(), &[
-                    GraphValue::Scalar(CanonicalScalar::Int(expected.0)),
-                    GraphValue::Scalar(CanonicalScalar::Int(expected.1)),
-                ]);
+                assert_eq!(
+                    row.values(),
+                    &[
+                        GraphValue::Scalar(CanonicalScalar::Int(expected.0)),
+                        GraphValue::Scalar(CanonicalScalar::Int(expected.1)),
+                    ]
+                );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -232,22 +240,41 @@ mod query_write_autocommit_tests {
             );
             let error = db
                 .execute_graph_query_write_autocommit_engine_governed(
-                    &txcx, &cx, &commit, &prepared, policy(), 2,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &prepared,
+                    policy(),
+                    2,
                 )
                 .await
                 .unwrap_err();
             assert!(matches!(error, GraphQueryWriteExecutionError::Program(_)));
             assert_eq!(db.frontier().unwrap(), before);
-            assert!(db.execute_graph_set_governed(
-                &cx, &read("MATCH (c:City) RETURN c"), policy().mutations.query,
-            ).unwrap().value.is_empty());
+            assert!(
+                db.execute_graph_set_governed(
+                    &cx,
+                    &read("MATCH (c:City) RETURN c"),
+                    policy().mutations.query,
+                )
+                .unwrap()
+                .value
+                .is_empty()
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
             // The aborted operation does not poison later engine allocation
             // or strand a transaction obligation.
             let retry = query("RETURN 1 AS key", "MERGE (c:City {name:$key})");
             db.execute_graph_query_write_autocommit_engine_governed(
-                &txcx, &cx, &commit, &retry, policy(), 1,
-            ).await.unwrap();
+                &txcx,
+                &cx,
+                &commit,
+                &retry,
+                policy(),
+                1,
+            )
+            .await
+            .unwrap();
             assert_eq!(db.frontier().unwrap(), CommitSeq(before.0 + 1));
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -266,25 +293,42 @@ mod query_write_autocommit_tests {
             let empty = query("UNWIND [] AS key RETURN key", "CREATE (c:City {name:$key})");
             let (execution, completion) = db
                 .execute_graph_query_write_autocommit_governed(
-                    &txcx, &cx, &commit, &empty, policy(), 0,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &empty,
+                    policy(),
+                    0,
                     |_| Err::<ElementId, _>("must not allocate"),
                 )
                 .await
                 .unwrap();
             assert_eq!(execution.input_rows, 0);
             assert!(execution.receipt.is_none());
-            assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
-            let too_many = query("UNWIND [1,2] AS key RETURN key", "CREATE (c:City {name:$key})");
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::ReadClosed { .. }
+            ));
+            let too_many = query(
+                "UNWIND [1,2] AS key RETURN key",
+                "CREATE (c:City {name:$key})",
+            );
             let error = db
                 .execute_graph_query_write_autocommit_governed(
-                    &txcx, &cx, &commit, &too_many, policy(), 1,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &too_many,
+                    policy(),
+                    1,
                     |_| Err::<ElementId, _>("must not allocate"),
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(error, GraphQueryWriteExecutionError::Source(
-                fgdb_gql::GqlQueryError::Rows(_),
-            )));
+            assert!(matches!(
+                error,
+                GraphQueryWriteExecutionError::Source(fgdb_gql::GqlQueryError::Rows(_),)
+            ));
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -302,16 +346,19 @@ mod query_write_autocommit_tests {
             let mut other = Database::open_memory(&commit, keys()).await.unwrap();
             let prepared = query("RETURN 1 AS key", "CREATE (c:City {name:$key})");
             let mut transaction = db.begin(&txcx).unwrap();
-            let error = transaction.execute_graph_query_write_engine_governed(
-                &mut other,
-                &cx,
-                &prepared,
-                GraphWriteProgramPolicy::new(GqlQueryPolicy::new(0, 0, 0, 0), 0, 0, 0),
-                0,
-            ).unwrap_err();
-            assert!(matches!(error, GraphQueryWriteExecutionError::Preflight(
-                WriteTxnError::WrongDatabase,
-            )));
+            let error = transaction
+                .execute_graph_query_write_engine_governed(
+                    &mut other,
+                    &cx,
+                    &prepared,
+                    GraphWriteProgramPolicy::new(GqlQueryPolicy::new(0, 0, 0, 0), 0, 0, 0),
+                    0,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                GraphQueryWriteExecutionError::Preflight(WriteTxnError::WrongDatabase,)
+            ));
             transaction.abort();
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -332,24 +379,39 @@ mod query_write_autocommit_tests {
                 "CREATE (c:City {name:$key})",
             );
             let mut calls = 0;
-            let error = db.execute_graph_query_write_autocommit_governed(
-                &txcx, &cx, &commit, &prepared, policy(), 2, |_| {
-                    calls += 1;
-                    match calls {
-                        1 => Ok(ElementId::Vertex(VId(100))),
-                        _ => Err("identity source exhausted"),
-                    }
-                },
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_query_write_autocommit_governed(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &prepared,
+                    policy(),
+                    2,
+                    |_| {
+                        calls += 1;
+                        match calls {
+                            1 => Ok(ElementId::Vertex(VId(100))),
+                            _ => Err("identity source exhausted"),
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
             assert_eq!(calls, 2);
             assert!(matches!(error, GraphQueryWriteExecutionError::Program(_)));
             assert_eq!(db.frontier().unwrap(), before);
-            assert!(db.execute_graph_set_governed(
-                &cx, &read("MATCH (c:City) RETURN c"), policy().mutations.query,
-            ).unwrap().value.is_empty());
+            assert!(
+                db.execute_graph_set_governed(
+                    &cx,
+                    &read("MATCH (c:City) RETURN c"),
+                    policy().mutations.query,
+                )
+                .unwrap()
+                .value
+                .is_empty()
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
-
 }

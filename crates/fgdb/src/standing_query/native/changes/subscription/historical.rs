@@ -71,7 +71,11 @@ mod tests {
         GqlQueryPolicy::new(0, rows, 10_000_000, 10_000_000)
     }
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0x51; 32], DatabaseSecurityNamespaceId([0x52; 32]), [0x53; 32])
+        DatabaseKeys::new(
+            [0x51; 32],
+            DatabaseSecurityNamespaceId([0x52; 32]),
+            [0x53; 32],
+        )
     }
     fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -82,7 +86,11 @@ mod tests {
     fn seed() -> WriteBatch {
         let mut batch = WriteBatch::new(RelationId(1));
         for (id, p) in [(1, 3), (2, 3), (3, 7)] {
-            batch.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(p))]);
+            batch.create_vertex(
+                VId(id),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+            );
         }
         batch
     }
@@ -91,10 +99,18 @@ mod tests {
         cx: &QueryCx,
         ticks: usize,
     ) -> (StandingQueryHandle, StandingQueryHandle) {
-        let source = db.register_standing_native(
-            cx, "MATCH (n) RETURN n.p AS p", &GqlParameters::new(), resolve, policy(),
-        ).unwrap();
-        let replay = db.register_standing_replay(cx, &source, ticks, 1000, 100_000, policy()).unwrap();
+        let source = db
+            .register_standing_native(
+                cx,
+                "MATCH (n) RETURN n.p AS p",
+                &GqlParameters::new(),
+                resolve,
+                policy(),
+            )
+            .unwrap();
+        let replay = db
+            .register_standing_replay(cx, &source, ticks, 1000, 100_000, policy())
+            .unwrap();
         (source, replay)
     }
 
@@ -115,16 +131,32 @@ mod tests {
             edit.set_vertex_property(VId(2), PropertyKeyId(99), Some(CanonicalScalar::Int(1)));
             let third = db.write(&commit, edit).await.unwrap();
             let window = db.standing_replay_window(&cx, &replay).unwrap();
-            let (mut atomic, baseline) = db.open_standing_replay_subscription_at(&cx, &replay, first, delivery(2)).unwrap();
-            let (mut net, net_baseline) = db.open_standing_replay_subscription_at(&cx, &replay, first, delivery(2)).unwrap();
+            let (mut atomic, baseline) = db
+                .open_standing_replay_subscription_at(&cx, &replay, first, delivery(2))
+                .unwrap();
+            let (mut net, net_baseline) = db
+                .open_standing_replay_subscription_at(&cx, &replay, first, delivery(2))
+                .unwrap();
             assert_eq!(baseline.rows(), &old);
             assert_eq!(baseline.frontier(), first);
             assert!(baseline.is_snapshot());
             assert_eq!(atomic.acknowledged_frontier(), None);
             assert_eq!(db.standing_replay_window(&cx, &replay).unwrap(), window);
-            assert!(matches!(atomic.acknowledge(net_baseline.receipt()), Err(SubscriptionError::InvalidReceipt)));
-            assert!(Arc::ptr_eq(&baseline, &atomic.poll(&db, &cx, delivery(0)).unwrap().unwrap()));
-            assert!(Arc::ptr_eq(&baseline, &atomic.poll_coalesced(&db, &cx, NonZeroUsize::new(8).unwrap(), delivery(0)).unwrap().unwrap()));
+            assert!(matches!(
+                atomic.acknowledge(net_baseline.receipt()),
+                Err(SubscriptionError::InvalidReceipt)
+            ));
+            assert!(Arc::ptr_eq(
+                &baseline,
+                &atomic.poll(&db, &cx, delivery(0)).unwrap().unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                &baseline,
+                &atomic
+                    .poll_coalesced(&db, &cx, NonZeroUsize::new(8).unwrap(), delivery(0))
+                    .unwrap()
+                    .unwrap()
+            ));
             // Neither constructor nor its returned consumer borrows the writer.
             let mut edit = WriteBatch::new(RelationId(1));
             edit.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
@@ -138,9 +170,16 @@ mod tests {
                 assert_eq!(frame.from(), Some(from));
                 assert_eq!(frame.frontier(), at);
                 assert!(!frame.is_snapshot());
-                if at == third { assert!(frame.rows().is_empty()); }
-                assert!(Arc::ptr_eq(&frame, &atomic.poll(&db, &cx, delivery(0)).unwrap().unwrap()));
-                result.integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
+                if at == third {
+                    assert!(frame.rows().is_empty());
+                }
+                assert!(Arc::ptr_eq(
+                    &frame,
+                    &atomic.poll(&db, &cx, delivery(0)).unwrap().unwrap()
+                ));
+                result
+                    .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
                 assert_eq!(atomic.acknowledge(frame.receipt()).unwrap(), at);
                 from = at;
             }
@@ -148,11 +187,16 @@ mod tests {
             let (_, current) = db.standing_native_bag(&cx, &source, delivery(100)).unwrap();
             assert_eq!(result, current);
             net.acknowledge(net_baseline.receipt()).unwrap();
-            let delta = net.poll_coalesced(&db, &cx, NonZeroUsize::new(8).unwrap(), delivery(100)).unwrap().unwrap();
+            let delta = net
+                .poll_coalesced(&db, &cx, NonZeroUsize::new(8).unwrap(), delivery(100))
+                .unwrap()
+                .unwrap();
             assert_eq!(delta.from(), Some(first));
             assert_eq!(delta.frontier(), fourth);
             let mut result = old;
-            result.integrate(delta.rows(), LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
+            result
+                .integrate(delta.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
             assert_eq!(result, current);
             net.acknowledge(delta.receipt()).unwrap();
             assert!(net.poll(&db, &cx, delivery(0)).unwrap().is_none());
@@ -169,31 +213,64 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let first = db.write(&commit, seed()).await.unwrap();
             let (source, replay) = register(&mut db, &cx, 1);
-            let (mut sub, baseline) = db.open_standing_replay_subscription_at(&cx, &replay, first, delivery(2)).unwrap();
+            let (mut sub, baseline) = db
+                .open_standing_replay_subscription_at(&cx, &replay, first, delivery(2))
+                .unwrap();
             let mut latest = first;
             for value in [8, 9] {
                 let mut edit = WriteBatch::new(RelationId(1));
-                edit.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(value)));
+                edit.set_vertex_property(
+                    VId(3),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(value)),
+                );
                 latest = db.write(&commit, edit).await.unwrap();
             }
-            assert!(db.standing_replay_window(&cx, &replay).unwrap().retained_after > first);
-            assert!(Arc::ptr_eq(&baseline, &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()));
+            assert!(
+                db.standing_replay_window(&cx, &replay)
+                    .unwrap()
+                    .retained_after
+                    > first
+            );
+            assert!(Arc::ptr_eq(
+                &baseline,
+                &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()
+            ));
             sub.acknowledge(baseline.receipt()).unwrap();
-            assert!(matches!(sub.poll(&db, &cx, delivery(100)), Err(SubscriptionError::Query(StandingQueryError::ReplayGap { .. }))));
+            assert!(matches!(
+                sub.poll(&db, &cx, delivery(100)),
+                Err(SubscriptionError::Query(
+                    StandingQueryError::ReplayGap { .. }
+                ))
+            ));
             assert_eq!(sub.acknowledged_frontier(), Some(first));
             assert!(sub.pending.is_none());
             sub.restart_from_current().unwrap();
-            assert!(matches!(sub.acknowledge(baseline.receipt()), Err(SubscriptionError::InvalidReceipt)));
+            assert!(matches!(
+                sub.acknowledge(baseline.receipt()),
+                Err(SubscriptionError::InvalidReceipt)
+            ));
             let replacement = sub.poll(&db, &cx, delivery(100)).unwrap().unwrap();
             assert!(replacement.is_snapshot());
             assert_eq!(replacement.frontier(), latest);
-            assert_eq!(replacement.rows(), &db.standing_native_bag(&cx, &source, delivery(100)).unwrap().1);
+            assert_eq!(
+                replacement.rows(),
+                &db.standing_native_bag(&cx, &source, delivery(100))
+                    .unwrap()
+                    .1
+            );
             let mut fork = sub.fork(&db, &cx).unwrap();
             let fork_baseline = fork.poll(&db, &cx, delivery(100)).unwrap().unwrap();
             assert_eq!(fork_baseline.frontier(), latest);
-            assert!(matches!(fork.acknowledge(replacement.receipt()), Err(SubscriptionError::InvalidReceipt)));
+            assert!(matches!(
+                fork.acknowledge(replacement.receipt()),
+                Err(SubscriptionError::InvalidReceipt)
+            ));
             sub.close();
-            assert!(matches!(sub.acknowledge(replacement.receipt()), Err(SubscriptionError::Closed)));
+            assert!(matches!(
+                sub.acknowledge(replacement.receipt()),
+                Err(SubscriptionError::Closed)
+            ));
             fork.acknowledge(fork_baseline.receipt()).unwrap();
             assert!(fork.poll(&db, &cx, delivery(0)).unwrap().is_none());
             assert!(db.standing_native_bag(&cx, &source, delivery(100)).is_ok());
@@ -210,25 +287,57 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let (source, replay) = register(&mut db, &cx, 8);
             let first = db.write(&commit, seed()).await.unwrap();
-            let (mut sub, empty) = db.open_standing_replay_subscription_at(&cx, &replay, CommitSeq::ORIGIN, delivery(0)).unwrap();
+            let (mut sub, empty) = db
+                .open_standing_replay_subscription_at(&cx, &replay, CommitSeq::ORIGIN, delivery(0))
+                .unwrap();
             assert!(empty.rows().is_empty());
             assert!(empty.is_snapshot());
             assert_eq!(empty.frontier(), CommitSeq::ORIGIN);
             let window = db.standing_replay_window(&cx, &replay).unwrap();
-            assert!(matches!(db.open_standing_replay_subscription_at(&cx, &source, first, delivery(100)), Err(SubscriptionError::Query(StandingQueryError::Unsupported))));
-            assert!(matches!(db.open_standing_replay_subscription_at(&cx, &replay, CommitSeq(u64::MAX), delivery(100)), Err(SubscriptionError::Query(StandingQueryError::ReplayGap { .. }))));
-            assert!(db.open_standing_replay_subscription_at(&cx, &replay, first, GqlQueryPolicy::new(0, 0, 0, 0)).is_err());
+            assert!(matches!(
+                db.open_standing_replay_subscription_at(&cx, &source, first, delivery(100)),
+                Err(SubscriptionError::Query(StandingQueryError::Unsupported))
+            ));
+            assert!(matches!(
+                db.open_standing_replay_subscription_at(
+                    &cx,
+                    &replay,
+                    CommitSeq(u64::MAX),
+                    delivery(100)
+                ),
+                Err(SubscriptionError::Query(
+                    StandingQueryError::ReplayGap { .. }
+                ))
+            ));
+            assert!(
+                db.open_standing_replay_subscription_at(
+                    &cx,
+                    &replay,
+                    first,
+                    GqlQueryPolicy::new(0, 0, 0, 0)
+                )
+                .is_err()
+            );
             let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-            assert!(matches!(foreign.open_standing_replay_subscription_at(&cx, &replay, first, delivery(100)), Err(SubscriptionError::Query(StandingQueryError::ForeignHandle))));
+            assert!(matches!(
+                foreign.open_standing_replay_subscription_at(&cx, &replay, first, delivery(100)),
+                Err(SubscriptionError::Query(StandingQueryError::ForeignHandle))
+            ));
             assert_eq!(db.standing_replay_window(&cx, &replay).unwrap(), window);
-            assert!(Arc::ptr_eq(&empty, &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()));
+            assert!(Arc::ptr_eq(
+                &empty,
+                &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()
+            ));
             assert_eq!(sub.acknowledged_frontier(), None);
             sub.acknowledge(empty.receipt()).unwrap();
             let first_delta = sub.poll(&db, &cx, delivery(2)).unwrap().unwrap();
             assert_eq!(first_delta.from(), Some(CommitSeq::ORIGIN));
             assert_eq!(first_delta.frontier(), first);
             assert!(!first_delta.is_snapshot());
-            assert_eq!(first_delta.rows(), &db.standing_native_bag(&cx, &source, delivery(2)).unwrap().1);
+            assert_eq!(
+                first_delta.rows(),
+                &db.standing_native_bag(&cx, &source, delivery(2)).unwrap().1
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

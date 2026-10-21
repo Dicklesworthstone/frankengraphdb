@@ -27,7 +27,10 @@ fn scalar_row() -> EdgePropertyRow {
     let mut bytes = Vec::with_capacity(8192);
     bytes.extend_from_slice(b"small payload, large retained capacity");
     let mut props = Vec::with_capacity(32);
-    props.push((PropertyKeyId(1), CanonicalScalar::bytes(bytes).unwrap().into()));
+    props.push((
+        PropertyKeyId(1),
+        CanonicalScalar::bytes(bytes).unwrap().into(),
+    ));
     props.push((
         PropertyKeyId(2),
         CanonicalScalar::ucs_basic_text("alpha\0β").unwrap().into(),
@@ -160,10 +163,8 @@ fn every_retention_control_failure_refunds_the_whole_candidate() {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut count = 0;
-        let value = BufferedValue::from_reserved(
-            edge(scalar_row()),
-            pool.reserve(&cx, WORKSPACE).unwrap(),
-        );
+        let value =
+            BufferedValue::from_reserved(edge(scalar_row()), pool.reserve(&cx, WORKSPACE).unwrap());
         drop(
             value
                 .retain_scan_edge(&mut || {

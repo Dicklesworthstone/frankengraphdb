@@ -163,13 +163,9 @@ impl<V: Vfs + Clone> Database<V> {
                             .ok_or_else(|| unavailable(from))?,
                         None => self.standing_query(cx, handle)?,
                     };
-                    collect_bag(
-                        view.rows(),
-                        from.is_some(),
-                        width,
-                        meter,
-                        |row, meter| aggregate_cells(row, slots, meter),
-                    )
+                    collect_bag(view.rows(), from.is_some(), width, meter, |row, meter| {
+                        aggregate_cells(row, slots, meter)
+                    })
                 }
             }
             .map_err(StandingQueryError::Delivery)?;
@@ -235,11 +231,9 @@ mod online_tests {
     type Bag = ZSet<Vec<QueryValue>>;
 
     fn source(count: u32, weight: impl Fn(u32) -> ZWeight) -> ZSet<u32> {
-        ZSet::from_updates(
-            (0..count).map(|key| (key, weight(key))),
-            LIMBS,
-            &mut |_| Ok::<_, ()>(()),
-        )
+        ZSet::from_updates((0..count).map(|key| (key, weight(key))), LIMBS, &mut |_| {
+            Ok::<_, ()>(())
+        })
         .unwrap()
     }
 
@@ -302,7 +296,10 @@ mod online_tests {
         let (result, stats) = run(&source, false, exact, || Ok(()), one);
         let result = result.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.iter().next().unwrap().1.to_i128(), Some(i128::from(n)));
+        assert_eq!(
+            result.iter().next().unwrap().1.to_i128(),
+            Some(i128::from(n))
+        );
         assert_eq!(stats.work_units, work);
         assert_eq!(stats.scratch_entries, scratch);
         for (policy, error) in [
@@ -332,7 +329,14 @@ mod online_tests {
         assert_eq!(stats.work_units, 14);
         assert_eq!(stats.scratch_entries, 6); // four tuple copies, two new keys
         assert_eq!(
-            run(&source, true, GqlQueryPolicy::new(0, 0, 14, 5), || Ok(()), one).0,
+            run(
+                &source,
+                true,
+                GqlQueryPolicy::new(0, 0, 14, 5),
+                || Ok(()),
+                one
+            )
+            .0,
             Err(StandingQueryFailure::ScratchBudget)
         );
     }
@@ -375,13 +379,14 @@ mod online_tests {
         );
         assert_eq!(result, Err(StandingQueryFailure::InvalidDelta));
         assert_eq!(
-            run(&source, false, wide(1), || Ok(()), one).0.unwrap().len(),
+            run(&source, false, wide(1), || Ok(()), one)
+                .0
+                .unwrap()
+                .len(),
             1
         );
 
-        let negative = self::source(2, |key| {
-            ZWeight::from_i128(if key == 0 { 1 } else { -1 })
-        });
+        let negative = self::source(2, |key| ZWeight::from_i128(if key == 0 { 1 } else { -1 }));
         let mut projected = Vec::new();
         let (result, _) = run(
             &negative,
@@ -417,7 +422,14 @@ mod online_tests {
         )
         .0;
         assert_eq!(
-            expected.as_ref().unwrap().iter().next().unwrap().1.to_i128(),
+            expected
+                .as_ref()
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()
+                .1
+                .to_i128(),
             Some(3)
         );
         for stop in 1..=calls {

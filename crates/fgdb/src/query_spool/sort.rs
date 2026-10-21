@@ -431,8 +431,8 @@ impl NativeResultSpool {
         let mut remaining = self.row_count();
         for _ in 0..required {
             let mut completed = {
-                let capacity = usize::try_from(remaining.min(width))
-                    .map_err(|_| SpillError::SizeOverflow)?;
+                let capacity =
+                    usize::try_from(remaining.min(width)).map_err(|_| SpillError::SizeOverflow)?;
                 let mut rows = ChargedVec::<TrackedBytes>::new(&pool, cx, capacity)?;
                 for _ in 0..remaining.min(width) {
                     work.charge(1)?;

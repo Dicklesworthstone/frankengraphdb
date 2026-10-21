@@ -22,8 +22,13 @@ use fgdb_types::CanonicalScalar;
 /// Coordinates address the script's parameter schema, never user values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphQueryWriteBuildError {
-    MissingColumn { parameter: usize },
-    NonScalarColumn { parameter: usize, column: usize },
+    MissingColumn {
+        parameter: usize,
+    },
+    NonScalarColumn {
+        parameter: usize,
+        column: usize,
+    },
     CollectionColumn {
         parameter: usize,
         column: usize,
@@ -47,45 +52,85 @@ pub struct GraphQueryWriteBindEvent {
 
 #[derive(Debug)]
 pub enum GraphQueryWriteBindError<C = Infallible> {
-    TooManyStatements { limit: usize, observed: u128 },
-    RowShape { row: usize },
-    NonScalar { row: usize, column: usize },
+    TooManyStatements {
+        limit: usize,
+        observed: u128,
+    },
+    RowShape {
+        row: usize,
+    },
+    NonScalar {
+        row: usize,
+        column: usize,
+    },
     CollectionValue {
         row: usize,
         column: usize,
         expected: GqlParameterType,
     },
-    InvalidValue { row: usize, column: usize },
+    InvalidValue {
+        row: usize,
+        column: usize,
+    },
     Parameter {
         row: usize,
         column: usize,
         source: GqlParameterError,
     },
-    ExpandedParametersTooLarge { limit: usize, observed: u128 },
+    ExpandedParametersTooLarge {
+        limit: usize,
+        observed: u128,
+    },
     Script(GraphWriteScriptBatchError),
-    Interrupted { row: Option<usize>, source: C },
+    Interrupted {
+        row: Option<usize>,
+        source: C,
+    },
 }
 impl<C: core::fmt::Display> core::fmt::Display for GraphQueryWriteBindError<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::TooManyStatements { limit, observed } => {
-                write!(f, "query-fed write has {observed} statements; limit {limit}")
+                write!(
+                    f,
+                    "query-fed write has {observed} statements; limit {limit}"
+                )
             }
             Self::RowShape { row } => write!(f, "query-fed write row {row} has the wrong width"),
             Self::NonScalar { row, column } => {
-                write!(f, "query-fed write row {row}, column {column} is not scalar")
+                write!(
+                    f,
+                    "query-fed write row {row}, column {column} is not scalar"
+                )
             }
-            Self::CollectionValue { row, column, expected } => {
-                write!(f, "query-fed write row {row}, column {column} is not {expected:?} or null")
+            Self::CollectionValue {
+                row,
+                column,
+                expected,
+            } => {
+                write!(
+                    f,
+                    "query-fed write row {row}, column {column} is not {expected:?} or null"
+                )
             }
             Self::InvalidValue { row, column } => {
-                write!(f, "query-fed write row {row}, column {column} exceeds value bounds")
+                write!(
+                    f,
+                    "query-fed write row {row}, column {column} exceeds value bounds"
+                )
             }
-            Self::Parameter { row, column, source } => {
+            Self::Parameter {
+                row,
+                column,
+                source,
+            } => {
                 write!(f, "query-fed write row {row}, column {column}: {source}")
             }
             Self::ExpandedParametersTooLarge { limit, observed } => {
-                write!(f, "query-fed write arguments use {observed} bytes; limit {limit}")
+                write!(
+                    f,
+                    "query-fed write arguments use {observed} bytes; limit {limit}"
+                )
             }
             Self::Script(source) => source.fmt(f),
             Self::Interrupted { row, source } => {
@@ -150,7 +195,9 @@ impl PreparedGraphQueryWrite {
                 return Err(match spec.parameter_type {
                     GqlParameterType::List | GqlParameterType::Map => {
                         GraphQueryWriteBuildError::CollectionColumn {
-                            parameter, column, expected: spec.parameter_type,
+                            parameter,
+                            column,
+                            expected: spec.parameter_type,
                         }
                     }
                     _ => GraphQueryWriteBuildError::NonScalarColumn { parameter, column },
@@ -158,7 +205,11 @@ impl PreparedGraphQueryWrite {
             }
             columns.push(column);
         }
-        Ok(Self { source, script, columns: columns.into_boxed_slice() })
+        Ok(Self {
+            source,
+            script,
+            columns: columns.into_boxed_slice(),
+        })
     }
 
     #[must_use]
@@ -238,23 +289,28 @@ impl PreparedGraphQueryWrite {
                     transcript_bytes + values.canonical_byte_len() as u128,
                     &mut |entries| retain(Some(row), entries),
                 )?;
-                values.insert(spec.name.clone(), parameter)
-                    .map_err(|source| GraphQueryWriteBindError::Parameter { row, column, source })?;
+                values
+                    .insert(spec.name.clone(), parameter)
+                    .map_err(|source| GraphQueryWriteBindError::Parameter {
+                        row,
+                        column,
+                        source,
+                    })?;
             }
             transcript_bytes += values.canonical_byte_len() as u128;
             let limit = crate::parameters::MAX_GQL_PARAMETER_TRANSCRIPT_BYTES;
             if transcript_bytes > limit as u128 {
                 return Err(GraphQueryWriteBindError::ExpandedParametersTooLarge {
-                    limit, observed: transcript_bytes,
+                    limit,
+                    observed: transcript_bytes,
                 });
             }
             arguments.push(values);
         }
         let mut expanded_reserved = false;
-        let batch = self.script.bind_parameter_sets_controlled(
-            &arguments,
-            max_statements,
-            |row| {
+        let batch = self
+            .script
+            .bind_parameter_sets_controlled(&arguments, max_statements, |row| {
                 let entries = if row.is_some() {
                     1
                 } else if !expanded_reserved {
@@ -264,11 +320,13 @@ impl PreparedGraphQueryWrite {
                     0
                 };
                 retain(row, entries)
-            },
-        ).map_err(|error| match error {
-            GraphWriteScriptBatchBindError::Binding(error) => GraphQueryWriteBindError::Script(error),
-            GraphWriteScriptBatchBindError::Interrupted { source, .. } => source,
-        })?;
+            })
+            .map_err(|error| match error {
+                GraphWriteScriptBatchBindError::Binding(error) => {
+                    GraphQueryWriteBindError::Script(error)
+                }
+                GraphWriteScriptBatchBindError::Interrupted { source, .. } => source,
+            })?;
         retain(None, 0)?;
         Ok(Some(batch))
     }
@@ -300,23 +358,27 @@ mod tests {
     use fgdb_delta_types::{PropertyKeyId, RelationId};
 
     fn source(text: &str) -> PreparedGraphSet {
-        PreparedGraphSetText::prepare(text, |_, _| None).unwrap()
-            .bind_parameters(&GqlParameters::new()).unwrap()
+        PreparedGraphSetText::prepare(text, |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
     }
     fn script(text: &str) -> PreparedGraphWriteScript {
-        PreparedGraphWriteScript::prepare(text, RelationId(1), |kind, name| {
-            match (kind, name) {
-                (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(PropertyKeyId(1))),
-                _ => None,
-            }
-        }).unwrap()
+        PreparedGraphWriteScript::prepare(text, RelationId(1), |kind, name| match (kind, name) {
+            (GraphSymbolKind::Property, "key") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
     }
     fn rows(source: &PreparedGraphSet) -> Vec<GraphValueRow> {
-        source.execute_governed(
-            GqlQueryPolicy::new(100, 100, 100_000, 100_000),
-            |_, _| Err(crate::GqlQueryError::Source(())),
-            || Ok::<(), ()>(()),
-        ).unwrap().value
+        source
+            .execute_governed(
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                |_, _| Err(crate::GqlQueryError::Source(())),
+                || Ok::<(), ()>(()),
+            )
+            .unwrap()
+            .value
     }
 
     #[test]
@@ -329,9 +391,9 @@ mod tests {
         assert_eq!(batch.argument_sets(), 3);
         assert_eq!(batch.program().statements().len(), 6);
         for (row, value) in [1, 2, 2].into_iter().enumerate() {
-            let expected = script.bind_parameters(
-                &GqlParameters::new().with_int64("key", value).unwrap(),
-            ).unwrap();
+            let expected = script
+                .bind_parameters(&GqlParameters::new().with_int64("key", value).unwrap())
+                .unwrap();
             assert_eq!(
                 &batch.program().statements()[batch.statement_range(row).unwrap()],
                 expected.statements(),
@@ -342,63 +404,105 @@ mod tests {
     #[test]
     fn missing_or_element_column_refuses_before_any_source_rows_exist() {
         assert!(matches!(
-            PreparedGraphQueryWrite::prepare(source("RETURN 1 AS other"), script("MERGE (n {key:$key})")),
+            PreparedGraphQueryWrite::prepare(
+                source("RETURN 1 AS other"),
+                script("MERGE (n {key:$key})")
+            ),
             Err(GraphQueryWriteBuildError::MissingColumn { parameter: 0 }),
         ));
         assert!(matches!(
-            PreparedGraphQueryWrite::prepare(source("MATCH (n) RETURN n AS key"), script("MERGE (n {key:$key})")),
-            Err(GraphQueryWriteBuildError::NonScalarColumn { parameter: 0, column: 0 }),
+            PreparedGraphQueryWrite::prepare(
+                source("MATCH (n) RETURN n AS key"),
+                script("MERGE (n {key:$key})")
+            ),
+            Err(GraphQueryWriteBuildError::NonScalarColumn {
+                parameter: 0,
+                column: 0
+            }),
         ));
     }
 
     #[test]
     fn empty_input_is_a_controlled_noop_and_bound_counts_precede_callbacks() {
         let prepared = PreparedGraphQueryWrite::prepare(
-            source("UNWIND [] AS x RETURN x AS key"), script("MERGE (n {key:$key})"),
-        ).unwrap();
+            source("UNWIND [] AS x RETURN x AS key"),
+            script("MERGE (n {key:$key})"),
+        )
+        .unwrap();
         let mut callbacks = 0;
-        assert!(prepared.bind_rows_controlled(&[], 0, |_| {
-            callbacks += 1;
-            Ok::<(), ()>(())
-        }).unwrap().is_none());
+        assert!(
+            prepared
+                .bind_rows_controlled(&[], 0, |_| {
+                    callbacks += 1;
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(callbacks, 2);
         let input = rows(&source("UNWIND [1,2] AS key RETURN key"));
         callbacks = 0;
-        assert!(matches!(prepared.bind_rows_controlled(&input, 1, |_| {
-            callbacks += 1;
-            Ok::<(), ()>(())
-        }), Err(GraphQueryWriteBindError::TooManyStatements { limit: 1, observed: 2 })));
+        assert!(matches!(
+            prepared.bind_rows_controlled(&input, 1, |_| {
+                callbacks += 1;
+                Ok::<(), ()>(())
+            }),
+            Err(GraphQueryWriteBindError::TooManyStatements {
+                limit: 1,
+                observed: 2
+            })
+        ));
         assert_eq!(callbacks, 0);
     }
 
     #[test]
     fn late_nonscalar_and_late_binding_failure_return_no_batch() {
         let prepared = PreparedGraphQueryWrite::prepare(
-            source("UNWIND [1, [2]] AS key RETURN key"), script("MERGE (n {key:$key})"),
-        ).unwrap();
-        assert!(matches!(prepared.bind_rows(&rows(prepared.source()), 2),
-            Err(GraphQueryWriteBindError::NonScalar { row: 1, column: 0 })));
+            source("UNWIND [1, [2]] AS key RETURN key"),
+            script("MERGE (n {key:$key})"),
+        )
+        .unwrap();
+        assert!(matches!(
+            prepared.bind_rows(&rows(prepared.source()), 2),
+            Err(GraphQueryWriteBindError::NonScalar { row: 1, column: 0 })
+        ));
         let bad = rows(&source("UNWIND [1, 'wrong'] AS key RETURN key"));
-        assert!(matches!(prepared.bind_rows(&bad, 2),
-            Err(GraphQueryWriteBindError::Script(GraphWriteScriptBatchError::Arguments {
-                argument_set: 1, ..
-            }))));
+        assert!(matches!(
+            prepared.bind_rows(&bad, 2),
+            Err(GraphQueryWriteBindError::Script(
+                GraphWriteScriptBatchError::Arguments {
+                    argument_set: 1,
+                    ..
+                }
+            ))
+        ));
         // Failure does not poison a reusable prepared definition.
         let good = rows(&source("RETURN 3 AS key"));
-        assert_eq!(prepared.bind_rows(&good, 2).unwrap().unwrap().argument_sets(), 1);
+        assert_eq!(
+            prepared
+                .bind_rows(&good, 2)
+                .unwrap()
+                .unwrap()
+                .argument_sets(),
+            1
+        );
     }
 
     #[test]
     fn cancellation_at_every_binding_boundary_never_releases_a_prefix() {
         let prepared = PreparedGraphQueryWrite::prepare(
-            source("UNWIND [1,2] AS key RETURN key"), script("MERGE (n {key:$key})"),
-        ).unwrap();
+            source("UNWIND [1,2] AS key RETURN key"),
+            script("MERGE (n {key:$key})"),
+        )
+        .unwrap();
         let input = rows(prepared.source());
         let mut count = 0;
-        prepared.bind_rows_controlled(&input, 2, |_| {
-            count += 1;
-            Ok::<(), usize>(())
-        }).unwrap();
+        prepared
+            .bind_rows_controlled(&input, 2, |_| {
+                count += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
         for stop in 0..count {
             let mut at = 0;
             let result = prepared.bind_rows_controlled(&input, 2, |_| {

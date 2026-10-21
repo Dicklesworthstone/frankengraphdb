@@ -5,7 +5,8 @@
 use super::*;
 
 fn add(left: usize, right: usize) -> Result<usize, BufferedReadError> {
-    left.checked_add(right).ok_or(BufferedReadError::SizeOverflow)
+    left.checked_add(right)
+        .ok_or(BufferedReadError::SizeOverflow)
 }
 
 fn vector_bytes<T>(values: &Vec<T>) -> Result<usize, BufferedReadError> {
@@ -85,7 +86,12 @@ pub(super) fn vertex<C>(
 ) -> Result<BufferedValue<VertexRow>, BufferedScanError<C>> {
     control()?;
     let bytes = properties(&row.props, control)?
-        .map(|props| add(add(size_of::<VertexRow>(), vector_bytes(&row.labels)?)?, props))
+        .map(|props| {
+            add(
+                add(size_of::<VertexRow>(), vector_bytes(&row.labels)?)?,
+                props,
+            )
+        })
         .transpose()?;
     control()?;
     Ok(retain(row, bytes)?)

@@ -52,15 +52,36 @@ impl<V: Vfs + Clone> Database<V> {
         max_ticks: NonZeroUsize,
         max_pinned_payload_units: usize,
         policy: GqlQueryPolicy,
-    ) -> Result<Option<(CommitSeq, impl core::iter::FusedIterator<Item = Item> + 'cx + use<'cx, V>)>, StandingQueryError> {
+    ) -> Result<
+        Option<(
+            CommitSeq,
+            impl core::iter::FusedIterator<Item = Item> + 'cx + use<'cx, V>,
+        )>,
+        StandingQueryError,
+    > {
         let history = self.owned_net_history(cx, replay)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
             let Some((end, pins)) = PinnedReplay::open(
-                history, after, max_ticks, max_pinned_payload_units, &mut meter,
-            )? else { return Ok(None); };
-            let pull = NetPull::from_pins(pins, false, &mut meter).map_err(StandingQueryError::Delivery)?;
+                history,
+                after,
+                max_ticks,
+                max_pinned_payload_units,
+                &mut meter,
+            )?
+            else {
+                return Ok(None);
+            };
+            let pull = NetPull::from_pins(pins, false, &mut meter)
+                .map_err(StandingQueryError::Delivery)?;
             Ok(Some((end, drive(cx, pull))))
         })
     }
@@ -81,23 +102,38 @@ impl<V: Vfs + Clone> Database<V> {
         after: CommitSeq,
         max_pinned_payload_units: usize,
         policy: GqlQueryPolicy,
-    ) -> Result<impl core::iter::FusedIterator<Item = Item> + 'cx + use<'cx, V>, StandingQueryError> {
+    ) -> Result<impl core::iter::FusedIterator<Item = Item> + 'cx + use<'cx, V>, StandingQueryError>
+    {
         let history = self.owned_net_history(cx, replay)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
             let pins = pin_interval(history, before, after, max_pinned_payload_units, &mut meter)?;
-            let pull = NetPull::from_pins(pins, before > after, &mut meter).map_err(StandingQueryError::Delivery)?;
+            let pull = NetPull::from_pins(pins, before > after, &mut meter)
+                .map_err(StandingQueryError::Delivery)?;
             Ok(drive(cx, pull))
         })
     }
 
-    fn owned_net_history(&self, cx: &QueryCx, replay: &StandingQueryHandle) -> Result<&History, StandingQueryError> {
+    fn owned_net_history(
+        &self,
+        cx: &QueryCx,
+        replay: &StandingQueryHandle,
+    ) -> Result<&History, StandingQueryError> {
         let StandingQuery::Replay(state) = self.admitted_standing_query(cx, replay)? else {
             return Err(StandingQueryError::Unsupported);
         };
         if state.history.frontier() != state.frontier {
-            return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta));
+            return Err(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ));
         }
         Ok(&state.history)
     }
@@ -105,8 +141,14 @@ impl<V: Vfs + Clone> Database<V> {
 
 fn drive(cx: &QueryCx, mut pull: NetPull) -> impl core::iter::FusedIterator<Item = Item> + '_ {
     std::iter::from_fn(move || {
-        cx.with_restriction(|| pull.advance(&mut || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)))
-    }).fuse()
+        cx.with_restriction(|| {
+            pull.advance(&mut || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            })
+        })
+    })
+    .fuse()
 }
 
 fn pin_interval(
@@ -119,9 +161,15 @@ fn pin_interval(
     let retained_after = history.retained_after();
     let frontier = history.frontier();
     for cut in [before, after] {
-        meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
+        meter
+            .charge(ZSetEvent::Work)
+            .map_err(StandingQueryError::Delivery)?;
         if cut < retained_after || cut > frontier {
-            return Err(StandingQueryError::ReplayGap { after: cut, retained_after, frontier });
+            return Err(StandingQueryError::ReplayGap {
+                after: cut,
+                retained_after,
+                frontier,
+            });
         }
     }
     let low = before.min(after);
@@ -129,16 +177,22 @@ fn pin_interval(
     let count = usize::try_from(high.0 - low.0)
         .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
     if let Some(count) = NonZeroUsize::new(count) {
-        let (end, pins) = PinnedReplay::open(history, low, count, max_units, meter)?
-            .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+        let (end, pins) = PinnedReplay::open(history, low, count, max_units, meter)?.ok_or(
+            StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta),
+        )?;
         if end != high {
-            return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta));
+            return Err(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ));
         }
         Ok(pins)
     } else {
         (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
         Ok(PinnedReplay {
-            frames: Some(VecDeque::new()), policy: meter.policy, stats: meter.stats, delivered: 0,
+            frames: Some(VecDeque::new()),
+            policy: meter.policy,
+            stats: meter.stats,
+            delivered: 0,
         })
     }
 }
@@ -149,34 +203,70 @@ struct OwnedHead {
     source: usize,
 }
 impl PartialEq for OwnedHead {
-    fn eq(&self, other: &Self) -> bool { self.source == other.source && self.row == other.row }
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.row == other.row
+    }
 }
 impl Eq for OwnedHead {}
 impl PartialOrd for OwnedHead {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for OwnedHead {
     fn cmp(&self, other: &Self) -> Ordering {
         // Max heap reversed in BOTH fields: canonical keys, then oldest tick.
-        other.row.cmp(&self.row).then_with(|| other.source.cmp(&self.source))
+        other
+            .row
+            .cmp(&self.row)
+            .then_with(|| other.source.cmp(&self.source))
     }
 }
 impl OwnedHead {
-    fn copy(row: &[QueryValue], weight: &ZWeight, source: usize, meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
+    fn copy(
+        row: &[QueryValue],
+        weight: &ZWeight,
+        source: usize,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        if weight.is_zero() { return Err(StandingQueryFailure::InvalidDelta); }
-        meter.units(ZSetEvent::ScratchEntry, weight.magnitude_limb_count().checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?)?;
-        let weight = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
+        if weight.is_zero() {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        meter.units(
+            ZSetEvent::ScratchEntry,
+            weight
+                .magnitude_limb_count()
+                .checked_add(1)
+                .ok_or(StandingQueryFailure::ScratchBudget)?,
+        )?;
+        let weight = weight
+            .checked_clone(LIMBS)
+            .map_err(|_| StandingQueryFailure::Arithmetic)?;
         meter.charge(ZSetEvent::ScratchEntry)?;
         let mut cells = Vec::new();
         for cell in row {
             meter.charge(ZSetEvent::Work)?;
-            let units = match cell { QueryValue::Value(value) => value.payload_units(), _ => 0 };
-            meter.units(ZSetEvent::ScratchEntry, units.checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?)?;
-            cells.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+            let units = match cell {
+                QueryValue::Value(value) => value.payload_units(),
+                _ => 0,
+            };
+            meter.units(
+                ZSetEvent::ScratchEntry,
+                units
+                    .checked_add(1)
+                    .ok_or(StandingQueryFailure::ScratchBudget)?,
+            )?;
+            cells
+                .try_reserve(1)
+                .map_err(|_| StandingQueryFailure::ScratchBudget)?;
             cells.push(cell.clone());
         }
-        Ok(Self { row: cells, weight, source })
+        Ok(Self {
+            row: cells,
+            weight,
+            source,
+        })
     }
 }
 
@@ -185,13 +275,18 @@ struct OwnedMerge {
     heads: BinaryHeap<OwnedHead>,
 }
 impl OwnedMerge {
-    fn new(frames: VecDeque<Arc<StandingReplayBatch>>, meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
+    fn new(
+        frames: VecDeque<Arc<StandingReplayBatch>>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
         let mut heads = BinaryHeap::new();
         for (source, frame) in frames.iter().enumerate() {
             meter.charge(ZSetEvent::Work)?;
             if let Some((row, weight)) = frame.rows.first_after(None) {
                 meter.charge(ZSetEvent::ScratchEntry)?;
-                heads.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+                heads
+                    .try_reserve(1)
+                    .map_err(|_| StandingQueryFailure::ScratchBudget)?;
                 heads.push(OwnedHead::copy(row, weight, source, meter)?);
             }
         }
@@ -199,12 +294,24 @@ impl OwnedMerge {
         Ok(Self { frames, heads })
     }
 
-    fn consume(&mut self, source: usize, row: &Vec<QueryValue>, weight: ZWeight, total: ZWeight, meter: &mut Meter<'_>) -> Result<ZWeight, StandingQueryFailure> {
+    fn consume(
+        &mut self,
+        source: usize,
+        row: &Vec<QueryValue>,
+        weight: ZWeight,
+        total: ZWeight,
+        meter: &mut Meter<'_>,
+    ) -> Result<ZWeight, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        let units = total.magnitude_limb_count().max(weight.magnitude_limb_count())
-            .checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
+        let units = total
+            .magnitude_limb_count()
+            .max(weight.magnitude_limb_count())
+            .checked_add(1)
+            .ok_or(StandingQueryFailure::ScratchBudget)?;
         meter.units(ZSetEvent::ScratchEntry, units)?;
-        let total = total.checked_add(&weight, LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
+        let total = total
+            .checked_add(&weight, LIMBS)
+            .map_err(|_| StandingQueryFailure::Arithmetic)?;
         meter.charge(ZSetEvent::Work)?;
         if let Some((next, weight)) = self.frames[source].rows.first_after(Some(row)) {
             let head = OwnedHead::copy(next, weight, source, meter)?;
@@ -217,15 +324,26 @@ impl OwnedMerge {
     fn next(&mut self, meter: &mut Meter<'_>) -> Result<Option<Change>, StandingQueryFailure> {
         loop {
             meter.charge(ZSetEvent::Work)?;
-            let Some(OwnedHead { row, weight, source }) = self.heads.pop() else { return Ok(None); };
+            let Some(OwnedHead {
+                row,
+                weight,
+                source,
+            }) = self.heads.pop()
+            else {
+                return Ok(None);
+            };
             let mut total = self.consume(source, &row, weight, ZWeight::ZERO, meter)?;
             loop {
                 meter.charge(ZSetEvent::Work)?;
-                if !self.heads.peek().is_some_and(|head| head.row == row) { break; }
+                if !self.heads.peek().is_some_and(|head| head.row == row) {
+                    break;
+                }
                 let head = self.heads.pop().ok_or(StandingQueryFailure::InvalidDelta)?;
                 total = self.consume(head.source, &head.row, head.weight, total, meter)?;
             }
-            if !total.is_zero() { return Ok(Some((row, total))); }
+            if !total.is_zero() {
+                return Ok(Some((row, total)));
+            }
         }
     }
 }
@@ -238,30 +356,66 @@ struct NetPull {
     delivered: u64,
 }
 impl NetPull {
-    fn from_pins(mut pins: PinnedReplay, reverse: bool, meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
-        let frames = pins.frames.take().ok_or(StandingQueryFailure::InvalidDelta)?;
+    fn from_pins(
+        mut pins: PinnedReplay,
+        reverse: bool,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        let frames = pins
+            .frames
+            .take()
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
         let merge = OwnedMerge::new(frames, meter)?;
-        Ok(Self { merge: Some(merge), reverse, policy: meter.policy, stats: meter.stats, delivered: 0 })
+        Ok(Self {
+            merge: Some(merge),
+            reverse,
+            policy: meter.policy,
+            stats: meter.stats,
+            delivered: 0,
+        })
     }
 
-    fn advance(&mut self, checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>) -> Option<Item> {
+    fn advance(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
+    ) -> Option<Item> {
         // Own all pins/heads locally before fallible or caller-controlled work.
         // Errors and unwinds cannot resume a partial key or retain its history.
         let mut merge = self.merge.take()?;
-        let mut meter = Meter { policy: self.policy, stats: self.stats, checkpoint };
+        let mut meter = Meter {
+            policy: self.policy,
+            stats: self.stats,
+            checkpoint,
+        };
         let result = (|| {
             let Some((row, mut weight)) = merge.next(&mut meter)? else {
                 (meter.checkpoint)()?;
                 return Ok(None);
             };
-            let delivered = self.delivered.checked_add(1).ok_or(StandingQueryFailure::ResultBudget)?;
-            if self.policy.rows.max_result_rows().is_some_and(|limit| delivered > limit) {
+            let delivered = self
+                .delivered
+                .checked_add(1)
+                .ok_or(StandingQueryFailure::ResultBudget)?;
+            if self
+                .policy
+                .rows
+                .max_result_rows()
+                .is_some_and(|limit| delivered > limit)
+            {
                 return Err(StandingQueryFailure::ResultBudget);
             }
             if self.reverse {
                 meter.charge(ZSetEvent::Work)?;
-                meter.units(ZSetEvent::ScratchEntry, weight.magnitude_limb_count().checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?)?;
-                weight = weight.checked_neg(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
+                meter.units(
+                    ZSetEvent::ScratchEntry,
+                    weight
+                        .magnitude_limb_count()
+                        .checked_add(1)
+                        .ok_or(StandingQueryFailure::ScratchBudget)?,
+                )?;
+                weight = weight
+                    .checked_neg(LIMBS)
+                    .map_err(|_| StandingQueryFailure::Arithmetic)?;
             }
             (meter.checkpoint)()?;
             Ok(Some((row, weight, delivered)))

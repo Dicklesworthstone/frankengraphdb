@@ -15,7 +15,10 @@ impl<T: Ord> ZSet<T> {
     pub fn first_after(&self, after: Option<&T>) -> Option<(&T, &ZWeight)> {
         match after {
             None => self.entries.first_key_value(),
-            Some(key) => self.entries.range::<T, _>((Excluded(key), Unbounded)).next(),
+            Some(key) => self
+                .entries
+                .range::<T, _>((Excluded(key), Unbounded))
+                .next(),
         }
     }
 }
@@ -88,7 +91,13 @@ mod tests {
         let comparisons = Cell::new(0);
         let set = ZSet::from_updates(
             (0..16_384).map(|value| {
-                (Key { value, comparisons: &comparisons }, ZWeight::ONE)
+                (
+                    Key {
+                        value,
+                        comparisons: &comparisons,
+                    },
+                    ZWeight::ONE,
+                )
             }),
             LimbLimit::new(4),
             &mut |_| Ok::<_, ()>(()),
@@ -96,7 +105,10 @@ mod tests {
         .unwrap();
         comparisons.set(0);
         let found = {
-            let probe = Key { value: 16_382, comparisons: &comparisons };
+            let probe = Key {
+                value: 16_382,
+                comparisons: &comparisons,
+            };
             set.first_after(Some(&probe)).unwrap()
         };
         assert_eq!(found.0.value, 16_383);

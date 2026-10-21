@@ -31,7 +31,9 @@ impl AsyncRead for File {
         let mut state = self.0.lock().unwrap();
         state.reads += 1;
         let at = state.bytes.position() as usize;
-        let count = output.remaining().min(state.bytes.get_ref().len().saturating_sub(at));
+        let count = output
+            .remaining()
+            .min(state.bytes.get_ref().len().saturating_sub(at));
         if count != 0 {
             output.put_slice(&state.bytes.get_ref()[at..at + count]);
             state.bytes.set_position((at + count) as u64);
@@ -67,31 +69,51 @@ impl AsyncSeek for File {
 }
 async fn file(cx: &QueryCx, pool: &MemoryPool) -> (SpillFile<File>, File) {
     let backing = File::default();
-    let file = SpillFile::new(cx, backing.clone(), pool.clone(), SpillLimits {
-        max_file_bytes: 64_000_000,
-        max_runs: 500_000,
-        max_run_bytes: 16_000_000,
-    }).await.unwrap();
+    let file = SpillFile::new(
+        cx,
+        backing.clone(),
+        pool.clone(),
+        SpillLimits {
+            max_file_bytes: 64_000_000,
+            max_runs: 500_000,
+            max_run_bytes: 16_000_000,
+        },
+    )
+    .await
+    .unwrap();
     (file, backing)
 }
 fn rows(count: usize) -> Vec<GraphValueRow> {
-    (0..count).map(|id| GraphValueRow::from_owned_values(vec![
-        GraphValue::Scalar(if id % 11 == 0 {
-            CanonicalScalar::Null
-        } else {
-            CanonicalScalar::Int((id * 13 % 19) as i64 - 9)
-        }),
-        GraphValue::Scalar(CanonicalScalar::Int(id as i64)),
-    ])).collect()
+    (0..count)
+        .map(|id| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(if id % 11 == 0 {
+                    CanonicalScalar::Null
+                } else {
+                    CanonicalScalar::Int((id * 13 % 19) as i64 - 9)
+                }),
+                GraphValue::Scalar(CanonicalScalar::Int(id as i64)),
+            ])
+        })
+        .collect()
 }
 fn encoded(rows: &[GraphValueRow]) -> Vec<Vec<u8>> {
-    rows.iter().map(|row| row.canonical_bytes().unwrap()).collect()
+    rows.iter()
+        .map(|row| row.canonical_bytes().unwrap())
+        .collect()
 }
-async fn seed(cx: &QueryCx, file: &mut SpillFile<File>, rows: &[GraphValueRow]) -> NativeResultSpool {
+async fn seed(
+    cx: &QueryCx,
+    file: &mut SpillFile<File>,
+    rows: &[GraphValueRow],
+) -> NativeResultSpool {
     let frames = encoded(rows);
     let mut writer = file.paged_writer(cx, 127).unwrap();
     for frame in &frames {
-        writer.write(cx, &(frame.len() as u64).to_be_bytes()).await.unwrap();
+        writer
+            .write(cx, &(frame.len() as u64).to_be_bytes())
+            .await
+            .unwrap();
         writer.write(cx, frame).await.unwrap();
     }
     NativeResultSpool {
@@ -99,8 +121,14 @@ async fn seed(cx: &QueryCx, file: &mut SpillFile<File>, rows: &[GraphValueRow]) 
         encoded_columns: 2,
         snapshot: CommitSeq(17),
         kind: ScanKind::Edge,
-        rows: GqlExecutionStats { snapshot_records: 91, result_rows: rows.len() as u64 },
-        evaluator: GlaExecutionStats { work_units: 101, scratch_entries: 103 },
+        rows: GqlExecutionStats {
+            snapshot_records: 91,
+            result_rows: rows.len() as u64,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: 101,
+            scratch_entries: 103,
+        },
         max_row_bytes: frames.iter().map(Vec::len).max().unwrap_or(0),
         run: writer.finish(cx).await.unwrap(),
     }
@@ -140,14 +168,29 @@ fn many_tiny_runs_fit_when_the_old_run_catalog_alone_exceeds_the_pool() {
         let input = rows(count);
         let spool = seed(&cx, &mut source, &input).await;
         assert_eq!(pool.used(), 0);
-        let (result, _) = spool.sort_into(
-            &cx, &mut source, &mut destination,
-            &[GraphValueOrder { column: 0, descending: false, nulls_first: true }],
-            1, count, 127, u64::MAX,
-        ).await.unwrap();
+        let (result, _) = spool
+            .sort_into(
+                &cx,
+                &mut source,
+                &mut destination,
+                &[GraphValueOrder {
+                    column: 0,
+                    descending: false,
+                    nulls_first: true,
+                }],
+                1,
+                count,
+                127,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
         let mut expected = input.clone();
         expected.sort();
-        assert_eq!(read(&cx, &mut destination, &result).await, encoded(&expected));
+        assert_eq!(
+            read(&cx, &mut destination, &result).await,
+            encoded(&expected)
+        );
         assert_eq!(read(&cx, &mut source, &spool).await, encoded(&input));
         assert_eq!(result.snapshot_seq(), spool.snapshot_seq());
         assert_eq!(result.row_stats(), spool.row_stats());
@@ -168,14 +211,29 @@ fn uneven_run_counts_preserve_frames_and_empty_results() {
                 let (mut destination, _) = file(&cx, &pool).await;
                 let input = rows(count);
                 let spool = seed(&cx, &mut source, &input).await;
-                let (sorted, _) = spool.sort_into(
-                    &cx, &mut source, &mut destination,
-                    &[GraphValueOrder { column: 0, descending: false, nulls_first: true }],
-                    width, count.div_ceil(width).max(1), 31, u64::MAX,
-                ).await.unwrap();
+                let (sorted, _) = spool
+                    .sort_into(
+                        &cx,
+                        &mut source,
+                        &mut destination,
+                        &[GraphValueOrder {
+                            column: 0,
+                            descending: false,
+                            nulls_first: true,
+                        }],
+                        width,
+                        count.div_ceil(width).max(1),
+                        31,
+                        u64::MAX,
+                    )
+                    .await
+                    .unwrap();
                 let mut expected = input.clone();
                 expected.sort();
-                assert_eq!(read(&cx, &mut destination, &sorted).await, encoded(&expected));
+                assert_eq!(
+                    read(&cx, &mut destination, &sorted).await,
+                    encoded(&expected)
+                );
                 assert_eq!(read(&cx, &mut source, &spool).await, encoded(&input));
                 assert_eq!(pool.used(), 0);
             }
@@ -187,10 +245,14 @@ fn uneven_run_counts_preserve_frames_and_empty_results() {
 // Equal comparator keys need not imply identical encoded rows (for example,
 // external join keys). With one row per initial run, left-first merging must
 // preserve source order even for runs accumulated in different scratch files.
-struct EqualOrder { validated: Arc<AtomicUsize> }
+struct EqualOrder {
+    validated: Arc<AtomicUsize>,
+}
 impl FrameOrder for EqualOrder {
     type Error = NativeSpoolError;
-    fn admit(&mut self, _: usize) -> Result<()> { Ok(()) }
+    fn admit(&mut self, _: usize) -> Result<()> {
+        Ok(())
+    }
     fn validate(&mut self, row: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
         canonical::validate(row, columns, work)?;
         self.validated.fetch_add(1, AtomicOrdering::Relaxed);
@@ -212,11 +274,22 @@ fn equal_key_representatives_keep_left_to_right_source_order() {
             let (mut destination, _) = file(&cx, &pool).await;
             let input = rows(count);
             let spool = seed(&cx, &mut source, &input).await;
-            let mut order = EqualOrder { validated: Arc::new(AtomicUsize::new(0)) };
-            let (result, _) = spool.sort_with(
-                &cx, &mut source, &mut destination, &mut order,
-                1, count, 31, u64::MAX,
-            ).await.unwrap();
+            let mut order = EqualOrder {
+                validated: Arc::new(AtomicUsize::new(0)),
+            };
+            let (result, _) = spool
+                .sort_with(
+                    &cx,
+                    &mut source,
+                    &mut destination,
+                    &mut order,
+                    1,
+                    count,
+                    31,
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
             assert_eq!(order.validated.load(AtomicOrdering::Relaxed), count);
             assert_eq!(read(&cx, &mut destination, &result).await, encoded(&input));
             assert_eq!(pool.used(), 0);
@@ -236,18 +309,53 @@ fn total_run_and_exact_work_limits_are_not_reset_by_carry_merges() {
         let order = [GraphValueOrder::ascending(0)];
         let before = (source.stats(), destination.stats());
         backing.0.lock().unwrap().reads = 0;
-        assert!(matches!(spool.sort_into(
-            &cx, &mut source, &mut destination, &order, 1, 12, 127, u64::MAX,
-        ).await, Err(NativeSpoolError::SortRunLimit { required: 13, limit: 12 })));
+        assert!(matches!(
+            spool
+                .sort_into(
+                    &cx,
+                    &mut source,
+                    &mut destination,
+                    &order,
+                    1,
+                    12,
+                    127,
+                    u64::MAX,
+                )
+                .await,
+            Err(NativeSpoolError::SortRunLimit {
+                required: 13,
+                limit: 12
+            })
+        ));
         assert_eq!(backing.0.lock().unwrap().reads, 0);
         assert_eq!((source.stats(), destination.stats()), before);
-        let (wide, measured) = spool.sort_into(
-            &cx, &mut source, &mut destination, &order, 1, 13, 127, u64::MAX,
-        ).await.unwrap();
+        let (wide, measured) = spool
+            .sort_into(
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                1,
+                13,
+                127,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
         let expected = read(&cx, &mut destination, &wide).await;
-        let (exact, exact_work) = spool.sort_into(
-            &cx, &mut source, &mut destination, &order, 1, 13, 127, measured,
-        ).await.unwrap();
+        let (exact, exact_work) = spool
+            .sort_into(
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                1,
+                13,
+                127,
+                measured,
+            )
+            .await
+            .unwrap();
         assert_eq!(exact_work, measured);
         assert_eq!(read(&cx, &mut destination, &exact).await, expected);
         assert!(matches!(spool.sort_into(
@@ -258,10 +366,20 @@ fn total_run_and_exact_work_limits_are_not_reset_by_carry_merges() {
         // restores consumed append quota. Earlier run handles remain readable.
         assert_eq!(read(&cx, &mut destination, &wide).await, expected);
         assert!(source.stats().reserved_bytes > before.0.reserved_bytes);
-        let (_, continued) = spool.sort_inner(
-            &cx, &mut source, &mut destination, &mut CanonicalOrder(&order),
-            1, 13, 127, measured + 29, 29,
-        ).await.unwrap();
+        let (_, continued) = spool
+            .sort_inner(
+                &cx,
+                &mut source,
+                &mut destination,
+                &mut CanonicalOrder(&order),
+                1,
+                13,
+                127,
+                measured + 29,
+                29,
+            )
+            .await
+            .unwrap();
         assert_eq!(continued, measured + 29);
         assert_eq!(pool.used(), 0);
     });
@@ -277,19 +395,28 @@ fn dropped_carry_merge_releases_generation_and_catalog_memory() {
         let (mut destination, _) = file(&cx, &pool).await;
         let spool = seed(&cx, &mut source, &rows(17)).await;
         let validated = Arc::new(AtomicUsize::new(0));
-        let mut order = EqualOrder { validated: Arc::clone(&validated) };
+        let mut order = EqualOrder {
+            validated: Arc::clone(&validated),
+        };
         // Initial runs go to destination. The FIRST carry merges them back
         // into source, so this blocks an actual merge, not input generation.
         backing.0.lock().unwrap().block_writes = true;
         let mut future = Box::pin(spool.sort_with(
-            &cx, &mut source, &mut destination, &mut order,
-            1, 17, 31, u64::MAX,
+            &cx,
+            &mut source,
+            &mut destination,
+            &mut order,
+            1,
+            17,
+            31,
+            u64::MAX,
         ));
         std::future::poll_fn(|task| match future.as_mut().poll(task) {
             Poll::Ready(_) => panic!("blocked carry append cannot complete"),
             Poll::Pending if backing.0.lock().unwrap().blocked_writes > 0 => Poll::Ready(()),
             Poll::Pending => Poll::Pending,
-        }).await;
+        })
+        .await;
         assert_eq!(validated.load(AtomicOrdering::Relaxed), 2);
         assert!(pool.used() > 0);
         drop(future);

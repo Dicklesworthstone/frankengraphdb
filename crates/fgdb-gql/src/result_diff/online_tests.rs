@@ -92,10 +92,19 @@ fn before_consolidation_is_charged_before_the_second_source_is_admitted() {
         let remaining = second.unwrap();
         assert_eq!(remaining.rows.max_result_rows(), None);
         assert_eq!(remaining.rows.max_snapshot_records(), Some(0));
-        assert_eq!(remaining.evaluator.max_work_units, 10_000 - (4 + 3 * n as u64));
-        assert_eq!(remaining.evaluator.max_scratch_entries, 10_000 - (n as u64 + 2));
+        assert_eq!(
+            remaining.evaluator.max_work_units,
+            10_000 - (4 + 3 * n as u64)
+        );
+        assert_eq!(
+            remaining.evaluator.max_scratch_entries,
+            10_000 - (n as u64 + 2)
+        );
         assert_eq!(result.changes().len(), 1);
-        assert_eq!(result.changes().iter().next().unwrap().1.to_i128(), Some(-(n as i128)));
+        assert_eq!(
+            result.changes().iter().next().unwrap().1.to_i128(),
+            Some(-(n as i128))
+        );
     }
 }
 
@@ -155,7 +164,10 @@ fn duplicate_occurrences_need_no_second_staging_bag_or_its_scratch_reservation()
     assert_eq!(result.evaluator_stats().work_units, work);
     assert_eq!(result.evaluator_stats().scratch_entries, scratch);
     assert_eq!(result.changes().len(), 1);
-    assert_eq!(result.changes().iter().next().unwrap().1.to_i128(), Some(-(n as i128)));
+    assert_eq!(
+        result.changes().iter().next().unwrap().1.to_i128(),
+        Some(-(n as i128))
+    );
     for policy in [
         GqlQueryPolicy::new(0, 1, work - 1, scratch),
         GqlQueryPolicy::new(0, 1, work, scratch - 1),
@@ -218,7 +230,10 @@ fn arbitrary_occurrence_orders_match_independent_counts_and_cancel_under_zero_ro
 
 #[test]
 fn aggregate_output_slot_consolidation_preserves_repeats_and_ignores_hidden_cells() {
-    let slots = [GraphAggregateTextSlot::Aggregate(0), GraphAggregateTextSlot::Aggregate(0)];
+    let slots = [
+        GraphAggregateTextSlot::Aggregate(0),
+        GraphAggregateTextSlot::Aggregate(0),
+    ];
     // Changes only to a non-returned cell must cancel, even under a zero-row
     // allowance. Repeated slots are part of each whole row, not separate keys.
     let result: Result<_, Error<&str, usize>> = GraphResultDiff::execute(
@@ -227,7 +242,11 @@ fn aggregate_output_slot_consolidation_preserves_repeats_and_ignores_hidden_cell
         vec!["a".into(), "again".into()],
         GqlQueryPolicy::new(0, 0, u64::MAX, u64::MAX),
         |endpoint, _| {
-            let hidden = if endpoint == DiffEndpoint::Before { 7 } else { 19 };
+            let hidden = if endpoint == DiffEndpoint::Before {
+                7
+            } else {
+                19
+            };
             let rows = (0..64)
                 .map(|_| {
                     GraphAggregateRow::from_global_values(vec![

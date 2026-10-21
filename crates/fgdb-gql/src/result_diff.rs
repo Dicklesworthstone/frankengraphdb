@@ -303,12 +303,7 @@ impl GraphResultDiff {
                         for (column, value) in row.values().iter().enumerate() {
                             cells.push(copy_value(value, endpoint, column, &mut meter)?);
                         }
-                        accumulate_row(
-                            &mut changes,
-                            cells.into_boxed_slice(),
-                            sign,
-                            &mut meter,
-                        )?;
+                        accumulate_row(&mut changes, cells.into_boxed_slice(), sign, &mut meter)?;
                     }
                 }
                 InputRows::Aggregates {
@@ -355,12 +350,7 @@ impl GraphResultDiff {
                             };
                             cells.push(cell);
                         }
-                        accumulate_row(
-                            &mut changes,
-                            cells.into_boxed_slice(),
-                            sign,
-                            &mut meter,
-                        )?;
+                        accumulate_row(&mut changes, cells.into_boxed_slice(), sign, &mut meter)?;
                     }
                 }
             }
@@ -410,12 +400,17 @@ fn accumulate_row<E, C>(
     meter: &mut Meter<'_, C>,
 ) -> Result<(), Error<E, C>> {
     changes
-        .accumulate(row, ZWeight::from_i128(sign), LimbLimit::new(4), &mut |event| {
-            meter.charge::<E>(match event {
-                ZSetEvent::Work => GlaExecutionEvent::Work,
-                ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-            })
-        })
+        .accumulate(
+            row,
+            ZWeight::from_i128(sign),
+            LimbLimit::new(4),
+            &mut |event| {
+                meter.charge::<E>(match event {
+                    ZSetEvent::Work => GlaExecutionEvent::Work,
+                    ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                })
+            },
+        )
         .map_err(|error| match error {
             ZSetError::Control(error) | ZSetError::Callback(error) => error,
             _ => GqlQueryError::Source(GraphDiffError::Arithmetic),

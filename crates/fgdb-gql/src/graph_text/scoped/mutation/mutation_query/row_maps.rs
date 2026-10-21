@@ -47,7 +47,10 @@ impl<'a> ParsedMutationReturn<'a> {
         }
         let key = match input {
             ReturnMapInput::Property(key) => key,
-            ReturnMapInput::Properties => Name { text: "*", at: source.at },
+            ReturnMapInput::Properties => Name {
+                text: "*",
+                at: source.at,
+            },
             ReturnMapInput::Identity | ReturnMapInput::Guard => {
                 unreachable!("identity and guard handled above")
             }
@@ -74,14 +77,24 @@ impl<'a> ParsedMutationReturn<'a> {
             .ok_or_else(|| {
                 error(
                     key.at,
-                    GraphPatternTextErrorKind::Expected("a property carried by the incoming WITH row"),
+                    GraphPatternTextErrorKind::Expected(
+                        "a property carried by the incoming WITH row",
+                    ),
                 )
             })?;
         if whole_map {
-            self.column(Binding::Properties { target, current }, source, GraphSetColumnType::Any)
+            self.column(
+                Binding::Properties { target, current },
+                source,
+                GraphSetColumnType::Any,
+            )
         } else {
             self.column(
-                Binding::Property { target, key, current },
+                Binding::Property {
+                    target,
+                    key,
+                    current,
+                },
                 key,
                 GraphSetColumnType::Stored,
             )

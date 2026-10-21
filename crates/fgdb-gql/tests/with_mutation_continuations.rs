@@ -5,9 +5,9 @@
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy,
-    GraphMutationQueryBatch, GraphMutationQueryError, GraphSymbol, GraphSymbolKind,
-    PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy, GraphMutationQueryBatch,
+    GraphMutationQueryError, GraphSymbol, GraphSymbolKind, PreparedGraphMutationQuery,
+    PreparedGraphMutationQueryText,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
@@ -17,8 +17,7 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const BASE: u128 = 1_u128 << 100;
-type Execution =
-    Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<()>, usize>>;
+type Execution = Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<()>, usize>>;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -87,7 +86,11 @@ fn execute(
         checkpoint,
     );
     if result.is_ok() {
-        assert_eq!(calls.get(), 1, "the positive control must execute native GLA");
+        assert_eq!(
+            calls.get(),
+            1,
+            "the positive control must execute native GLA"
+        );
     }
     result
 }
@@ -145,9 +148,7 @@ fn grouped_row_mutations_preserve_occurrences_and_compound_summary_slots() {
 fn completed_projection_drops_input_scope_without_hiding_real_output_aliases() {
     // The incoming row has one visible item plus a hidden field. The RETURN
     // also has width two, but neither of its outputs is hidden.
-    let query = prepare(
-        "MATCH (n) WITH n SET n.p=n.p+10 RETURN n.p AS p,n AS node ORDER BY node",
-    );
+    let query = prepare("MATCH (n) WITH n SET n.p=n.p+10 RETURN n.p AS p,n AS node ORDER BY node");
     assert_eq!(
         rows(&execute(&query, policy(3), || Ok(())).unwrap()),
         vec![
@@ -249,9 +250,8 @@ fn row_mutation_continuations_keep_final_row_limits_late_errors_and_cancellation
         execute(&query, policy(0), || Ok(())),
         Err(GqlQueryError::Source(_))
     ));
-    let query = prepare(
-        "MATCH (n) WITH n SET n.p=n.p+10 WITH n AS kept RETURN kept.p AS p LIMIT 0",
-    );
+    let query =
+        prepare("MATCH (n) WITH n SET n.p=n.p+10 WITH n AS kept RETURN kept.p AS p LIMIT 0");
     let batch = execute(&query, policy(0), || Ok(())).unwrap();
     assert!(batch.returning().value.is_empty());
     assert_eq!(batch.mutation().stats().effects, 3);

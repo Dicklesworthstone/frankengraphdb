@@ -1841,8 +1841,7 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Timestamp(v)) => {
-            format!(r#"{{"type":"timestamp","value":{}}}"#,
-                timestamp_cell(v))
+            format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp_cell(v))
         }
         GraphValue::Scalar(CanonicalScalar::Bytes(v)) => {
             format!(
@@ -1851,8 +1850,7 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Date(v)) => {
-            format!(r#"{{"type":"date","value":{}}}"#,
-                quoted(&v.to_string()))
+            format!(r#"{{"type":"date","value":{}}}"#, quoted(&v.to_string()))
         }
         GraphValue::Scalar(CanonicalScalar::LocalTime(v)) => {
             format!(
@@ -1861,8 +1859,7 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Time(v)) => {
-            format!(r#"{{"type":"time","value":{}}}"#,
-                quoted(&v.to_string()))
+            format!(r#"{{"type":"time","value":{}}}"#, quoted(&v.to_string()))
         }
         GraphValue::Scalar(CanonicalScalar::LocalDateTime(v)) => {
             format!(
@@ -1876,12 +1873,9 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
                 quoted(&v.to_string())
             )
         }
-        GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#,
-            v.0),
-        GraphValue::Edge(v) => format!(r#"{{"type":"edge","value":"{}"}}"#,
-            v.0),
-        GraphValue::Path(v) => format!(r#"{{"type":"path","value":{}}}"#,
-            path_cell(v)),
+        GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#, v.0),
+        GraphValue::Edge(v) => format!(r#"{{"type":"edge","value":"{}"}}"#, v.0),
+        GraphValue::Path(v) => format!(r#"{{"type":"path","value":{}}}"#, path_cell(v)),
         GraphValue::Vertices(v) => format!(
             r#"{{"type":"vertices","value":[{}]}}"#,
             v.iter()
@@ -2094,8 +2088,7 @@ fn render_rows_iter<Row: AsRef<[String]>>(
     if robot {
         emit(
             out,
-            &format!(r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{count}}}"#,
-            ),
+            &format!(r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{count}}}"#,),
         )
     } else {
         emit(out, &format!("{count} row(s)"))

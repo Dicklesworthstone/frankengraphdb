@@ -15,8 +15,8 @@ use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_strata::vertex::{VertexRow, encode_patch};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion, encode_block_with_properties};
 use fgdb_types::{
-    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
-    EId, GraphId, PurposeContexts, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    GraphId, PurposeContexts, VId,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -122,15 +122,9 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
             .await
             .unwrap();
         let locators: Vec<_> = (1..=entries.len()).map(|index| index as u8).collect();
-        let bytes = encode_block_with_properties(
-            0,
-            predecessor,
-            &entries,
-            patch.0,
-            &locators,
-            &props,
-        )
-        .unwrap();
+        let bytes =
+            encode_block_with_properties(0, predecessor, &entries, patch.0, &locators, &props)
+                .unwrap();
         let id = store.put(&cx, &bytes).await.unwrap();
         predecessor = Some(id);
         blocks.push(BlockRef {

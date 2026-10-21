@@ -4,9 +4,9 @@ use super::{GraphQueryWriteBindError, GraphQueryWriteBindEvent, PreparedGraphQue
 use crate::algebra::GraphValueRow;
 use crate::{
     BoundGraphWriteScriptBatch, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-    GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphSetExecutionError, GraphWriteProgramPolicy, GraphWriteProgramReceipt,
-    GraphWriteProgramStats, GraphWriteScriptExecutionError, PreparedGraphSet,
+    GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
+    GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteProgramStats,
+    GraphWriteScriptExecutionError, PreparedGraphSet,
 };
 use core::convert::Infallible;
 
@@ -87,15 +87,30 @@ fn charge<C>(
     let work = u128::from(used.work_units) + u128::from(entries);
     let scratch = u128::from(used.scratch_entries) + u128::from(entries);
     for (observed, limit, dimension) in [
-        (work, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-        (scratch, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+        (
+            work,
+            policy.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            scratch,
+            policy.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
     ] {
         if observed > u128::from(limit) {
-            return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+            return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                dimension,
+                limit,
+                observed,
+            }));
         }
     }
     // Install neither successor until both bounds hold, including at u64::MAX.
-    *used = GlaExecutionStats { work_units: work as u64, scratch_entries: scratch as u64 };
+    *used = GlaExecutionStats {
+        work_units: work as u64,
+        scratch_entries: scratch as u64,
+    };
     Ok(())
 }
 
@@ -122,11 +137,15 @@ impl PreparedGraphQueryWrite {
         read: impl FnMut(
             &PreparedGraphSet,
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>>,
+        ) -> Result<
+            GqlQueryExecution<GraphValueRow>,
+            GqlQueryError<GraphSetExecutionError<E>, C>,
+        >,
         stage: impl FnMut(
             &BoundGraphWriteScriptBatch,
             GraphWriteProgramPolicy,
-        ) -> Result<GraphWriteProgramReceipt, GraphWriteScriptExecutionError<E, A, C>>,
+        )
+            -> Result<GraphWriteProgramReceipt, GraphWriteScriptExecutionError<E, A, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphQueryWriteExecution, GraphQueryWriteExecutionError<E, A, C>> {
         self.execute_governed_with_binding_control(
@@ -164,11 +183,17 @@ impl PreparedGraphQueryWrite {
         mut read: impl FnMut(
             &PreparedGraphSet,
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>>,
+        ) -> Result<
+            GqlQueryExecution<GraphValueRow>,
+            GqlQueryError<GraphSetExecutionError<E>, C>,
+        >,
         mut stage: impl FnMut(
             &BoundGraphWriteScriptBatch,
             GraphWriteProgramPolicy,
-        ) -> Result<GraphWriteProgramReceipt, GraphWriteScriptExecutionError<E, A, C>>,
+        ) -> Result<
+            GraphWriteProgramReceipt,
+            GraphWriteScriptExecutionError<E, A, C>,
+        >,
         mut checkpoint: impl FnMut() -> Result<(), C>,
         mut binding_control: impl FnMut(GraphQueryWriteBindEvent) -> Result<(), C>,
     ) -> Result<GraphQueryWriteExecution, GraphQueryWriteExecutionError<E, A, C>> {
@@ -177,7 +202,10 @@ impl PreparedGraphQueryWrite {
         let query = policy.mutations.query;
         let read_policy = GqlQueryPolicy::new(
             query.rows.max_snapshot_records().unwrap_or(u64::MAX),
-            query.rows.max_result_rows().unwrap_or(u64::MAX)
+            query
+                .rows
+                .max_result_rows()
+                .unwrap_or(u64::MAX)
                 .min(self.input_row_limit(max_statements) as u64),
             query.evaluator.max_work_units,
             query.evaluator.max_scratch_entries,
@@ -190,11 +218,13 @@ impl PreparedGraphQueryWrite {
         }
         let selection = source.rows;
         let mut evaluator = source.evaluator;
-        let batch = self.bind_rows_controlled(&source.value, max_statements, |event| {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
-            binding_control(event).map_err(GqlQueryError::Interrupted)?;
-            charge(query, &mut evaluator, event.entries)
-        }).map_err(Error::Binding)?;
+        let batch = self
+            .bind_rows_controlled(&source.value, max_statements, |event| {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                binding_control(event).map_err(GqlQueryError::Interrupted)?;
+                charge(query, &mut evaluator, event.entries)
+            })
+            .map_err(Error::Binding)?;
         // Frozen operands now belong to the admitted batch. Drop read results
         // before writing, but never refund their cumulative scratch/work cost.
         drop(source);
@@ -211,7 +241,8 @@ impl PreparedGraphQueryWrite {
         let receipt = if let Some(batch) = batch {
             let remaining = GraphWriteProgramPolicy::new(
                 GqlQueryPolicy::new(
-                    query.rows.max_snapshot_records().unwrap_or(u64::MAX) - selection.snapshot_records,
+                    query.rows.max_snapshot_records().unwrap_or(u64::MAX)
+                        - selection.snapshot_records,
                     query.rows.max_result_rows().unwrap_or(u64::MAX) - selection.result_rows,
                     query.evaluator.max_work_units - evaluator.work_units,
                     query.evaluator.max_scratch_entries - evaluator.scratch_entries,
@@ -224,7 +255,11 @@ impl PreparedGraphQueryWrite {
             let written = receipt.stats();
             if written.completed_statements != batch.program().statements().len()
                 || receipt.steps().len() != written.completed_statements
-                || !within(remaining.mutations.query, written.selection, written.evaluator)
+                || !within(
+                    remaining.mutations.query,
+                    written.selection,
+                    written.evaluator,
+                )
                 || written.mutation_effects > remaining.mutations.max_effects
                 || written.created_vertices > remaining.max_created_vertices
                 || written.created_edges > remaining.max_created_edges
@@ -242,7 +277,11 @@ impl PreparedGraphQueryWrite {
             None
         };
         checkpoint().map_err(|error| Error::Control(GqlQueryError::Interrupted(error)))?;
-        Ok(GraphQueryWriteExecution { input_rows: selection.result_rows, stats, receipt })
+        Ok(GraphQueryWriteExecution {
+            input_rows: selection.result_rows,
+            stats,
+            receipt,
+        })
     }
 }
 

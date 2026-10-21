@@ -348,8 +348,12 @@ impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
         input: ReturnMapInput<'a>,
     ) -> Result<usize, GraphPatternTextError> {
         match self.row {
-            Some(row) => self.returning.row_map_input(parser, row, self.scope, source, input),
-            None => self.returning.map_input(parser, self.columns, self.scope, source, input),
+            Some(row) => self
+                .returning
+                .row_map_input(parser, row, self.scope, source, input),
+            None => self
+                .returning
+                .map_input(parser, self.columns, self.scope, source, input),
         }
     }
     fn types(&self) -> Vec<GraphSetColumnType> {
@@ -526,7 +530,8 @@ impl<'a> ParsedMutationReturn<'a> {
             return Ok(None);
         };
         let labels = word.eq_ignore_ascii_case("labels");
-        if !labels && !word.eq_ignore_ascii_case("properties") && !word.eq_ignore_ascii_case("keys") {
+        if !labels && !word.eq_ignore_ascii_case("properties") && !word.eq_ignore_ascii_case("keys")
+        {
             return Ok(None);
         }
         let mut lookahead = parser.lexer.clone();
@@ -543,12 +548,17 @@ impl<'a> ParsedMutationReturn<'a> {
             return Ok(None);
         }
         let visible = parser.visible_width(row);
-        let Some(target) = row[..visible].iter().position(|(source, _)| source.text == name) else {
+        let Some(target) = row[..visible]
+            .iter()
+            .position(|(source, _)| source.text == name)
+        else {
             return Ok(None);
         };
         let domain = row[target].1;
-        if !matches!(domain, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
-            || labels && domain != GraphSetColumnType::Vertex
+        if !matches!(
+            domain,
+            GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+        ) || labels && domain != GraphSetColumnType::Vertex
         {
             return Ok(None);
         }
@@ -571,9 +581,13 @@ impl<'a> ParsedMutationReturn<'a> {
             .filter(|boundary| boundary.width == row.len() && target < boundary.visible)
             .and_then(|boundary| {
                 if labels {
-                    boundary.functions.iter().find_map(|&(source, function, column)| {
-                        (source == name && function == GraphPathFunction::Labels).then_some(column)
-                    })
+                    boundary
+                        .functions
+                        .iter()
+                        .find_map(|&(source, function, column)| {
+                            (source == name && function == GraphPathFunction::Labels)
+                                .then_some(column)
+                        })
                 } else {
                     boundary.reads.iter().find_map(|&(source, field, column)| {
                         (source == name && field.text == "*").then_some(column)
@@ -594,7 +608,14 @@ impl<'a> ParsedMutationReturn<'a> {
         } else {
             Binding::Properties { target, current }
         };
-        let column = self.column(binding, Name { text: name, at: token.at }, kind)?;
+        let column = self.column(
+            binding,
+            Name {
+                text: name,
+                at: token.at,
+            },
+            kind,
+        )?;
         for _ in 0..4 {
             parser.advance()?;
         }
@@ -620,7 +641,10 @@ impl<'a> ParsedMutationReturn<'a> {
             return Ok(None);
         }
         let visible = parser.visible_width(row);
-        let Some(index) = row[..visible].iter().position(|(name, _)| name.text == word) else {
+        let Some(index) = row[..visible]
+            .iter()
+            .position(|(name, _)| name.text == word)
+        else {
             return Ok(None);
         };
         let kind = row[index].1;
@@ -956,9 +980,9 @@ impl<'a> Parser<'a> {
                 continue;
             };
             let column = if let Some(row) = row {
-                let &(source, kind) = row.get(input).ok_or_else(|| {
-                    error(key.at, GraphPatternTextErrorKind::UnknownVariable)
-                })?;
+                let &(source, kind) = row
+                    .get(input)
+                    .ok_or_else(|| error(key.at, GraphPatternTextErrorKind::UnknownVariable))?;
                 if kind == GraphSetColumnType::Edge && scope.deleting {
                     return Err(error(
                         key.at,
@@ -1408,7 +1432,10 @@ mod framing_tests {
             ("MATCH (n) REMOVE (n).p RETURN n.p", true),
             ("MATCH ()-[r:R]->() SET (r).p = 1 RETURN r.p", true),
             ("MATCH ()-[r:R]->() REMOVE (r).p RETURN r", true),
-            ("MATCH (n) WITH n AS kept SET (kept).p = 1 RETURN kept", true),
+            (
+                "MATCH (n) WITH n AS kept SET (kept).p = 1 RETURN kept",
+                true,
+            ),
             ("OPTIONAL MATCH (n) SET (n).p = 1 RETURN n", true),
             (
                 "mAtCh (n) sEt /* target */ ( /* name */ n ).p = 1 RETURN n.p",

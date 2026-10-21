@@ -17,7 +17,11 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 const IDS: [VId; 2] = [VId(1), VId((1_u128 << 100) | 1)];
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32])
+    DatabaseKeys::new(
+        [0xa1; 32],
+        DatabaseSecurityNamespaceId([0xa2; 32]),
+        [0xa3; 32],
+    )
 }
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -73,12 +77,13 @@ fn native_plain_merge_returns_every_target_but_keeps_selected_row_limits() {
             panic!("plain MERGE must retain its native program family")
         };
         let mut txn = db.begin(&txcx).unwrap();
-        let unique = txn.execute_graph_vertex_merge_governed(
-            &mut db, &cx, &merge, policy(2), no_allocate,
-        );
+        let unique =
+            txn.execute_graph_vertex_merge_governed(&mut db, &cx, &merge, policy(2), no_allocate);
         assert!(matches!(
             unique,
-            Err(GqlQueryError::Source(GraphVertexMergeError::AmbiguousMatches { observed: 2 }))
+            Err(GqlQueryError::Source(
+                GraphVertexMergeError::AmbiguousMatches { observed: 2 }
+            ))
         ));
         let (stats, outcomes) = txn
             .execute_graph_vertex_merges_governed(&mut db, &cx, &merge, policy(2), no_allocate)
@@ -86,9 +91,8 @@ fn native_plain_merge_returns_every_target_but_keeps_selected_row_limits() {
         assert_eq!(stats.match_selection.result_rows, 2);
         assert_eq!(stats.created_vertices, 0);
         assert_eq!(outcomes, IDS.map(GraphVertexMergeOutcome::Matched));
-        let limited = txn.execute_graph_vertex_merges_governed(
-            &mut db, &cx, &merge, policy(1), no_allocate,
-        );
+        let limited =
+            txn.execute_graph_vertex_merges_governed(&mut db, &cx, &merge, policy(1), no_allocate);
         assert!(matches!(limited, Err(GqlQueryError::Rows(_))));
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap(), before);
@@ -113,40 +117,57 @@ fn native_upsert_freezes_targets_and_charges_all_actions_before_acceptance() {
         prefix.create_vertex(VId(90), vec![], vec![]);
         txn.write(&mut db, prefix).unwrap();
         let digest = txn.staged_effect_digest().unwrap();
-        let GraphWriteStatement::VertexUpsert(upsert) = statement(
-            "MERGE (n:N {p:1}) ON MATCH SET n.p=2,n.q=n.q+1 SET n.q=n.q*2",
-        ) else {
+        let GraphWriteStatement::VertexUpsert(upsert) =
+            statement("MERGE (n:N {p:1}) ON MATCH SET n.p=2,n.q=n.q+1 SET n.q=n.q*2")
+        else {
             panic!("ON/SET must bind a native upsert")
         };
         let limited = txn.execute_graph_vertex_upserts_governed(
-            &mut db, &cx, &upsert, GraphVertexUpsertPolicy::new(policy(2), 5), no_allocate,
+            &mut db,
+            &cx,
+            &upsert,
+            GraphVertexUpsertPolicy::new(policy(2), 5),
+            no_allocate,
         );
         assert!(matches!(
             limited,
             Err(GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
-                limit: 5, observed: 6,
+                limit: 5,
+                observed: 6,
             }))
         ));
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
-        let (stats, outcomes) = txn.execute_graph_vertex_upserts_governed(
-            &mut db, &cx, &upsert, GraphVertexUpsertPolicy::new(policy(2), 6), no_allocate,
-        ).unwrap();
+        let (stats, outcomes) = txn
+            .execute_graph_vertex_upserts_governed(
+                &mut db,
+                &cx,
+                &upsert,
+                GraphVertexUpsertPolicy::new(policy(2), 6),
+                no_allocate,
+            )
+            .unwrap();
         assert_eq!(stats.action_effects, 6);
         assert_eq!(outcomes, IDS.map(GraphVertexMergeOutcome::Matched));
         let accepted = txn.staged_effect_digest().unwrap();
         // The final target, not the first, divides by zero. Its failure must
         // undo the earlier target's accepted ON/SET clauses as well.
-        let GraphWriteStatement::VertexUpsert(failing) = statement(
-            "MERGE (n:N {p:2}) ON MATCH SET n.q=n.q-16 SET n.q=10/n.q",
-        ) else {
+        let GraphWriteStatement::VertexUpsert(failing) =
+            statement("MERGE (n:N {p:2}) ON MATCH SET n.q=n.q-16 SET n.q=10/n.q")
+        else {
             panic!("expected upsert")
         };
         let error = txn.execute_graph_vertex_upserts_governed(
-            &mut db, &cx, &failing, GraphVertexUpsertPolicy::new(policy(2), 4), no_allocate,
+            &mut db,
+            &cx,
+            &failing,
+            GraphVertexUpsertPolicy::new(policy(2), 4),
+            no_allocate,
         );
         assert!(matches!(
             error,
-            Err(GqlQueryError::Source(GraphVertexUpsertError::Expression { .. }))
+            Err(GqlQueryError::Source(
+                GraphVertexUpsertError::Expression { .. }
+            ))
         ));
         assert_eq!(txn.staged_effect_digest().unwrap(), accepted);
         assert_eq!(db.frontier().unwrap(), before);
@@ -176,21 +197,26 @@ fn native_empty_merge_creates_once_with_original_allocator_coordinates() {
             panic!("expected merge")
         };
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, outcomes) = txn.execute_graph_vertex_merges_governed(
-            &mut db,
-            &cx,
-            &merge,
-            policy(1).with_creation_limit(1),
-            |request| -> Result<ElementId, ()> {
-                assert!(matches!(request, GraphInsertRequest::Vertex { row: 0, vertex: 0 }));
-                Ok(ElementId::Vertex(IDS[1]))
-            },
-        ).unwrap();
+        let (stats, outcomes) = txn
+            .execute_graph_vertex_merges_governed(
+                &mut db,
+                &cx,
+                &merge,
+                policy(1).with_creation_limit(1),
+                |request| -> Result<ElementId, ()> {
+                    assert!(matches!(
+                        request,
+                        GraphInsertRequest::Vertex { row: 0, vertex: 0 }
+                    ));
+                    Ok(ElementId::Vertex(IDS[1]))
+                },
+            )
+            .unwrap();
         assert_eq!(stats.created_vertices, 1);
         assert_eq!(outcomes, [GraphVertexMergeOutcome::Created(IDS[1])]);
-        let (stats, outcomes) = txn.execute_graph_vertex_merges_governed(
-            &mut db, &cx, &merge, policy(1), no_allocate,
-        ).unwrap();
+        let (stats, outcomes) = txn
+            .execute_graph_vertex_merges_governed(&mut db, &cx, &merge, policy(1), no_allocate)
+            .unwrap();
         assert_eq!(stats.created_vertices, 0);
         assert_eq!(outcomes, [GraphVertexMergeOutcome::Matched(IDS[1])]);
         txn.finish(&mut db, &commit).await.unwrap();

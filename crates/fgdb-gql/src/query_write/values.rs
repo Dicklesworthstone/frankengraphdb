@@ -27,10 +27,15 @@ fn entry_bytes(
     let payload = match (expected, value) {
         (GqlParameterType::Int64, GraphValue::Scalar(CanonicalScalar::Int(_))) => 8,
         (GqlParameterType::UInt64, GraphValue::Scalar(CanonicalScalar::Int(n))) if *n >= 0 => 8,
-        (_, GraphValue::Scalar(value)) => 8_usize.checked_add(value.canonical_encoded_len().ok()?)?,
+        (_, GraphValue::Scalar(value)) => {
+            8_usize.checked_add(value.canonical_encoded_len().ok()?)?
+        }
         _ => 8_usize.checked_add(value_bytes)?,
     };
-    8_usize.checked_add(name_bytes)?.checked_add(1)?.checked_add(payload)
+    8_usize
+        .checked_add(name_bytes)?
+        .checked_add(1)?
+        .checked_add(payload)
 }
 
 #[allow(clippy::too_many_arguments)] // preserve row/column coordinates and whole-prefix admission
@@ -43,13 +48,21 @@ pub(super) fn bind_cell<C>(
     retained_bytes: u128,
     control: &mut impl FnMut(u64) -> Result<(), GraphQueryWriteBindError<C>>,
 ) -> Result<GqlParameterValue, GraphQueryWriteBindError<C>> {
-    let parameter_error = |source| GraphQueryWriteBindError::Parameter { row, column, source };
+    let parameter_error = |source| GraphQueryWriteBindError::Parameter {
+        row,
+        column,
+        source,
+    };
     match (expected, cell) {
         (GqlParameterType::List, GraphValue::List(_))
         | (GqlParameterType::Map, GraphValue::Map { .. }) => {}
         (_, GraphValue::Scalar(CanonicalScalar::Null)) => {}
         (GqlParameterType::List | GqlParameterType::Map, _) => {
-            return Err(GraphQueryWriteBindError::CollectionValue { row, column, expected });
+            return Err(GraphQueryWriteBindError::CollectionValue {
+                row,
+                column,
+                expected,
+            });
         }
         (_, GraphValue::Scalar(_)) => {}
         _ => return Err(GraphQueryWriteBindError::NonScalar { row, column }),
@@ -59,7 +72,8 @@ pub(super) fn bind_cell<C>(
     if !cell.validate_bounds() {
         return Err(GraphQueryWriteBindError::InvalidValue { row, column });
     }
-    let bytes = cell.canonical_byte_len()
+    let bytes = cell
+        .canonical_byte_len()
         .map_err(|_| GraphQueryWriteBindError::InvalidValue { row, column })?;
     match cell {
         GraphValue::Scalar(value)

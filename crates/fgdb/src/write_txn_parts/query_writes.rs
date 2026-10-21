@@ -29,7 +29,9 @@ impl WriteTxn {
     ) -> Result<
         fgdb_gql::query_write::GraphQueryWriteExecution,
         fgdb_gql::query_write::GraphQueryWriteExecutionError<
-            WriteTxnError, A, Box<asupersync::error::Error>,
+            WriteTxnError,
+            A,
+            Box<asupersync::error::Error>,
         >,
     > {
         use fgdb_gql::query_write::GraphQueryWriteExecutionError as Error;
@@ -49,13 +51,18 @@ impl WriteTxn {
                     max_statements,
                     |source, allowance| {
                         let host = host.borrow();
-                        host.0.execute_graph_set_governed(&*host.1, cx, source, allowance)
+                        host.0
+                            .execute_graph_set_governed(&*host.1, cx, source, allowance)
                     },
                     |batch, allowance| {
                         let mut host = host.borrow_mut();
                         let (txn, database) = &mut *host;
                         txn.execute_bound_graph_write_script_batch_governed(
-                            database, cx, batch, allowance, &mut allocate,
+                            database,
+                            cx,
+                            batch,
+                            allowance,
+                            &mut allocate,
                         )
                     },
                     || cx.checkpoint(),
@@ -76,9 +83,7 @@ mod query_write_tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_gql::algebra::GraphValue;
-    use fgdb_gql::query_write::{
-        GraphQueryWriteExecutionError, PreparedGraphQueryWrite,
-    };
+    use fgdb_gql::query_write::{GraphQueryWriteExecutionError, PreparedGraphQueryWrite};
     use fgdb_gql::{
         GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
         GraphWriteProgramPolicy, PreparedGraphSet, PreparedGraphSetText, PreparedGraphWriteScript,
@@ -97,27 +102,43 @@ mod query_write_tests {
         }
     }
     fn read(text: &str) -> PreparedGraphSet {
-        PreparedGraphSetText::prepare(text, resolve).unwrap()
-            .bind_parameters(&GqlParameters::new()).unwrap()
+        PreparedGraphSetText::prepare(text, resolve)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
     }
-    fn query(source: &str, write: &str, declarations: &[(&str, GqlParameterType)])
-        -> PreparedGraphQueryWrite
-    {
+    fn query(
+        source: &str,
+        write: &str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> PreparedGraphQueryWrite {
         let mut resolver = resolve;
         let script = PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
-            write, RelationId(1), declarations, &mut resolver,
-        ).unwrap();
+            write,
+            RelationId(1),
+            declarations,
+            &mut resolver,
+        )
+        .unwrap();
         PreparedGraphQueryWrite::prepare(read(source), script).unwrap()
     }
     fn policy() -> GraphWriteProgramPolicy {
-        GraphWriteProgramPolicy::new(GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000),
-            10_000, 10_000, 10_000)
+        GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000),
+            10_000,
+            10_000,
+            10_000,
+        )
     }
     fn text(value: &str) -> CanonicalScalar {
         CanonicalScalar::ucs_basic_text(value).unwrap()
     }
     fn keys() -> crate::DatabaseKeys {
-        crate::DatabaseKeys::new([0x71; 32], DatabaseSecurityNamespaceId([0x72; 32]), [0x73; 32])
+        crate::DatabaseKeys::new(
+            [0x71; 32],
+            DatabaseSecurityNamespaceId([0x72; 32]),
+            [0x73; 32],
+        )
     }
 
     #[test]
@@ -130,40 +151,74 @@ mod query_write_tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
             for (index, city) in ["Paris", "Rome", "Paris"].into_iter().enumerate() {
-                seed.create_vertex(VId(index as u128 + 1), vec![LabelId(1)],
-                    vec![(PropertyKeyId(1), text(city))]);
+                seed.create_vertex(
+                    VId(index as u128 + 1),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), text(city))],
+                );
             }
             db.write(&commit, seed).await.unwrap();
             let prepared = query(
                 "MATCH (p:Person) RETURN p.bornIn AS city",
                 "MERGE (c:City {name:$city}) ON CREATE SET c.seen=1 ON MATCH SET c.seen=c.seen+1",
-                &[("city", GqlParameterType::Scalar(CanonicalScalarKind::of(&text("Paris"))))],
+                &[(
+                    "city",
+                    GqlParameterType::Scalar(CanonicalScalarKind::of(&text("Paris"))),
+                )],
             );
             let mut txn = db.begin(&txcx).unwrap();
             let mut allocations = Vec::new();
-            let receipt = txn.execute_graph_query_write_governed(
-                &mut db, &cx, &prepared, policy(), 3, |request| {
-                    allocations.push(request);
-                    Ok::<_, ()>(ElementId::Vertex(VId(100 + allocations.len() as u128)))
-                },
-            ).unwrap();
+            let receipt = txn
+                .execute_graph_query_write_governed(
+                    &mut db,
+                    &cx,
+                    &prepared,
+                    policy(),
+                    3,
+                    |request| {
+                        allocations.push(request);
+                        Ok::<_, ()>(ElementId::Vertex(VId(100 + allocations.len() as u128)))
+                    },
+                )
+                .unwrap();
             assert_eq!(receipt.input_rows, 3);
             assert_eq!(receipt.receipt.as_ref().unwrap().steps().len(), 3);
             assert_eq!(allocations.len(), 2);
-            let cities = txn.execute_graph_set_governed(&db, &cx,
-                &read("MATCH (c:City) RETURN c.name AS city, c.seen AS seen ORDER BY city"),
-                policy().mutations.query).unwrap().value;
+            let cities = txn
+                .execute_graph_set_governed(
+                    &db,
+                    &cx,
+                    &read("MATCH (c:City) RETURN c.name AS city, c.seen AS seen ORDER BY city"),
+                    policy().mutations.query,
+                )
+                .unwrap()
+                .value;
             assert_eq!(cities.len(), 2);
-            assert_eq!(cities[0].values(), &[
-                GraphValue::Scalar(text("Paris")), GraphValue::Scalar(CanonicalScalar::Int(2)),
-            ]);
-            assert_eq!(cities[1].values(), &[
-                GraphValue::Scalar(text("Rome")), GraphValue::Scalar(CanonicalScalar::Int(1)),
-            ]);
+            assert_eq!(
+                cities[0].values(),
+                &[
+                    GraphValue::Scalar(text("Paris")),
+                    GraphValue::Scalar(CanonicalScalar::Int(2)),
+                ]
+            );
+            assert_eq!(
+                cities[1].values(),
+                &[
+                    GraphValue::Scalar(text("Rome")),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                ]
+            );
             txn.finish(&mut db, &commit).await.unwrap();
-            assert_eq!(db.execute_graph_set_governed(&cx,
-                &read("MATCH (c:City) RETURN c.name AS city, c.seen AS seen ORDER BY city"),
-                policy().mutations.query).unwrap().value, cities);
+            assert_eq!(
+                db.execute_graph_set_governed(
+                    &cx,
+                    &read("MATCH (c:City) RETURN c.name AS city, c.seen AS seen ORDER BY city"),
+                    policy().mutations.query
+                )
+                .unwrap()
+                .value,
+                cities
+            );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -179,24 +234,40 @@ mod query_write_tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
             for vid in 1..=3 {
-                seed.create_vertex(VId(vid), vec![LabelId(1)],
-                    vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))]);
+                seed.create_vertex(
+                    VId(vid),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))],
+                );
             }
             db.write(&commit, seed).await.unwrap();
-            let prepared = query("MATCH (p:Person) RETURN p.bornIn AS city",
-                "CREATE (p:Person {bornIn:$city})", &[]);
+            let prepared = query(
+                "MATCH (p:Person) RETURN p.bornIn AS city",
+                "CREATE (p:Person {bornIn:$city})",
+                &[],
+            );
             let mut txn = db.begin(&txcx).unwrap();
             let mut allocations = 0;
-            let receipt = txn.execute_graph_query_write_governed(
-                &mut db, &cx, &prepared, policy(), 3, |_| {
+            let receipt = txn
+                .execute_graph_query_write_governed(&mut db, &cx, &prepared, policy(), 3, |_| {
                     allocations += 1;
                     Ok::<_, ()>(ElementId::Vertex(VId(100 + allocations)))
-                },
-            ).unwrap();
+                })
+                .unwrap();
             assert_eq!(receipt.input_rows, 3);
             assert_eq!(allocations, 3);
-            assert_eq!(txn.execute_graph_set_governed(&db, &cx,
-                &read("MATCH (p:Person) RETURN p"), policy().mutations.query).unwrap().value.len(), 6);
+            assert_eq!(
+                txn.execute_graph_set_governed(
+                    &db,
+                    &cx,
+                    &read("MATCH (p:Person) RETURN p"),
+                    policy().mutations.query
+                )
+                .unwrap()
+                .value
+                .len(),
+                6
+            );
             txn.finish(&mut db, &commit).await.unwrap();
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -212,29 +283,65 @@ mod query_write_tests {
             let txcx = contexts.txn();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
-            seed.create_vertex(VId(1), vec![LabelId(2)], vec![
-                (PropertyKeyId(2), CanonicalScalar::Int(1)),
-                (PropertyKeyId(3), CanonicalScalar::Int(10)),
-            ]);
+            seed.create_vertex(
+                VId(1),
+                vec![LabelId(2)],
+                vec![
+                    (PropertyKeyId(2), CanonicalScalar::Int(1)),
+                    (PropertyKeyId(3), CanonicalScalar::Int(10)),
+                ],
+            );
             db.write(&commit, seed).await.unwrap();
             let mut txn = db.begin(&txcx).unwrap();
-            let prefix = PreparedGraphWriteScript::prepare("CREATE (p:Person)", RelationId(1), resolve).unwrap();
-            txn.execute_graph_write_script_governed(&mut db, &cx, &prefix, &GqlParameters::new(),
-                policy(), |_| Ok::<_, ()>(ElementId::Vertex(VId(99)))).unwrap();
+            let prefix =
+                PreparedGraphWriteScript::prepare("CREATE (p:Person)", RelationId(1), resolve)
+                    .unwrap();
+            txn.execute_graph_write_script_governed(
+                &mut db,
+                &cx,
+                &prefix,
+                &GqlParameters::new(),
+                policy(),
+                |_| Ok::<_, ()>(ElementId::Vertex(VId(99))),
+            )
+            .unwrap();
             let prepared = query(
                 "UNWIND [2,0] AS denominator RETURN 1 AS key, denominator ORDER BY denominator DESC",
-                "MERGE (c:City {name:$key}) ON MATCH SET c.seen=c.seen / $denominator", &[],
+                "MERGE (c:City {name:$key}) ON MATCH SET c.seen=c.seen / $denominator",
+                &[],
             );
-            let error = txn.execute_graph_query_write_governed(
-                &mut db, &cx, &prepared, policy(), 2, |_| Err::<ElementId, _>(()),
-            ).unwrap_err();
+            let error = txn
+                .execute_graph_query_write_governed(&mut db, &cx, &prepared, policy(), 2, |_| {
+                    Err::<ElementId, _>(())
+                })
+                .unwrap_err();
             assert!(matches!(error, GraphQueryWriteExecutionError::Program(_)));
-            let target = txn.execute_graph_set_governed(&db, &cx,
-                &read("MATCH (c:City) RETURN c.seen AS seen"), policy().mutations.query).unwrap().value;
+            let target = txn
+                .execute_graph_set_governed(
+                    &db,
+                    &cx,
+                    &read("MATCH (c:City) RETURN c.seen AS seen"),
+                    policy().mutations.query,
+                )
+                .unwrap()
+                .value;
             assert_eq!(target.len(), 1);
-            assert_eq!(target[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(10))]);
-            assert_eq!(txn.execute_graph_set_governed(&db, &cx,
-                &read("MATCH (p:Person) RETURN p"), policy().mutations.query).unwrap().value.len(), 1);
+            assert_eq!(
+                target[0].values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(10))]
+            );
+            assert_eq!(
+                txn.execute_graph_set_governed(
+                    &db,
+                    &cx,
+                    &read("MATCH (p:Person) RETURN p"),
+                    policy().mutations.query
+                )
+                .unwrap()
+                .value
+                .len(),
+                1
+            );
             txn.finish(&mut db, &commit).await.unwrap();
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -249,27 +356,47 @@ mod query_write_tests {
             let cx = contexts.query();
             let txcx = contexts.txn();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let prepared = query("UNWIND [1,NULL] AS key RETURN key",
+            let prepared = query(
+                "UNWIND [1,NULL] AS key RETURN key",
                 "MERGE (c:City {name:$key})",
-                &[("key", GqlParameterType::Scalar(CanonicalScalarKind::of(&CanonicalScalar::Int(1))))]);
+                &[(
+                    "key",
+                    GqlParameterType::Scalar(CanonicalScalarKind::of(&CanonicalScalar::Int(1))),
+                )],
+            );
             let mut txn = db.begin(&txcx).unwrap();
             let mut allocations = 0;
-            assert!(txn.execute_graph_query_write_governed(
-                &mut db, &cx, &prepared, policy(), 2, |_| {
-                    allocations += 1;
-                    Ok::<_, ()>(ElementId::Vertex(VId(100 + allocations)))
-                },
-            ).is_err());
+            assert!(
+                txn.execute_graph_query_write_governed(
+                    &mut db,
+                    &cx,
+                    &prepared,
+                    policy(),
+                    2,
+                    |_| {
+                        allocations += 1;
+                        Ok::<_, ()>(ElementId::Vertex(VId(100 + allocations)))
+                    },
+                )
+                .is_err()
+            );
             assert_eq!(allocations, 0);
-            let empty = query("MATCH (p:Missing) RETURN 1 AS key",
-                "MERGE (c:City {name:$key})", &[]);
-            let receipt = txn.execute_graph_query_write_governed(
-                &mut db, &cx, &empty, policy(), 0, |_| Err::<ElementId, _>(()),
-            ).unwrap();
+            let empty = query(
+                "MATCH (p:Missing) RETURN 1 AS key",
+                "MERGE (c:City {name:$key})",
+                &[],
+            );
+            let receipt = txn
+                .execute_graph_query_write_governed(&mut db, &cx, &empty, policy(), 0, |_| {
+                    Err::<ElementId, _>(())
+                })
+                .unwrap();
             assert!(receipt.receipt.is_none());
             assert_eq!(receipt.input_rows, 0);
-            assert!(matches!(txn.finish(&mut db, &commit).await.unwrap(),
-                EmbeddedTxnCompletion::ReadClosed { .. }));
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await.unwrap(),
+                EmbeddedTxnCompletion::ReadClosed { .. }
+            ));
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -285,20 +412,29 @@ mod query_write_tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let prepared = query("RETURN 1 AS key", "CREATE (c:City {name:$key})", &[]);
             let mut txn = db.begin(&txcx).unwrap();
-            let source = txn.execute_graph_set_governed(&db, &cx, prepared.source(),
-                policy().mutations.query).unwrap();
+            let source = txn
+                .execute_graph_set_governed(&db, &cx, prepared.source(), policy().mutations.query)
+                .unwrap();
             let mut tight = policy();
             tight.mutations.query.evaluator.max_work_units = source.evaluator.work_units;
-            let error = txn.execute_graph_query_write_governed(
-                &mut db, &cx, &prepared, tight, 1, |_| Err::<ElementId, _>(()),
-            ).unwrap_err();
-            assert!(matches!(error, GraphQueryWriteExecutionError::Binding(
-                fgdb_gql::query_write::GraphQueryWriteBindError::Interrupted {
-                    source: fgdb_gql::GqlQueryError::Evaluator(_), ..
-                }
-            )));
-            assert!(matches!(txn.finish(&mut db, &commit).await.unwrap(),
-                EmbeddedTxnCompletion::ReadClosed { .. }));
+            let error = txn
+                .execute_graph_query_write_governed(&mut db, &cx, &prepared, tight, 1, |_| {
+                    Err::<ElementId, _>(())
+                })
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                GraphQueryWriteExecutionError::Binding(
+                    fgdb_gql::query_write::GraphQueryWriteBindError::Interrupted {
+                        source: fgdb_gql::GqlQueryError::Evaluator(_),
+                        ..
+                    }
+                )
+            ));
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await.unwrap(),
+                EmbeddedTxnCompletion::ReadClosed { .. }
+            ));
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

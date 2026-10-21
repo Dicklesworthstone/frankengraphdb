@@ -177,14 +177,23 @@ impl Merge {
             native(work.charge(1))?;
             let take_left = match (&self.a, &self.b) {
                 (Some(a), Some(b)) => {
-                    native(canonical::compare(a.as_ref(), b.as_ref(), keys, self.width, work))?
-                        != Ordering::Greater
+                    native(canonical::compare(
+                        a.as_ref(),
+                        b.as_ref(),
+                        keys,
+                        self.width,
+                        work,
+                    ))? != Ordering::Greater
                 }
                 (Some(_), None) => true,
                 _ => false,
             };
-            let row = if take_left { self.a.take() } else { self.b.take() }
-                .ok_or(GqlQueryError::Source(NativeSpoolError::IncompleteCursor))?;
+            let row = if take_left {
+                self.a.take()
+            } else {
+                self.b.take()
+            }
+            .ok_or(GqlQueryError::Source(NativeSpoolError::IncompleteCursor))?;
             let mut weight = if take_left {
                 self.a = pull(&mut self.left, scratch, work).await?;
                 -1_i128
@@ -198,7 +207,13 @@ impl Merge {
             ] {
                 while let Some(next) = head.as_ref() {
                     native(work.charge(1))?;
-                    match native(canonical::compare(next.as_ref(), row.as_ref(), keys, self.width, work))? {
+                    match native(canonical::compare(
+                        next.as_ref(),
+                        row.as_ref(),
+                        keys,
+                        self.width,
+                        work,
+                    ))? {
                         Ordering::Less => {
                             return Err(GqlQueryError::Source(SpillError::InvalidRun.into()));
                         }

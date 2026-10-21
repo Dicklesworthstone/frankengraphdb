@@ -84,8 +84,15 @@ impl NativeResultSpool {
     {
         let mut cursor = self
             .difference_stream(
-                after, cx, source, scratch, run_rows, max_runs, page_bytes,
-                max_changed_rows, max_work_units,
+                after,
+                cx,
+                source,
+                scratch,
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_changed_rows,
+                max_work_units,
             )
             .await?;
         while let Some((weight, row)) = cursor.next_inner().await? {
@@ -212,18 +219,19 @@ impl NativeResultSpool {
         )?;
         work.used = used;
         let (after, used) = native(
-            after.sort_continuing(
-                cx,
-                source,
-                scratch,
-                &keys.values,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_work_units,
-                work.used,
-            )
-            .await,
+            after
+                .sort_continuing(
+                    cx,
+                    source,
+                    scratch,
+                    &keys.values,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_work_units,
+                    work.used,
+                )
+                .await,
         )?;
         work.used = used;
         Ok(NativeSpoolDifference::new(
@@ -247,7 +255,6 @@ async fn pull<B: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     native(work.charge(1))?;
     native(input.next(scratch, work.cx).await)
 }
-
 
 #[cfg(test)]
 #[path = "difference/tests.rs"]
