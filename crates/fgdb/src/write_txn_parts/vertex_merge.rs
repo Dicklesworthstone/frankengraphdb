@@ -353,7 +353,8 @@ impl WriteTxn {
     /// previous write's, a leading UNWIND's, or one empty row) and one
     /// (input row, vertex) pair per vertex each row merged, in row order and
     /// then identity order. Each pair, like each tuple, takes one scratch
-    /// entry.
+    /// entry. These are private occurrences, not final result rows: the
+    /// enclosing chain admits RETURN only after grouping and pagination.
     pub(crate) fn execute_graph_vertex_merges_over<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -368,6 +369,17 @@ impl WriteTxn {
             GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
             GqlQueryError, GqlQueryPolicy, GraphVertexMergeError, GraphVertexMergeOutcome,
             GraphVertexMergePolicy, GraphVertexMergeStats, GraphWriteStepReceipt,
+        };
+        // Both the leading relation and every per-key match feed the write,
+        // not the public result. A one-row aggregate (or LIMIT 0) must not
+        // truncate/refuse those occurrences before all effects are staged.
+        // Keep the caller's snapshot, work, scratch and creation limits;
+        // only final-row admission belongs to the chain's RETURN owner.
+        // This private adapter does not change the standalone MERGE APIs.
+        let mut policy = policy;
+        policy.query.rows = match policy.query.rows.max_snapshot_records() {
+            Some(limit) => fgdb_gql::GqlExecutionBudget::snapshot_records(limit),
+            None => fgdb_gql::GqlExecutionBudget::UNLIMITED,
         };
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
