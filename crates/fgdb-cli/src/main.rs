@@ -10,6 +10,7 @@ mod diff;
 mod fnx;
 mod import;
 mod load;
+mod query_write;
 mod remote;
 mod scrub;
 mod search;
@@ -168,7 +169,7 @@ their native types. Post-aggregate RETURN DISTINCT removes equal visible rows
 before pagination. COUNT/SUM/AVG(DISTINCT argument) use external typed membership
 sorting; NULL is ignored and ordinary aggregates still count all occurrences.
 COLLECT and relational aggregate inputs currently refuse, as do
-optional/variable-length joins and unsupported instructions; no eager retry.
+optional/variable-length joins and unsupported native instructions; no eager retry.
 This flag cannot combine
 with --stream, --certify-to or a standalone CALL fnx. Sorting completes before output.
 --spill-memory-bytes (default 67108864) bounds the shared scratch pool;
@@ -328,6 +329,21 @@ rows, not the writes. Encoded output is bounded to 16 MiB.
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
 On Unix the key file must be a regular file with mode 0600 (no group/other bits).
+write --from-query '<read RETURN ...>' '<write script>' evaluates the source
+once and binds each projected row by name to the script's parameters. --param
+binds the SOURCE only; project a global value to pass it into the script.
+--feed-type name=type declares a SCRIPT parameter: int64, uint64, int, text,
+bool, null, float, decimal or bytes. Undeclared script parameters retain native
+inference (usually int64); no value-based inference or scalar coercion occurs.
+--max-batch-statements bounds the TOTAL expanded statements, not each row,
+and cannot exceed the native batch ceiling. Zero permits only empty input.
+One transaction and one source/work/scratch/selection allowance cover the read,
+binding and all script instances. Duplicate rows remain separate invocations;
+later MERGEs see earlier creates, but the source is never rerun. Empty input
+closes read-only without a marker. --rows and script RETURN are not supported
+in this profile; flags apply only to write, not transaction/remote/query.
+Only after completion does result kind=written report seq, records and statements.
+This is bounded in-memory composition, not streaming input or a byte-memory cap.
 Robot stdout: versioned NDJSON; errors include message strings in diagnostics.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
 ";
@@ -423,6 +439,8 @@ struct Options {
     raw_params: Vec<(String, String)>,
     /// `write --rows json:[...]`: one parameter set per object.
     rows: Option<String>,
+    /// `write --from-query`: a frozen read feeds one atomic native batch.
+    query_write: query_write::QueryWriteOptions,
     tzdb_file: Option<PathBuf>,
     /// The `--tzdb-file` artifact as the statement's named-zone capability,
     /// once it is read (fgdb-txbg9).
@@ -618,6 +636,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let params = GqlParameters::new();
     let mut raw_params = Vec::new();
     let mut rows = None;
+    let mut query_write = query_write::QueryWriteOptions::default();
     let mut tzdb_file = None;
     let mut labels = BTreeMap::new();
     let mut relations = BTreeMap::new();
@@ -743,6 +762,11 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--rows" if command == "write" && rows.is_none() => {
                     rows = Some(value.clone());
                 }
+                flag if command == "write"
+                    && query_write::QueryWriteOptions::FLAGS.contains(&flag) =>
+                {
+                    query_write.set(flag, value)?;
+                }
                 "--certify-to" if command == "query" && certify_to.is_none() => {
                     certify_to = Some(PathBuf::from(value));
                 }
@@ -831,6 +855,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             ));
         }
     }
+    query_write.validate(rows.is_some())?;
     if command == "replay" && certificate.is_none() {
         return Err(Failure::usage("--certificate required"));
     }
@@ -944,6 +969,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         buffered,
         spill,
         budget,
+        query_write,
         diff,
         csv,
         fnx_call,
@@ -1551,6 +1577,10 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
                 // And a search's lanes, symbols and corpus.
                 let retrieval = if command == "search" { Some(search::prepare(&options)?) } else { None };
+                // Query-fed writes prepare both definitions before writable open.
+                // Their actual input is read/bound later under the SAME transaction
+                // as the dependent writes, never in a separate read invocation.
+                let query_fed = if command == "write" { query_write::prepare(&options)? } else { None };
                 // A --rows batch is parsed, typed and bound before storage opens,
                 // like CSV, so a refused row leaves no trace in the database.
                 let batch = if command == "write" && options.rows.is_some() {
@@ -1558,11 +1588,11 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 } else {
                     None
                 };
-                let returning = if command == "write" && batch.is_none() { write_returning::prepare(&options)? } else { None };
+                let returning = if command == "write" && batch.is_none() && query_fed.is_none() { write_returning::prepare(&options)? } else { None };
                 // Native UNWIND mutations and ordinary scripts bind completely
                 // before opening storage. Keep the bound record map through
                 // completion instead of discarding it into a bare program.
-                let native = if command == "write" && batch.is_none() && returning.is_none() {
+                let native = if command == "write" && batch.is_none() && returning.is_none() && query_fed.is_none() {
                     Some(BoundNativeGraphWrite::bind_with_resolver(
                         &options.text,
                         &options.params,
@@ -1661,6 +1691,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return transaction::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
                 }
                 if command == "write" {
+                    if let Some(prepared) = query_fed {
+                        return query_write::run(&mut db, &contexts, prepared, robot, out).await;
+                    }
                     if let Some(prepared) = returning {
                         return write_returning::run(
                             &mut db, &contexts, prepared, options.budget.policy(), robot, out,
@@ -1808,7 +1841,8 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Timestamp(v)) => {
-            format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp_cell(v))
+            format!(r#"{{"type":"timestamp","value":{}}}"#,
+                timestamp_cell(v))
         }
         GraphValue::Scalar(CanonicalScalar::Bytes(v)) => {
             format!(
@@ -1817,7 +1851,8 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Date(v)) => {
-            format!(r#"{{"type":"date","value":{}}}"#, quoted(&v.to_string()))
+            format!(r#"{{"type":"date","value":{}}}"#,
+                quoted(&v.to_string()))
         }
         GraphValue::Scalar(CanonicalScalar::LocalTime(v)) => {
             format!(
@@ -1826,7 +1861,8 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             )
         }
         GraphValue::Scalar(CanonicalScalar::Time(v)) => {
-            format!(r#"{{"type":"time","value":{}}}"#, quoted(&v.to_string()))
+            format!(r#"{{"type":"time","value":{}}}"#,
+                quoted(&v.to_string()))
         }
         GraphValue::Scalar(CanonicalScalar::LocalDateTime(v)) => {
             format!(
@@ -1840,9 +1876,12 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
                 quoted(&v.to_string())
             )
         }
-        GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#, v.0),
-        GraphValue::Edge(v) => format!(r#"{{"type":"edge","value":"{}"}}"#, v.0),
-        GraphValue::Path(v) => format!(r#"{{"type":"path","value":{}}}"#, path_cell(v)),
+        GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#,
+            v.0),
+        GraphValue::Edge(v) => format!(r#"{{"type":"edge","value":"{}"}}"#,
+            v.0),
+        GraphValue::Path(v) => format!(r#"{{"type":"path","value":{}}}"#,
+            path_cell(v)),
         GraphValue::Vertices(v) => format!(
             r#"{{"type":"vertices","value":[{}]}}"#,
             v.iter()
@@ -2055,7 +2094,8 @@ fn render_rows_iter<Row: AsRef<[String]>>(
     if robot {
         emit(
             out,
-            &format!(r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{count}}}"#,),
+            &format!(r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{count}}}"#,
+            ),
         )
     } else {
         emit(out, &format!("{count} row(s)"))
