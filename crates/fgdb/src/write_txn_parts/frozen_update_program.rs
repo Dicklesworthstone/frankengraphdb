@@ -150,14 +150,15 @@ impl WriteTxn {
 }
 
 impl WriteTxn {
-    /// The frozen upsert profile (PreparedGraphWriteProgram::
-    /// freezes_vertex_upsert_input). Each row's MERGE matches against the
-    /// entry overlay and allocates its creation exactly as the sequential
-    /// path does; its creation and ON/SET actions append to that row's batch
-    /// instead of re-preparing every earlier row. One ordered preparation
-    /// stages all rows after the last statement. Distinct keys and key-free
-    /// constant actions make this the sequential program's result; receipts
-    /// and per-statement statistics keep their ordinary shape.
+    /// The frozen vertex MERGE profile (PreparedGraphWriteProgram::
+    /// freezes_vertex_upsert_input), for plain MERGEs and upserts. Each row's
+    /// MERGE matches against the entry overlay and allocates its creation
+    /// exactly as the sequential path does; its creation and ON/SET actions
+    /// append to that row's batch instead of re-preparing every earlier row.
+    /// One ordered preparation stages all rows after the last statement.
+    /// Distinct keys and key-free constant actions make this the sequential
+    /// program's result; receipts, per-statement statistics and each
+    /// statement kind's errors keep their ordinary shape.
     #[allow(clippy::type_complexity)]
     fn execute_frozen_vertex_upserts_governed<V: Vfs + Clone, A>(
         &mut self,
@@ -173,12 +174,12 @@ impl WriteTxn {
         ),
         fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
     > {
-        use fgdb_gql::insertion::GraphInsertIntent;
+        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{
             GlaExecutionEvent, GqlQueryError, GraphMutationProgramError, GraphVertexMergeError,
             GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats,
             GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteStatement,
-            GraphWriteStepError,
+            GraphWriteStepError, GraphWriteStepStats,
         };
         debug_assert!(program.freezes_vertex_upsert_input());
         cx.with_restriction(|| {
@@ -188,19 +189,97 @@ impl WriteTxn {
             let mut receipts = Vec::new();
             let mut deferred_error_at = None;
             let staging = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+            // A staging refusal or interruption in the statement's own kind,
+            // as the sequential path reports it.
+            let step_error =
+                |statement: usize, error: GqlQueryError<WriteTxnError, _>| match &program
+                    .statements()[statement]
+                {
+                    GraphWriteStatement::VertexMerge(_) => {
+                        GraphWriteStepError::VertexMerge(error.map_source(|error| {
+                            GraphVertexMergeError::Creation(GraphInsertError::Source(error))
+                        }))
+                    }
+                    _ => GraphWriteStepError::VertexUpsert(
+                        error.map_source(GraphVertexUpsertError::Staging),
+                    ),
+                };
             let result = program.execute_governed(
                 policy,
                 |statement, input, remaining| {
-                    let GraphWriteStatement::VertexUpsert(upsert) = input else {
-                        return Err(GraphWriteStepError::VertexUpsert(staging(
-                            WriteTxnError::UnsupportedAtomicMutation,
-                        )));
+                    let relation = match input {
+                        GraphWriteStatement::VertexMerge(merge) => merge.relation(),
+                        GraphWriteStatement::VertexUpsert(upsert) => upsert.merge().relation(),
+                        _ => {
+                            return Err(GraphWriteStepError::VertexUpsert(staging(
+                                WriteTxnError::UnsupportedAtomicMutation,
+                            )));
+                        }
                     };
-                    let policy = remaining.vertex_upsert_policy();
-                    let mut batch = WriteBatch::new(upsert.merge().relation());
-                    let (stats, receipt) = (|| {
-                        let proposal =
-                            collect_vertex_merge_output::<VertexMergeTargets, WriteTxnError, A, _>(
+                    let mut batch = WriteBatch::new(relation);
+                    let stats = if let GraphWriteStatement::VertexMerge(merge) = input {
+                        let policy = remaining.vertex_merge_policy();
+                        let (stats, receipt) = (|| {
+                            let proposal = collect_vertex_merge_output::<
+                                VertexMergeTargets,
+                                WriteTxnError,
+                                A,
+                                _,
+                            >(
+                                merge,
+                                policy,
+                                |pattern, allowance| {
+                                    workspace.txn.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                                || cx.checkpoint(),
+                            )?;
+                            if let Some(creation) = proposal.creation {
+                                for intent in creation.into_intents() {
+                                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                                    let GraphInsertIntent::Vertex {
+                                        vertex,
+                                        labels,
+                                        properties,
+                                    } = intent
+                                    else {
+                                        unreachable!(
+                                            "validated vertex MERGE contains no edge creation"
+                                        )
+                                    };
+                                    batch.create_vertex_values(vertex, labels, properties);
+                                }
+                            }
+                            let mut stats = proposal.stats;
+                            let outcomes = proposal.outcome.into_outcomes(|event| {
+                                vertex_targets_event::<GraphVertexMergeError<WriteTxnError, A>>(
+                                    cx,
+                                    policy.query,
+                                    &mut stats.evaluator,
+                                    event,
+                                )
+                            })?;
+                            vertex_merge_program_result::<A>((stats, outcomes))
+                        })()
+                        .map_err(GraphWriteStepError::VertexMerge)?;
+                        receipts.push(receipt);
+                        GraphWriteStepStats::VertexMerge(stats)
+                    } else {
+                        let GraphWriteStatement::VertexUpsert(upsert) = input else {
+                            unreachable!("the profile admits only vertex MERGEs and upserts")
+                        };
+                        let policy = remaining.vertex_upsert_policy();
+                        let (stats, receipt) = (|| {
+                            let proposal = collect_vertex_merge_output::<
+                                VertexMergeTargets,
+                                WriteTxnError,
+                                A,
+                                _,
+                            >(
                                 upsert.merge(),
                                 policy.merge,
                                 |pattern, allowance| {
@@ -214,89 +293,93 @@ impl WriteTxn {
                                 || cx.checkpoint(),
                             )
                             .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
-                        let targets = proposal.outcome;
-                        let (branch, actions) = if targets.created.is_some() {
-                            (GraphVertexUpsertBranch::Create, upsert.on_create())
-                        } else {
-                            (GraphVertexUpsertBranch::Match, upsert.on_match())
-                        };
-                        let observed = (targets.len() as u128)
-                            .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
-                            .ok_or_else(|| {
-                                GqlQueryError::Source(GraphVertexUpsertError::Merge(
-                                    GraphVertexMergeError::AccountingOverflow,
-                                ))
-                            })?;
-                        if observed > u128::from(policy.max_actions) {
-                            return Err(GqlQueryError::Source(
-                                GraphVertexUpsertError::ActionLimit {
-                                    limit: policy.max_actions,
-                                    observed,
-                                },
-                            ));
-                        }
-                        if let Some(creation) = proposal.creation {
-                            for intent in creation.into_intents() {
-                                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                                let GraphInsertIntent::Vertex {
-                                    vertex,
-                                    labels,
-                                    properties,
-                                } = intent
-                                else {
-                                    unreachable!("validated vertex MERGE contains no edge creation")
-                                };
-                                batch.create_vertex_values(vertex, labels, properties);
+                            let targets = proposal.outcome;
+                            let (branch, actions) = if targets.created.is_some() {
+                                (GraphVertexUpsertBranch::Create, upsert.on_create())
+                            } else {
+                                (GraphVertexUpsertBranch::Match, upsert.on_match())
+                            };
+                            let observed = (targets.len() as u128)
+                                .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
+                                .ok_or_else(|| {
+                                    GqlQueryError::Source(GraphVertexUpsertError::Merge(
+                                        GraphVertexMergeError::AccountingOverflow,
+                                    ))
+                                })?;
+                            if observed > u128::from(policy.max_actions) {
+                                return Err(GqlQueryError::Source(
+                                    GraphVertexUpsertError::ActionLimit {
+                                        limit: policy.max_actions,
+                                        observed,
+                                    },
+                                ));
                             }
-                        }
-                        let mut stats = GraphVertexUpsertStats {
-                            merge: proposal.stats,
-                            branch,
-                            action_effects: observed as u64,
-                        };
-                        for outcome in targets.outcomes() {
-                            vertex_upsert_batch_event::<A>(
-                                cx,
-                                policy.merge.query,
-                                &mut stats.merge.evaluator,
-                                GlaExecutionEvent::Work,
-                            )?;
-                            let action_stats = vertex_upsert_actions::<WriteTxnError, A, _>(
-                                upsert,
-                                policy,
-                                stats.merge,
-                                outcome,
-                                || cx.checkpoint(),
-                                // The profile admits no action that reads its
-                                // target; a read would see the entry overlay.
-                                |key, control| {
-                                    vertex_upsert_property(
-                                        &*workspace.txn,
-                                        &*database,
-                                        outcome.vertex(),
-                                        key,
-                                        control,
-                                    )
-                                },
-                                |staged| {
-                                    batch.rows.extend(staged.rows);
-                                    Ok(())
-                                },
-                            )?;
-                            stats.merge.evaluator = action_stats.merge.evaluator;
-                        }
-                        let outcomes = targets.into_outcomes(|event| {
-                            vertex_upsert_batch_event::<A>(
-                                cx,
-                                policy.merge.query,
-                                &mut stats.merge.evaluator,
-                                event,
-                            )
-                        })?;
-                        vertex_upsert_program_result::<A>((stats, outcomes))
-                    })()
-                    .map_err(GraphWriteStepError::VertexUpsert)?;
-                    receipts.push(receipt);
+                            if let Some(creation) = proposal.creation {
+                                for intent in creation.into_intents() {
+                                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                                    let GraphInsertIntent::Vertex {
+                                        vertex,
+                                        labels,
+                                        properties,
+                                    } = intent
+                                    else {
+                                        unreachable!(
+                                            "validated vertex MERGE contains no edge creation"
+                                        )
+                                    };
+                                    batch.create_vertex_values(vertex, labels, properties);
+                                }
+                            }
+                            let mut stats = GraphVertexUpsertStats {
+                                merge: proposal.stats,
+                                branch,
+                                action_effects: observed as u64,
+                            };
+                            for outcome in targets.outcomes() {
+                                vertex_upsert_batch_event::<A>(
+                                    cx,
+                                    policy.merge.query,
+                                    &mut stats.merge.evaluator,
+                                    GlaExecutionEvent::Work,
+                                )?;
+                                let action_stats = vertex_upsert_actions::<WriteTxnError, A, _>(
+                                    upsert,
+                                    policy,
+                                    stats.merge,
+                                    outcome,
+                                    || cx.checkpoint(),
+                                    // The profile admits no action that reads its
+                                    // target; a read would see the entry overlay.
+                                    |key, control| {
+                                        vertex_upsert_property(
+                                            &*workspace.txn,
+                                            &*database,
+                                            outcome.vertex(),
+                                            key,
+                                            control,
+                                        )
+                                    },
+                                    |staged| {
+                                        batch.rows.extend(staged.rows);
+                                        Ok(())
+                                    },
+                                )?;
+                                stats.merge.evaluator = action_stats.merge.evaluator;
+                            }
+                            let outcomes = targets.into_outcomes(|event| {
+                                vertex_upsert_batch_event::<A>(
+                                    cx,
+                                    policy.merge.query,
+                                    &mut stats.merge.evaluator,
+                                    event,
+                                )
+                            })?;
+                            vertex_upsert_program_result::<A>((stats, outcomes))
+                        })()
+                        .map_err(GraphWriteStepError::VertexUpsert)?;
+                        receipts.push(receipt);
+                        stats
+                    };
                     if !batch.is_empty() {
                         batches.push((statement, batch));
                     }
@@ -306,12 +389,13 @@ impl WriteTxn {
                         for (origin, batch) in &batches {
                             cx.checkpoint()
                                 .map_err(GqlQueryError::Interrupted)
-                                .map_err(GraphWriteStepError::VertexUpsert)?;
+                                .map_err(|error| step_error(statement, error))?;
                             if let Err(error) = database.admit_write_values(batch) {
                                 deferred_error_at = Some(*origin);
-                                return Err(GraphWriteStepError::VertexUpsert(staging(
-                                    WriteTxnError::Write(error),
-                                )));
+                                return Err(step_error(
+                                    *origin,
+                                    GqlQueryError::Source(WriteTxnError::Write(error)),
+                                ));
                             }
                         }
                         workspace
@@ -323,7 +407,7 @@ impl WriteTxn {
                                     .map(|(_, batch)| batch)
                                     .collect(),
                             )
-                            .map_err(|error| GraphWriteStepError::VertexUpsert(staging(error)))?;
+                            .map_err(|error| step_error(statement, GqlQueryError::Source(error)))?;
                     }
                     Ok(stats)
                 },

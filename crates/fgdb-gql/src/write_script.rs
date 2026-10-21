@@ -831,6 +831,17 @@ mod controlled_binding_tests {
                 .program()
                 .freezes_vertex_upsert_input()
         );
+        // A plain MERGE freezes on the same distinct keys.
+        assert!(
+            bind("MERGE (n:Entity {id: $id})", &[1, 2, 3])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            !bind("MERGE (n:Entity {id: $id})", &[1, 2, 1])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
         assert!(
             !bind(upsert, &[1, 1])
                 .program()

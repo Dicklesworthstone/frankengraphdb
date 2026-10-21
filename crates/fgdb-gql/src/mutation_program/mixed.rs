@@ -441,10 +441,11 @@ impl PreparedGraphWriteProgram {
         }) && self.freeze_vertex_update_input()
     }
 
-    /// Every statement is one vertex upsert of a single template whose MERGE
-    /// keys are pairwise distinct and whose actions write constant values to
-    /// neither a key property (other than its own key value, as `SET n += row`
-    /// does) nor a key label (fgdb-2l3pt). No row can then
+    /// Every statement is one vertex MERGE or upsert of a single template
+    /// whose MERGE keys are pairwise distinct and whose actions, if any,
+    /// write constant values to neither a key property (other than its own
+    /// key value, as `SET n += row` does) nor a key label (fgdb-2l3pt). A
+    /// plain MERGE has no actions at all. No row can then
     /// match a vertex another row creates or changes, so evaluating each MERGE
     /// against the entry overlay and staging all rows once in input order is
     /// the sequential program's result. A physical execution choice only: the
@@ -465,10 +466,12 @@ impl PreparedGraphWriteProgram {
         )> = None;
         let mut keys = std::collections::BTreeSet::new();
         for statement in &self.statements {
-            let GraphWriteStatement::VertexUpsert(upsert) = statement else {
-                return false;
+            let (merge, upsert) = match statement {
+                GraphWriteStatement::VertexMerge(merge) => (merge, None),
+                GraphWriteStatement::VertexUpsert(upsert) => (upsert.merge(), Some(upsert)),
+                _ => return false,
             };
-            let Some(key) = upsert.merge().equality_key() else {
+            let Some(key) = merge.equality_key() else {
                 return false;
             };
             let names: Vec<_> = key.properties.iter().map(|(name, _)| *name).collect();
@@ -477,12 +480,13 @@ impl PreparedGraphWriteProgram {
                 Some(_) => return false,
                 None => shape = Some((key.labels.clone(), names.clone())),
             }
-            for action in upsert
-                .on_match()
-                .iter()
-                .chain(upsert.on_create())
-                .chain(upsert.after())
-            {
+            for action in upsert.into_iter().flat_map(|upsert| {
+                upsert
+                    .on_match()
+                    .iter()
+                    .chain(upsert.on_create())
+                    .chain(upsert.after())
+            }) {
                 let safe = match action {
                     // `MERGE (n {id: row.id}) SET n += row` rewrites the key
                     // with its own value: the chosen vertex already holds it,
