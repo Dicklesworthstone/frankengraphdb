@@ -9,13 +9,19 @@ use fgdb_gql::{
     GraphSymbolKind, GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
     GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphWriteStatement,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const IDS: [VId; 2] = [VId(1), VId((1_u128 << 100) | 1)];
 
+/// A stored integer property, as `props` reports it since stored lists.
+fn stored(value: i64) -> CanonicalPropertyValue {
+    CanonicalScalar::Int(value).into()
+}
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0xa1; 32],
@@ -176,7 +182,7 @@ fn native_upsert_freezes_targets_and_charges_all_actions_before_acceptance() {
         for (id, q) in IDS.into_iter().zip([8, 16]) {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(q))],
+                vec![(P, stored(2)), (Q, stored(q))],
             );
         }
         assert!(db.vertex(VId(90)).unwrap().is_some());

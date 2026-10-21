@@ -57,9 +57,7 @@ fn source_parameters_and_feed_declarations_have_separate_native_schemas() {
     );
     // A global read parameter is not implicitly copied into every write row.
     let options = options_with_missing_projection();
-    let error = prepare(&options)
-        .err()
-        .expect("missing script input must refuse");
+    let error = prepare(&options).expect_err("missing script input must refuse");
     assert_eq!(error.code, 3);
     assert!(error.message.contains("MissingColumn"), "{}", error.message);
 }
@@ -202,8 +200,7 @@ fn output_failure_after_completion_does_not_retry_or_undo_the_write() {
         let prepared = prepare(&options).unwrap().unwrap();
         let error = run(&mut db, &contexts, prepared, true, &mut BrokenOutput)
             .await
-            .err()
-            .expect("transport must fail");
+            .expect_err("transport must fail");
         assert_eq!(error.code, 5);
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(db.vertices().unwrap().len(), 2);
