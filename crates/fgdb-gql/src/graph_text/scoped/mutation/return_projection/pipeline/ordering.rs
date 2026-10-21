@@ -419,7 +419,7 @@ impl<'a> Parser<'a> {
                             })
                         {
                             parser.punct(b'.', ".")?;
-                            parser.map_key()?;
+                            parser.schema_name()?;
                             return Ok(Some(column));
                         }
                     }
