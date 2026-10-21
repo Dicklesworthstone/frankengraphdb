@@ -372,6 +372,26 @@ fn ordered_equality_preserves_denied_key_quota_and_earlier_expression_errors() {
                         if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
                             && error.limit == 1 && error.observed == 2)
             ));
+            // The failed execution may poison this session's spill files, and
+            // poisoning persists across calls (the session's documented law).
+            // The earlier-error claim gets its own session and fresh files.
+            drop(ordered);
+            let (scratch, _) = file(&cx, &pool).await;
+            let (destination, _) = file(&cx, &pool).await;
+            let mut ordered = db
+                .authorized_ordered_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols as Resolver,
+                    GqlQueryPolicy::new(1, 2, 1_000_000, 1_000_000),
+                    || 100,
+                    scratch,
+                    destination,
+                    limits(),
+                )
+                .unwrap();
             let fallible = ordered
                 .prepare(
                     &cx,
@@ -384,12 +404,16 @@ fn ordered_equality_preserves_denied_key_quota_and_earlier_expression_errors() {
                 .unwrap()
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                error,
-                NativeSpoolError::Authorized(error)
-                    if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
-                        if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
-            ));
+            let observed = format!("{error:?}");
+            assert!(
+                matches!(
+                    error,
+                    NativeSpoolError::Authorized(error)
+                        if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
+                            if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
+                ),
+                "{observed}"
+            );
             assert_eq!(pool.used(), 0);
         }
     });
@@ -1206,6 +1230,25 @@ fn ordered_range_and_prefix_keep_denied_key_refusals_and_earlier_arithmetic_erro
                             if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
                                 && error.limit == 1 && error.observed == 2)
                 ));
+                // As above: a fresh session and files, since a failed execution
+                // may poison spill files and poisoning persists across calls.
+                drop(ordered);
+                let (scratch, _) = file(&cx, &pool).await;
+                let (destination, _) = file(&cx, &pool).await;
+                let mut ordered = db
+                    .authorized_ordered_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols as Resolver,
+                        GqlQueryPolicy::new(1, 2, 1_000_000, 1_000_000),
+                        || 100,
+                        scratch,
+                        destination,
+                        limits(),
+                    )
+                    .unwrap();
                 let text = if prefix {
                     "MATCH (n:L) WHERE 10 / n.p > 0 AND n.p STARTS WITH 'Ad' RETURN n AS id ORDER BY id DESC"
                 } else {
@@ -1217,12 +1260,16 @@ fn ordered_range_and_prefix_keep_denied_key_refusals_and_earlier_arithmetic_erro
                     .unwrap()
                     .await
                     .unwrap_err();
-                assert!(matches!(
-                    error,
-                    NativeSpoolError::Authorized(error)
-                        if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
-                            if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
-                ));
+                let observed = format!("{error:?}");
+                assert!(
+                    matches!(
+                        error,
+                        NativeSpoolError::Authorized(error)
+                            if matches!(*error, QueryError::Stream(GqlQueryError::Data(error))
+                                if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)
+                    ),
+                    "{observed}"
+                );
                 assert_eq!(pool.used(), 0);
             }
         }
