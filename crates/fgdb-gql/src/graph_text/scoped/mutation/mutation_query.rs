@@ -333,7 +333,10 @@ struct MutationLeaves<'r, 'a> {
 impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self.row {
-            Some(row) => self.returning.row_leaf(parser, row),
+            Some(row) => match self.returning.row_metadata(parser, row, self.scope)? {
+                Some(column) => Ok(Some(column)),
+                None => self.returning.row_leaf(parser, row),
+            },
             None => self.returning.leaf(parser, self.columns, self.scope),
         }
     }
@@ -503,6 +506,95 @@ impl<'a> ParsedMutationReturn<'a> {
         let key = parser.name()?;
         self.map_input(parser, columns, scope, name, ReturnMapInput::Property(key))
             .map(Some)
+    }
+
+    /// A complete metadata call over an element retained by the incoming
+    /// WITH. Its captured map/list is a preimage, not the answer: the mutation
+    /// owner overlays final properties/labels before projection or grouping.
+    /// Local/map-valued operands stay with the ordinary expression compiler.
+    fn row_metadata(
+        &mut self,
+        parser: &mut Parser<'a>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+        scope: ReturnScope,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
+        let labels = word.eq_ignore_ascii_case("labels");
+        if !labels && !word.eq_ignore_ascii_case("properties") && !word.eq_ignore_ascii_case("keys") {
+            return Ok(None);
+        }
+        let mut lookahead = parser.lexer.clone();
+        if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let token = lookahead.next()?;
+        let TokenKind::Word(name) = token.kind else {
+            return Ok(None);
+        };
+        if parser.elements.contains(&name)
+            || !matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(None);
+        }
+        let visible = parser.visible_width(row);
+        let Some(target) = row[..visible].iter().position(|(source, _)| source.text == name) else {
+            return Ok(None);
+        };
+        let domain = row[target].1;
+        if !matches!(domain, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            || labels && domain != GraphSetColumnType::Vertex
+        {
+            return Ok(None);
+        }
+        if !labels && domain == GraphSetColumnType::Edge && scope.deleting {
+            return Err(error(
+                token.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a vertex property after DETACH DELETE, which may cascade to edges",
+                ),
+            ));
+        }
+        let kind = if labels {
+            GraphSetColumnType::List
+        } else {
+            GraphSetColumnType::Any
+        };
+        let current = parser
+            .boundary_reads
+            .as_ref()
+            .filter(|boundary| boundary.width == row.len() && target < boundary.visible)
+            .and_then(|boundary| {
+                if labels {
+                    boundary.functions.iter().find_map(|&(source, function, column)| {
+                        (source == name && function == GraphPathFunction::Labels).then_some(column)
+                    })
+                } else {
+                    boundary.reads.iter().find_map(|&(source, field, column)| {
+                        (source == name && field.text == "*").then_some(column)
+                    })
+                }
+            })
+            .filter(|&column| row.get(column).is_some_and(|(_, domain)| *domain == kind))
+            .ok_or_else(|| {
+                error(
+                    token.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "metadata carried by the incoming WITH row",
+                    ),
+                )
+            })?;
+        let binding = if labels {
+            Binding::Labels { target, current }
+        } else {
+            Binding::Properties { target, current }
+        };
+        let column = self.column(binding, Name { text: name, at: token.at }, kind)?;
+        for _ in 0..4 {
+            parser.advance()?;
+        }
+        Ok(Some(column))
     }
 
     /// A RETURN leaf after a write after WITH: a value of the WITH row. A
