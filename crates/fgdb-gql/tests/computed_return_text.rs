@@ -1,6 +1,6 @@
 //! Native computed RETURN shares MATCH/scalar preparation and set execution.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -36,8 +36,10 @@ fn prepare(text: &str) -> PreparedGraphSet {
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(10_000, 10_000, 2_000_000, 1_000_000)
 }
+/// Carried-element property reads go through the pinned element reader
+/// (30e3ca7e), so the harness supplies one over the same fixture properties.
 fn run(query: &PreparedGraphSet, vertices: &[VId], edges: &[Triple], props: &Props) -> QueryResult {
-    query.execute_governed(
+    query.execute_governed_with_elements(
         policy(),
         |pattern, budget| {
             pattern.plan().execute_governed_with_properties(
@@ -58,6 +60,13 @@ fn run(query: &PreparedGraphSet, vertices: &[VId], edges: &[Triple], props: &Pro
                 budget,
                 || Ok::<_, ()>(()),
             )
+        },
+        |_, _, _| panic!("this fixture has no CALL source"),
+        |element, key| {
+            Ok(match element {
+                ElementId::Vertex(vid) => props.get(&(vid, key)).cloned(),
+                _ => None,
+            })
         },
         || Ok::<_, ()>(()),
     )

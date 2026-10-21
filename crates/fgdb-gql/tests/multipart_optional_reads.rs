@@ -112,7 +112,7 @@ fn identified_rows(text: &str) -> Vec<GraphValueRow> {
         })
         .collect();
     bind(text)
-        .execute_governed(
+        .execute_governed_with_elements(
             wide(),
             |pattern, remaining| {
                 pattern.plan().execute_governed_with_identified_properties(
@@ -138,6 +138,18 @@ fn identified_rows(text: &str) -> Vec<GraphValueRow> {
                     remaining,
                     || Ok::<_, usize>(()),
                 )
+            },
+            |_, _, _| panic!("this fixture has no CALL source"),
+            // A carried element's property after WITH reads through the
+            // pinned element reader (30e3ca7e), over the same properties.
+            |element, key| {
+                Ok(match element {
+                    ElementId::Vertex(vid) => props[vid.0 as usize - 1]
+                        .iter()
+                        .find(|(candidate, _)| *candidate == key)
+                        .map(|(_, value)| value.clone()),
+                    _ => None,
+                })
             },
             || Ok::<_, usize>(()),
         )

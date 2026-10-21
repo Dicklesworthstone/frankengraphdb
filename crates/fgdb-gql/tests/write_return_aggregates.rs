@@ -424,7 +424,6 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
     for text in [
         "CREATE (n:Item {p:1}) RETURN sum(n)",
         "CREATE (n:Item {p:1}) RETURN count(DISTINCT *)",
-        "CREATE (n:Item {p:1}) RETURN sum(n.p)+1",
         "CREATE (n:Item {p:1}) RETURN count(*) AS same,max(n.p) AS same",
         // rand() in an aggregate's argument is a non-constant expression.
         "CREATE (n:Item {p:1}) RETURN count(rand())",
@@ -440,6 +439,13 @@ fn malformed_aggregate_forms_refuse_before_catalog_access_for_every_write_family
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // A numeric aggregate inside a compound RETURN expression is admitted
+    // (92e83e49): it is not a malformed form, and it answers.
+    let compound = prepare("CREATE (n:Item {p:1}) RETURN sum(n.p)+1 AS s");
+    assert_eq!(
+        rows(create(&compound, policy(1), || Ok(())).unwrap().returning()),
+        vec![vec![int(2)]]
+    );
     let calls = Cell::new(0);
     assert!(
         PreparedGraphMutationQueryText::prepare(
