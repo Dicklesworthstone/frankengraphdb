@@ -176,12 +176,12 @@ pub use query::{
     AuthorizedSpoolCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS, HybridCallError,
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, NativeAggregateCursor, NativeAggregateSpool,
-    NativeAggregateSpoolCursor, NativeAggregateSpoolError, NativeAggregateSpoolRow,
-    NativeExplainCertificate, NativeResultCertificate, NativeResultSpool, NativeSpoolCursor,
-    NativeSpoolDifference, NativeSpoolError, PinnedIndex, PreparedBufferedAggregate,
-    PreparedBufferedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue,
-    QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
-    SealedProjectionOpenError,
+    NativeAggregateSpoolCursor, NativeAggregateSpoolDifference, NativeAggregateSpoolError,
+    NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
+    NativeSpoolCursor, NativeSpoolDifference, NativeSpoolError, PinnedIndex,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedNativeRead, ProcedureError,
+    QueryError, QueryResult, QueryValue, QueryWriteError, RefreshReport, ReplayRefusal,
+    ResidentIndex, ResidentIndexError, SealedProjectionOpenError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
