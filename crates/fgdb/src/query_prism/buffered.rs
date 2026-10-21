@@ -217,7 +217,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         selection: FnxSelection,
         limits: ProjectionLimits,
         source_limits: FnxSourceLimits,
-        control: &mut impl FnMut(SourceEvent) -> Result<(), Error>,
+        // The buffered scan's observer crosses its awaits, so it must be Send.
+        control: &mut (impl FnMut(SourceEvent) -> Result<(), Error> + Send),
         staged_bytes: &mut usize,
     ) -> Result<Vec<VId>, Error> {
         let mut vertices = Vec::new();
