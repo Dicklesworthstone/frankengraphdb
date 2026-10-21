@@ -503,7 +503,8 @@ fn optional_and_exists_children_use_boolean_selection_before_match_success_and_g
 
 /// openCypher `v:L` in WHERE (TCK MatchWhere1 [1]): a top-level AND conjunct
 /// is the label `(v:L)` writes inline, the same plan byte for byte. Under OR,
-/// NOT or parentheses it refuses, as does a name the scope does not bind.
+/// NOT or parentheses the pattern compiler refuses it, as it does a name the
+/// scope does not bind; a read's row filter takes those (the next law).
 #[test]
 fn a_where_label_conjunct_is_the_inline_label() {
     for (conjunct, inline) in [
@@ -530,6 +531,63 @@ fn a_where_label_conjunct_is_the_inline_label() {
         "MATCH (a) WHERE b:L RETURN a",
     ] {
         assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}
+
+/// fgdb-qo3jv: under OR, NOT or parentheses, or beside a conjunct the
+/// Boolean parser reads as a compound expression, a WHERE label test is a
+/// Boolean leaf the pattern filter cannot read, and so is a relationship's
+/// `r:T` anywhere. A read's MATCH WHERE then runs as the row filter after an
+/// implicit `WITH *` (fgdb-1c29d), where `v:L` reads `'L' IN labels(v)`: the
+/// same template as writing that `WITH *`, also before a later MATCH or
+/// OPTIONAL MATCH (TCK Match7 [25]), which then joins the filtered rows. A
+/// flat conjunction keeps its inline label, byte for byte. An OPTIONAL
+/// MATCH's own WHERE belongs to its left join, so there a compound label test
+/// still refuses, as does a name no clause binds.
+#[test]
+fn a_compound_where_label_test_filters_after_an_implicit_with_star() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (pattern, predicate, tail) in [
+        ("(a)", "NOT a:L", "RETURN a"),
+        ("(a)", "a:L OR a.n = 1", "RETURN a"),
+        ("(a)", "(a:L)", "RETURN a"),
+        ("(a)", "NOT (a:L:M) AND a.n > 0", "RETURN a.n AS n"),
+        ("(a)", "a:L AND (a.n = 1 OR a.n = 2)", "RETURN a"),
+        ("(a)", "a:L AND a.n IN [1, 2]", "RETURN a"),
+        ("(a)-[r]->(b)", "r:R", "RETURN a, b"),
+        ("(a)-[r]->(b)", "r:R OR b:L", "RETURN a, b"),
+        ("(a)", "NOT (a:L)", "OPTIONAL MATCH (a)-[r:R]->(a) RETURN r"),
+        ("(a)", "a:L OR a.n = 1", "MATCH (a)-[:R]->(b) RETURN b"),
+    ] {
+        let deferred = template(&format!("MATCH {pattern} WHERE {predicate} {tail}"));
+        let explicit = template(&format!("MATCH {pattern} WITH * WHERE {predicate} {tail}"));
+        assert_eq!(deferred, explicit, "{predicate} {tail}");
+    }
+    for (conjunct, inline) in [
+        ("MATCH (a) WHERE a:L RETURN a", "MATCH (a:L) RETURN a"),
+        (
+            "MATCH (a) WHERE a.n = 2 AND a:L RETURN a.n AS n",
+            "MATCH (a:L) WHERE a.n = 2 RETURN a.n AS n",
+        ),
+        (
+            "MATCH (a) WHERE a:L AND (a)-[:R]->() RETURN a",
+            "MATCH (a:L) WHERE (a)-[:R]->() RETURN a",
+        ),
+    ] {
+        assert_eq!(template(conjunct), template(inline), "{conjunct}");
+    }
+    for text in [
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b:L OR b.n = 1 RETURN b",
+        "MATCH (a) WHERE b:L OR a.n = 1 RETURN a",
+    ] {
+        assert!(
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
     }
 }
 

@@ -904,6 +904,11 @@ struct Parser<'a> {
     /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
     /// key belongs to the HAVING test, not to the key expression.
     having_operand: bool,
+    /// A label test `v:L` over a row is being read (fgdb-qo3jv): the
+    /// resolver's boundary_read takes a carried element followed by `:` to
+    /// the labels() or type() column its boundary hoisted, and records here
+    /// which of the two it read.
+    label_test: Option<Option<GraphPathFunction>>,
     /// The host's pinned tzdb, carried by every temporal constructor the
     /// statement reads (fgdb-txbg9): named zones resolve only through it.
     zones: Option<crate::GqlTimeZones>,
@@ -1008,6 +1013,7 @@ impl<'a> Parser<'a> {
             aggregate_argument: false,
             percentile_leaf: false,
             having_operand: false,
+            label_test: None,
             zones: None,
             defer_where: false,
             optional_part: false,

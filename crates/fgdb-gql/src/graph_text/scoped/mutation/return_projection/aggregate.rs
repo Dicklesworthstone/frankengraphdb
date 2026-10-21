@@ -292,7 +292,13 @@ impl PreparedGraphPipelineAggregateText {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
-        let multipart = crate::set_text::multipart::has_continuation(&tokens);
+        let multipart = crate::set_text::multipart::has_continuation(&tokens)
+            || Parser::deferred_where_continues(
+                statement,
+                declarations,
+                &tokens,
+                parser.zones.as_ref(),
+            );
         let leading_match =
             !multipart && crate::set_text::multipart::leading_rows_then_match(&tokens);
         let (head, mut stages, schema, depth) =

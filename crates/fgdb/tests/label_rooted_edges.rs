@@ -228,6 +228,183 @@ fn label_rooted_edge_reads_answer_exactly_what_was_written() {
     });
 }
 
+/// fgdb-qo3jv: a label test under OR, NOT or parentheses in a MATCH WHERE is
+/// the Boolean `'L' IN labels(v)`, and a relationship's `r:T` is
+/// `type(r) = 'T'`, both read by the row filter after the match. Their rows
+/// are the ones a three-valued evaluation of what was written keeps, the
+/// rows the spelled-out forms return, and an OR of two labels is the union of
+/// the two inline labels. A label no catalog names is simply absent. A NULL
+/// element from OPTIONAL MATCH makes the test NULL, so neither it nor its
+/// negation keeps the row. A WHERE so deferred before a later OPTIONAL MATCH
+/// filters that clause's input (TCK Match7 [25]).
+#[test]
+fn label_tests_under_or_and_not_are_three_valued_label_membership() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        let vertex = |value: &GraphValue| match value {
+            GraphValue::Vertex(VId(vid)) => *vid,
+            other => panic!("not a vertex: {other:?}"),
+        };
+        let vertices = |text: &str| {
+            let mut found: Vec<u128> = query(&db, cx, text)
+                .iter()
+                .map(|row| vertex(&row[0]))
+                .collect();
+            found.sort_unstable();
+            found
+        };
+        // Each case: the label test, its spelled-out form, and which written
+        // vertices (or relationships) it keeps.
+        type KeepVertex = fn(u128) -> bool;
+        type KeepEdge = fn(RelationId, u128) -> bool;
+        let cases: [(&str, &str, KeepVertex); 6] = [
+            ("a:A OR a:B", "'A' IN labels(a) OR 'B' IN labels(a)", |v| {
+                is(A, v) || is(B, v)
+            }),
+            ("NOT a:B", "NOT 'B' IN labels(a)", |v| !is(B, v)),
+            ("NOT (a:A)", "NOT ('A' IN labels(a))", |v| !is(A, v)),
+            (
+                "(a:A) AND NOT a:B",
+                "'A' IN labels(a) AND NOT 'B' IN labels(a)",
+                |v| is(A, v) && !is(B, v),
+            ),
+            (
+                "a:A:B OR NOT (a:A OR a:B)",
+                "'A' IN labels(a) AND 'B' IN labels(a) \
+                 OR NOT ('A' IN labels(a) OR 'B' IN labels(a))",
+                |v| (is(A, v) && is(B, v)) || !(is(A, v) || is(B, v)),
+            ),
+            (
+                "a:Z OR NOT a:Z",
+                "'Z' IN labels(a) OR NOT 'Z' IN labels(a)",
+                |_| true,
+            ),
+        ];
+        for (test, spelled, keep) in cases {
+            let expected: Vec<u128> = (1..=12).filter(|&vid| keep(vid)).collect();
+            let text = format!("MATCH (a) WHERE {test} RETURN a");
+            assert_eq!(vertices(&text), expected, "{text}");
+            let text = format!("MATCH (a) WHERE {spelled} RETURN a");
+            assert_eq!(vertices(&text), expected, "{text}");
+            let text = format!("MATCH (a) WHERE {test} RETURN count(*) AS c");
+            assert_eq!(count(&db, cx, &text), expected.len() as u64, "{text}");
+        }
+        let mut union = vertices("MATCH (a:A) RETURN a");
+        union.extend(vertices("MATCH (a:B) RETURN a"));
+        union.sort_unstable();
+        union.dedup();
+        assert_eq!(vertices("MATCH (a) WHERE a:A OR a:B RETURN a"), union);
+        // Relationship tests, over both relations' live edges.
+        let edges: Vec<(RelationId, u128, u128)> = (R_EDGES.iter().map(|&(_, s, d)| (R, s, d)))
+            .chain(S_EDGES.iter().map(|&(_, s, d)| (S, s, d)))
+            .collect();
+        let relationship_cases: [(&str, &str, KeepEdge); 2] = [
+            (
+                "r:S OR b:A",
+                "type(r) = 'S' OR 'A' IN labels(b)",
+                |relation, dst| relation == S || is(A, dst),
+            ),
+            (
+                "NOT r:R AND NOT (b:B)",
+                "NOT type(r) = 'R' AND NOT ('B' IN labels(b))",
+                |relation, dst| relation != R && !is(B, dst),
+            ),
+        ];
+        for (test, spelled, keep) in relationship_cases {
+            let mut expected: Vec<(u128, u128)> = (edges.iter())
+                .filter(|&&(relation, _, dst)| keep(relation, dst))
+                .map(|&(_, src, dst)| (src, dst))
+                .collect();
+            expected.sort_unstable();
+            for predicate in [test, spelled] {
+                let text = format!("MATCH (a)-[r]->(b) WHERE {predicate} RETURN a, b");
+                let mut found: Vec<(u128, u128)> = query(&db, cx, &text)
+                    .iter()
+                    .map(|row| (vertex(&row[0]), vertex(&row[1])))
+                    .collect();
+                found.sort_unstable();
+                assert_eq!(found, expected, "{text}");
+            }
+        }
+        // TCK Match7 [25]: the filter runs before the OPTIONAL MATCH, which
+        // finds the one self-loop (S 5->5) among the vertices that are not A.
+        for predicate in ["NOT (a:A)", "NOT ('A' IN labels(a))"] {
+            let text = format!(
+                "MATCH (a) WHERE {predicate} OPTIONAL MATCH (a)-[r]->(a) \
+                 RETURN a, r IS NULL AS missing"
+            );
+            let mut found: Vec<(u128, bool)> = query(&db, cx, &text)
+                .iter()
+                .map(|row| match &row[1] {
+                    GraphValue::Scalar(CanonicalScalar::Bool(missing)) => {
+                        (vertex(&row[0]), *missing)
+                    }
+                    other => panic!("{text}: {other:?}"),
+                })
+                .collect();
+            found.sort_unstable();
+            let expected: Vec<(u128, bool)> = (5..=12).map(|vid| (vid, vid != 5)).collect();
+            assert_eq!(found, expected, "{text}");
+        }
+        // A NULL element: every A vertex with its S successor, if any (1->5,
+        // 3->8; 2 and 4 have none), filtered three-valued. Each case reads
+        // (a, whether b is B, whether b is A), NULL for a NULL b.
+        fn or(x: Option<bool>, y: Option<bool>) -> Option<bool> {
+            match (x, y) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            }
+        }
+        fn not(x: Option<bool>) -> Option<bool> {
+            x.map(|truth| !truth)
+        }
+        let successors: [(u128, Option<u128>); 4] =
+            [(1, Some(5)), (2, None), (3, Some(8)), (4, None)];
+        type Keep = fn(u128, Option<bool>, Option<bool>) -> Option<bool>;
+        let null_cases: [(&str, &str, Keep); 3] = [
+            (
+                "b:B OR NOT b:A",
+                "'B' IN labels(b) OR NOT 'A' IN labels(b)",
+                |_, b, a| or(b, not(a)),
+            ),
+            ("NOT b:B", "NOT 'B' IN labels(b)", |_, b, _| not(b)),
+            (
+                "b:B OR a:A",
+                "'B' IN labels(b) OR 'A' IN labels(a)",
+                |a, b, _| or(b, Some(is(A, a))),
+            ),
+        ];
+        for (test, spelled, keep) in null_cases {
+            let mut expected: Vec<(u128, bool)> = (successors.iter())
+                .filter(|&&(a, b)| {
+                    let label = |of| b.map(|b| is(of, b));
+                    keep(a, label(B), label(A)) == Some(true)
+                })
+                .map(|&(a, b)| (a, b.is_none()))
+                .collect();
+            expected.sort_unstable();
+            for predicate in [test, spelled] {
+                let text = format!(
+                    "MATCH (a:A) OPTIONAL MATCH (a)-[:S]->(b) WITH a, b \
+                     WHERE {predicate} RETURN a, b IS NULL AS missing"
+                );
+                let mut found: Vec<(u128, bool)> = query(&db, cx, &text)
+                    .iter()
+                    .map(|row| match &row[1] {
+                        GraphValue::Scalar(CanonicalScalar::Bool(missing)) => {
+                            (vertex(&row[0]), *missing)
+                        }
+                        other => panic!("{text}: {other:?}"),
+                    })
+                    .collect();
+                found.sort_unstable();
+                assert_eq!(found, expected, "{text}");
+            }
+        }
+    });
+}
+
 /// The smallest snapshot-record budget `text` is admitted under.
 fn least_records(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> u64 {
     let admitted = |records| {

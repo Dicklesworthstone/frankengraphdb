@@ -2104,9 +2104,13 @@ impl<'a> Parser<'a> {
     /// A vertex test is `'L1' IN labels(v) AND 'L2' IN labels(v)` over the
     /// labels() column, each membership a let slot. A relationship test is
     /// `type(r) = 'T'`. Either is NULL for a NULL element, and a label no
-    /// catalog name matches is simply absent. Graph scope only. False, with
-    /// nothing consumed, unless a MATCH vertex or relationship is followed by
-    /// `:`. Out of line: integer_unary repeats once per nested parenthesis.
+    /// catalog name matches is simply absent. Over a graph-to-row boundary (a
+    /// WITH's WHERE, a MATCH WHERE deferred past an implicit `WITH *`) a
+    /// carried element reads the labels() or type() column the boundary
+    /// hoisted for it, as `labels(v)` there does. False, with nothing
+    /// consumed, unless a MATCH vertex or relationship, or such a carried
+    /// element, is followed by `:`. Out of line: integer_unary repeats once
+    /// per nested parenthesis.
     #[inline(never)]
     fn label_test_operand(
         &mut self,
@@ -2122,35 +2126,70 @@ impl<'a> Parser<'a> {
         {
             return Ok(false);
         }
-        let ExpressionColumns::Graph(columns) = columns else {
-            return Ok(false);
-        };
-        let (variable, function) = match self.insertion_match_kind(word) {
-            Some(crate::GraphSetColumnType::Vertex) => {
-                (self.vertex_variable()?, GraphPathFunction::Labels)
+        let (column, function) = match columns {
+            ExpressionColumns::Graph(columns) => {
+                let (variable, function) = match self.insertion_match_kind(word) {
+                    Some(crate::GraphSetColumnType::Vertex) => {
+                        (self.vertex_variable()?, GraphPathFunction::Labels)
+                    }
+                    Some(crate::GraphSetColumnType::Edge) => {
+                        (self.edge_variable()?, GraphPathFunction::Type)
+                    }
+                    _ => return Ok(false),
+                };
+                if function == GraphPathFunction::Labels && self.lets.is_none() {
+                    return Err(failure(
+                        at,
+                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                            "a label test where values are read (RETURN, WITH or ORDER BY)",
+                        )),
+                    ));
+                }
+                let column = self.projection_slot(
+                    columns,
+                    Projection {
+                        variable,
+                        property: None,
+                        path: Some(function),
+                        collect: None,
+                    },
+                )?;
+                (column, function)
             }
-            Some(crate::GraphSetColumnType::Edge) => {
-                (self.edge_variable()?, GraphPathFunction::Type)
+            ExpressionColumns::Resolved(resolve) => {
+                let hoisted = self.boundary_reads.as_ref().is_some_and(|boundary| {
+                    boundary.functions.iter().any(|&(alias, function, _)| {
+                        alias == word
+                            && matches!(
+                                function,
+                                GraphPathFunction::Labels | GraphPathFunction::Type
+                            )
+                    })
+                });
+                if !hoisted || self.lets.is_none() {
+                    return Ok(false);
+                }
+                // Only the boundary row's own resolver reads the hoisted
+                // column; a nested row of another width resolves the name
+                // as something else, which is no label test.
+                self.label_test = Some(None);
+                let resolved = resolve(self);
+                let function = self.label_test.take().flatten();
+                match (resolved?, function) {
+                    (Some(column), Some(function)) => (column, function),
+                    (None, None) => return Ok(false),
+                    _ => {
+                        return Err(failure(
+                            at,
+                            GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                                "a label test over a MATCH element carried unchanged",
+                            )),
+                        ));
+                    }
+                }
             }
-            _ => return Ok(false),
+            ExpressionColumns::Row(_) => return Ok(false),
         };
-        if function == GraphPathFunction::Labels && self.lets.is_none() {
-            return Err(failure(
-                at,
-                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
-                    "a label test where values are read (RETURN, WITH or ORDER BY)",
-                )),
-            ));
-        }
-        let column = self.projection_slot(
-            columns,
-            Projection {
-                variable,
-                property: None,
-                path: Some(function),
-                collect: None,
-            },
-        )?;
         let mut first = true;
         while self.take(b':')? {
             let label = self.schema_name()?;

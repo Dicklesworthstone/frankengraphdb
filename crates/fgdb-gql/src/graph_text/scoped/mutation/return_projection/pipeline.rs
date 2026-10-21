@@ -524,7 +524,33 @@ impl<'a> Parser<'a> {
                     }
                     let kept =
                         |alias: &str| carried.as_ref().is_none_or(|kept| kept.contains(&alias));
-                    if let Some((source, function)) = metadata_source(word, token.at, &lexer)?
+                    // A label test `v:L` reads the column `labels(v)` or
+                    // `type(v)` reads (label_test_operand, fgdb-qo3jv).
+                    let label_test = if matches!(next, TokenKind::Punct(b':'))
+                        && !matches!(window[2], Some(TokenKind::Punct(b':')))
+                    {
+                        [GraphPathFunction::Labels, GraphPathFunction::Type]
+                            .into_iter()
+                            .find(|&function| {
+                                boundary_metadata_binding(head, offset, word, function).is_some()
+                            })
+                            .map(|function| {
+                                (
+                                    Name {
+                                        text: word,
+                                        at: token.at,
+                                    },
+                                    function,
+                                )
+                            })
+                    } else {
+                        None
+                    };
+                    let metadata = match label_test {
+                        Some(test) => Some(test),
+                        None => metadata_source(word, token.at, &lexer)?,
+                    };
+                    if let Some((source, function)) = metadata
                         && kept(source.text)
                         && let Some(variable) =
                             boundary_metadata_binding(head, offset, source.text, function)
@@ -681,6 +707,28 @@ impl<'a> Parser<'a> {
         // read of the same name, whichever scan found the name.
         if boundary.width != width || self.elements.contains(&alias) {
             return Ok(None);
+        }
+        if self.label_test.is_some() {
+            // `v:L` (label_test_operand): the alias alone, read as the
+            // labels() or type() column hoisted for it; the labels follow.
+            let hoisted = (boundary.functions.iter())
+                .find(|&&(read, function, _)| {
+                    read == alias
+                        && matches!(
+                            function,
+                            GraphPathFunction::Labels | GraphPathFunction::Type
+                        )
+                })
+                .map(|&(_, function, column)| (function, column));
+            let Some((function, column)) = hoisted else {
+                return Ok(None);
+            };
+            if !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':')) {
+                return Ok(None);
+            }
+            self.advance()?;
+            self.label_test = Some(Some(function));
+            return Ok(Some(column));
         }
         if let Some((source, function)) = metadata_source(alias, self.current.at, &self.lexer)? {
             if self.elements.contains(&source.text) {

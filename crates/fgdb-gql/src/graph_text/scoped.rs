@@ -594,7 +594,10 @@ impl<'a> Parser<'a> {
         } else if self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
-        loop {
+        // A deferred WHERE filters this clause's rows before any later MATCH
+        // or OPTIONAL MATCH joins them: that clause starts the next part of
+        // a multipart read (deferred_where_continues), never a scope here.
+        while self.deferred_where.is_none() {
             // An OPTIONAL continuation ends before the next clause; its
             // caller draws the implicit `WITH *` there.
             if self.optional_part && (self.is_word("OPTIONAL") || self.is_word("MATCH")) {
@@ -646,10 +649,23 @@ impl<'a> Parser<'a> {
     /// column `RETURN type(r)` already uses.
     /// `nodes(p)` and `edges(p)` at depth zero are path predicates; inside
     /// parentheses (`size(nodes(p))`) they are list values.
+    ///
+    /// So does a label test (fgdb-qo3jv) the pattern filter cannot read: a
+    /// relationship's `r:T`, and a vertex's `v:L` once the WHERE has OR, NOT
+    /// or parentheses, or any other conjunct the Boolean parser reads as a
+    /// compound expression. There a label test is a Boolean leaf, which the
+    /// row filter reads as `'L' IN labels(v)` (`type(r) = 'T'`), three-valued.
+    /// A flat AND of label tests and comparisons keeps its inline labels,
+    /// and an EXISTS or pattern-predicate conjunct is its own scope, whose
+    /// labels and connectives count for neither.
     fn where_needs_values(&self) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         let mut depth = 0_usize;
+        let mut braces = 0_usize;
         let mut previous: Option<TokenKind<'a>> = None;
+        // A conjunct begins the WHERE and follows each top-level AND.
+        let (mut conjunct, mut existence) = (true, false);
+        let (mut vertex_test, mut edge_test, mut compound) = (false, false, false);
         loop {
             let token = lexer.next()?;
             let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
@@ -659,10 +675,13 @@ impl<'a> Parser<'a> {
                 Ok(matches!(ahead.next()?.kind, TokenKind::Word(word)
                     if word.eq_ignore_ascii_case("IN")))
             };
+            if core::mem::take(&mut conjunct) {
+                existence = existence_follows(token.kind, &lexer)?;
+            }
             match token.kind {
-                TokenKind::End => return Ok(false),
+                TokenKind::End => return Ok(edge_test || (vertex_test && compound)),
                 TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
-                    return Ok(false);
+                    return Ok(edge_test || (vertex_test && compound));
                 }
                 TokenKind::Word(word) if !key && matches!(next, TokenKind::Punct(b'(')) => {
                     let list_function = [
@@ -707,13 +726,80 @@ impl<'a> Parser<'a> {
                 }
                 _ => {}
             }
+            if !existence && !key {
+                match token.kind {
+                    TokenKind::Word(word)
+                        if braces == 0 && matches!(next, TokenKind::Punct(b':')) =>
+                    {
+                        if self.syntax.variables.iter().any(|name| name.text == word) {
+                            vertex_test = true;
+                        } else if self.syntax.visible_edge(word).is_some() {
+                            edge_test = true;
+                        }
+                    }
+                    // `IS NOT NULL` is a flat atom; every other NOT, OR,
+                    // list or range membership, text operator and
+                    // parenthesis makes the Boolean parser's expression
+                    // compound.
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+                        compound |= !matches!(previous, Some(TokenKind::Word(is))
+                            if is.eq_ignore_ascii_case("IS"));
+                    }
+                    TokenKind::Word(word) => {
+                        compound |= ["OR", "XOR", "IN", "BETWEEN", "STARTS", "ENDS", "CONTAINS"]
+                            .iter()
+                            .any(|operator| word.eq_ignore_ascii_case(operator));
+                    }
+                    TokenKind::Punct(b'(') => compound = true,
+                    _ => {}
+                }
+            }
+            if depth == 0
+                && !key
+                && matches!(token.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("AND"))
+            {
+                conjunct = true;
+            }
             match token.kind {
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                 _ => {}
             }
+            match token.kind {
+                TokenKind::Punct(b'{') => braces += 1,
+                TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+                _ => {}
+            }
             previous = Some(token.kind);
         }
+    }
+
+    /// Whether a root MATCH WHERE the row filter reads (where_needs_values)
+    /// is followed by another MATCH or OPTIONAL MATCH clause (fgdb-qo3jv,
+    /// TCK Match7 [25]). That WHERE filters the first part at its implicit
+    /// `WITH *`, so the statement is a multipart read whose next part starts
+    /// at that clause, exactly as `MATCH ... WITH * WHERE ... OPTIONAL MATCH`
+    /// is. Only a token-level candidate (where_then_match) parses its root
+    /// MATCH a second time, before any catalog access; a parse error is left
+    /// to the read's own parser.
+    pub(super) fn deferred_where_continues(
+        statement: &str,
+        declarations: &[(&str, crate::GqlParameterType)],
+        tokens: &[crate::set_text::TextToken<'_>],
+        zones: Option<&crate::GqlTimeZones>,
+    ) -> bool {
+        if !crate::set_text::multipart::where_then_match(tokens) {
+            return false;
+        }
+        let Ok(parser) = Parser::new_with_parameter_types(statement, declarations) else {
+            return false;
+        };
+        let mut parser = parser.with_zones(zones.cloned());
+        parser.defer_where = true;
+        parser.parse_match_prefix().is_ok()
+            && parser.deferred_where.is_some()
+            && (parser.is_word("MATCH") || parser.is_word("OPTIONAL"))
     }
 
     /// Step past a deferred WHERE and its predicate, to the next clause.
@@ -1007,18 +1093,7 @@ impl<'a> Parser<'a> {
     // predicate `[NOT] (n)-[...]-(...)`, or its `[NOT] exists(<pattern>)`
     // spelling is present.
     pub(super) fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
-        let mut lookahead = self.lexer.clone();
-        if self.is_word("EXISTS") {
-            return exists_introducer_follows(&mut lookahead);
-        }
-        if self.is_word("NOT") {
-            let next = lookahead.next()?;
-            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
-                return exists_introducer_follows(&mut lookahead);
-            }
-            return pattern_predicate_follows(next.kind, &mut lookahead);
-        }
-        pattern_predicate_follows(self.current.kind, &mut lookahead)
+        existence_follows(self.current.kind, &self.lexer)
     }
 
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
@@ -1442,6 +1517,28 @@ enum ScopeForm {
     Pattern,
     /// A pattern comprehension's body (fgdb-7nwox).
     Comprehension,
+}
+
+/// Whether `first`, with `lexer` just after it, starts an existence
+/// predicate: EXISTS, NOT EXISTS, or a pattern predicate or its anti form.
+fn existence_follows(
+    first: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lookahead = lexer.clone();
+    match first {
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS") => {
+            exists_introducer_follows(&mut lookahead)
+        }
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+            let next = lookahead.next()?;
+            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
+                return exists_introducer_follows(&mut lookahead);
+            }
+            pattern_predicate_follows(next.kind, &mut lookahead)
+        }
+        first => pattern_predicate_follows(first, &mut lookahead),
+    }
 }
 
 /// After an `EXISTS` word: `{` (a subquery), or `(` whose content is a

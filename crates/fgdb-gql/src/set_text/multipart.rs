@@ -86,6 +86,45 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
+/// Whether the statement starts with MATCH and a top-level MATCH or
+/// OPTIONAL MATCH clause follows its first top-level WHERE, before any
+/// RETURN or WITH: the only statements whose root WHERE, deferred to the
+/// row filter, can start a multipart read (Parser::deferred_where_continues).
+pub(crate) fn where_then_match(tokens: &[TextToken<'_>]) -> bool {
+    if !tokens.first().is_some_and(|token| token.word("MATCH")) {
+        return false;
+    }
+    let mut depth = 0_usize;
+    let mut filtered = false;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    continue;
+                }
+                if token.word("RETURN")
+                    || (token.word("WITH")
+                        && !previous.is_some_and(|previous| {
+                            previous.word("STARTS") || previous.word("ENDS")
+                        }))
+                {
+                    return false;
+                }
+                if token.word("WHERE") {
+                    filtered = true;
+                } else if filtered && token.word("MATCH") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether a leading UNWIND starts the statement and a top-level MATCH
 /// follows its row stages (`UNWIND $ids AS id MATCH (n {id: id}) WITH ...
 /// RETURN count(*)`). Where has_continuation is false, a pipeline aggregate

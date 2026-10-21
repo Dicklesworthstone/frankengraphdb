@@ -92,7 +92,9 @@ impl PreparedGraphText {
         tokens: &[TextToken<'_>],
         zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
-        if !has_continuation(tokens) {
+        if !has_continuation(tokens)
+            && !Parser::deferred_where_continues(statement, declarations, tokens, zones)
+        {
             return Ok(UnresolvedReadInput {
                 first: Self::unresolved_for_composition(statement, declarations, zones)?,
                 continuations: Vec::new(),
@@ -470,7 +472,13 @@ impl<'a> Parser<'a> {
         // clause: this part ends before the next clause, at an implicit
         // `WITH *` (multipart_head), never wrapping it in one left join.
         self.optional_part = optional;
+        // The first part's WHERE over values is that part's implicit `WITH *
+        // WHERE` (fgdb-1c29d, fgdb-qo3jv). A continuation's WHERE stays its
+        // own: an OPTIONAL one belongs to the left join, not after it.
+        self.defer_where = kind.is_none();
         let parsed = self.parse_match_prefix();
+        self.defer_where = false;
+        let deferred = self.deferred_where.take();
         self.optional_part = false;
         let row_fields = core::mem::take(&mut self.read_row_fields);
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
@@ -575,6 +583,7 @@ impl<'a> Parser<'a> {
         let implicit_star = aggregate && kind.is_some() && self.is_word("RETURN");
         if aggregate
             && !implicit_star
+            && deferred.is_none()
             && !self.is_word("WITH")
             && !(kind.is_none() && self.is_word("UNWIND"))
         {
@@ -583,7 +592,14 @@ impl<'a> Parser<'a> {
                 "WITH before a multipart aggregate RETURN",
             ));
         }
-        let mut head = if kind.is_none() {
+        let mut head = if let Some((lexer, at_where)) = deferred {
+            // The row pipeline reads the WHERE after the implicit `WITH *`,
+            // then this part ends at the next MATCH, as after an explicit one.
+            let head = self.implicit_with_head()?;
+            self.lexer = lexer;
+            self.current = at_where;
+            head
+        } else if kind.is_none() {
             self.graph_projection_head()?
         } else if implicit_star {
             // The same graph-to-row aggregate head owns carried properties

@@ -821,13 +821,14 @@ fn match_where_over_list_values_filters_after_the_match() {
         rows(&format!("{untyped} WHERE type(r) = 'R' RETURN a, c")),
         rows("MATCH (a)-[r:R]->(c) RETURN a, c")
     );
-    // The deferred predicate belongs to the root MATCH, so v1 refuses another
-    // MATCH clause between it and the RETURN rather than moving it past one.
-    assert!(
-        fgdb_gql::PreparedGraphSetText::prepare(
-            "MATCH p = (a)-[:R]->(c) WHERE size(nodes(p)) > 1 MATCH (d) RETURN a",
-            symbols,
-        )
-        .is_err()
+    // The deferred predicate belongs to the root MATCH, so it filters that
+    // clause's rows before a later MATCH joins them, never after (fgdb-qo3jv):
+    // the read is the explicit `WITH * WHERE` multipart read.
+    let joined = "MATCH (d) RETURN a, d";
+    let deferred = rows(&format!("{path} WHERE size(nodes(p)) > 2 {joined}"));
+    assert_eq!(
+        deferred,
+        rows(&format!("{path} WITH * WHERE size(nodes(p)) > 2 {joined}"))
     );
+    assert_eq!(deferred.len(), 4);
 }
