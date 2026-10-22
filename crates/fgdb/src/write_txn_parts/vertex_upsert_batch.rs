@@ -296,13 +296,13 @@ impl WriteTxn {
                                     GraphValue::Vertex(outcome.vertex())
                                 }
                                 GraphVertexReturnBinding::Property(key) => {
-                                    GraphValue::Scalar(vertex_upsert_property(
+                                    vertex_upsert_returned_property(
                                         transaction,
                                         database,
                                         outcome.vertex(),
                                         key,
                                         &mut control,
-                                    )?)
+                                    )?
                                 }
                                 GraphVertexReturnBinding::Properties => vertex_upsert_properties(
                                     transaction,

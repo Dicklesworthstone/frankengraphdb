@@ -102,7 +102,7 @@ impl WriteTxn {
                 policy,
                 || cx.checkpoint(),
                 |key, control| {
-                    vertex_upsert_property(
+                    vertex_upsert_returned_property(
                         &*workspace.txn,
                         &*database,
                         outcome.vertex(),
@@ -193,7 +193,7 @@ fn vertex_upsert_returning<E, A, C>(
     mut property: impl FnMut(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
-    ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
     mut properties: impl FnMut(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
@@ -241,9 +241,7 @@ fn vertex_upsert_returning<E, A, C>(
         for binding in query.bindings() {
             row.push(match binding {
                 GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
-                GraphVertexReturnBinding::Property(key) => {
-                    GraphValue::Scalar(property(*key, &mut control)?)
-                }
+                GraphVertexReturnBinding::Property(key) => property(*key, &mut control)?,
                 GraphVertexReturnBinding::Properties => properties(&mut control)?,
                 GraphVertexReturnBinding::Labels => labels(&mut control)?,
             });
@@ -414,6 +412,57 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
         fgdb_gql::GlaExecutionEvent,
     ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
 ) -> VertexUpsertActionResult<CanonicalScalar, WriteTxnError, A, C> {
+    // A MERGE action reads its operands as scalars; a stored List or Map
+    // refuses rather than read as NULL (fgdb-k3nub).
+    vertex_upsert_property_read(transaction, database, vertex, property, control, |stored| {
+        match stored {
+            None => Ok(CanonicalScalar::Null),
+            Some(value) => value.as_scalar().cloned().ok_or_else(|| {
+                fgdb_gql::GqlQueryError::from(fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredCollection,
+                })
+            }),
+        }
+    })
+}
+
+/// A MERGE RETURN reads a stored List or Map as itself (fgdb-k3nub), as a
+/// MATCH RETURN does; only a MERGE action needs a scalar operand.
+fn vertex_upsert_returned_property<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    property: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    vertex_upsert_property_read(transaction, database, vertex, property, control, |stored| {
+        match stored {
+            None => Ok(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null)),
+            Some(value) => fgdb_gql::algebra::GraphValue::from_property_value(value).ok_or(
+                fgdb_gql::GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                }),
+            ),
+        }
+    })
+}
+
+fn vertex_upsert_property_read<V: Vfs + Clone, A, C, T>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    property: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    convert: impl FnOnce(
+        Option<&fgdb_types::CanonicalPropertyValue>,
+    ) -> VertexUpsertActionResult<T, WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<T, WriteTxnError, A, C> {
     use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
     control(GlaExecutionEvent::Work)?;
@@ -444,17 +493,7 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
     source_control(SourceEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     source_control(SourceEvent::ScratchEntry)?;
-    // A MERGE action reads its operands as scalars; a stored List or Map
-    // refuses rather than read as NULL (fgdb-k3nub).
-    let value = match projected.property {
-        None => CanonicalScalar::Null,
-        Some(value) => value.as_scalar().cloned().ok_or_else(|| {
-            GqlQueryError::from(fgdb_gql::GraphIntegerError {
-                instruction: 0,
-                kind: fgdb_gql::GraphIntegerErrorKind::StoredCollection,
-            })
-        })?,
-    };
+    let value = convert(projected.property)?;
     attempt.accepted = true;
     Ok(value)
 }

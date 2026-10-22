@@ -170,7 +170,9 @@ impl<V: Vfs + Clone> Database<V> {
                         |key, control| {
                             if !verified.predicates().allows_property(key) {
                                 control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
-                                return Ok(fgdb_types::CanonicalScalar::Null);
+                                return Ok(fgdb_gql::algebra::GraphValue::Scalar(
+                                    fgdb_types::CanonicalScalar::Null,
+                                ));
                             }
                             selection::property(
                                 transaction,
@@ -191,7 +193,15 @@ impl<V: Vfs + Clone> Database<V> {
                                 control,
                                 source,
                             )
-                            .and_then(selection::scalar)
+                            .and_then(|value| {
+                                // A stored List or Map returns as itself (fgdb-k3nub).
+                                fgdb_gql::algebra::GraphValue::from_property_value(&value).ok_or(
+                                    GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                                        instruction: 0,
+                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                                    }),
+                                )
+                            })
                         },
                         |control| {
                             vertex_upsert_properties(

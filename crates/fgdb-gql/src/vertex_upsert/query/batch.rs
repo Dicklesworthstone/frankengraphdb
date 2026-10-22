@@ -35,8 +35,9 @@ impl PreparedGraphVertexUpsertQuery {
         };
         work()?;
         // Validate even unprojected cells and rows later discarded by LIMIT.
-        // Open map/list domains may not smuggle non-scalar stored properties,
-        // malformed maps or non-text labels into a projected expression.
+        // A property is a stored value: a scalar, or a stored List or Map
+        // (fgdb-k3nub), never a graph element. Malformed maps and non-text
+        // labels may not reach a projected expression.
         for row in &rows {
             work()?;
             if row.len() != self.bindings.len() {
@@ -51,7 +52,7 @@ impl PreparedGraphVertexUpsertQuery {
                         }
                     }
                     GraphVertexReturnBinding::Property(_) => {
-                        if !matches!(value, GraphValue::Scalar(_)) {
+                        if !value.is_stored_value() {
                             return Err(invalid());
                         }
                     }
@@ -79,7 +80,7 @@ impl PreparedGraphVertexUpsertQuery {
                         }
                         for (at, (key, value)) in keys.iter().zip(values).enumerate() {
                             work()?;
-                            if !matches!(value, GraphValue::Scalar(_))
+                            if !value.is_stored_value()
                                 || at != 0 && keys[at - 1].as_bytes() >= key.as_bytes()
                             {
                                 return Err(invalid());

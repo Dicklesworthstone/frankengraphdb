@@ -691,7 +691,8 @@ fn set_to_a_literal_map_replaces_every_property() {
 }
 
 /// fgdb-k3nub: a write RETURN's property map carries a stored List field
-/// unchanged beside the fields the write assigns, for SET and vertex MERGE.
+/// unchanged beside the fields the write assigns, for SET and vertex MERGE,
+/// and the List property itself returns as a List, with or without a clause.
 #[test]
 fn write_return_maps_carry_stored_list_fields() {
     let ((), report) = run_async_under_lab(0x6d61_000b, |root| async move {
@@ -715,9 +716,22 @@ fn write_return_maps_carry_stored_list_fields() {
         db.write(&commit, batch).await.unwrap();
         let listed = GraphValue::List(vec![text("a"), int(2)].into_boxed_slice());
         let params = GqlParameters::new();
-        for statement in [
-            "MATCH (a:Foo) SET a.score = 5 RETURN properties(a) AS node",
-            "MERGE (a:Foo) ON MATCH SET a.score = 5 RETURN properties(a) AS node",
+        let node = map(&[("name", listed.clone()), ("score", int(5))]);
+        for (statement, expected) in [
+            (
+                "MATCH (a:Foo) SET a.score = 5 RETURN properties(a) AS node",
+                vec![node.clone()],
+            ),
+            (
+                "MERGE (a:Foo) ON MATCH SET a.score = 5 RETURN properties(a) AS node",
+                vec![node.clone()],
+            ),
+            ("MERGE (a:Foo) RETURN properties(a) AS node", vec![node]),
+            (
+                "MERGE (a:Foo) ON MATCH SET a.score = 5 RETURN a.name AS name",
+                vec![listed.clone()],
+            ),
+            ("MERGE (a:Foo) RETURN a.name AS name", vec![listed.clone()]),
         ] {
             let result = db
                 .query_write_engine(
@@ -733,11 +747,7 @@ fn write_return_maps_carry_stored_list_fields() {
                 .await
                 .map_err(|error| format!("{statement}: {error}"))
                 .unwrap();
-            assert_eq!(
-                cells(result),
-                vec![vec![map(&[("name", listed.clone()), ("score", int(5))])]],
-                "{statement}"
-            );
+            assert_eq!(cells(result), vec![expected], "{statement}");
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
