@@ -628,3 +628,145 @@ fn lazy_arithmetic_cannot_hide_property_source_failure_or_late_overflow() {
     assert!(matches!(run(&query,&[VId(1),VId(2)],&[],&props),
         Err(GqlQueryError::Source(GraphSetExecutionError::Projection { row:1,error,.. })) if error.kind == GraphIntegerErrorKind::Overflow));
 }
+
+#[test]
+fn nested_composite_projections_preserve_list_slice_bounds() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let list = |values: &[i64]| {
+        GraphValue::List(
+            values
+                .iter()
+                .map(|&value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                .collect(),
+        )
+    };
+    let expected_map = GraphValue::map(vec![
+        ("tail".into(), list(&[2, 3])),
+        ("values".into(), list(&[1, 2, 3])),
+    ])
+    .unwrap();
+    for (expression, expected) in [
+        ("{values:items,tail:items[1..]}", expected_map.clone()),
+        (
+            "CASE WHEN true THEN {values:items,tail:items[1..]} ELSE null END",
+            expected_map.clone(),
+        ),
+        (
+            "CASE 1 WHEN 0 THEN null ELSE {values:items,tail:items[1..]} END",
+            expected_map,
+        ),
+        ("CASE WHEN true THEN items[1..] ELSE [] END", list(&[2, 3])),
+        ("items[..2]", list(&[1, 2])),
+        ("items[..]", list(&[1, 2, 3])),
+        ("items[-2..]", list(&[2, 3])),
+        ("items[0+1..]", list(&[2, 3])),
+        (
+            "[lower IN [1] | items[lower..]]",
+            GraphValue::List(vec![list(&[2, 3])].into_boxed_slice()),
+        ),
+        (
+            "items[0] + 10",
+            GraphValue::Scalar(CanonicalScalar::Int(11)),
+        ),
+        (
+            "10 + items[0]",
+            GraphValue::Scalar(CanonicalScalar::Int(11)),
+        ),
+        (
+            "coalesce(items[0], 0)",
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+        ),
+        (
+            "CASE WHEN true THEN items[0] + 10 ELSE 0 END",
+            GraphValue::Scalar(CanonicalScalar::Int(11)),
+        ),
+        ("[lower IN [0,1] | items[lower] + 10]", list(&[11, 12])),
+    ] {
+        let text = format!("MATCH (n) WITH [1,2,3] AS items RETURN {expression} AS result");
+        let query = PreparedGraphSetText::prepare(&text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let execution = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
+        assert_eq!(execution.value.len(), 1, "{text}");
+        assert_eq!(execution.value[0].values(), &[expected], "{text}");
+    }
+}
+
+#[test]
+fn indexed_scalar_operands_keep_parameter_types_nulls_and_typed_failures() {
+    use fgdb_gql::algebra::GraphValue;
+
+    for text in [
+        "MATCH (n) RETURN $items[0] + 10 AS result",
+        "MATCH (n) WITH $items AS items RETURN items[0] + 10 AS result",
+        "MATCH (n) RETURN [items IN [$items] | items[0] + 10] AS result",
+    ] {
+        let template = PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(
+            template.parameter_schema()[0].parameter_type,
+            GqlParameterType::List
+        );
+        let arguments = GqlParameters::new()
+            .with_list("items", vec![GraphValue::Scalar(CanonicalScalar::Int(1))])
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let execution = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
+        let expected = GraphValue::Scalar(CanonicalScalar::Int(11));
+        let expected = if text.contains("| items") {
+            GraphValue::List(vec![expected].into_boxed_slice())
+        } else {
+            expected
+        };
+        assert_eq!(execution.value[0].values(), &[expected], "{text}");
+    }
+    for text in [
+        "MATCH (n) WITH [1] AS items RETURN items[3] + 10 AS result",
+        "MATCH (n) WITH [1] AS items RETURN items[0] + null AS result",
+        "MATCH (n) RETURN null[0] + 10 AS result",
+        "MATCH (n) RETURN 10 + null[0] AS result",
+        "MATCH (n) WITH 1 AS value RETURN null[0] + value AS result",
+    ] {
+        let query = prepare(text);
+        let execution = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
+        assert!(execution.value[0].get(0).unwrap().is_null(), "{text}");
+    }
+    for (items, expected) in [
+        ("[[1]]", GraphIntegerErrorKind::NonScalar),
+        ("[true]", GraphIntegerErrorKind::NonInteger),
+    ] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH {items} AS items RETURN items[0] + 10 AS result LIMIT 0"
+        ));
+        assert!(
+            matches!(
+                run(&query, &[VId(1)], &[], &Props::new()),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == expected
+            ),
+            "{items}"
+        );
+    }
+}
+
+#[test]
+fn unknown_subscript_bases_refuse_without_reentering_the_scalar_compiler() {
+    for text in [
+        "MATCH (n) RETURN missing[0] + 10 AS result",
+        "MATCH (n) RETURN 10 + missing[0] AS result",
+        "MATCH (n) WITH 1 AS value RETURN missing[0] + value AS result",
+    ] {
+        let error = PreparedGraphSetText::prepare(text, symbols).err().unwrap();
+        assert_eq!(
+            error.kind,
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownVariable),
+            "{text}: {error:?}"
+        );
+    }
+}

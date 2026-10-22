@@ -2627,6 +2627,8 @@ mod async_elements {
             "[x IN items WHERE x > 1 | x * 2]",
             "reduce(total=0,x IN items | total+x)",
             "CASE WHEN true THEN {values:items,tail:items[1..]} ELSE null END",
+            "items[0] + 10",
+            "CASE WHEN true THEN items[0] + 10 ELSE 0 END",
             "coalesce(null,items)",
             "[x IN items | rand()]",
         ]

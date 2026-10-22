@@ -295,6 +295,23 @@ fn list_functions_slices_ranges_and_reduce_follow_opencypher() {
             ("RETURN [1, 2, 3][..-1] AS v", ints(&[1, 2])),
             ("RETURN [1, 2, 3][5..9] AS v", ints(&[])),
             ("RETURN [1, 2, 3][2..1] AS v", ints(&[])),
+            // Subscripts compose with scalar expressions through the normal
+            // Database query path, including carried rows and element locals.
+            ("WITH [1, 2, 3] AS items RETURN items[0] + 10 AS v", int(11)),
+            (
+                "MATCH (n:Person) WHERE n.p = 20 WITH [n.p, n.p + 1] AS items \
+                 RETURN items[0] + items[1] AS v",
+                int(41),
+            ),
+            (
+                "RETURN [items IN [[1, 2], [3, 4]] | items[0] + items[1]] AS v",
+                ints(&[3, 7]),
+            ),
+            (
+                "WITH [1, 2, 3] AS items \
+                 RETURN CASE WHEN true THEN items[1] + 10 ELSE 0 END AS v",
+                int(12),
+            ),
             // A NULL bound is NULL. (A bare `null..` reads as a property
             // access in the shared operand parser, so the bound is wrapped.)
             ("RETURN [1, 2, 3][(null)..2] AS v", null()),

@@ -1781,9 +1781,9 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
         }
-        // An element subscript `n['p']` reads in the scalar compiler when an
-        // operator follows it, as it does on an operator's right (Graph7).
-        let subscript = self.element_subscript_follows()?;
+        // A named value's subscript reads through the same let slot as an
+        // element subscript: `items[0] + 1` must not leave `+ 1` unread.
+        let subscript = self.named_subscript_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         if !subscript && !size && !self.starts_let_operand()? {
@@ -1935,7 +1935,7 @@ impl<'a> Parser<'a> {
     /// (fgdb-c4i0d). A literal compared with `=` or IN was already taken by
     /// starts_composite_comparison.
     pub(super) fn let_operand_here(&self) -> Result<bool, GraphPatternTextError> {
-        if self.starts_let_operand()? {
+        if self.starts_let_operand()? || self.named_subscript_follows()? {
             return Ok(true);
         }
         if !self.is_punct(b'[') {
@@ -1944,6 +1944,16 @@ impl<'a> Parser<'a> {
         let mut lexer = self.lexer.clone();
         skip_group(&mut lexer)?;
         Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
+    }
+
+    /// A row value, element local, parameter or graph element followed by a
+    /// subscript. The value reader resolves its base in the current scope;
+    /// the scalar compiler reads the resulting value through a let slot.
+    fn named_subscript_follows(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(matches!(
+            self.current.kind,
+            TokenKind::Word(_) | TokenKind::Parameter(_)
+        ) && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'[')))
     }
 
     /// Whether a MATCH vertex or fixed-length relationship is subscripted
@@ -2028,8 +2038,35 @@ impl<'a> Parser<'a> {
                 && matches!(lexer.next()?.kind,
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
         };
+        // A let-slot operand must read the base directly before applying its
+        // postfix. Re-entering the scalar compiler at `items[0]` would ask
+        // for the same let slot recursively. Graph elements retain their
+        // property-map projection below; locals shadow both graph and row
+        // names, and parameters use the ordinary declared-type reader.
+        // Literals and unknown names also take that direct reader: falling
+        // back to a scalar expression here would request the same let slot
+        // again instead of producing NULL or a typed name refusal.
+        let subscript_base = !operators
+            && resolve.is_none()
+            && self.named_subscript_follows()?
+            && (inputs.is_none()
+                || !matches!(self.current.kind, TokenKind::Word(word)
+                    if !self.elements.contains(&word)
+                        && (self.syntax.variables.iter().any(|name| name.text == word)
+                            || self.syntax.names_path(word)
+                            || self.syntax.visible_edge(word).is_some())));
         let mut value = if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
+        } else if subscript_base {
+            if let TokenKind::Word(word) = self.current.kind
+                && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
+            {
+                self.advance()?;
+                ReadValueTemplate::Local(self.elements.len() - 1 - binding)
+            } else {
+                let operand = self.row_operand(schema)?;
+                self.read_value_template(operand, at)?
+            }
         } else if self.starts_pattern_comprehension()? {
             // `[(n)-->(m) | m.p]` (fgdb-7nwox) reads the MATCH bindings of a
             // graph projection; a row or aggregate scope has none to correlate.
