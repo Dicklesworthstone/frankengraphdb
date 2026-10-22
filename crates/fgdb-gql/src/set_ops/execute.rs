@@ -331,7 +331,26 @@ fn finish_source_rows<E, C, Checkpoint>(
 where
     Checkpoint: FnMut() -> Result<(), C>,
 {
-    for row in &rows {
+    check_source_rows(&rows, types, at, meter)?;
+    merge::sort(
+        &mut rows,
+        &mut |event| meter.event(event),
+        &mut |a, b, control| compare_rows(a, b, &[], control),
+    )?;
+    Ok(rows)
+}
+
+/// Every source row has the operand's admitted schema.
+fn check_source_rows<E, C, Checkpoint>(
+    rows: &[GraphValueRow],
+    types: &[GraphSetColumnType],
+    at: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<(), E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    for row in rows {
         meter.event(GlaExecutionEvent::ScratchEntry)?;
         if row.len() != types.len() {
             return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
@@ -347,12 +366,7 @@ where
             }
         }
     }
-    merge::sort(
-        &mut rows,
-        &mut |event| meter.event(event),
-        &mut |a, b, control| compare_rows(a, b, &[], control),
-    )?;
-    Ok(rows)
+    Ok(())
 }
 
 fn run_node<E, C, S, Checkpoint>(
@@ -477,7 +491,16 @@ where
                     GraphSetExecutionError::ProcedureUnavailable { operand: at },
                 ))?
                 .map_err(|error| meter.source_error(error))?;
-            admit_source_rows(query, execution, at, meter)?
+            if call.preserves_row_order() {
+                // A ranked procedure (`hybrid.*`) delivers its rows best
+                // first, ties by ascending vertex. That order is the
+                // relation's own, so it is checked but not re-sorted.
+                meter.absorb(&execution, at)?;
+                check_source_rows(&execution.value, &query.types, at, meter)?;
+                execution.value
+            } else {
+                admit_source_rows(query, execution, at, meter)?
+            }
         }
         SetNode::Scope(input) => run(input, source, meter, operand)?,
         SetNode::Filter { input, predicate } => {
