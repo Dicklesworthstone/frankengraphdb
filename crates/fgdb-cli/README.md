@@ -152,6 +152,11 @@ script (`MERGE (a ...); MERGE (b ...); MATCH (a ...), (b ...) MERGE
   `--types-file` must not declare a parameter the statement does not read.
 - The import stays one transaction. This path reads the whole CSV and its
   records into memory before binding.
+- The records travel as one list parameter, capped at 65,536 values. A
+  record of k columns counts k + 1, so a two-column file holds at most 21,845
+  records (measured: 21,845 commit, 22,000 refuse with "list parameter exceeds
+  canonical admission bounds"). Split a larger file into separate imports,
+  each its own transaction.
 - The text must not already use the names `__csv_rows` or `__csv_row`.
 
 ### Floating-point, decimal and binary CSV columns
