@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::over_database::run;
 use super::*;
 use asupersync::lab::run_async_under_lab;
@@ -297,6 +299,86 @@ fn cancellation_after_a_flushed_row_does_not_request_another() {
         let text = String::from_utf8(out.bytes).unwrap();
         assert_eq!(row_lines(&text).len(), 1);
         assert!(!text.contains(r#""event":"result""#));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn projected_set_streams_deliver_bound_values_and_stop_at_errors_or_cancellation() {
+    let ((), report) = run_async_under_lab(0x636c_7306, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        for (id, value) in [(1, 4), (2, 0), (3, 9)] {
+            db.write(&contexts.commit(), batch(id, value))
+                .await
+                .unwrap();
+        }
+        let text = "MATCH (n) RETURN n AS id,n.p+$value AS p,$value AS value";
+        for value in [2, -5] {
+            let mut opts = options(text);
+            opts.params = GqlParameters::new().with_int64("value", value).unwrap();
+            let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 3, "rows", true, &mut expected));
+            let mut bytes = Vec::new();
+            okay(run(&db, &cx, &opts, true, &mut bytes));
+            let streamed = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                row_lines(&streamed),
+                row_lines(&String::from_utf8(expected).unwrap())
+            );
+            assert_eq!(row_lines(&streamed).len(), 3);
+            assert!(
+                streamed.starts_with("{\"v\":1,\"event\":\"columns\",\"stream\":true,\"seq\":3,")
+            );
+            assert!(streamed.ends_with("{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"stream\":true,\"seq\":3,\"count\":3}\n"));
+        }
+        let opts = options("MATCH (n) RETURN n AS id,10/n.p AS value");
+        let mut bytes = Vec::new();
+        let error = run(&db, &cx, &opts, true, &mut bytes).unwrap_err();
+        assert_eq!(error.code, 3);
+        let delivered = String::from_utf8(bytes).unwrap();
+        assert_eq!(row_lines(&delivered).len(), 1);
+        assert!(!delivered.contains("\"event\":\"result\""));
+
+        let mut opts = options(text);
+        opts.params = GqlParameters::new().with_int64("value", 2).unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
+        let (columns, mut cursor) = prepared.stream(&db, &cx, &opts.params, policy()).unwrap();
+        let pulls = Rc::new(Cell::new(0));
+        let flushed = Rc::new(Cell::new(0));
+        let mut out = ObservedOutput {
+            bytes: Vec::new(),
+            pulls: pulls.clone(),
+            flushed: flushed.clone(),
+            fail_on_flush: None,
+        };
+        let error = deliver(
+            &columns,
+            cursor.snapshot_seq().0,
+            &mut cursor.by_ref().inspect(|_| pulls.set(pulls.get() + 1)),
+            true,
+            &mut out,
+            || {
+                if flushed.get() == 2 {
+                    Err(Failure::query("cancelled"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 3);
+        assert_eq!(pulls.get(), 1);
+        assert_eq!(cursor.row_stats().snapshot_records, 1);
+        cursor.close();
+        assert!(cursor.next().is_none());
+        let delivered = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(row_lines(&delivered).len(), 1);
+        assert!(!delivered.contains("\"event\":\"result\""));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
