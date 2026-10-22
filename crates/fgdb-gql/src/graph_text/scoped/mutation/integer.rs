@@ -338,6 +338,9 @@ impl<'a> Parser<'a> {
                 self.read_composite_operand(Some(&mut **columns), &[], nesting)?
             }
             ExpressionColumns::Row(schema) => self.read_composite_operand(None, schema, nesting)?,
+            ExpressionColumns::Resolved(resolve) if self.named_subscript_follows()? => {
+                self.read_resolved_composite_operand(&mut **resolve, nesting)?
+            }
             ExpressionColumns::Resolved(_) => {
                 return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
             }

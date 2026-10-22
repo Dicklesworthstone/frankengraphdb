@@ -113,6 +113,18 @@ fn admit_head(
     types: &[GraphSetColumnType],
     parameters: &[GqlParameterSpec],
 ) -> Result<(), GraphSetTextError> {
+    admit_values(
+        head.outputs.iter().map(|(name, value)| (name.at, value)),
+        types,
+        parameters,
+    )
+}
+
+fn admit_values<'a>(
+    outputs: impl IntoIterator<Item = (usize, &'a ReadValueTemplate)>,
+    types: &[GraphSetColumnType],
+    parameters: &[GqlParameterSpec],
+) -> Result<(), GraphSetTextError> {
     let values: Vec<_> = parameters
         .iter()
         .map(|spec| match spec.parameter_type {
@@ -129,11 +141,11 @@ fn admit_head(
             ),
         })
         .collect();
-    for (column, (name, value)) in head.outputs.iter().enumerate() {
+    for (column, (at, value)) in outputs.into_iter().enumerate() {
         let value = super::super::bind_read_value(value, &values)?;
         GraphSetProjection::admit_output(&value, types, column).map_err(|kind| {
             GraphSetTextError {
-                offset: name.at,
+                offset: at,
                 kind: GraphSetTextErrorKind::ProjectionBuild(kind),
             }
         })?;
@@ -204,6 +216,37 @@ fn join_spec(
 }
 
 impl<'a> Parser<'a> {
+    /// A separable ON operand over the incoming row uses the existing private
+    /// input projection. In particular it must not re-match a carried vertex:
+    /// that vertex can be NULL, and only the new bindings are null-extended.
+    pub(in crate::graph_text) fn computed_imported_operand(
+        &mut self,
+    ) -> Result<usize, GraphPatternTextError> {
+        let at = self.current.at;
+        let schema: Vec<_> = self
+            .read_row_bindings
+            .iter()
+            .map(|name| (*name, GraphSetColumnType::Any))
+            .collect();
+        let (operand, slots) = self
+            .row_operand_with_lets(&schema)
+            .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
+        let value = self
+            .scalar_let_value(operand, slots, at)
+            .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
+        if let ReadValueTemplate::Column(column) = value {
+            return Ok(column);
+        }
+        let column = self.read_row_bindings.len() + self.read_row_fields.len();
+        self.capacity(
+            column,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        self.read_row_fields.push(value);
+        Ok(column)
+    }
+
     fn multipart_read(
         mut self,
         statement: &'a str,
@@ -635,6 +678,15 @@ impl<'a> Parser<'a> {
         // empty; column count is not evidence that there was no earlier part.
         let join = if let Some(kind) = kind {
             let mut left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+            if !row_fields.is_empty() {
+                // Private ON operands have the same pre-catalog domain
+                // admission as public outputs, against the real input schema.
+                admit_values(
+                    row_fields.iter().map(|value| (at, value)),
+                    &left,
+                    &self.syntax.parameters,
+                )?;
+            }
             let field_types: Vec<_> = row_fields
                 .iter()
                 .map(|value| value.column_type(&left, &self.syntax.parameters))

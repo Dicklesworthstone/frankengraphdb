@@ -288,6 +288,28 @@ mod tests {
     }
 
     #[test]
+    fn indexed_rhs_operands_continue_through_arithmetic_in_resolved_where() {
+        assert_eq!(
+            execute(
+                "UNWIND [0,1,2] AS n WITH n, [[2],[1]] AS groups \
+                 WHERE n IN groups[0] AND groups[1][0] + 1 = n RETURN n"
+            ),
+            expected(&[2]),
+        );
+        let arguments = GqlParameters::new()
+            .with_list("groups", vec![list(vec![int(2)]), list(vec![int(1)])])
+            .unwrap();
+        assert_eq!(
+            run(&prepare(
+                "UNWIND [0,1,2] AS n WITH n \
+                 WHERE n IN $groups[0] AND $groups[1][0] + 1 = n RETURN n",
+                &arguments,
+            )),
+            expected(&[2]),
+        );
+    }
+
+    #[test]
     fn membership_keeps_pages_and_private_output_columns_in_scope() {
         assert!(
             execute(

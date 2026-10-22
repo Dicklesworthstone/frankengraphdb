@@ -1652,6 +1652,22 @@ impl<'a> Parser<'a> {
         self.read_value_inner(inputs, schema, &mut None, depth, false)
     }
 
+    /// A named subscript in a resolved WHERE or aggregate scope retains the
+    /// caller's leaf resolver while the ordinary reader applies its postfix.
+    pub(super) fn read_resolved_composite_operand(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        self.read_value_inner(
+            None,
+            &[],
+            &mut Some(ValueResolver::Columns(resolve)),
+            depth,
+            false,
+        )
+    }
+
     /// A scalar expression in a graph or row scope: whole, or with `operand`
     /// one operand at the concatenation level (the list of an `IN`). Its
     /// composite operands wrap it as a Let.
@@ -1949,7 +1965,7 @@ impl<'a> Parser<'a> {
     /// A row value, element local, parameter or graph element followed by a
     /// subscript. The value reader resolves its base in the current scope;
     /// the scalar compiler reads the resulting value through a let slot.
-    fn named_subscript_follows(&self) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn named_subscript_follows(&self) -> Result<bool, GraphPatternTextError> {
         Ok(matches!(
             self.current.kind,
             TokenKind::Word(_) | TokenKind::Parameter(_)
@@ -2047,7 +2063,6 @@ impl<'a> Parser<'a> {
         // back to a scalar expression here would request the same let slot
         // again instead of producing NULL or a typed name refusal.
         let subscript_base = !operators
-            && resolve.is_none()
             && self.named_subscript_follows()?
             && (inputs.is_none()
                 || !matches!(self.current.kind, TokenKind::Word(word)
@@ -2063,6 +2078,12 @@ impl<'a> Parser<'a> {
             {
                 self.advance()?;
                 ReadValueTemplate::Local(self.elements.len() - 1 - binding)
+            } else if let Some(resolve) = resolve.as_mut() {
+                let operand = match resolve.leaf(self)? {
+                    Some(column) => Operand::Column(column),
+                    None => self.row_operand(schema)?,
+                };
+                self.read_value_template(operand, at)?
             } else {
                 let operand = self.row_operand(schema)?;
                 self.read_value_template(operand, at)?

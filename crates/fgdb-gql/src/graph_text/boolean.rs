@@ -229,6 +229,10 @@ impl<'a> Parser<'a> {
             ));
         }
         let at = self.current.at;
+        if let Some(comparison) = self.computed_row_comparison()? {
+            parsed.comparisons.push(comparison);
+            return Ok(());
+        }
         if self.starts_scalar_predicate()? {
             self.admit_compound_leaf()?;
             let (columns, program) = self.boolean_scalar_expression()?;
