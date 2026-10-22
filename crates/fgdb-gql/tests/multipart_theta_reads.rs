@@ -347,6 +347,24 @@ fn theta_work_is_inside_cumulative_budgets_and_cancellation() {
 }
 
 #[test]
+fn computed_carried_operands_keep_required_theta_results_and_direction() {
+    let scores = [1, 2, 2, 3];
+    let mut expected = Vec::new();
+    for threshold in scores {
+        for (m, value) in scores.iter().enumerate() {
+            if *value > threshold + 1 {
+                expected.push(vertices(&[m as u128 + 1]));
+            }
+        }
+    }
+    for predicate in ["m.p > t + 1", "t + 1 < m.p"] {
+        let text =
+            format!("MATCH (n) WITH n.p AS t MATCH (m) WHERE {predicate} RETURN m ORDER BY m");
+        assert_eq!(execute(&text), expected, "{text}");
+    }
+}
+
+#[test]
 fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
     // A carried vertex's property re-matches it by identity (fgdb-dhcfo;
     // multipart_reads pins the rows).
@@ -362,7 +380,7 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         "MATCH (n) WITH n MATCH (m) WHERE NOT n <> m RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE (n <> m) RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
-        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + 1 RETURN m",
+        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
         "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
     ] {

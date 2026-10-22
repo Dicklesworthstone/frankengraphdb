@@ -253,6 +253,199 @@ fn property_map_correlations_and_where_filter_candidates_before_null_extension()
 }
 
 #[test]
+fn computed_carried_properties_filter_optional_candidates_before_null_extension() {
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + 20 \
+             RETURN a,b ORDER BY a,b"
+        ),
+        vec![
+            vertices(&[Some(1), Some(3)]),
+            vertices(&[Some(2), Some(4)]),
+            vertices(&[Some(3), None]),
+            vertices(&[Some(4), None]),
+        ],
+    );
+}
+
+#[test]
+fn functions_of_carried_properties_are_optional_join_conditions() {
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = abs(a.score - 30) \
+             RETURN a,b ORDER BY a,b"
+        ),
+        vec![
+            vertices(&[Some(1), Some(2)]),
+            vertices(&[Some(2), Some(1)]),
+            vertices(&[Some(3), None]),
+            vertices(&[Some(4), Some(1)]),
+        ],
+    );
+}
+
+#[test]
+fn computed_optional_conditions_keep_nulls_bags_and_comparison_direction() {
+    let expected = vec![
+        vertices(&[Some(1), Some(3)]),
+        vertices(&[Some(2), Some(4)]),
+        vertices(&[Some(3), None]),
+        vertices(&[Some(4), None]),
+    ];
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE a.score + 20 = b.score RETURN a,b ORDER BY a,b"
+        ),
+        expected,
+    );
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score > a.score + 10 AND b.score < 40 RETURN a,b ORDER BY a,b"
+        ),
+        vec![
+            vertices(&[Some(1), Some(3)]),
+            vertices(&[Some(2), None]),
+            vertices(&[Some(3), None]),
+            vertices(&[Some(4), None]),
+        ],
+    );
+    assert_eq!(
+        rows(
+            "UNWIND [10,10,NULL,90] AS wanted WITH wanted OPTIONAL MATCH (b) WHERE b.score = coalesce(wanted,20) + 10 RETURN wanted,b ORDER BY wanted NULLS FIRST,b"
+        ),
+        vec![
+            scalar_vertex(None, Some(3)),
+            scalar_vertex(Some(10), Some(2)),
+            scalar_vertex(Some(10), Some(2)),
+            scalar_vertex(Some(90), None),
+        ],
+    );
+    assert_eq!(
+        rows(
+            "MATCH (a) WHERE a.score < 0 WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + 20 RETURN a,b"
+        ),
+        Vec::<GraphValueRow>::new(),
+    );
+    assert_eq!(
+        rows(
+            "WITH NULL AS a OPTIONAL MATCH (b) WHERE b.score = coalesce(a.score,10) + 20 RETURN a,b"
+        ),
+        vec![vertices(&[None, Some(3)])],
+    );
+    assert_eq!(
+        rows("WITH {} AS a OPTIONAL MATCH (b) WHERE b.score = a.score + 20 RETURN b"),
+        vec![vertices(&[None])],
+    );
+}
+
+#[test]
+fn computed_optional_comparisons_preserve_all_six_operator_directions() {
+    for operator in ["=", "<>", "<", "<=", ">", ">="] {
+        let mut expected = Vec::new();
+        for a in 1..=4 {
+            let before = expected.len();
+            for b in 1..=4 {
+                let (left, right) = (b * 10, a * 10 + 10);
+                if match operator {
+                    "=" => left == right,
+                    "<>" => left != right,
+                    "<" => left < right,
+                    "<=" => left <= right,
+                    ">" => left > right,
+                    ">=" => left >= right,
+                    _ => unreachable!(),
+                } {
+                    expected.push(vertices(&[Some(a), Some(b)]));
+                }
+            }
+            if expected.len() == before {
+                expected.push(vertices(&[Some(a), None]));
+            }
+        }
+        let text = format!(
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score {operator} a.score + 10 RETURN a,b ORDER BY a,b"
+        );
+        assert_eq!(rows(&text), expected, "{text}");
+    }
+}
+
+#[test]
+fn a_carried_alias_named_like_a_function_does_not_capture_a_local_predicate() {
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a AS abs OPTIONAL MATCH (b) WHERE b.score = abs(b.score) RETURN abs,b ORDER BY abs,b"
+        ),
+        (1..=4)
+            .flat_map(|a| (1..=4).map(move |b| vertices(&[Some(a), Some(b)])))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn computed_optional_parameters_rebind_without_mutating_the_template() {
+    let template = PreparedGraphSetText::prepare(
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + $step RETURN a,b ORDER BY a,b",
+        symbols,
+    ).unwrap();
+    let transcript = template.canonical_template_bytes();
+    let mut previous = None;
+    for (step, expected) in [
+        (
+            20,
+            vec![
+                vertices(&[Some(1), Some(3)]),
+                vertices(&[Some(2), Some(4)]),
+                vertices(&[Some(3), None]),
+                vertices(&[Some(4), None]),
+            ],
+        ),
+        (40, (1..=4).map(|id| vertices(&[Some(id), None])).collect()),
+    ] {
+        let arguments = GqlParameters::new().with_int64("step", step).unwrap();
+        let bound = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            run(&bound, wide(), None, &Cell::new(0), || Ok(()))
+                .unwrap()
+                .value,
+            expected
+        );
+        if let Some(previous) = previous {
+            assert_ne!(previous, bound.canonical_bytes());
+        }
+        previous = Some(bound.canonical_bytes());
+        assert_eq!(template.canonical_template_bytes(), transcript);
+    }
+}
+
+#[test]
+fn computed_optional_operands_check_static_domains_and_keep_dynamic_scalar_errors() {
+    let calls = Cell::new(0);
+    let prepared = PreparedGraphSetText::prepare(
+        "WITH [1] AS items OPTIONAL MATCH (b) WHERE b.score = abs(items) RETURN b",
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    );
+    assert!(prepared.is_err());
+    assert_eq!(calls.get(), 0);
+    // WITH retains the Scalar domain, not a Bool/Int specialization. Its
+    // scalar-kind failure is checked by the ordinary VM during execution.
+    assert!(matches!(
+        run(
+            &bind("WITH true AS flag OPTIONAL MATCH (b) WHERE b.score = flag + 1 RETURN b"),
+            wide(),
+            None,
+            &Cell::new(0),
+            || Ok(()),
+        ),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::Projection { .. }
+        )),
+    ));
+}
+
+#[test]
 fn null_imports_remain_null_through_optional_parts_and_fail_required_matching() {
     assert_eq!(
         rows(
@@ -435,6 +628,8 @@ fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN SIZE(labels(a)) AS size",
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b",
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + 10 OR b.score = 40 RETURN b",
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE NOT b.score = a.score + 10 RETURN b",
         "MATCH (a) WITH a OPTIONAL RETURN a",
     ] {
         let mut calls = 0;
@@ -525,63 +720,82 @@ fn empty_input_limit_zero_and_unmatched_results_never_hide_late_failures() {
             GraphSetExecutionError::Projection { .. }
         )),
     ));
+    for suffix in ["", " LIMIT 0"] {
+        let text = format!(
+            "WITH 0 AS divisor OPTIONAL MATCH (b) WHERE b.score = 10 / divisor RETURN b{suffix}"
+        );
+        assert!(matches!(
+            run(&bind(&text), wide(), None, &Cell::new(0), || Ok(())),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            )),
+        ));
+    }
 }
 
 #[test]
 fn exact_quotas_and_every_cancellation_checkpoint_cover_optional_join_and_delivery() {
-    let query = bind("MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b");
-    let checkpoints = Cell::new(0);
-    let measured = run(&query, wide(), None, &Cell::new(0), || {
-        checkpoints.set(checkpoints.get() + 1);
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(measured.rows.snapshot_records, 16);
-    assert_eq!(measured.rows.result_rows, 5);
-    let caps = [
-        measured.rows.snapshot_records,
-        measured.rows.result_rows,
-        measured.evaluator.work_units,
-        measured.evaluator.scratch_entries,
-    ];
-    assert_eq!(
-        run(
-            &query,
-            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
-            None,
-            &Cell::new(0),
-            || Ok(())
-        )
-        .unwrap(),
-        measured,
-    );
-    for dimension in 0..4 {
-        let mut limits = caps;
-        assert!(limits[dimension] > 0);
-        limits[dimension] -= 1;
-        assert!(
+    for text in [
+        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b",
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = abs(a.score - 30) RETURN a,b",
+    ] {
+        let query = bind(text);
+        let checkpoints = Cell::new(0);
+        let measured = run(&query, wide(), None, &Cell::new(0), || {
+            checkpoints.set(checkpoints.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(measured.rows.snapshot_records, 16);
+        assert_eq!(
+            measured.rows.result_rows,
+            if text.contains("abs(") { 4 } else { 5 }
+        );
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
             run(
                 &query,
-                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
                 None,
                 &Cell::new(0),
                 || Ok(())
             )
-            .is_err()
+            .unwrap(),
+            measured,
         );
-    }
-    for stop in 1..=checkpoints.get() {
-        let seen = Cell::new(0);
-        let result = run(&query, wide(), None, &Cell::new(0), || {
-            seen.set(seen.get() + 1);
-            if seen.get() == stop {
-                Err(stop)
-            } else {
-                Ok(())
-            }
-        });
-        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
-        assert_eq!(seen.get(), stop);
+        for dimension in 0..4 {
+            let mut limits = caps;
+            assert!(limits[dimension] > 0);
+            limits[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                    None,
+                    &Cell::new(0),
+                    || Ok(())
+                )
+                .is_err()
+            );
+        }
+        for stop in 1..=checkpoints.get() {
+            let seen = Cell::new(0);
+            let result = run(&query, wide(), None, &Cell::new(0), || {
+                seen.set(seen.get() + 1);
+                if seen.get() == stop {
+                    Err(stop)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert_eq!(seen.get(), stop);
+        }
     }
 }
 
