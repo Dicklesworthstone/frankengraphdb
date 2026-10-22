@@ -763,7 +763,6 @@ fn real_historical_aggregate_spools_match_query_diff_after_writer_and_templates_
             "MATCH (n) RETURN COUNT(*) AS n GROUP BY n.q",
             "MATCH (n) RETURN n.q AS category,SUM(n.p) AS total,n.q AS again GROUP BY n.q",
             "MATCH (n) RETURN AVG(n.p) AS average,COUNT(*) AS n GROUP BY n.q ORDER BY average DESC LIMIT 1",
-            "MATCH (n) RETURN COLLECT(n.p) AS items,COLLECT(DISTINCT n.q) AS groups",
             "MATCH (n) RETURN COUNT(*) AS n GROUP BY n.q HAVING SUM(n.p)>0 LIMIT 0",
         ] {
             let prepared =
@@ -839,6 +838,43 @@ fn real_historical_aggregate_spools_match_query_diff_after_writer_and_templates_
             assert_eq!(actual, expected, "{text}");
             assert_eq!(pool.used(), 0);
         }
+        // The spill aggregate keeps no COLLECT state (aggregate_tests.rs,
+        // refusal 5), so a COLLECT result has no spooled difference: it
+        // refuses before publishing a run, while the query diff answers it.
+        let text = "MATCH (n) RETURN COLLECT(n.p) AS items,COLLECT(DISTINCT n.q) AS groups";
+        let prepared = PreparedNativeRead::prepare(text, &GqlParameters::new(), resolver).unwrap();
+        prepared
+            .diff_in_view(&after, &cx, &GqlParameters::new(), first, last, policy)
+            .unwrap();
+        let pool = MemoryPool::new(512 * 1024, 0).unwrap();
+        let (mut scratch, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
+        let (mut source, _) = file(&cx, &pool).await;
+        let refused = prepared
+            .spool_aggregate_in_view(
+                &after,
+                &cx,
+                &GqlParameters::new(),
+                policy,
+                &mut scratch,
+                &mut auxiliary,
+                &mut source,
+                1,
+                100,
+                2,
+                100,
+                127,
+                8192,
+                1000,
+                100_000_000,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            refused,
+            Err(NativeAggregateSpoolError::Unsupported)
+        ));
+        assert_eq!(scratch.stats().published_runs, 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
