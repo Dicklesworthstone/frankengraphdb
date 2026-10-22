@@ -304,6 +304,36 @@ impl IndexedHeap {
         }
     }
 
+    /// The synchronous driver's same initialization transcript in bounded
+    /// runs. Both reservations still follow the leading checkpoint; filling
+    /// their already reserved storage cannot fail partway through a run.
+    /// An empty heap retains the scalar driver's one terminal step.
+    fn new_metered<C>(
+        n: usize,
+        comparison: DijkstraComparison,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<Self, HeapError<C>> {
+        #[cfg(test)]
+        if tests::scalar_passes() {
+            return Self::new(n, comparison, &mut || checkpoint.unit());
+        }
+        checkpoint.unit().map_err(HeapError::Cancelled)?;
+        let mut initialization = Self::initialize::<C>(n, comparison)?;
+        if n == 0 {
+            checkpoint.unit().map_err(HeapError::Cancelled)?;
+        }
+        while initialization.heap.positions.len() < n {
+            let start = initialization.heap.positions.len();
+            let count = (n - start).min(FNX_METER_RUN);
+            checkpoint.units(count).map_err(HeapError::Cancelled)?;
+            initialization
+                .heap
+                .positions
+                .resize(start + count, usize::MAX);
+        }
+        initialization.finish().ok_or(HeapError::InvalidOrdinal)
+    }
+
     /// Reserve the unchanged two backing stores. Allocation is indivisible;
     /// filling the inverse directory is driven separately, one slot at a time.
     pub(crate) fn initialize<C>(
@@ -591,6 +621,69 @@ fn validate_weights<C>(
     Ok(())
 }
 
+/// Initialize the two already reserved output buffers without a host call
+/// for every vertex. The scalar transcript is one unit for both writes.
+fn initialize_output<C>(
+    n: usize,
+    distances: &mut Vec<Option<f64>>,
+    overflowed: &mut Vec<bool>,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(), FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::scalar_passes() {
+        for _ in 0..n {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            distances.push(None);
+            overflowed.push(false);
+        }
+        return Ok(());
+    }
+    while distances.len() < n {
+        let start = distances.len();
+        let count = (n - start).min(FNX_METER_RUN);
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        distances.resize(start + count, None);
+        overflowed.resize(start + count, false);
+    }
+    Ok(())
+}
+
+/// An overflow-only path is a numeric refusal, not an unreachable vertex.
+/// Inspect at most one run ahead, then charge only through the first such
+/// vertex. A cancellation at that unit wins; a later one cannot hide the
+/// numeric refusal. The lookahead reads immutable, query-local vectors.
+fn validate_overflow<C>(
+    distances: &[Option<f64>],
+    overflowed: &[bool],
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(), FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::scalar_passes() {
+        for node in 0..distances.len() {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            if overflowed[node] && distances[node].is_none() {
+                return Err(FnxExecutionError::InvalidNumericResult);
+            }
+        }
+        return Ok(());
+    }
+    for first in (0..distances.len()).step_by(FNX_METER_RUN) {
+        let count = (distances.len() - first).min(FNX_METER_RUN);
+        let refused =
+            (first..first + count).find(|&node| overflowed[node] && distances[node].is_none());
+        let charged = refused.map_or(count, |node| node - first + 1);
+        checkpoint
+            .units(charged)
+            .map_err(FnxExecutionError::Cancelled)?;
+        if refused.is_some() {
+            return Err(FnxExecutionError::InvalidNumericResult);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
     options: DijkstraOptions,
@@ -605,12 +698,8 @@ pub(crate) fn run<C>(
     validate_weights(graph, checkpoint)?;
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
-    let mut heap = IndexedHeap::new(n, options.comparison, &mut || checkpoint.unit())?;
-    for _ in 0..n {
-        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        distances.push(None);
-        overflowed.push(false);
-    }
+    let mut heap = IndexedHeap::new_metered(n, options.comparison, checkpoint)?;
+    initialize_output(n, &mut distances, &mut overflowed, checkpoint)?;
     heap.offer_metered(source, 0.0, checkpoint)?;
     let mut discovered = 1usize;
     let mut witness = ComplexityWitness {
@@ -668,13 +757,7 @@ pub(crate) fn run<C>(
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
-    for node in 0..n {
-        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        if overflowed[node] && distances[node].is_none() {
-            // Reachable but unrepresentable is not the same as unreachable.
-            return Err(FnxExecutionError::InvalidNumericResult);
-        }
-    }
+    validate_overflow(&distances, &overflowed, checkpoint)?;
     Ok(DijkstraOutput {
         distances,
         row_count: discovered,
@@ -697,6 +780,7 @@ mod tests {
     thread_local! {
         static INCUMBENT_WEIGHT_SCAN: Cell<bool> = const { Cell::new(false) };
         static INCUMBENT_HEAP: Cell<bool> = const { Cell::new(false) };
+        static INCUMBENT_PASSES: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn scan_incumbent_weights() -> bool {
@@ -705,6 +789,21 @@ mod tests {
 
     pub(super) fn scalar_heap() -> bool {
         INCUMBENT_HEAP.with(Cell::get)
+    }
+
+    pub(super) fn scalar_passes() -> bool {
+        INCUMBENT_PASSES.with(Cell::get)
+    }
+
+    fn with_scalar_passes<R>(incumbent: bool, work: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INCUMBENT_PASSES.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(INCUMBENT_PASSES.with(|mode| mode.replace(incumbent)));
+        work()
     }
 
     fn with_scalar_heap<R>(incumbent: bool, work: impl FnOnce() -> R) -> R {
@@ -1174,6 +1273,210 @@ mod tests {
     }
 
     #[test]
+    fn metered_heap_initialization_keeps_empty_terminal_and_all_refusal_prefixes() {
+        for n in [
+            0,
+            1,
+            FNX_METER_RUN - 1,
+            FNX_METER_RUN,
+            FNX_METER_RUN + 1,
+            129,
+            usize::MAX,
+        ] {
+            let attempt = |incumbent, stop| {
+                let mut trace = Trace::default();
+                let result = with_scalar_passes(incumbent, || {
+                    IndexedHeap::new_metered(
+                        n,
+                        DijkstraComparison::Strict,
+                        &mut ExactMeter {
+                            trace: &mut trace,
+                            stop,
+                        },
+                    )
+                })
+                .map(|heap| {
+                    (
+                        heap.entries.len(),
+                        heap.positions,
+                        heap.sequence,
+                        heap.comparison,
+                    )
+                })
+                .map_err(|error| format!("{error:?}"));
+                (result, trace)
+            };
+            let (expected, before) = attempt(true, None);
+            let (actual, after) = attempt(false, None);
+            assert_eq!(actual, expected, "n={n}");
+            assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+            if n == usize::MAX {
+                assert!(actual.is_err());
+                assert_eq!(after.seen, 1, "allocation follows the leading unit");
+            } else {
+                assert_eq!(after.seen, 1 + n.max(1));
+            }
+            for stop in 1..=before.seen + 1 {
+                let (expected, before) = attempt(true, Some(stop));
+                let (actual, after) = attempt(false, Some(stop));
+                assert_eq!(actual, expected, "n={n} stop={stop}");
+                assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_runs_charge_only_through_first_unresolved_numeric_refusal() {
+        for n in [0, 2 * FNX_METER_RUN + 3] {
+            for refused in [
+                None,
+                Some(0),
+                Some(FNX_METER_RUN - 1),
+                Some(FNX_METER_RUN),
+                Some(FNX_METER_RUN + 1),
+                Some(2 * FNX_METER_RUN + 2),
+            ] {
+                if refused.is_some_and(|index| index >= n) {
+                    continue;
+                }
+                let mut distances = vec![None; n];
+                let mut overflowed = vec![false; n];
+                if n != 0 {
+                    // A finite alternative resolves this earlier overflow.
+                    distances[0] = Some(f64::MAX);
+                    overflowed[0] = true;
+                }
+                if let Some(index) = refused {
+                    distances[index] = None;
+                    overflowed[index] = true;
+                    // A later overflow must not extend the charged prefix.
+                    overflowed[n - 1] = true;
+                }
+                let attempt = |incumbent, stop| {
+                    let mut trace = Trace::default();
+                    let result = with_scalar_passes(incumbent, || {
+                        validate_overflow(
+                            &distances,
+                            &overflowed,
+                            &mut ExactMeter {
+                                trace: &mut trace,
+                                stop,
+                            },
+                        )
+                    })
+                    .map_err(|error| format!("{error:?}"));
+                    (result, trace)
+                };
+                let (expected, before) = attempt(true, None);
+                let (actual, after) = attempt(false, None);
+                assert_eq!(actual, expected);
+                assert_eq!(after.seen, refused.map_or(n, |index| index + 1));
+                assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                for stop in 1..=before.seen + 1 {
+                    let (expected, before) = attempt(true, Some(stop));
+                    let (actual, after) = attempt(false, Some(stop));
+                    assert_eq!(actual, expected, "refused={refused:?} stop={stop}");
+                    assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                }
+            }
+        }
+    }
+
+    fn compare_linear_passes(
+        view: &SnapshotGraphView,
+        call: &FnxCallSpec,
+        cap: FnxExecutionLimits,
+    ) -> bool {
+        let compare = |stop| {
+            let (expected, before) =
+                with_scalar_passes(true, || full_call(view, call, cap, false, stop));
+            let (actual, after) =
+                with_scalar_passes(false, || full_call(view, call, cap, false, stop));
+            assert_eq!(actual, expected, "stop={stop:?}");
+            assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+            (before, after)
+        };
+        let (before, after) = compare(None);
+        for stop in 1..=before.seen + 1 {
+            compare(Some(stop));
+        }
+        after.runs < before.runs
+    }
+
+    #[test]
+    fn metered_linear_passes_preserve_complete_calls_and_every_refusal_prefix() {
+        let n = 2 * FNX_METER_RUN + 3;
+        let edges = [
+            (0, 1, 8.0),
+            (0, 2, 1.0),
+            (2, 1, 1.0),
+            (1, 3, 0.0),
+            (3, 0, 0.0),
+            (0, 0, 0.0),
+            (n - 2, n - 1, 0.25),
+        ];
+        let mut observed_batch = false;
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(n, &edges, direction);
+            for comparison in [DijkstraComparison::Strict, DijkstraComparison::FnxEpsilon] {
+                for source in [0, n - 1] {
+                    for cutoff in [None, Some(0.0)] {
+                        let call = FnxCallSpec::single_source_dijkstra_path_length(
+                            options(&view, source, cutoff).with_comparison(comparison),
+                        );
+                        for max_result_rows in [0, 1, n] {
+                            observed_batch |= compare_linear_passes(
+                                &view,
+                                &call,
+                                FnxExecutionLimits {
+                                    max_result_rows,
+                                    ..limits()
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            observed_batch,
+            "the complete call must reduce host invocations"
+        );
+    }
+
+    #[test]
+    fn metered_linear_passes_preserve_overflow_alternatives_and_cutoffs() {
+        let n = 2 * FNX_METER_RUN + 3;
+        for target in [FNX_METER_RUN - 1, FNX_METER_RUN, FNX_METER_RUN + 1] {
+            for finite_alternative in [false, true] {
+                let mut edges = vec![(0, 1, f64::MAX * 0.75), (1, target, f64::MAX * 0.75)];
+                if finite_alternative {
+                    // Node 1 first overflows the target's distance; a later
+                    // settled node then supplies a representable alternative.
+                    edges.extend([(0, 2, f64::MAX * 0.9), (2, target, 0.0)]);
+                }
+                let view = graph(n, &edges, Directedness::Directed);
+                for cutoff in [None, Some(f64::MAX)] {
+                    let call =
+                        FnxCallSpec::single_source_dijkstra_path_length(options(&view, 0, cutoff));
+                    compare_linear_passes(
+                        &view,
+                        &call,
+                        FnxExecutionLimits {
+                            max_result_rows: n,
+                            ..limits()
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn metered_heap_preserves_complete_calls_and_every_refusal_prefix() {
         let mut edges: Vec<_> = (1..13)
             .map(|target| (0, target, 2.0 + (target % 5) as f64))
@@ -1279,6 +1582,16 @@ mod tests {
     #[test]
     #[ignore = "manual same-invocation complete Prism-call performance comparison"]
     fn cached_validation_paired_full_call_performance() {
+        paired_full_call_performance(false);
+    }
+
+    #[test]
+    #[ignore = "manual same-invocation complete Prism-call performance comparison"]
+    fn linear_passes_paired_full_call_performance() {
+        paired_full_call_performance(true);
+    }
+
+    fn paired_full_call_performance(linear_passes: bool) {
         use std::hint::black_box;
         use std::time::{Duration, Instant};
 
@@ -1302,36 +1615,39 @@ mod tests {
             calls: &[FnxCallSpec],
             cap: FnxExecutionLimits,
             incumbent: bool,
+            linear_passes: bool,
         ) -> (Duration, usize, u64) {
-            with_weight_scan(incumbent, || {
-                let mut units = 0;
-                let mut consumed = 0u64;
-                let start = Instant::now();
-                for _ in 0..8 {
-                    for call in calls {
-                        let result = call
-                            .execute(black_box(view), cap, Counting(&mut units))
-                            .unwrap();
-                        for row in &result.rows {
-                            for value in row {
-                                consumed = consumed.rotate_left(7)
-                                    ^ match value {
-                                        FnxValue::Vertex(vertex) => {
-                                            vertex.0 as u64 ^ (vertex.0 >> 64) as u64
-                                        }
-                                        FnxValue::Float(value) | FnxValue::Score(value) => {
-                                            value.to_bits()
-                                        }
-                                        FnxValue::Integer(value) => *value,
-                                    };
+            with_weight_scan(!linear_passes && incumbent, || {
+                with_scalar_passes(linear_passes && incumbent, || {
+                    let mut units = 0;
+                    let mut consumed = 0u64;
+                    let start = Instant::now();
+                    for _ in 0..8 {
+                        for call in calls {
+                            let result = call
+                                .execute(black_box(view), cap, Counting(&mut units))
+                                .unwrap();
+                            for row in &result.rows {
+                                for value in row {
+                                    consumed = consumed.rotate_left(7)
+                                        ^ match value {
+                                            FnxValue::Vertex(vertex) => {
+                                                vertex.0 as u64 ^ (vertex.0 >> 64) as u64
+                                            }
+                                            FnxValue::Float(value) | FnxValue::Score(value) => {
+                                                value.to_bits()
+                                            }
+                                            FnxValue::Integer(value) => *value,
+                                        };
+                                }
                             }
+                            black_box(&result.certificate);
+                            black_box(consumed);
+                            // Result destruction is included in the measured call.
                         }
-                        black_box(&result.certificate);
-                        black_box(consumed);
-                        // Result destruction is included in the measured call.
                     }
-                }
-                (start.elapsed(), units, consumed)
+                    (start.elapsed(), units, consumed)
+                })
             })
         }
 
@@ -1364,31 +1680,45 @@ mod tests {
                 })
                 .collect();
             for call in &calls {
-                let (old, old_trace) = full_call(&view, call, cap, true, None);
+                let (old, old_trace) = with_scalar_passes(linear_passes, || {
+                    full_call(&view, call, cap, !linear_passes, None)
+                });
                 let (new, new_trace) = full_call(&view, call, cap, false, None);
                 assert_eq!(new, old);
                 assert_eq!(new_trace.seen, old_trace.seen);
             }
             // Warm both complete paths, then alternate order in each pair.
             assert_eq!(
-                measure(&view, &calls, cap, true).1,
-                measure(&view, &calls, cap, false).1
+                measure(&view, &calls, cap, true, linear_passes).1,
+                measure(&view, &calls, cap, false, linear_passes).1
             );
             let mut incumbent = Vec::new();
             let mut cached = Vec::new();
             for pair in 0..15 {
                 let mut results = [(Duration::ZERO, 0, 0); 2];
                 for mode in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
-                    results[mode] = measure(&view, &calls, cap, mode == 0);
+                    results[mode] = measure(&view, &calls, cap, mode == 0, linear_passes);
                 }
                 assert_eq!((results[0].1, results[0].2), (results[1].1, results[1].2));
+                eprintln!(
+                    "sssp_pair control={} fixture={name} pair={pair} incumbent_ns={} optimized_ns={} logical_units={} consumed={}",
+                    if linear_passes {
+                        "linear_passes"
+                    } else {
+                        "weight_validation"
+                    },
+                    results[0].0.as_nanos(),
+                    results[1].0.as_nanos(),
+                    results[0].1,
+                    results[0].2,
+                );
                 incumbent.push(results[0].0.as_nanos());
                 cached.push(results[1].0.as_nanos());
             }
             incumbent.sort_unstable();
             cached.sort_unstable();
             eprintln!(
-                "{name}: vertices={n} arcs={} calls_per_sample={} incumbent_ns[min/median/max]={}/{}/{} cached_ns[min/median/max]={}/{}/{} median_speedup={:.3}x",
+                "{name}: vertices={n} arcs={} calls_per_sample={} incumbent_ns[min/median/max]={}/{}/{} optimized_ns[min/median/max]={}/{}/{} median_speedup={:.3}x",
                 edges.len(),
                 calls.len() * 8,
                 incumbent[0],
