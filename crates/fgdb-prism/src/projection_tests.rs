@@ -1,7 +1,481 @@
 //! Admission, cancellation and semantic laws for BOTH projection entrypoints.
 use super::*;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+
+thread_local! {
+    static INCUMBENT_DIRECTORY: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn incumbent_directory() -> bool {
+    INCUMBENT_DIRECTORY.with(Cell::get)
+}
+
+fn with_incumbent_directory<T>(enabled: bool, work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INCUMBENT_DIRECTORY.with(|mode| mode.set(self.0));
+        }
+    }
+    let _reset = Reset(INCUMBENT_DIRECTORY.with(|mode| mode.replace(enabled)));
+    work()
+}
+
+fn permuted_identity(mut value: u128) -> u128 {
+    // A reversible full-width permutation for fixtures, not an engine ID
+    // generator. Every operation is bijective over the entire u128 domain.
+    for factor in [
+        0x9e37_79b9_7f4a_7c15_d1b5_4a32_d192_ed03,
+        0xda94_2042_e4dd_58b5_a24b_aed4_963e_e407,
+        0x94d0_49bb_1331_11eb_bf58_476d_1ce4_e5b9,
+    ] {
+        value =
+            value.wrapping_mul(factor).rotate_left(47) ^ 0xdeca_fbad_1234_5678_9abc_def0_1024_6813;
+    }
+    value
+}
+
+fn directory_vertices(n: usize, shape: usize) -> Vec<VId> {
+    (0..n)
+        .map(|index| {
+            let value = index as u128;
+            VId(match shape {
+                0 => permuted_identity(value),
+                // The engine's four-round 63-bit Feistel shape, using a
+                // fixed public fixture key and no database key material.
+                1 => {
+                    let (mut left, mut right) = ((index as u64 >> 32) as u32, index as u32);
+                    for round in 0u8..4 {
+                        let width = if round.is_multiple_of(2) { 31 } else { 32 };
+                        let mut input = [0u8; 5];
+                        input[0] = round;
+                        input[1..].copy_from_slice(&right.to_be_bytes());
+                        let mut hash = Hasher::new_keyed(&[19; 32]);
+                        hash.update(&input);
+                        let digest = hash.finalize();
+                        let f = u32::from_be_bytes(digest.0[..4].try_into().unwrap())
+                            & (u32::MAX >> (32 - width));
+                        (left, right) = (right, left ^ f);
+                    }
+                    (u128::from(left) << 32) | u128::from(right)
+                }
+                2 => (0xcafeu128 << 112) | (value * 257),
+                3 => (value << 64) | 17,
+                // One outlier makes almost every vertex share one bucket.
+                4 if index + 1 == n => u128::MAX,
+                _ => value,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn prefix_directory_matches_full_width_search_across_thresholds_and_empty_buckets() {
+    for n in [0, 1, 2, 31, 511, 512, 513, 1024, 4096] {
+        for shape in 0..5 {
+            let mut vertices = directory_vertices(n, shape);
+            vertices.sort_unstable();
+            let mut directory = OrdinalDirectory::new(&vertices);
+            for index in 1..n {
+                directory.include(index);
+            }
+            directory.finish();
+            assert_eq!(directory.prefix.is_some(), n >= INDEXED_DIRECTORY_MIN);
+            if let Some(prefix) = &directory.prefix {
+                assert_eq!(prefix.boundaries[0], 0);
+                assert_eq!(prefix.boundaries[256], n);
+                assert!(prefix.boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
+            }
+            let mut queries = vec![VId(0), VId(u128::MAX)];
+            for &vertex in &vertices {
+                queries.extend([
+                    vertex,
+                    VId(vertex.0.wrapping_sub(1)),
+                    VId(vertex.0.wrapping_add(1)),
+                ]);
+            }
+            if let Some(first) = vertices.first() {
+                queries.extend((0..128).map(|bit| VId(first.0 ^ (1u128 << bit))));
+            }
+            for query in queries {
+                let eid = EId((1u128 << 127) | 31);
+                assert_eq!(
+                    directory.ordinal(eid, query),
+                    ordinal(&vertices, eid, query),
+                    "n={n} shape={shape} query={query:?}"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProjectionContents {
+    binding: SnapshotBinding,
+    spec: ProjectionSpec,
+    digest: Digest,
+    vertices: Vec<VId>,
+    names: Vec<[u8; 32]>,
+    outgoing: (Vec<usize>, Vec<usize>),
+    incoming: Option<(Vec<usize>, Vec<usize>)>,
+    weight_bits: Vec<u64>,
+    first_negative: Option<usize>,
+    counts_and_bytes: [usize; 6],
+}
+
+fn contents(view: SnapshotGraphView) -> ProjectionContents {
+    let graph = &*view.0;
+    ProjectionContents {
+        binding: graph.binding,
+        spec: graph.spec,
+        digest: graph.digest,
+        vertices: graph.vertices.clone(),
+        names: graph.names.clone(),
+        outgoing: (
+            graph.outgoing.offsets.clone(),
+            graph.outgoing.neighbors.clone(),
+        ),
+        incoming: graph
+            .incoming
+            .as_ref()
+            .map(|rows| (rows.offsets.clone(), rows.neighbors.clone())),
+        weight_bits: graph
+            .weights
+            .iter()
+            .map(|weight| weight.to_bits())
+            .collect(),
+        first_negative: graph.first_negative_weight_visit,
+        counts_and_bytes: [
+            graph.max_out_degree,
+            graph.max_weak_degree,
+            graph.edges,
+            graph.input_edges,
+            view.charged_workspace_bytes(),
+            view.charged_resident_bytes(),
+        ],
+    }
+}
+
+fn directory_build(
+    vertices: &[VId],
+    edges: &[ProjectionEdge],
+    spec: ProjectionSpec,
+    limits: ProjectionLimits,
+    owned: bool,
+    incumbent: bool,
+    stop: Option<usize>,
+) -> (
+    Result<ProjectionContents, ProjectionBuildError<usize>>,
+    usize,
+) {
+    let mut units = 0;
+    let result = with_incumbent_directory(incumbent, || {
+        let checkpoint = || {
+            units += 1;
+            if stop == Some(units) {
+                Err(units)
+            } else {
+                Ok(())
+            }
+        };
+        if owned {
+            SnapshotGraphView::build_owned_with_checkpoint(
+                binding(),
+                vertices.to_vec(),
+                edges.to_vec(),
+                spec,
+                limits,
+                checkpoint,
+            )
+        } else {
+            SnapshotGraphView::build_with_checkpoint(
+                binding(),
+                vertices,
+                edges,
+                spec,
+                limits,
+                checkpoint,
+            )
+        }
+    });
+    (result.map(contents), units)
+}
+
+#[test]
+fn indexed_projection_keeps_every_policy_error_digest_row_and_capacity_charge() {
+    let vertices = directory_vertices(513, 0);
+    let edges = [
+        edge(1, vertices[0].0, vertices[1].0, 1e16),
+        edge(2, vertices[0].0, vertices[1].0, -1e16),
+        edge(3, vertices[0].0, vertices[1].0, 1.0),
+        edge(4, vertices[1].0, vertices[0].0, -0.0),
+        edge(5, vertices[2].0, vertices[2].0, -1.0),
+        edge(6, vertices[3].0, vertices[4].0, 0.125),
+    ];
+    let admission = ProjectionLimits {
+        max_vertices: 1024,
+        ..limits()
+    };
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for parallel_edges in [
+            ParallelEdgePolicy::Reject,
+            ParallelEdgePolicy::CollapseUnit,
+            ParallelEdgePolicy::Minimum,
+            ParallelEdgePolicy::Maximum,
+            ParallelEdgePolicy::Sum,
+        ] {
+            for self_loops in [
+                SelfLoopPolicy::Reject,
+                SelfLoopPolicy::Drop,
+                SelfLoopPolicy::Keep,
+            ] {
+                let spec = ProjectionSpec {
+                    directedness,
+                    parallel_edges,
+                    self_loops,
+                };
+                for owned in [false, true] {
+                    assert_eq!(
+                        directory_build(&vertices, &edges, spec, admission, owned, false, None),
+                        directory_build(&vertices, &edges, spec, admission, owned, true, None),
+                        "{spec:?} owned={owned}"
+                    );
+                }
+            }
+        }
+    }
+    let mut duplicate_vertices = vertices.clone();
+    duplicate_vertices.push(vertices[0]);
+    let mut duplicate_edges = edges.to_vec();
+    duplicate_edges.push(edges[0]);
+    let missing_source = edge(0, 0, u128::MAX, 1.0);
+    let missing_target = edge(0, vertices[0].0, u128::MAX, 1.0);
+    let non_finite = edge(0, vertices[0].0, vertices[1].0, f64::NAN);
+    let overflow = [
+        edge(0, vertices[0].0, vertices[1].0, f64::MAX),
+        edge(1, vertices[0].0, vertices[1].0, f64::MAX),
+    ];
+    for (vertices, edges) in [
+        (&duplicate_vertices[..], &edges[..]),
+        (&vertices[..], &duplicate_edges[..]),
+        (&vertices[..], std::slice::from_ref(&missing_source)),
+        (&vertices[..], std::slice::from_ref(&missing_target)),
+        (&vertices[..], std::slice::from_ref(&non_finite)),
+        (&vertices[..], &overflow[..]),
+    ] {
+        let expected = directory_build(vertices, edges, spec(), admission, true, true, None);
+        assert!(expected.0.is_err());
+        assert_eq!(
+            directory_build(vertices, edges, spec(), admission, true, false, None),
+            expected
+        );
+    }
+}
+
+#[test]
+fn indexed_projection_preserves_every_cancellation_and_limit_refusal_prefix() {
+    let mut vertices = directory_vertices(512, 2);
+    vertices.sort_unstable();
+    let edges = [
+        edge(1, vertices[0].0, vertices[511].0, 1.0),
+        edge(2, vertices[511].0, vertices[0].0, -2.0),
+    ];
+    let admission = ProjectionLimits {
+        max_vertices: vertices.len(),
+        ..limits()
+    };
+    for owned in [false, true] {
+        let (_, total) = directory_build(&vertices, &edges, spec(), admission, owned, true, None);
+        for stop in 1..=total + 1 {
+            assert_eq!(
+                directory_build(
+                    &vertices,
+                    &edges,
+                    spec(),
+                    admission,
+                    owned,
+                    false,
+                    Some(stop)
+                ),
+                directory_build(
+                    &vertices,
+                    &edges,
+                    spec(),
+                    admission,
+                    owned,
+                    true,
+                    Some(stop)
+                ),
+                "owned={owned} stop={stop}"
+            );
+        }
+        let (result, _) = directory_build(&vertices, &edges, spec(), admission, owned, true, None);
+        let workspace = result.unwrap().counts_and_bytes[4];
+        for cap in [
+            ProjectionLimits {
+                max_vertices: 511,
+                ..admission
+            },
+            ProjectionLimits {
+                max_input_edges: 1,
+                ..admission
+            },
+            ProjectionLimits {
+                max_adjacency_entries: 1,
+                ..admission
+            },
+            ProjectionLimits {
+                max_workspace_bytes: 0,
+                ..admission
+            },
+            ProjectionLimits {
+                max_workspace_bytes: workspace - 1,
+                ..admission
+            },
+            ProjectionLimits {
+                max_workspace_bytes: workspace,
+                ..admission
+            },
+        ] {
+            assert_eq!(
+                directory_build(&vertices, &edges, spec(), cap, owned, false, None),
+                directory_build(&vertices, &edges, spec(), cap, owned, true, None)
+            );
+        }
+    }
+}
+
+/// Paired maintenance comparison of complete cold projection construction,
+/// both CSR-face/weight consumption and destruction. Input fixture generation
+/// is outside the interval, as it is upstream of this builder in production.
+/// This is not durable database/server latency or a competitor comparison.
+#[test]
+#[ignore = "manual paired cold projection measurement; optimized, single test thread"]
+fn prefix_directory_paired_cold_build_performance() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn consume(view: &SnapshotGraphView) -> (Digest, u128, usize) {
+        let mut consumed = 0u128;
+        for node in 0..view.node_count() {
+            consumed = consumed.rotate_left(7) ^ view.vertex_id(node).unwrap().0;
+            let (targets, weights) = view.projected_row(node).unwrap();
+            for (&target, weight) in targets.iter().zip(weights) {
+                consumed = consumed.rotate_left(11) ^ target as u128 ^ weight.to_bits() as u128;
+            }
+            for &source in view.in_neighbors_indices(node).unwrap() {
+                consumed = consumed.rotate_left(13) ^ source as u128;
+            }
+        }
+        black_box((view.digest(), consumed, view.charged_workspace_bytes()))
+    }
+
+    for (name, n, fanout, identity_shape) in [
+        ("tiny", 32usize, 2usize, 0usize),
+        ("below_threshold", 511, 4, 0),
+        ("road_feistel63", 4096, 2, 1),
+        ("many_edges_feistel63", 4096, 32, 1),
+        ("large_sparse_full128", 65536, 8, 0),
+        ("shared_high_prefix", 4096, 8, 2),
+        ("single_outlier_skew", 4096, 8, 4),
+    ] {
+        let vertices = directory_vertices(n, identity_shape);
+        let edges: Vec<_> = (0..n)
+            .flat_map(|source| {
+                (1..=fanout).map(move |offset| (source, (source * 31 + offset * 127) % n))
+            })
+            .enumerate()
+            .map(|(index, (source, target))| ProjectionEdge {
+                eid: EId(permuted_identity(index as u128 + 999999)),
+                source: vertices[source],
+                target: vertices[target],
+                weight: (index % 7) as f64,
+            })
+            .collect();
+        let admission = ProjectionLimits {
+            max_vertices: n,
+            max_input_edges: edges.len(),
+            max_adjacency_entries: 2 * edges.len(),
+            max_workspace_bytes: usize::MAX,
+        };
+        for canonical in [true, false] {
+            let mut vertices = vertices.clone();
+            let mut edges = edges.clone();
+            if canonical {
+                vertices.sort_unstable();
+                edges.sort_unstable_by_key(|edge| edge.eid);
+            }
+            let projection_spec = ProjectionSpec {
+                parallel_edges: ParallelEdgePolicy::Minimum,
+                ..spec()
+            };
+            // Full representation equality is checked separately from the
+            // consumed checksum, including incoming rows and exact weight bits.
+            assert_eq!(
+                directory_build(
+                    &vertices,
+                    &edges,
+                    projection_spec,
+                    admission,
+                    false,
+                    true,
+                    None
+                ),
+                directory_build(
+                    &vertices,
+                    &edges,
+                    projection_spec,
+                    admission,
+                    false,
+                    false,
+                    None
+                )
+            );
+            for trial in 0..7 {
+                let mut pair = [None, None];
+                for incumbent in [trial % 2 == 0, trial % 2 != 0] {
+                    let mut units = 0usize;
+                    let (elapsed, output) = with_incumbent_directory(incumbent, || {
+                        let start = Instant::now();
+                        let output = {
+                            let view = SnapshotGraphView::build_with_checkpoint(
+                                binding(),
+                                black_box(&vertices),
+                                black_box(&edges),
+                                projection_spec,
+                                admission,
+                                || {
+                                    units += 1;
+                                    Ok::<(), Infallible>(())
+                                },
+                            )
+                            .unwrap();
+                            consume(&view)
+                        };
+                        (start.elapsed().as_nanos(), output)
+                    });
+                    pair[usize::from(incumbent)] = Some((units, output));
+                    eprintln!(
+                        "projection_pair fixture={name} vertices={n} edges={} canonical={canonical} trial={trial} incumbent={incumbent} elapsed_ns={elapsed} units={units} workspace_bytes={} consumed={}",
+                        edges.len(),
+                        output.2,
+                        output.1,
+                    );
+                }
+                assert_eq!(
+                    pair[0], pair[1],
+                    "{name} canonical={canonical} trial={trial}"
+                );
+            }
+        }
+    }
+}
 
 fn binding() -> SnapshotBinding {
     SnapshotBinding {

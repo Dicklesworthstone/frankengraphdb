@@ -450,6 +450,86 @@ fn ordinal(vertices: &[VId], edge: EId, vertex: VId) -> Result<usize, Projection
         .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
 }
 
+/// A fixed-size search directory, local to construction and never retained by
+/// the graph. Two endpoint checks per input edge and the reduced target pass
+/// otherwise repeat binary searches over the whole stable-ID population.
+/// The directory narrows those searches without a heap allocation, changing
+/// their checkpoints, or assuming dense, low-bit or allocation-ordered IDs.
+struct OrdinalDirectory<'a> {
+    vertices: &'a [VId],
+    prefix: Option<OrdinalPrefix>,
+}
+
+struct OrdinalPrefix {
+    boundaries: [usize; 257],
+    shift: u32,
+}
+
+const INDEXED_DIRECTORY_MIN: usize = 512;
+
+impl<'a> OrdinalDirectory<'a> {
+    fn new(vertices: &'a [VId]) -> Self {
+        #[cfg(test)]
+        if tests::incumbent_directory() {
+            return Self {
+                vertices,
+                prefix: None,
+            };
+        }
+        let prefix = (vertices.len() >= INDEXED_DIRECTORY_MIN).then(|| {
+            // Ignore only the prefix shared by EVERY sorted identity. This
+            // also distributes normal permuted 63-bit engine identities,
+            // whose most significant 65 bits are all zero.
+            let differing = vertices[0].0 ^ vertices[vertices.len() - 1].0;
+            OrdinalPrefix {
+                boundaries: [0; 257],
+                shift: (128 - differing.leading_zeros()).saturating_sub(8),
+            }
+        });
+        let mut result = Self { vertices, prefix };
+        if result.prefix.is_some() {
+            result.include(0);
+        }
+        result
+    }
+
+    /// Called alongside the existing duplicate-identity validation. Above
+    /// `shift + 8` every member has the same prefix, so buckets are monotone.
+    /// The last member of each bucket establishes its exclusive upper bound.
+    fn include(&mut self, index: usize) {
+        if let Some(prefix) = &mut self.prefix {
+            let bucket = ((self.vertices[index].0 >> prefix.shift) & 255) as usize;
+            prefix.boundaries[bucket + 1] = index + 1;
+        }
+    }
+
+    /// Fill empty buckets in at most 257 scalar steps, independent of n/m.
+    /// This bounded stack scratch adds no allocation or per-edge callback.
+    fn finish(&mut self) {
+        if let Some(prefix) = &mut self.prefix {
+            let mut end = 0;
+            for next in &mut prefix.boundaries {
+                end = end.max(*next);
+                *next = end;
+            }
+        }
+    }
+
+    fn ordinal(&self, edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
+        let Some(prefix) = &self.prefix else {
+            return ordinal(self.vertices, edge, vertex);
+        };
+        let bucket = ((vertex.0 >> prefix.shift) & 255) as usize;
+        let first = prefix.boundaries[bucket];
+        // A missing ID may differ in the supposedly shared high prefix.
+        // Full-width comparisons within the bucket still reject it exactly.
+        self.vertices[first..prefix.boundaries[bucket + 1]]
+            .binary_search(&vertex)
+            .map(|index| first + index)
+            .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
+    }
+}
+
 impl SnapshotGraphView {
     /// Build from one already-selected snapshot. Input order is immaterial;
     /// VId order fixes ordinals, EId order fixes floating-point reductions.
@@ -523,12 +603,15 @@ impl SnapshotGraphView {
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
         sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
-        for pair in vertices.windows(2) {
+        let mut directory = OrdinalDirectory::new(&vertices);
+        for (index, pair) in vertices.windows(2).enumerate() {
             poll(&mut checkpoint)?;
             if pair[0] == pair[1] {
                 return Err(ProjectionError::DuplicateVertex(pair[0]).into());
             }
+            directory.include(index + 1);
         }
+        directory.finish();
         sort_by_key(&mut work, |edge| edge.eid, &mut checkpoint)?;
         for pair in work.windows(2) {
             poll(&mut checkpoint)?;
@@ -538,8 +621,8 @@ impl SnapshotGraphView {
         }
         for edge in &mut work {
             poll(&mut checkpoint)?;
-            ordinal(&vertices, edge.eid, edge.source)?;
-            ordinal(&vertices, edge.eid, edge.target)?;
+            directory.ordinal(edge.eid, edge.source)?;
+            directory.ordinal(edge.eid, edge.target)?;
             if edge.source == edge.target {
                 match spec.self_loops {
                     SelfLoopPolicy::Reject => {
@@ -697,7 +780,7 @@ impl SnapshotGraphView {
                 source += 1;
             }
             let s = source;
-            let t = ordinal(&vertices, edge.eid, edge.target)?;
+            let t = directory.ordinal(edge.eid, edge.target)?;
             out_nodes[index] = t;
             out_counts[s] = add(out_counts[s], 1)?;
             if directed {
