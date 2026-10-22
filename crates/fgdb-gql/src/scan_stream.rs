@@ -204,12 +204,20 @@ pub enum ScanKind {
 pub enum ScanError<E> {
     Vertex(VertexScanError<E>),
     Edge(EdgeScanError<E>),
+    Projection {
+        row: u64,
+        column: usize,
+        error: crate::GraphIntegerError,
+    },
 }
 impl<E: core::fmt::Display> core::fmt::Display for ScanError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
+            Self::Projection { row, column, error } => {
+                write!(f, "stream row {row} column {column}: {error}")
+            }
         }
     }
 }
@@ -218,6 +226,7 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
         match self {
             Self::Vertex(error) => Some(error),
             Self::Edge(error) => Some(error),
+            Self::Projection { error, .. } => Some(error),
         }
     }
 }
@@ -227,9 +236,19 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
 /// late-error behavior and source lifetime. Switching physical strategies is
 /// never an error-recovery mechanism; the host chooses before opening a source.
 /// Source errors have one shared domain; checkpoint closures may differ while
-/// retaining the same interruption type. No extra allocation or meter is added.
+/// retaining the same interruption type. A projected vertex cursor retains its
+/// checked row projection beside the source in one box; it adds no row bag or
+/// second meter.
 pub enum ScanCursor<VS, VF, ES, EF> {
     Vertex(VertexScanCursor<VS, VF, GraphValueRow>),
+    /// The cursor must be compiled from this projection's `pattern()`. The
+    /// checked leading identity preserves canonical output order and uniqueness.
+    ProjectedVertex(
+        Box<(
+            VertexScanCursor<VS, VF, GraphValueRow>,
+            crate::GraphSetRowPull,
+        )>,
+    ),
     /// Boxed: the edge cursor's join and resumable-quantum state is twice
     /// the vertex cursor's size (clippy::large_enum_variant).
     Edge(Box<EdgeScanCursor<ES, EF>>),
@@ -243,6 +262,7 @@ where
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
+            Self::ProjectedVertex(_) => ScanKind::Vertex,
             Self::Edge(_) => ScanKind::Edge,
         }
     }
@@ -250,6 +270,7 @@ where
     pub fn snapshot_seq(&self) -> CommitSeq {
         match self {
             Self::Vertex(cursor) => cursor.snapshot_seq(),
+            Self::ProjectedVertex(projected) => projected.0.snapshot_seq(),
             Self::Edge(cursor) => cursor.snapshot_seq(),
         }
     }
@@ -257,6 +278,7 @@ where
     pub fn row_stats(&self) -> GqlExecutionStats {
         match self {
             Self::Vertex(cursor) => cursor.row_stats(),
+            Self::ProjectedVertex(projected) => projected.0.row_stats(),
             Self::Edge(cursor) => cursor.row_stats(),
         }
     }
@@ -264,6 +286,7 @@ where
     pub fn evaluator_stats(&self) -> GlaExecutionStats {
         match self {
             Self::Vertex(cursor) => cursor.evaluator_stats(),
+            Self::ProjectedVertex(projected) => projected.0.evaluator_stats(),
             Self::Edge(cursor) => cursor.evaluator_stats(),
         }
     }
@@ -271,6 +294,7 @@ where
     pub fn state(&self) -> ScanState {
         match self {
             Self::Vertex(cursor) => cursor.state(),
+            Self::ProjectedVertex(projected) => projected.0.state(),
             Self::Edge(cursor) => match cursor.state() {
                 EdgeScanState::Open => ScanState::Open,
                 EdgeScanState::Exhausted => ScanState::Exhausted,
@@ -283,6 +307,7 @@ where
     pub fn close(&mut self) {
         match self {
             Self::Vertex(cursor) => cursor.close(),
+            Self::ProjectedVertex(projected) => projected.0.close(),
             Self::Edge(cursor) => cursor.close(),
         }
     }
@@ -300,6 +325,16 @@ where
             Self::Vertex(cursor) => cursor
                 .next()
                 .map(|row| row.map_err(|error| error.map_source(ScanError::Vertex))),
+            Self::ProjectedVertex(projected) => {
+                let (cursor, pull) = projected.as_mut();
+                cursor.next_projected(
+                    pull,
+                    |error| error.map_source(ScanError::Vertex),
+                    |row, column, error| {
+                        GqlQueryError::Source(ScanError::Projection { row, column, error })
+                    },
+                )
+            }
             Self::Edge(cursor) => cursor
                 .next()
                 .map(|row| row.map_err(|error| error.map_source(ScanError::Edge))),
@@ -308,6 +343,7 @@ where
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             Self::Vertex(cursor) => cursor.size_hint(),
+            Self::ProjectedVertex(projected) => projected.0.size_hint(),
             Self::Edge(cursor) => cursor.size_hint(),
         }
     }
@@ -324,6 +360,11 @@ impl<VS, VF, ES, EF> core::fmt::Debug for ScanCursor<VS, VF, ES, EF> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Vertex(cursor) => f.debug_tuple("ScanCursor::Vertex").field(cursor).finish(),
+            Self::ProjectedVertex(projected) => f
+                .debug_tuple("ScanCursor::ProjectedVertex")
+                .field(&projected.0)
+                .field(&projected.1)
+                .finish(),
             Self::Edge(cursor) => f.debug_tuple("ScanCursor::Edge").field(cursor).finish(),
         }
     }
