@@ -2233,10 +2233,15 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
         let commit = contexts.commit();
         let txcx = contexts.txn();
         // The relationship clause merges each distinct pair once, or a final
-        // CREATE adds one relationship per row (the frozen chain holds both).
-        for write in ["MERGE", "CREATE"] {
+        // CREATE adds one relationship per row; an ON CREATE clause assigns to
+        // each vertex its MERGE created. The frozen chain holds all three.
+        for (on_create, write) in [
+            ("", "MERGE"),
+            ("", "CREATE"),
+            (" ON CREATE SET a.p = row.d", "MERGE"),
+        ] {
             let statement = format!(
-                "UNWIND $rows AS row MERGE (a:Entity {{id: row.s}}) \
+                "UNWIND $rows AS row MERGE (a:Entity {{id: row.s}}){on_create} \
                  MERGE (b:Entity {{id: row.d}}) {write} (a)-[:R]->(b)"
             );
             let mut records = Vec::new();
@@ -2277,7 +2282,7 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
                             })
                         },
                     )
-                    .unwrap_or_else(|error| panic!("{write}, {rows} rows: {error:?}"));
+                    .unwrap_or_else(|error| panic!("{statement}, {rows} rows: {error:?}"));
                 let QueryResult::Write { receipt, .. } = result else {
                     panic!("a RETURN-less write returns its receipt")
                 };
@@ -2293,16 +2298,16 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
                     pairs.len()
                 };
                 let vertices = db.vertices().unwrap();
-                assert_eq!(vertices.len() as i64, ids, "{write}, {rows} rows");
-                assert_eq!(db.edges().unwrap().len(), edges, "{write}, {rows} rows");
+                assert_eq!(vertices.len() as i64, ids, "{statement}, {rows} rows");
+                assert_eq!(db.edges().unwrap().len(), edges, "{statement}, {rows} rows");
                 assert_eq!(
                     issued.load(Ordering::Relaxed),
                     ids as u64 + edges as u64,
-                    "{write}, {rows} rows"
+                    "{statement}, {rows} rows"
                 );
             }
             // Linear, not quadratic, in the batch size.
-            assert!(records[2] <= 5 * records[0], "{write}: {records:?}");
+            assert!(records[2] <= 5 * records[0], "{statement}: {records:?}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -2493,6 +2498,141 @@ fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
             }
             transaction.finish(&mut reference, &commit).await.unwrap();
             assert_eq!(content(&frozen), content(&reference), "{chain}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn an_on_create_merge_chain_freezes_to_the_sequential_chains_graph() {
+    // fgdb-0s2pq: a chain whose MERGEs carry only ON CREATE clauses freezes,
+    // and its held vertices carry their assignments into later lookups. The
+    // oracle is the same chain made ineligible by a no-op ON MATCH clause:
+    // it runs the sequential chain and stores no different value. Covered: a
+    // property assigned on creation, a key reassigned on creation (a later
+    // lookup must find the new value and miss the old one), and a label
+    // assigned on creation that a later MERGE selects by.
+    let ((), report) = run_async_under_lab(0x7363_2a42, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let float = |value: f64| {
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        };
+        let rows: Vec<(GraphValue, GraphValue)> = vec![
+            (int(1), int(2)),
+            (int(2), int(3)),
+            (int(4), int(4)),
+            (int(4), int(5)),
+            (int(5), int(4)),
+            (int(6), float(7.0)),
+            (int(7), int(6)),
+            (int(8), int(1)),
+            (int(9), int(9)),
+            (int(1), int(2)),
+        ];
+        let input = args(
+            rows.iter()
+                .map(|(s, d)| object(vec![("s", s.clone()), ("d", d.clone())]))
+                .collect(),
+        );
+        // Every vertex by its labels and all of its properties; identities
+        // differ between the runs.
+        let content = |db: &Database<MemVfs>| {
+            let vertices = db.vertices().unwrap();
+            let name = |vid: VId| {
+                let vertex = vertices.iter().find(|vertex| vertex.vid == vid).unwrap();
+                let mut props: Vec<String> = vertex
+                    .props
+                    .iter()
+                    .map(|(key, value)| match value {
+                        fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v)) => {
+                            format!("{key:?} int {v}")
+                        }
+                        fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Float(v)) => {
+                            format!("{key:?} float {}", v.get())
+                        }
+                        _ => panic!("only numbers are written"),
+                    })
+                    .collect();
+                props.sort();
+                let mut labels = vertex.labels.clone();
+                labels.sort();
+                format!("{labels:?} {props:?}")
+            };
+            let mut nodes: Vec<String> = vertices.iter().map(|vertex| name(vertex.vid)).collect();
+            nodes.sort();
+            let mut edges: Vec<(String, String)> = db
+                .edges()
+                .unwrap()
+                .iter()
+                .map(|edge| (name(edge.entry.src), name(edge.entry.dst)))
+                .collect();
+            edges.sort();
+            (nodes, edges)
+        };
+        let issued = AtomicU64::new(0);
+        let allocate = |request: GraphWriteIdentityRequest| {
+            let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+            Ok::<_, Infallible>(match request.request {
+                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+            })
+        };
+        let program = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+            1_000,
+            1_000,
+            1_000,
+        );
+        for template in [
+            "UNWIND $rows AS row MERGE (a:Entity {id: row.s}) ON CREATE SET a.p = row.d{forced} \
+             MERGE (b:Entity {id: row.d}) MERGE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MERGE (a:Entity {id: row.s}) ON CREATE SET a.id = row.d{forced} \
+             MERGE (b:Entity {id: row.s})",
+            "UNWIND $rows AS row MERGE (a:Entity {id: row.s}) ON CREATE SET a:Other{forced} \
+             MERGE (b:Entity:Other {id: row.d}) CREATE (a)-[:R]->(b)",
+        ] {
+            let mut graphs = Vec::new();
+            for forced in ["", " ON MATCH SET a.id = a.id"] {
+                let chain = template.replace("{forced}", forced);
+                // Committed: ids 1 and 2 joined by R, and id 8 with both
+                // labels; staged earlier in the transaction: id 3.
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(5_001),
+                    vec![ENTITY],
+                    vec![(ID, CanonicalScalar::Int(1))],
+                );
+                seed.create_vertex(
+                    VId(5_002),
+                    vec![ENTITY],
+                    vec![(ID, CanonicalScalar::Int(2))],
+                );
+                seed.create_vertex(
+                    VId(5_008),
+                    vec![ENTITY, LabelId(2)],
+                    vec![(ID, CanonicalScalar::Int(8))],
+                );
+                seed.add_edge(EId(6_001), VId(5_001), VId(5_002), vec![]);
+                db.write(&commit, seed).await.unwrap();
+                let mut transaction = db.begin(&txcx).unwrap();
+                let mut staged = WriteBatch::new(R);
+                staged.create_vertex(
+                    VId(5_003),
+                    vec![ENTITY],
+                    vec![(ID, CanonicalScalar::Int(3))],
+                );
+                transaction.write(&mut db, staged).unwrap();
+                transaction
+                    .query_write(&mut db, &cx, &chain, &input, symbols, R, program, allocate)
+                    .unwrap_or_else(|error| panic!("{chain}: {error:?}"));
+                transaction.finish(&mut db, &commit).await.unwrap();
+                graphs.push(content(&db));
+            }
+            assert_eq!(graphs[0], graphs[1], "{template}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

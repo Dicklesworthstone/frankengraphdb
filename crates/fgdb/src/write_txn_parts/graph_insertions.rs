@@ -260,8 +260,8 @@ impl WriteTxn {
             let mut result = None;
             let mut receipts = Vec::with_capacity(chain.steps().len());
             let last = chain.steps().len().saturating_sub(1);
-            // A chain of action-free MERGEs holds its creations and stages
-            // them once after its last step (fgdb-0s2pq).
+            // A chain of creating MERGEs (see frozen_chain) holds its effects
+            // and stages them once after its last step (fgdb-0s2pq).
             let mut frozen = frozen_chain(chain).then(FrozenCreations::default);
             for (at, step) in chain.steps().iter().enumerate() {
                 // Only a last step with RETURN delivers rows. A last write
@@ -1488,7 +1488,7 @@ mod chain_materialization_tests {
     }
 
     #[test]
-    fn action_free_merge_chains_freeze_and_others_stay_sequential() {
+    fn creating_merge_chains_freeze_and_others_stay_sequential() {
         // fgdb-0s2pq: the frozen chain must actually engage for the
         // node-and-relationship ingest idiom. Its equivalence law alone
         // passes even when nothing freezes, as it did while the value
@@ -1506,13 +1506,20 @@ mod chain_materialization_tests {
             // A final CREATE: nothing in the statement reads what it makes.
             "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k}) \
              CREATE (a)-[:R]->(b)",
+            // ON CREATE assigns only to the vertex its MERGE created.
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) ON CREATE SET a.q = k \
+             MERGE (b:Source {p: k})",
         ] {
             assert!(frozen_chain(&chain(text)), "{text}");
         }
         for text in [
-            // ON/SET clauses read and write the targets row by row.
-            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) ON CREATE SET a.q = 1 \
+            // ON MATCH and a trailing SET update vertices the chain did not
+            // create.
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) ON MATCH SET a.q = 1 \
              MERGE (b:Source {p: k})",
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) ON CREATE SET a.q = k \
+             ON MATCH SET a.p = a.p MERGE (b:Source {p: k})",
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) SET a.q = 1 MERGE (b:Source {p: k})",
             // RETURN reads the staged state.
             "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k}) RETURN a, b",
             // A CREATE a later MERGE could find.

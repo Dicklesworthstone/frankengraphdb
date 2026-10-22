@@ -42,7 +42,10 @@ pub(crate) struct FrozenCreations {
     // predicates decide every match.
     buckets:
         std::collections::BTreeMap<(fgdb_delta_types::PropertyKeyId, FrozenValueClass), Vec<usize>>,
-    /// Every creation batch, in creation order, for the one ordered staging.
+    /// Each held vertex's position in `vertices`.
+    index: std::collections::BTreeMap<VId, usize>,
+    /// Every creation batch, and every ON CREATE clause on a held vertex, in
+    /// statement order, for the one ordered staging.
     batches: Vec<WriteBatch>,
 }
 
@@ -82,23 +85,73 @@ impl FrozenCreations {
     /// join every later lookup.
     pub(crate) fn defer(&mut self, batch: WriteBatch) {
         for row in &batch.rows {
-            if let PendingRow::Vertex {
-                vid, labels, props, ..
-            } = row
-            {
-                let at = self.vertices.len();
-                for (key, value) in props {
-                    if let CanonicalPropertyValue::Scalar(value) = value {
-                        self.buckets
-                            .entry((*key, FrozenValueClass::of(value)))
-                            .or_default()
-                            .push(at);
+            match row {
+                PendingRow::Vertex {
+                    vid, labels, props, ..
+                } => {
+                    let at = self.vertices.len();
+                    for (key, value) in props {
+                        self.bucket(at, *key, value);
+                    }
+                    self.index.insert(*vid, at);
+                    self.vertices.push((*vid, labels.clone(), props.clone()));
+                }
+                // An ON CREATE clause on a held vertex: later lookups see its
+                // assignments, as they would see them staged. Its old bucket
+                // entries stay; buckets are only a superset.
+                PendingRow::SetProperty { vid, key, value } => {
+                    if let Some(&at) = self.index.get(vid) {
+                        self.vertices[at].2.retain(|(present, _)| present != key);
+                        if let Some(value) = value {
+                            self.vertices[at].2.push((*key, value.clone()));
+                            self.bucket(at, *key, value);
+                        }
                     }
                 }
-                self.vertices.push((*vid, labels.clone(), props.clone()));
+                PendingRow::SetLabel { vid, label, member } => {
+                    if let Some(&at) = self.index.get(vid) {
+                        let labels = &mut self.vertices[at].1;
+                        labels.retain(|present| present != label);
+                        if *member {
+                            labels.push(*label);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         self.batches.push(batch);
+    }
+
+    fn bucket(
+        &mut self,
+        at: usize,
+        key: fgdb_delta_types::PropertyKeyId,
+        value: &CanonicalPropertyValue,
+    ) {
+        if let CanonicalPropertyValue::Scalar(value) = value {
+            self.buckets
+                .entry((key, FrozenValueClass::of(value)))
+                .or_default()
+                .push(at);
+        }
+    }
+
+    /// A held vertex's property: `None` when the vertex is not held, else
+    /// its current value, if any.
+    fn property(
+        &self,
+        vertex: VId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Option<CanonicalPropertyValue>> {
+        let &at = self.index.get(&vertex)?;
+        Some(
+            self.vertices[at]
+                .2
+                .iter()
+                .find(|(present, _)| *present == key)
+                .map(|(_, value)| value.clone()),
+        )
     }
 
     /// The held batches, in creation order.
@@ -154,15 +207,16 @@ impl FrozenCreations {
     }
 }
 
-/// Whether a write chain runs frozen (fgdb-0s2pq): every step is an
-/// action-free vertex MERGE or a relationship MERGE whose selection reads only
-/// the previous step's rows, with at most one relationship MERGE, at most a
-/// final CREATE over the previous step's rows, and no RETURN. Such a chain's
-/// effects are pure creations. Each lookup sees the chain-entry overlay plus
-/// the chain's own held vertices, and the relationship MERGE finds no
-/// relationship on a held vertex. Nothing reads what the final CREATE makes.
-/// So holding every creation until the end gives the sequential chain's
-/// answer.
+/// Whether a write chain runs frozen (fgdb-0s2pq): every step is a vertex
+/// MERGE with no clause but ON CREATE, or a relationship MERGE whose
+/// selection reads only the previous step's rows, with at most one
+/// relationship MERGE, at most a final CREATE over the previous step's rows,
+/// and no RETURN. Such a chain's effects are creations and assignments to
+/// what it created. Each lookup sees the chain-entry overlay plus the chain's
+/// own held vertices with their ON CREATE assignments, and the relationship
+/// MERGE finds no relationship on a held vertex. Nothing reads what the final
+/// CREATE makes. So holding every effect until the end gives the sequential
+/// chain's answer.
 fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
     use fgdb_gql::GraphWriteChainStep;
     let mut vertex_steps = 0;
@@ -171,7 +225,12 @@ fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
     for (at, step) in chain.steps().iter().enumerate() {
         match step {
             GraphWriteChainStep::VertexMerge(merge) => {
-                if merge.actions().is_some() {
+                // ON CREATE acts only on the vertex its row's MERGE created,
+                // which the chain holds. ON MATCH and a trailing SET update
+                // vertices the chain did not create.
+                if merge.actions().is_some_and(|actions| {
+                    !actions.on_match.is_empty() || !actions.after.is_empty()
+                }) {
                     return false;
                 }
                 // Every tuple's single MERGE shares this template's shape.
@@ -578,10 +637,11 @@ impl WriteTxn {
     /// entry. These are private occurrences, not final result rows: the
     /// enclosing chain admits RETURN only after grouping and pagination.
     ///
-    /// With `frozen` (a chain of action-free MERGEs, fgdb-0s2pq), creations
-    /// are held there instead of staged, and each tuple also matches the
-    /// chain's held vertices that its predicates admit: the same answer as
-    /// staging each creation, without re-reading a growing overlay per tuple.
+    /// With `frozen` (a chain of creating MERGEs, fgdb-0s2pq), creations and
+    /// their ON CREATE clauses are held there instead of staged, and each
+    /// tuple also matches the chain's held vertices that its predicates
+    /// admit: the same answer as staging each effect, without re-reading a
+    /// growing overlay per tuple.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_graph_vertex_merges_over<V: Vfs + Clone, A>(
         &mut self,
@@ -851,6 +911,7 @@ impl WriteTxn {
                             [selected, &actions.after],
                             policy,
                             &mut used,
+                            frozen.as_deref_mut(),
                         )?;
                     }
                 }
@@ -884,6 +945,7 @@ impl WriteTxn {
         clauses: [&[fgdb_gql::GraphVertexMergeRowAction]; 2],
         policy: fgdb_gql::GraphVertexMergePolicy,
         used: &mut fgdb_gql::GraphVertexMergeStats,
+        mut held: Option<&mut FrozenCreations>,
     ) -> Result<(), TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>> {
         use crate::gql_exec::source::SourceEvent;
         use fgdb_gql::algebra::GraphValue;
@@ -976,10 +1038,17 @@ impl WriteTxn {
                             frame.push(match *input {
                                 GraphVertexMergeRowInput::Property(key) => {
                                     charge(used, GlaExecutionEvent::Work)?;
-                                    match self
-                                        .merged_vertex_property(database, vertex, key)
-                                        .map_err(source)?
+                                    // A frozen chain's vertex is held, not staged.
+                                    let stored = match held
+                                        .as_deref()
+                                        .and_then(|held| held.property(vertex, key))
                                     {
+                                        Some(stored) => stored,
+                                        None => self
+                                            .merged_vertex_property(database, vertex, key)
+                                            .map_err(source)?,
+                                    };
+                                    match stored {
                                         None => GraphValue::Scalar(CanonicalScalar::Null),
                                         Some(value) => GraphValue::from_property_value(&value)
                                             .ok_or(GqlQueryError::Data(
@@ -1045,9 +1114,13 @@ impl WriteTxn {
             }
             // No right-hand side of this clause observes a sibling; the next
             // clause sees this staging. Preserve the insertion adapter's
-            // composition choice.
+            // composition choice. A frozen chain holds the clause with the
+            // vertex it created.
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let staged = if self.staged.iter().all(|staged| staged.relation == relation) {
+            let staged = if let Some(held) = held.as_deref_mut() {
+                held.defer(batch);
+                Ok(())
+            } else if self.staged.iter().all(|staged| staged.relation == relation) {
                 self.write(database, batch)
             } else {
                 self.write_atomic(database, vec![batch])
