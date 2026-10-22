@@ -466,6 +466,60 @@ fn tuple_refusal_retains_unprojected_dependencies_and_phantoms_without_global_ve
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// The indexed edge root reads only its candidates' edges, so a vertex that
+/// enters the friend predicate must conflict, but only if it has the incoming
+/// R edge that friend binds through. A vertex with no edge, or only an S edge,
+/// cannot bind and does not fence a disjoint commit.
+#[test]
+fn indexed_edge_roots_fence_only_vertices_with_the_root_edge() {
+    let ((), report) = run_async_under_lab(0xb1ad_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txn_cx = contexts.txn();
+        // VId(10) has incoming R edges and fails n >= 5 (n = 3) until the
+        // winner sets it. VId(3) has no edge; VId(20) only an incoming S edge.
+        for (winner, conflicts) in [(VId(10), true), (VId(3), false), (VId(20), false)] {
+            let mut db = seeded(&commit).await;
+            let mut txn = db.begin(&txn_cx).unwrap();
+            let mut stage = WriteBatch::new(R);
+            stage.create_vertex(VId(99), vec![], vec![]);
+            txn.write(&mut db, stage).unwrap();
+            let query = builder(5)
+                .prepare_bindings(&["person", "company"], 0, None)
+                .unwrap();
+            txn.execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &query,
+                GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000),
+            )
+            .unwrap();
+            let mut change = WriteBatch::new(R);
+            change.set_vertex_property(winner, N, Some(CanonicalScalar::Int(9)));
+            db.write(&commit, change).await.unwrap();
+            let result = txn.commit(&mut db, &commit).await;
+            if conflicts {
+                assert!(
+                    matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ),
+                    "{winner:?}"
+                );
+                assert!(db.vertex(VId(99)).unwrap().is_none());
+            } else {
+                result.unwrap_or_else(|error| panic!("{winner:?}: {error:?}"));
+                assert!(db.vertex(VId(99)).unwrap().is_some());
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn tuples_keep_source_refusal_precedence_and_labeled_node_scans() {
     let ((), report) = run_async_under_lab(0xb1ad_0005, |root| async move {

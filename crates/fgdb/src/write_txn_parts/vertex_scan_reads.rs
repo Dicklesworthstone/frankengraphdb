@@ -2,6 +2,12 @@
 // Native predicates and Boolean evaluation own value/NULL/error semantics;
 // these observations never replace the query's source or execution path.
 
+/// The root edge, seen from the root endpoint: relation and direction.
+type ScanEndpoint = (
+    fgdb_gql::algebra::EdgeRelation,
+    fgdb_gql::algebra::GlaDirection,
+);
+
 struct VertexScanRead {
     // Only Select/SelectBoolean operators. Boolean programs share their checked
     // immutable encoding; the transaction never owns an evaluator callback.
@@ -10,6 +16,12 @@ struct VertexScanRead {
     // all final quota checks. Refusal/unwind leaves a conservative vertex-domain
     // witness. A later successful call never completes an earlier failed read.
     complete: bool,
+    // The edge a root endpoint must have, seen from that endpoint, when the
+    // root binds only through it (an edge-rooted bound source). A vertex with
+    // no such edge on either side of a commit cannot enter the result, and
+    // no predicate of the root is ever evaluated on it. Inserting the edge
+    // later is caught by the relation witness.
+    endpoint: Option<ScanEndpoint>,
 }
 
 // A data exception is not FALSE: it may change a future query into a refusal.
@@ -261,11 +273,16 @@ impl VertexScanRead {
 }
 
 impl PointReads {
-    fn begin_vertex_scan(&mut self, predicates: &[fgdb_gql::algebra::GlaOperator]) -> usize {
+    fn begin_vertex_scan(
+        &mut self,
+        predicates: &[fgdb_gql::algebra::GlaOperator],
+        endpoint: Option<ScanEndpoint>,
+    ) -> usize {
         let index = self.2.len();
         self.2.push(VertexScanRead {
             selections: predicates.to_vec(),
             complete: false,
+            endpoint,
         });
         index
     }
@@ -320,12 +337,49 @@ impl PointReads {
             } else {
                 scan.matches_labels(before) || scan.matches_labels(after)
             };
+            if hit
+                && let Some((relation, direction)) = &scan.endpoint
+                && !has_endpoint_edge(database, vid, relation, *direction, at, checkpoint)?
+            {
+                continue;
+            }
             if hit {
                 return Ok(Some(ElementId::Vertex(vid)));
             }
         }
         Ok(None)
     }
+}
+
+/// Whether `vid` has an edge of `relation` in `direction` on either side of
+/// commit `at`. Validation sequences are positive, as above.
+fn has_endpoint_edge<V: Vfs + Clone>(
+    database: &Database<V>,
+    vid: VId,
+    relation: &fgdb_gql::algebra::EdgeRelation,
+    direction: fgdb_gql::algebra::GlaDirection,
+    at: CommitSeq,
+    checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+) -> Result<bool, WriteTxnError> {
+    let snapshot = &database.snapshot;
+    for seq in [CommitSeq(at.0 - 1), at] {
+        let mut found = false;
+        snapshot.adjacency_index().visit(
+            &snapshot.blocks,
+            vid,
+            direction,
+            seq,
+            &mut |_| checkpoint(),
+            |entry, _, _, _| {
+                found |= relation.matches(entry.relation);
+                Ok(())
+            },
+        )?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

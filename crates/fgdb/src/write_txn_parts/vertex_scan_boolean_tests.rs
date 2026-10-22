@@ -515,6 +515,7 @@ fn a_later_label_never_hides_an_earlier_boolean_data_error() {
         let mut scan = VertexScanRead {
             selections: VertexScanRead::predicates(query.plan()).unwrap().to_vec(),
             complete: false,
+            endpoint: None,
         };
         assert_eq!(scan.selections.len(), 2);
         assert!(!scan.matches_labels(Some(&row)));

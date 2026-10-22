@@ -579,7 +579,27 @@ mod query_source {
             // Primitive predicates read one vertex regardless of its root slot.
             let selections = core::slice::from_ref(selection);
             super::VertexScanRead::charge_definition(selections, control)?;
-            let root_observation = self.point_reads.borrow_mut().begin_vertex_scan(selections);
+            // An edge root binds this vertex only as an endpoint of the root
+            // edge, so entering the closure also needs that edge. A vertex
+            // root also evaluates its selection on vertices without edges.
+            let endpoint = match root {
+                GlaOperator::ScanEdges {
+                    relation,
+                    direction,
+                } => Some((
+                    *relation,
+                    match (*direction, root_slot) {
+                        (GlaDirection::Forward, 1) => GlaDirection::Reverse,
+                        (GlaDirection::Reverse, 1) => GlaDirection::Forward,
+                        (direction, _) => direction,
+                    },
+                )),
+                _ => None,
+            };
+            let root_observation = self
+                .point_reads
+                .borrow_mut()
+                .begin_vertex_scan(selections, endpoint);
             let Some(roots) = source::indexed_roots(snapshot, predicates, self.basis, control)?
             else {
                 return Ok(None);
@@ -761,7 +781,10 @@ mod query_source {
                 if record_membership {
                     let selections = core::slice::from_ref(*selection);
                     super::VertexScanRead::charge_definition(selections, control)?;
-                    let observation = self.point_reads.borrow_mut().begin_vertex_scan(selections);
+                    let observation = self
+                        .point_reads
+                        .borrow_mut()
+                        .begin_vertex_scan(selections, None);
                     control(SourceEvent::ScratchEntry)?;
                     root_observations.push(observation);
                 }
@@ -1080,7 +1103,10 @@ mod query_source {
                 // Charge the bounded definition copy before allocation or graph
                 // reads. A failure here has learned nothing from the database.
                 super::VertexScanRead::charge_definition(predicates, control)?;
-                let index = self.point_reads.borrow_mut().begin_vertex_scan(predicates);
+                let index = self
+                    .point_reads
+                    .borrow_mut()
+                    .begin_vertex_scan(predicates, None);
                 control(SourceEvent::ScratchEntry)?;
                 vec![(self, index)]
             } else {
