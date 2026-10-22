@@ -2362,11 +2362,14 @@ fn external_cross_children_and_full_product_finish_before_empty_parent_pages() {
                 0,
                 32,
             ),
+            // Seeded correlation (fgdb-2acff) reads only the vertices whose p
+            // was unwound: three UNWIND rows and three seeded rows, not the
+            // nine-row product. LIMIT 0 still cannot hide their admission.
             (
                 3,
                 "UNWIND [1,2,13] AS wanted MATCH (n {p:wanted}) RETURN n LIMIT 0",
                 3,
-                8,
+                5,
             ),
         ] {
             let prepared = prepare(text, &GqlParameters::new());
@@ -2424,7 +2427,7 @@ fn external_cross_children_and_full_product_finish_before_empty_parent_pages() {
                     matches!(error, NativeSpoolError::BufferedExecute(ref inner)
                     if matches!(**inner, GqlQueryError::Rows(ref error)
                     if error.dimension == GqlBudgetDimension::ResultRows
-                    && error.limit == 8 && error.observed == 9)),
+                    && error.limit == 5 && error.observed == 6)),
                     "{text}: {error:?}"
                 ),
                 _ => unreachable!(),

@@ -339,7 +339,9 @@ fn cold_cartesian_groups_round_trip_through_ordering_into_a_final_aggregate() {
             "ORDER BY value DESC SKIP 1 LIMIT 2 ",
             "RETURN COUNT(*) AS rows,SUM(value*copies) AS total"
         ));
-        for input_limit in [12, 11] {
+        // Seeded correlation (fgdb-2acff) admits the four UNWIND rows and the
+        // three vertices whose p was unwound: seven rows, not the 4 x 3 product.
+        for input_limit in [7, 6] {
             let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
             let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
             let mut view = view(&commit, &vfs, &source_pool).await;
@@ -368,7 +370,7 @@ fn cold_cartesian_groups_round_trip_through_ordering_into_a_final_aggregate() {
                     None,
                 )
                 .await;
-            if input_limit == 12 {
+            if input_limit == 7 {
                 let (spool, _) = result.unwrap();
                 // The fixture has p=[1,2,13]. Correlation keeps [1,1,2,13],
                 // grouped as (1,2),(2,1),(13,1). The ordered window removes
@@ -381,17 +383,18 @@ fn cold_cartesian_groups_round_trip_through_ordering_into_a_final_aggregate() {
                 assert_eq!(spool.row_count(), 1);
                 assert_eq!(contents(&spool, &mut destination, &cx).await, summary(2, 4));
             } else {
-                let error = result.expect_err("the complete Cartesian product needs twelve rows");
+                let error = result.expect_err("the correlated input needs seven rows");
                 // The final one-row aggregate and intermediate window must
-                // not hide admission of four UNWIND rows times three vertices.
+                // not hide admission of the four UNWIND rows and three
+                // seeded vertex rows.
                 assert!(
                     matches!(
                         &error,
                         NativeAggregateSpoolError::Spool(NativeSpoolError::BufferedExecute(inner))
                             if matches!(**inner, GqlQueryError::Rows(ref exceeded)
                                 if exceeded.dimension == GqlBudgetDimension::ResultRows
-                                    && exceeded.limit == 11
-                                    && exceeded.observed == 12)
+                                    && exceeded.limit == 6
+                                    && exceeded.observed == 7)
                     ),
                     "{error:?}"
                 );
