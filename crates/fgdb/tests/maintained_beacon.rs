@@ -87,8 +87,19 @@ fn verify_current(
     let pin = db.beacon_index_snapshot(cx, handle).unwrap();
     let view = db.read_session().unwrap();
     assert_eq!(pin.source_sequence(), db.frontier().unwrap());
+    // A read session reuses a registered index whose definition matches
+    // exactly (fgdb-t38fv). One raised capacity bound makes the oracle miss
+    // and build its corpus from the snapshot; it cannot change these results.
+    let mut cold = definition.clone();
+    cold.index.max_documents += 1;
+    let mut unstaged = cold.clone();
+    unstaged.policy.max_staging_rows = 0;
     for query in [text_query(), vector_query()] {
-        let expected = view.beacon_search(cx, definition, query).unwrap();
+        assert!(
+            view.beacon_search(cx, &unstaged, query).is_err(),
+            "the oracle must build, not reuse the maintained index"
+        );
+        let expected = view.beacon_search(cx, &cold, query).unwrap();
         assert_eq!(
             pin.search(cx, query, ReadPolicy::default()).unwrap(),
             expected,
@@ -592,6 +603,17 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
             eligible => [2, 3], k => 2, candidates => 4, graph_candidates => 4\
         ) YIELD node, score, graph_hops \
         RETURN node, score, graph_hops";
+        // The default indexed profile prepares a selected-vertex directory
+        // for the graph lane even when it reuses the text/vector index, so it
+        // reads the whole corpus. Demand access probes only reached vertices
+        // and takes text/vector from the maintained exact index.
+        let statement_three_lane_demand = "CALL hybrid.search(\
+            label => 'Doc', text => 'graph', text_property => 'body', \
+            vector => [1.0], vector_properties => ['x'], \
+            seeds => [1], relation => 'LINKS', max_hops => 2, graph_access => 'demand', \
+            eligible => [2, 3], k => 2, candidates => 4, graph_candidates => 4\
+        ) YIELD node, score, graph_hops \
+        RETURN node, score, graph_hops";
 
         let generous = GqlQueryPolicy::new(1_000, 100, 1_000_000, 100_000);
         // Tight policy: zero snapshot_records (which forbids any one-shot
@@ -610,13 +632,15 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
             .is_err()
         );
 
+        // A read session pins the maintained indexes registered when it opens
+        // (fgdb-t38fv), so the cold oracle opens before registration.
+        let view = db.read_session().unwrap();
         let handle = db
             .register_beacon_graph_index(&cx, &options(), ReadPolicy::default())
             .unwrap();
 
         // After registration, Database::query reuses the maintained index and fits `tight`,
         // while the un-cached EmbeddedReadView still requires the full scan and fails `tight`.
-        let view = db.read_session().unwrap();
         assert!(
             view.query(
                 &cx,
@@ -656,13 +680,28 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
                 generous,
             )
             .unwrap();
-        let actual_three_lane = db
-            .query(
+        // The graph lane reads every vertex it reaches as a snapshot record,
+        // so it needs a few. Eight cannot cover a scan of the 64-vertex corpus.
+        // Its demand kernels also retain more than 64 scratch entries; scratch
+        // is not what this law bounds.
+        let probes = GqlQueryPolicy::new(8, 10, 2_000, 1_000);
+        assert!(
+            db.query(
                 &cx,
                 statement_three_lane,
                 &GqlParameters::new(),
                 symbols,
-                tight,
+                probes
+            )
+            .is_err()
+        );
+        let actual_three_lane = db
+            .query(
+                &cx,
+                statement_three_lane_demand,
+                &GqlParameters::new(),
+                symbols,
+                probes,
             )
             .unwrap();
         assert_eq!(actual_three_lane, expected_three_lane);
@@ -673,16 +712,6 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
         update.add_edge(EId(3), VId(2), VId(4), vec![]);
         db.write(&commit, update).await.unwrap();
 
-        let view_after = db.read_session().unwrap();
-        let expected_after = view_after
-            .query(
-                &cx,
-                statement_two_lane,
-                &GqlParameters::new(),
-                symbols,
-                generous,
-            )
-            .unwrap();
         let actual_after = db
             .query(
                 &cx,
@@ -692,18 +721,12 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
                 tight,
             )
             .unwrap();
-        assert_eq!(actual_after, expected_after);
         assert_ne!(actual_after, actual_two_lane);
 
         // Database::beacon_search_filtered and search_beacon_index_filtered also reuse the pin.
         let mut tight_options = options();
         tight_options.policy.max_staging_rows = 0;
         tight_options.policy.max_work_units = 500;
-        assert!(
-            view_after
-                .beacon_search_filtered(&cx, &tight_options, vector_query(), |id| id == VId(4))
-                .is_err()
-        );
         let filtered_rows = db
             .beacon_search_filtered(&cx, &tight_options, vector_query(), |id| id == VId(4))
             .unwrap();
@@ -717,6 +740,32 @@ fn call_hybrid_search_and_database_beacon_search_reuse_maintained_index_across_c
                 |id| id == VId(4),
             )
             .unwrap(),
+            filtered_rows
+        );
+
+        // The cold oracle at the updated cut: a session opened after the
+        // index is released pins no maintained generation, so it scans.
+        db.unregister_beacon_index(&cx, &handle).unwrap();
+        let view_after = db.read_session().unwrap();
+        let expected_after = view_after
+            .query(
+                &cx,
+                statement_two_lane,
+                &GqlParameters::new(),
+                symbols,
+                generous,
+            )
+            .unwrap();
+        assert_eq!(actual_after, expected_after);
+        assert!(
+            view_after
+                .beacon_search_filtered(&cx, &tight_options, vector_query(), |id| id == VId(4))
+                .is_err()
+        );
+        assert_eq!(
+            view_after
+                .beacon_search_filtered(&cx, &options(), vector_query(), |id| id == VId(4))
+                .unwrap(),
             filtered_rows
         );
     });
