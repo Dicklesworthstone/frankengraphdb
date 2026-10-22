@@ -70,7 +70,7 @@ pub use fnx_algorithms::GraphView;
 pub use projection::{
     AdapterPath, Directedness, PROJECTED_WEIGHT_ATTRIBUTE, ParallelEdgePolicy,
     ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
-    SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
 
 /// The same immutable foundation revision as the workspace topology registry.

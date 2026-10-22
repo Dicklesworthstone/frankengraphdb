@@ -12,7 +12,7 @@ use fgdb_prism::{
     FnxSealedReadError, FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError,
     ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView,
     SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
-    SnapshotGraphView,
+    SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_strata::store::{BufferedScanError, BufferedScanEvent};
 use fgdb_strata::tiered::buffer::BufferError;
@@ -309,6 +309,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     &mut staged_bytes,
                 )
                 .await?;
+            let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
             let mut edges = Vec::new();
             {
                 let mut scan = match selection.relation {
@@ -334,8 +335,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     if selection
                         .relation
                         .is_some_and(|relation| relation != entry.relation)
-                        || vertices.binary_search(&entry.src).is_err()
-                        || vertices.binary_search(&entry.dst).is_err()
+                        || !selected_vertices.contains(entry.src)
+                        || !selected_vertices.contains(entry.dst)
                     {
                         continue;
                     }

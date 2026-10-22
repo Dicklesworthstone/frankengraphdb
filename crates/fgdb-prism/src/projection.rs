@@ -444,18 +444,21 @@ fn name(vid: VId) -> [u8; 32] {
 fn canonical_weight(weight: f64) -> f64 {
     if weight == 0.0 { 0.0 } else { weight }
 }
+#[cfg(test)]
 fn ordinal(vertices: &[VId], edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
     vertices
         .binary_search(&vertex)
         .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
 }
 
-/// A fixed-size search directory, local to construction and never retained by
-/// the graph. Two endpoint checks per input edge and the reduced target pass
-/// otherwise repeat binary searches over the whole stable-ID population.
-/// The directory narrows those searches without a heap allocation, changing
-/// their checkpoints, or assuming dense, low-bit or allocation-ordered IDs.
-struct OrdinalDirectory<'a> {
+/// Allocation-free membership and ordinal lookup over borrowed, sorted vertex
+/// identities. A fixed prefix directory narrows full-width binary searches
+/// without assuming dense, low-bit or allocation-ordered IDs.
+///
+/// The directory uses approximately 2 KiB of fixed storage, independent of the
+/// population size. It does not validate selection, snapshot binding, or access
+/// authority; those remain the caller's responsibility.
+pub struct SortedVertexLookup<'a> {
     vertices: &'a [VId],
     prefix: Option<OrdinalPrefix>,
 }
@@ -467,7 +470,51 @@ struct OrdinalPrefix {
 
 const INDEXED_DIRECTORY_MIN: usize = 512;
 
-impl<'a> OrdinalDirectory<'a> {
+impl<'a> SortedVertexLookup<'a> {
+    /// Borrow identities sorted in ascending `VId` order, as required by
+    /// [`slice::binary_search`]. Unsorted input yields unspecified lookup
+    /// results. Duplicates are allowed; an ordinal may identify any matching
+    /// entry, just as for `binary_search`.
+    ///
+    /// Construction performs at most 255 partition-point searches rather than
+    /// scanning the entire population. It allocates no heap memory and does not
+    /// retain authority over the borrowed vertices.
+    pub fn from_sorted(vertices: &'a [VId]) -> Self {
+        let mut result = Self::new(vertices);
+        if let Some(prefix) = &mut result.prefix {
+            let mut end = 0;
+            for bucket in 1..256 {
+                end += vertices[end..]
+                    .partition_point(|vertex| ((vertex.0 >> prefix.shift) & 255) < bucket as u128);
+                prefix.boundaries[bucket] = end;
+            }
+            prefix.boundaries[256] = vertices.len();
+        }
+        result
+    }
+
+    /// Return an ordinal of this identity in the borrowed sorted slice.
+    #[inline]
+    pub fn ordinal(&self, vertex: VId) -> Option<usize> {
+        let Some(prefix) = &self.prefix else {
+            return self.vertices.binary_search(&vertex).ok();
+        };
+        let bucket = ((vertex.0 >> prefix.shift) & 255) as usize;
+        let first = prefix.boundaries[bucket];
+        // A missing ID may differ in the supposedly shared high prefix.
+        // Full-width comparisons within the bucket still reject it exactly.
+        self.vertices[first..prefix.boundaries[bucket + 1]]
+            .binary_search(&vertex)
+            .ok()
+            .map(|index| first + index)
+    }
+
+    /// Test membership in the borrowed sorted slice.
+    #[inline]
+    pub fn contains(&self, vertex: VId) -> bool {
+        self.ordinal(vertex).is_some()
+    }
+
     fn new(vertices: &'a [VId]) -> Self {
         #[cfg(test)]
         if tests::incumbent_directory() {
@@ -515,18 +562,9 @@ impl<'a> OrdinalDirectory<'a> {
         }
     }
 
-    fn ordinal(&self, edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
-        let Some(prefix) = &self.prefix else {
-            return ordinal(self.vertices, edge, vertex);
-        };
-        let bucket = ((vertex.0 >> prefix.shift) & 255) as usize;
-        let first = prefix.boundaries[bucket];
-        // A missing ID may differ in the supposedly shared high prefix.
-        // Full-width comparisons within the bucket still reject it exactly.
-        self.vertices[first..prefix.boundaries[bucket + 1]]
-            .binary_search(&vertex)
-            .map(|index| first + index)
-            .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
+    fn checked_ordinal(&self, edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
+        self.ordinal(vertex)
+            .ok_or(ProjectionError::MissingEndpoint { edge, vertex })
     }
 }
 
@@ -603,7 +641,7 @@ impl SnapshotGraphView {
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
         sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
-        let mut directory = OrdinalDirectory::new(&vertices);
+        let mut directory = SortedVertexLookup::new(&vertices);
         for (index, pair) in vertices.windows(2).enumerate() {
             poll(&mut checkpoint)?;
             if pair[0] == pair[1] {
@@ -621,8 +659,8 @@ impl SnapshotGraphView {
         }
         for edge in &mut work {
             poll(&mut checkpoint)?;
-            directory.ordinal(edge.eid, edge.source)?;
-            directory.ordinal(edge.eid, edge.target)?;
+            directory.checked_ordinal(edge.eid, edge.source)?;
+            directory.checked_ordinal(edge.eid, edge.target)?;
             if edge.source == edge.target {
                 match spec.self_loops {
                     SelfLoopPolicy::Reject => {
@@ -780,7 +818,7 @@ impl SnapshotGraphView {
                 source += 1;
             }
             let s = source;
-            let t = directory.ordinal(edge.eid, edge.target)?;
+            let t = directory.checked_ordinal(edge.eid, edge.target)?;
             out_nodes[index] = t;
             out_counts[s] = add(out_counts[s], 1)?;
             if directed {

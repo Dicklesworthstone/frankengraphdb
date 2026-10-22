@@ -25,6 +25,7 @@ use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
     FnxReadError, FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
     ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    SortedVertexLookup,
 };
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
@@ -552,6 +553,7 @@ fn build(
             options.source_limits.max_staging_bytes,
         )
     })?;
+    let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
     let mut edges = Vec::new();
     source::visit_edges_with_properties(snapshot, binding.as_of, &mut scan, |entry, props, _| {
         if !scope.allows_relation(entry.relation)
@@ -559,8 +561,8 @@ fn build(
                 .selection
                 .relation
                 .is_some_and(|relation| relation != entry.relation)
-            || vertices.binary_search(&entry.src).is_err()
-            || vertices.binary_search(&entry.dst).is_err()
+            || !selected_vertices.contains(entry.src)
+            || !selected_vertices.contains(entry.dst)
         {
             return Ok(());
         }

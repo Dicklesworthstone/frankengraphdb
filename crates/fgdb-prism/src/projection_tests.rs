@@ -77,16 +77,21 @@ fn prefix_directory_matches_full_width_search_across_thresholds_and_empty_bucket
         for shape in 0..5 {
             let mut vertices = directory_vertices(n, shape);
             vertices.sort_unstable();
-            let mut directory = OrdinalDirectory::new(&vertices);
+            let mut directory = SortedVertexLookup::new(&vertices);
             for index in 1..n {
                 directory.include(index);
             }
             directory.finish();
+            let borrowed = SortedVertexLookup::from_sorted(&vertices);
             assert_eq!(directory.prefix.is_some(), n >= INDEXED_DIRECTORY_MIN);
+            assert_eq!(borrowed.prefix.is_some(), directory.prefix.is_some());
             if let Some(prefix) = &directory.prefix {
                 assert_eq!(prefix.boundaries[0], 0);
                 assert_eq!(prefix.boundaries[256], n);
                 assert!(prefix.boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
+                let borrowed_prefix = borrowed.prefix.as_ref().unwrap();
+                assert_eq!(borrowed_prefix.shift, prefix.shift);
+                assert_eq!(borrowed_prefix.boundaries, prefix.boundaries);
             }
             let mut queries = vec![VId(0), VId(u128::MAX)];
             for &vertex in &vertices {
@@ -102,10 +107,56 @@ fn prefix_directory_matches_full_width_search_across_thresholds_and_empty_bucket
             for query in queries {
                 let eid = EId((1u128 << 127) | 31);
                 assert_eq!(
-                    directory.ordinal(eid, query),
+                    directory.checked_ordinal(eid, query),
                     ordinal(&vertices, eid, query),
                     "n={n} shape={shape} query={query:?}"
                 );
+                assert_eq!(
+                    borrowed.ordinal(query),
+                    vertices.binary_search(&query).ok(),
+                    "borrowed n={n} shape={shape} query={query:?}"
+                );
+                assert_eq!(
+                    borrowed.contains(query),
+                    vertices.binary_search(&query).is_ok()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sorted_vertex_lookup_accepts_duplicates_and_rejects_absent_full_width_ids() {
+    for n in [0, 1, 2, 31, 511, 512, 513, 1024] {
+        for shape in 0..5 {
+            let population = directory_vertices(n, shape);
+            let mut vertices: Vec<_> = (0..n).map(|index| population[index / 3]).collect();
+            vertices.sort_unstable();
+            for same_identity in [false, true] {
+                if same_identity {
+                    vertices.fill(VId(0xfedc_ba98_7654_3210_1234_5678_9abc_def0));
+                }
+                let lookup = SortedVertexLookup::from_sorted(&vertices);
+                let mut queries = vec![VId(0), VId(u128::MAX)];
+                for &vertex in &vertices {
+                    queries.extend([
+                        vertex,
+                        VId(vertex.0.wrapping_sub(1)),
+                        VId(vertex.0.wrapping_add(1)),
+                    ]);
+                }
+                if let Some(first) = vertices.first() {
+                    queries.extend((0..128).map(|bit| VId(first.0 ^ (1u128 << bit))));
+                }
+                for query in queries {
+                    let expected = vertices.binary_search(&query).is_ok();
+                    assert_eq!(lookup.contains(query), expected);
+                    let actual = lookup.ordinal(query);
+                    assert_eq!(actual.is_some(), expected);
+                    if let Some(index) = actual {
+                        assert_eq!(vertices[index], query);
+                    }
+                }
             }
         }
     }

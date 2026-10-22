@@ -17,7 +17,7 @@ use fgdb_prism::{
     FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
     ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
     SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
-    SnapshotGraphView,
+    SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
@@ -966,6 +966,7 @@ impl EmbeddedReadView {
                 &mut control,
                 &mut staging_bytes,
             )?;
+            let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
             let mut edges = Vec::new();
             source::visit_edges_with_properties(
                 &self.snapshot,
@@ -976,8 +977,8 @@ impl EmbeddedReadView {
                     if selection
                         .relation
                         .is_some_and(|relation| relation != entry.relation)
-                        || vertices.binary_search(&entry.src).is_err()
-                        || vertices.binary_search(&entry.dst).is_err()
+                        || !selected_vertices.contains(entry.src)
+                        || !selected_vertices.contains(entry.dst)
                     {
                         return Ok(());
                     }
