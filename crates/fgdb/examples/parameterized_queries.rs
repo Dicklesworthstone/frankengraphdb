@@ -86,10 +86,14 @@ pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let policy = GqlQueryPolicy::new(2, 1, 1_000, 1_000);
         let governed = db.execute_prepared_query_governed(&query_cx, &older, policy)?;
         assert_eq!(governed.value, limited.value);
-        assert_eq!(governed.rows.snapshot_records, 2);
+        // The keyed endpoint b (age >= 40) roots the edge source, not the
+        // label-only a:Person (8de21125): only the one edge into VId(3) is
+        // admitted, one snapshot record. Rooting at every Person admitted both
+        // edges of VId(1).
+        assert_eq!(governed.rows.snapshot_records, 1);
         // Since commit e104b59a, governed queries dispatch through the FreeJoin
-        // physical engine (charging index/trie work: 64 work units, 18 scratch entries),
-        // whereas the ungoverned `limited` API stays on the legacy evaluator (21, 6).
+        // physical engine (charging index/trie work: 45 work units, 11 scratch entries),
+        // whereas the ungoverned `limited` API stays on the legacy evaluator (12, 4).
         // The bound `b.age >= $min_age` seeks the age index (fgdb-2n2a2), and
         // each candidate's seek charges every identity-tree node it visits
         // (fddf91d0, fgdb-bwxsi). The seek grows with log V and its candidates,
@@ -97,15 +101,15 @@ pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(
             governed.evaluator,
             fgdb_gql::GlaExecutionStats {
-                work_units: 64,
-                scratch_entries: 18,
+                work_units: 45,
+                scratch_entries: 11,
             }
         );
         assert_eq!(
             limited.stats,
             fgdb_gql::GlaExecutionStats {
-                work_units: 21,
-                scratch_entries: 6,
+                work_units: 12,
+                scratch_entries: 4,
             }
         );
         println!(

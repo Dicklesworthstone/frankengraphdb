@@ -260,9 +260,11 @@ mod tests {
         for row in [
             vec![GraphValue::Vertex(VId(1))],
             vec![int(1), int(2)],
+            // A stored List is a valid property cell (fgdb-k3nub); a List
+            // holding a graph element is not a stored value at any depth.
             vec![
                 GraphValue::Vertex(VId(1)),
-                GraphValue::List(vec![int(2)].into()),
+                GraphValue::List(vec![GraphValue::Vertex(VId(2))].into()),
             ],
         ] {
             assert!(matches!(
