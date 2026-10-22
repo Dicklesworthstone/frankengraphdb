@@ -188,15 +188,17 @@ fn failed_rebuild_preserves_healthy_policy_and_corrected_data_can_repair_numeric
             Some(CanonicalScalar::ucs_basic_text("not-a-number").unwrap()),
         );
         db.write(&commit, invalid).await.unwrap();
+        // The group circuit (a6ab58b7) names the numeric input it rejected:
+        // column 1 is the score.
         assert!(matches!(
             db.rebuild_standing_query(&cx, &handle, wide()),
             Err(StandingQueryError::Maintenance(
-                StandingQueryFailure::NonIntegerSum
+                StandingQueryFailure::NonIntegerAggregate { column: 1 }
             ))
         ));
         assert!(
             matches!(db.standing_query(&cx, &handle), Err(StandingQueryError::Unavailable {
-            frontier, reason: StandingQueryFailure::NonIntegerSum,
+            frontier, reason: StandingQueryFailure::NonIntegerAggregate { column: 1 },
         }) if frontier == healthy)
         );
         let mut correction = WriteBatch::new(R);
