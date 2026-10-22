@@ -166,7 +166,7 @@ fn oracle(txn: &WriteTxn, db: &Database<MemVfs>) -> Vec<(Vec<VId>, u64)> {
 
 fn check_overlay(txn: &WriteTxn, db: &Database<MemVfs>, cx: &QueryCx) -> Vec<(Vec<VId>, u64)> {
     let expected = oracle(txn, db);
-    for (query, (rows, records)) in queries().iter().zip(&expected) {
+    for (at, (query, (rows, records))) in queries().iter().zip(&expected).enumerate() {
         assert_eq!(txn.execute_prepared_query(db, query).unwrap(), *rows);
         let budgeted = txn
             .execute_prepared_query_budgeted(
@@ -176,7 +176,27 @@ fn check_overlay(txn: &WriteTxn, db: &Database<MemVfs>, cx: &QueryCx) -> Vec<(Ve
             )
             .unwrap();
         assert_eq!(budgeted.value, *rows);
-        assert_eq!(budgeted.stats.snapshot_records, *records);
+        // `records` is the broad bound: every vertex, or every edge. A query
+        // with an `n>=3` predicate (0, 1 and 6) may seek the property index
+        // and admit only its candidates; a scan without one admits exactly
+        // the bound. Either way the charge is exact: one record less refuses.
+        let charged = budgeted.stats.snapshot_records;
+        if matches!(at, 0 | 1 | 6) {
+            assert!(charged <= *records, "query {at}: {charged} > {records}");
+        } else {
+            assert_eq!(charged, *records, "query {at}");
+        }
+        if let Some(short) = charged.checked_sub(1) {
+            assert!(
+                txn.execute_prepared_query_budgeted(
+                    db,
+                    query,
+                    GqlExecutionBudget::new(short, rows.len() as u64),
+                )
+                .is_err(),
+                "query {at}: {short} records must refuse"
+            );
+        }
         assert_eq!(
             txn.execute_prepared_query_limited(
                 db,
@@ -191,7 +211,7 @@ fn check_overlay(txn: &WriteTxn, db: &Database<MemVfs>, cx: &QueryCx) -> Vec<(Ve
             .execute_prepared_query_governed(db, cx, query, generous())
             .unwrap();
         assert_eq!(run.value, *rows);
-        assert_eq!(run.rows.snapshot_records, *records);
+        assert_eq!(run.rows.snapshot_records, charged, "query {at}");
         assert_eq!(run.rows.result_rows, rows.len() as u64);
         let artifact = txn
             .execute_prepared_query_overlay_artifact(db, query)
