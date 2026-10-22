@@ -133,6 +133,27 @@ offset) without echoing its value.
   per record.
 - `-` reads stdin, and at most one input may use it.
 
+### Chained statements
+
+A chained write such as
+`MERGE (a:Person {id: $src}) MERGE (b:Person {id: $dst}) MERGE (a)-[:KNOWS]->(b)`
+is not a write script, so it is not bound once per record. It runs as one
+chain over every record: `UNWIND` over the records, with each `$name` read
+from the current record. As in openCypher's `LOAD CSV`, each clause applies
+to every record before the next clause runs. A chain of MERGEs (with at most
+ON CREATE clauses, and at most one final CREATE) stages its creations once,
+so its cost grows linearly with the record count. The equivalent per-record
+script (`MERGE (a ...); MERGE (b ...); MATCH (a ...), (b ...) MERGE
+(a)-[:KNOWS]->(b)`) re-reads everything staged before each record, and in a
+2026-10-22 measurement it refused after about 190 records.
+
+- Statements the script grammar accepts keep the per-record path above.
+- Parameter types come from `--types-file`; an undeclared parameter is int64.
+  `--types-file` must not declare a parameter the statement does not read.
+- The import stays one transaction. This path reads the whole CSV and its
+  records into memory before binding.
+- The text must not already use the names `__csv_rows` or `__csv_row`.
+
 ### Floating-point, decimal and binary CSV columns
 
 `float` parses finite binary64 values, including decimal exponents; nonfinite

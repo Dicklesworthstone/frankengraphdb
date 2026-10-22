@@ -753,3 +753,74 @@ fn an_undeclared_text_column_names_the_types_file_fix_and_imports_once_declared(
     assert!(imported.contains("\"records\":2"), "{imported}");
     fixture.count(2);
 }
+
+/// A chained MERGE is not a write script, so import-csv runs it as ONE chain
+/// over every record (each clause over all records, creations staged once,
+/// fgdb-0s2pq) instead of refusing it. Repeated pairs merge once, 2000
+/// records commit (a per-record script refused at about 190), and a
+/// --types-file name the statement does not read refuses before any write.
+#[test]
+fn a_chained_merge_imports_as_one_chain_over_every_record() {
+    let fixture = Fixture::new();
+    let statement =
+        "MERGE (a:Person {id: $src}) MERGE (b:Person {id: $dst}) MERGE (a)-[:KNOWS]->(b)";
+    let import = |extra: &[&str]| {
+        fixture
+            .command(true, "import-csv")
+            .args(["--relation", "KNOWS=1"])
+            .args(extra)
+            .arg(statement)
+            .output()
+            .unwrap()
+    };
+    fixture.file("pairs.csv", "src,dst\n1,2\n2,3\n1,2\n3,1\n");
+    let imported = success(import(&["--input", "pairs.csv"]));
+    assert!(
+        imported.contains("\"kind\":\"imported_csv\"")
+            && imported.contains("\"records\":4,\"statements\":1"),
+        "{imported}"
+    );
+    fixture.count(3);
+    let edges = success(
+        fixture
+            .command(true, "query")
+            .args(["--relation", "KNOWS=1"])
+            .arg("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id AS s, b.id AS d")
+            .output()
+            .unwrap(),
+    );
+    let mut rows: Vec<&str> = edges
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect();
+    rows.sort_unstable();
+    let pair = |s: u8, d: u8| {
+        format!(
+            "\"cells\":[{{\"type\":\"int\",\"value\":\"{s}\"}},{{\"type\":\"int\",\"value\":\"{d}\"}}]"
+        )
+    };
+    assert_eq!(rows.len(), 3, "{edges}");
+    for (s, d) in [(1, 2), (2, 3), (3, 1)] {
+        assert!(rows.iter().any(|row| row.contains(&pair(s, d))), "{edges}");
+    }
+    let mut many = String::from("src,dst\n");
+    for i in 0..2000 {
+        many.push_str(&format!(
+            "{},{}\n",
+            1000 + i % 1000,
+            1000 + (i * 7 + 1) % 1000
+        ));
+    }
+    fixture.file("many.csv", &many);
+    let imported = success(import(&["--input", "many.csv"]));
+    assert!(imported.contains("\"records\":2000"), "{imported}");
+    fixture.count(1003);
+    fixture.file("unused.types", "int64\tsrc\nint64\tother\n");
+    fixture.file("one.csv", "src,dst\n7,8\n");
+    refusal(
+        &import(&["--input", "one.csv", "--types-file", "unused.types"]),
+        3,
+        "query",
+    );
+    fixture.count(1003);
+}

@@ -254,3 +254,43 @@ fn new_scalar_values_keep_the_source_bound_and_cancellation_contract() {
     assert_eq!(error.code, 5);
     assert_eq!(error.message, "cancelled");
 }
+
+#[test]
+fn record_chain_text_reads_parameters_from_the_current_record_only_outside_literals() {
+    let (text, names) = record_chain_text(
+        "MERGE (a:N {id: $s, note: '$s \\'quoted\\' $d'}) // $ignored\n\
+         MERGE (b:`$N` {id: $d}) /* $also */ MERGE (a)-[:E {w: $s}]->(b)",
+    )
+    .unwrap();
+    assert_eq!(
+        text,
+        "UNWIND $__csv_rows AS __csv_row MERGE (a:N {id: __csv_row.s, note: '$s \\'quoted\\' $d'}) \
+         // $ignored\nMERGE (b:`$N` {id: __csv_row.d}) /* $also */ \
+         MERGE (a)-[:E {w: __csv_row.s}]->(b)"
+    );
+    // First appearance order, each name once.
+    assert_eq!(names, ["s", "d"]);
+    // UTF-8 outside the rewritten parameters is copied unchanged.
+    let (text, names) =
+        record_chain_text("MERGE (a:N {name: '雪', id: $雪id})").unwrap_or_default();
+    assert!(
+        text.is_empty() && names.is_empty(),
+        "a non-ASCII name is not a parameter here"
+    );
+    let (text, _) = record_chain_text("MERGE (a:N {name: '雪', id: $id})").unwrap();
+    assert!(
+        text.ends_with("MERGE (a:N {name: '雪', id: __csv_row.id})"),
+        "{text}"
+    );
+}
+
+#[test]
+fn record_chain_text_refuses_a_name_clash_or_a_bare_dollar() {
+    for statement in [
+        "MERGE (__csv_row:N {id: $s}) MERGE (b:N {id: $d})",
+        "MERGE (a:N {id: $}) MERGE (b:N {id: $d})",
+        "MERGE (a:N {id: $1}) MERGE (b:N {id: $d})",
+    ] {
+        assert!(record_chain_text(statement).is_none(), "{statement}");
+    }
+}

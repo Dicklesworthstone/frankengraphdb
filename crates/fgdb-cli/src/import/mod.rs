@@ -9,17 +9,29 @@
 //! shared execution allowance. A source, binding or execution failure before
 //! commit publishes nothing. This module never commits/retries individual
 //! records or infers a catalog. Commit-outcome errors retain their native form.
+//!
+//! A chained write that the script grammar refuses (`MERGE ... MERGE ...`)
+//! runs instead as one chain over every record ([`record_chain_text`]). That
+//! path reads the complete CSV and its row list into memory before binding.
 
 use super::{Failure, Options, emit, execution_failure};
 use asupersync::fs::Vfs;
 use fgdb::Database;
-use fgdb_gql::csv_parameters::{CsvParameterErrorKind, CsvParameterLimits};
+use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::csv_parameters::{
+    CsvParameterError, CsvParameterErrorKind, CsvParameterLimits, decode_csv_parameters,
+};
 use fgdb_gql::csv_write_script::GraphWriteScriptCsvStreamError;
+use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
+    GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy,
+    GraphWriteProgramPolicy, PreparedGraphWriteChain, PreparedGraphWriteChainText,
     PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalarKind, EmbeddedTxnCompletion, PurposeContexts, QueryCx};
+use fgdb_types::{
+    CanonicalScalar, CanonicalScalarKind, EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts,
+    QueryCx,
+};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -92,12 +104,23 @@ impl CsvOptions {
 
 /// A fully bound program, admitted before any storage is opened.
 pub(super) struct PreparedImport {
-    program: PreparedGraphWriteProgram,
+    body: Body,
     records: usize,
     changes: u64,
     /// One execution allowance for the entire bound CSV, never per record.
     allowance: GqlQueryPolicy,
 }
+
+/// What the CSV became: a write script bound once per record, or one chain
+/// over every record (see [`record_chain_text`]).
+enum Body {
+    Script(PreparedGraphWriteProgram),
+    Chain(Box<PreparedGraphWriteChain>),
+}
+
+/// The list parameter and row variable a chain import reads its records from.
+const ROWS: &str = "__csv_rows";
+const ROW: &str = "__csv_row";
 
 /// Read every input and bind every CSV record. Nothing here touches the
 /// database; a refusal leaves it byte-identical.
@@ -132,23 +155,226 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
     cx.checkpoint().map_err(Failure::io)?;
     // Reject the statement before opening/consuming its CSV source. This is
     // especially important for stdin and potentially blocking pipe sources.
-    let script = PreparedGraphWriteScript::prepare_with_parameter_types(
+    let changes = csv_options.max_changes.unwrap_or(DEFAULT_CHANGES);
+    let script = match PreparedGraphWriteScript::prepare_with_parameter_types(
         &statement,
         options.coordinate,
         &declarations,
         |kind, name| options.resolve(kind, name),
-    )
-    .map_err(Failure::query)?;
+    ) {
+        Ok(script) => script,
+        Err(error) => {
+            // Only a statement the script grammar refuses runs as a chain, so
+            // every script import keeps its per-record semantics.
+            let Some((template, names)) = prepare_chain(options, &statement, &declarations)? else {
+                return Err(Failure::query(error));
+            };
+            let input = read_bounded(cx, input, limit, "--input")?;
+            let (chain, records) = bind_chain(&template, &names, &declarations, &input, limit)?;
+            return Ok(PreparedImport {
+                body: Body::Chain(Box::new(chain)),
+                records,
+                changes,
+                allowance: options.budget.policy(),
+            });
+        }
+    };
     let mut source = open_bounded(input, limit, "--input")?;
     let (program, records) = bind_source(&script, &mut source, limit, || {
         cx.checkpoint().map_err(Failure::io)
     })?;
     Ok(PreparedImport {
-        program,
+        body: Body::Script(program),
         records,
-        changes: csv_options.max_changes.unwrap_or(DEFAULT_CHANGES),
+        changes,
         allowance: options.budget.policy(),
     })
+}
+
+/// A chained write (`MERGE (a:N {id: $s}) MERGE (b:N {id: $d})
+/// MERGE (a)-[:E]->(b)`) is not a write script, so it cannot bind once per
+/// record. It runs instead as ONE chain over all records:
+/// `UNWIND $__csv_rows AS __csv_row` ahead of it, and every `$name` read as
+/// `__csv_row.name`. A chain applies each clause to every record before the
+/// next, as openCypher's LOAD CSV does. A chain of creating MERGEs stages its
+/// creations once (fgdb-0s2pq), where a per-record script re-reads its staged
+/// prefix for every record (fgdb-irqu2).
+///
+/// Parameters are found by skipping string literals, backtick names and
+/// comments. None when the text already names the row variable, or has a
+/// `$` that does not start a parameter name.
+fn record_chain_text(statement: &str) -> Option<(String, Vec<String>)> {
+    if statement.contains(ROW) {
+        return None;
+    }
+    let bytes = statement.as_bytes();
+    let mut text = format!("UNWIND ${ROWS} AS {ROW} ");
+    let mut names: Vec<String> = Vec::new();
+    // Every boundary below is an ASCII byte, so each slice is whole UTF-8.
+    let (mut at, mut copied) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != quote {
+                    at += if bytes[at] == b'\\' && quote != b'`' {
+                        2
+                    } else {
+                        1
+                    };
+                }
+                at = (at + 1).min(bytes.len());
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2;
+                while at < bytes.len() && !(bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/')) {
+                    at += 1;
+                }
+                at = (at + 2).min(bytes.len());
+            }
+            b'$' => {
+                let start = at + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                if end == start || bytes[start].is_ascii_digit() {
+                    return None;
+                }
+                let name = &statement[start..end];
+                text.push_str(&statement[copied..at]);
+                text.push_str(ROW);
+                text.push('.');
+                text.push_str(name);
+                if !names.iter().any(|known| known == name) {
+                    names.push(name.to_owned());
+                }
+                (at, copied) = (end, end);
+            }
+            _ => at += 1,
+        }
+    }
+    text.push_str(&statement[copied..]);
+    Some((text, names))
+}
+
+/// Prepare a chained statement over the CSV records before the CSV is read.
+/// None when the text is not a chain (the script refusal then stands).
+fn prepare_chain(
+    options: &Options,
+    statement: &str,
+    declarations: &[(&str, GqlParameterType)],
+) -> Result<Option<(PreparedGraphWriteChainText, Vec<String>)>, Failure> {
+    if !PreparedGraphWriteChainText::is_chain(statement).unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some((text, names)) = record_chain_text(statement) else {
+        return Ok(None);
+    };
+    if let Some((name, _)) = declarations
+        .iter()
+        .find(|(name, _)| !names.iter().any(|used| used == name))
+    {
+        return Err(Failure::query(format!(
+            "--types-file declares {name}, which the statement does not read"
+        )));
+    }
+    let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+        &text,
+        options.coordinate,
+        &[(ROWS, GqlParameterType::List)],
+        options,
+    )
+    .map_err(|error| {
+        Failure::query(format!(
+            "as one chain over the CSV records, `{text}`: {error}"
+        ))
+    })?;
+    Ok(Some((template, names)))
+}
+
+/// Decode every record with the statement's parameter types (declared, or
+/// int64 as a script's stored-property operand is) and bind them as the
+/// chain's row list. The CSV framing, value decoder and limits are the
+/// script import's own.
+fn bind_chain(
+    template: &PreparedGraphWriteChainText,
+    names: &[String],
+    declarations: &[(&str, GqlParameterType)],
+    input: &str,
+    limit: u64,
+) -> Result<(PreparedGraphWriteChain, usize), Failure> {
+    let schema: Vec<GqlParameterSpec> = names
+        .iter()
+        .map(|name| GqlParameterSpec {
+            name: name.clone(),
+            parameter_type: declarations
+                .iter()
+                .find(|(declared, _)| declared == name)
+                .map_or(GqlParameterType::Int64, |(_, kind)| *kind),
+            requires_positive: false,
+            occurrences: 1,
+        })
+        .collect();
+    let limits = CsvParameterLimits {
+        max_input_bytes: usize::try_from(limit)
+            .map_err(|_| Failure::usage("--max-input-bytes exceeds this platform"))?,
+        max_records: CsvParameterLimits::HARD.max_records,
+        ..CsvParameterLimits::default()
+    };
+    let records = decode_csv_parameters(input, &schema, limits).map_err(csv_failure)?;
+    let mut rows = Vec::with_capacity(records.len());
+    for record in &records {
+        let mut fields = Vec::with_capacity(names.len());
+        for name in names {
+            let value = match record.get(name) {
+                Some(GqlParameterValue::Int64(value)) => {
+                    GraphValue::Scalar(CanonicalScalar::Int(value))
+                }
+                Some(GqlParameterValue::UInt64(value)) => GraphValue::Scalar(CanonicalScalar::Int(
+                    i64::try_from(value).map_err(|_| {
+                        Failure::query(format!("CSV column {name} exceeds int64 in a chain import"))
+                    })?,
+                )),
+                Some(GqlParameterValue::Scalar(value)) => GraphValue::Scalar(value.value().clone()),
+                Some(GqlParameterValue::List(value)) => value.value().clone(),
+                Some(GqlParameterValue::Map(value)) => value.value().clone(),
+                None => GraphValue::Scalar(CanonicalScalar::Null),
+            };
+            fields.push((name.as_str().into(), value));
+        }
+        // Names are distinct, so the map refuses only a value it cannot hold.
+        rows.push(
+            GraphValue::map(fields)
+                .ok_or_else(|| Failure::query("a CSV record does not form a row map"))?,
+        );
+    }
+    let arguments = GqlParameters::new()
+        .with_list(ROWS, rows)
+        .map_err(Failure::query)?;
+    let chain = template
+        .bind_parameters(&arguments)
+        .map_err(Failure::query)?;
+    Ok((chain, records.len()))
+}
+
+fn csv_failure(source: CsvParameterError) -> Failure {
+    if matches!(source.kind, CsvParameterErrorKind::InvalidValue) {
+        Failure::query(format!(
+            "{source} (the field does not decode as its parameter's type; an undeclared \
+             parameter is int64, so declare text or bool columns with --types-file, e.g. \
+             text<TAB>name)"
+        ))
+    } else {
+        Failure::query(source)
+    }
 }
 
 /// The native adapter owns CSV framing, cumulative source/parameter admission,
@@ -217,17 +443,25 @@ pub(super) async fn run<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let changes = prepared.changes;
-    let statements = prepared.program.statements().len();
-    let (_, completion) = db
-        .execute_graph_write_program_returning_autocommit_engine_governed(
-            &contexts.txn(),
-            &contexts.query(),
-            &contexts.commit(),
-            &prepared.program,
-            GraphWriteProgramPolicy::new(prepared.allowance, changes, changes, changes),
-        )
-        .await
-        .map_err(execution_failure)?;
+    let (statements, completion) = match &prepared.body {
+        Body::Script(program) => {
+            let (_, completion) = db
+                .execute_graph_write_program_returning_autocommit_engine_governed(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    program,
+                    GraphWriteProgramPolicy::new(prepared.allowance, changes, changes, changes),
+                )
+                .await
+                .map_err(execution_failure)?;
+            (program.statements().len(), completion)
+        }
+        Body::Chain(chain) => (
+            1,
+            run_chain(db, contexts, chain, prepared.allowance, changes).await?,
+        ),
+    };
     let seq = match completion {
         EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq.0,
         EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq.0,
@@ -246,6 +480,40 @@ pub(super) async fn run<V: Vfs + Clone>(
             "imported {records} record(s), {statements} statement(s) at seq {seq}"
         )
         .map_err(Failure::io)
+    }
+}
+
+/// One transaction for the whole chain; a failure before commit publishes
+/// nothing, and a commit-outcome error keeps its native meaning.
+async fn run_chain<V: Vfs + Clone>(
+    db: &mut Database<V>,
+    contexts: &PurposeContexts,
+    chain: &PreparedGraphWriteChain,
+    allowance: GqlQueryPolicy,
+    changes: u64,
+) -> Result<EmbeddedTxnCompletion, Failure> {
+    let mut transaction = db.begin(&contexts.txn()).map_err(execution_failure)?;
+    if let Err(error) = transaction.execute_graph_write_chain_engine_governed(
+        db,
+        &contexts.query(),
+        chain,
+        GraphInsertPolicy::new(allowance, changes, changes),
+    ) {
+        transaction.abort();
+        return Err(execution_failure(error));
+    }
+    match transaction.finish(db, &contexts.commit()).await {
+        Ok(completion) => Ok(completion),
+        Err(error) => Err(match transaction.state() {
+            EmbeddedTxnState::CommitOutcomeUnknown { .. } => Failure::io(format!(
+                "transaction outcome unknown; reopen and resolve before retrying: {error}"
+            )),
+            EmbeddedTxnState::CommittedNeedsRecovery { commit_seq } => Failure::io(format!(
+                "transaction committed at seq {}; recovery required: {error}",
+                commit_seq.0
+            )),
+            _ => execution_failure(error),
+        }),
     }
 }
 
