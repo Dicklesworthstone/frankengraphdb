@@ -341,7 +341,25 @@ fn sealed_compaction_snapshot_preserves_history_pins_and_subsequent_writes() {
             vec![(property, CanonicalScalar::Int(12).into())]
         );
         let after_write = history(&db);
-        assert_eq!(&after_write[..before.len()], before.as_slice());
+        // A row reports its statement's lifetime: the fourth write restates
+        // the versions it retires (retired_at None -> Some(fourth_seq)). Each
+        // earlier cut must still see the same state, so compare lifetimes as
+        // seen from that cut.
+        assert_ne!(&after_write[..before.len()], before.as_slice());
+        let mut restated = after_write[..before.len()].to_vec();
+        let mut original = before.clone();
+        for states in [&mut restated, &mut original] {
+            for (sequence, (vertices, edges, _, _)) in states.iter_mut().enumerate() {
+                let seen = |retired: &CommitSeq| retired.0 <= sequence as u64;
+                for row in vertices.iter_mut() {
+                    row.retired_at = row.retired_at.filter(seen);
+                }
+                for edge in edges.iter_mut() {
+                    edge.entry.retired_at = edge.entry.retired_at.filter(seen);
+                }
+            }
+        }
+        assert_eq!(restated, original);
         db.compact(&cx).await.unwrap();
         assert_eq!(history(&db), after_write);
         assert_eq!(pinned.vertices().unwrap(), before[3].0);
