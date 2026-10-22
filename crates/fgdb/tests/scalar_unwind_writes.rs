@@ -2297,10 +2297,14 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
 #[test]
 fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
     // fgdb-0s2pq: the frozen chain holds its creations until its last step.
-    // Its graph must equal running each row's three MERGEs as ordinary
-    // statements: repeated keys and pairs, committed vertices and edges, a
-    // vertex staged earlier in the same transaction, a float key equal to an
-    // integer one, a self-loop, and a MERGE whose labels are a superset.
+    // Its graph must equal the unfrozen chain's, which applies each clause to
+    // every row before the next: each MERGE run over all rows, clause by
+    // clause, as ordinary statements. Covered: repeated keys and pairs,
+    // committed vertices and edges, a vertex staged earlier in the same
+    // transaction, a float key equal to an integer one, a self-loop, and a
+    // MERGE whose labels are a superset. Clause order is observable: rows
+    // (6, 7.0) then (7, 6) create the integer 7 in the first clause, which
+    // the second clause's 7.0 then finds.
     let ((), report) = run_async_under_lab(0x7363_2a41, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -2434,24 +2438,27 @@ fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
             let mut reference = open().await;
             let mut transaction = reference.begin(&txcx).unwrap();
             seeded(&mut transaction, &mut reference);
-            for (s, d) in &rows {
-                let params = GqlParameters::new()
-                    .with_scalar("s", scalar(s))
-                    .unwrap()
-                    .with_scalar("d", scalar(d))
-                    .unwrap();
-                for statement in [
-                    format!("MERGE (a{labels} {{id: $s}})"),
-                    "MERGE (b:Entity {id: $d})".to_owned(),
-                    format!(
-                        "MATCH (a{labels} {{id: $s}}), (b:Entity {{id: $d}}) MERGE (a)-[:R]->(b)"
-                    ),
-                ] {
+            let statements = [
+                format!("MERGE (a{labels} {{id: $s}})"),
+                "MERGE (b:Entity {id: $d})".to_owned(),
+                format!("MATCH (a{labels} {{id: $s}}), (b:Entity {{id: $d}}) MERGE (a)-[:R]->(b)"),
+            ];
+            for (clause, statement) in statements.iter().enumerate() {
+                for (s, d) in &rows {
+                    // Each statement binds only what it reads: a declared but
+                    // unused parameter is refused.
+                    let mut params = GqlParameters::new();
+                    if clause != 1 {
+                        params = params.with_scalar("s", scalar(s)).unwrap();
+                    }
+                    if clause != 0 {
+                        params = params.with_scalar("d", scalar(d)).unwrap();
+                    }
                     transaction
                         .query_write(
                             &mut reference,
                             &cx,
-                            &statement,
+                            statement,
                             &params,
                             symbols,
                             R,

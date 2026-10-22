@@ -218,12 +218,20 @@ fn frozen_merge_predicates(
             GlaOperator::Select {
                 predicates: more, ..
             } => predicates.extend(more.iter().cloned()),
+            // The value projection's tail (`prepare_values`): ordering and an
+            // unbounded window change no match. A real page would cap the
+            // matches, so it has no frozen form.
             GlaOperator::VertexIdentity { .. }
             | GlaOperator::Project { .. }
             | GlaOperator::ProjectBindings { .. }
             | GlaOperator::ProjectValues { .. }
             | GlaOperator::Distinct
-            | GlaOperator::OrderByVertexId => {}
+            | GlaOperator::OrderByVertexId
+            | GlaOperator::OrderByValues
+            | GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } => {}
             _ => return None,
         }
     }

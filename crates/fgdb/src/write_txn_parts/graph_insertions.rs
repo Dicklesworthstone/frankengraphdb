@@ -1447,4 +1447,34 @@ mod chain_materialization_tests {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+
+    #[test]
+    fn action_free_merge_chains_freeze_and_others_stay_sequential() {
+        // fgdb-0s2pq: the frozen chain must actually engage for the
+        // node-and-relationship ingest idiom. Its equivalence law alone
+        // passes even when nothing freezes, as it did while the value
+        // projection's ordering and window kept every MERGE ineligible.
+        let chain = |text: &str| {
+            PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .expect(text)
+                .bind_parameters(&GqlParameters::new())
+                .expect(text)
+        };
+        for text in [
+            "UNWIND [{s: 1, d: 2}, {s: 2, d: 1}] AS row MERGE (a:Target {p: row.s}) \
+             MERGE (b:Target {p: row.d}) MERGE (a)-[:R]->(b)",
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k})",
+        ] {
+            assert!(frozen_chain(&chain(text)), "{text}");
+        }
+        for text in [
+            // ON/SET clauses read and write the targets row by row.
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) ON CREATE SET a.q = 1 \
+             MERGE (b:Source {p: k})",
+            // RETURN reads the staged state.
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k}) RETURN a, b",
+        ] {
+            assert!(!frozen_chain(&chain(text)), "{text}");
+        }
+    }
 }
