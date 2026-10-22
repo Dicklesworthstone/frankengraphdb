@@ -679,12 +679,16 @@ fn late_invalid_unwind_row_refuses_before_any_identity_or_staged_effect() {
         let cases = [
             (
                 "UNWIND $values AS x CREATE (:Person {p:x})",
+                // A List is a storable property since fgdb-k3nub; a Map is
+                // still refused (stored maps await their language ruling).
                 vec![
                     GraphValue::Scalar(CanonicalScalar::Int(4)),
                     GraphValue::Scalar(CanonicalScalar::Int(2)),
-                    GraphValue::List(
-                        vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice(),
-                    ),
+                    GraphValue::map(vec![(
+                        "x".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    )])
+                    .unwrap(),
                 ],
             ),
             (

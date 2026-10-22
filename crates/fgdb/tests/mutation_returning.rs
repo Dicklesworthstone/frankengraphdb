@@ -658,15 +658,33 @@ fn a_failing_merge_return_rolls_the_upsert_back() {
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(db.frontier().unwrap(), before);
         assert!(read(&db, cx, "MATCH (n:Item {p: 7}) RETURN n.p AS p").is_empty());
-        for text in [
-            "MERGE (n:Item {p: 1}) RETURN labels(n)",
-            "MERGE (n:Item {p: 1}) RETURN m.p",
-        ] {
-            assert!(
-                PreparedGraphVertexUpsertQueryText::prepare(text, R, symbols).is_err(),
-                "{text}"
-            );
-        }
+        // An unbound variable still refuses at preparation. labels(n) is a
+        // supported RETURN function now, as after SET and REMOVE above: it
+        // returns the chosen vertex's labels instead of refusing.
+        assert!(
+            PreparedGraphVertexUpsertQueryText::prepare(
+                "MERGE (n:Item {p: 1}) RETURN m.p",
+                R,
+                symbols
+            )
+            .is_err()
+        );
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, matched, labels) = txn
+            .execute_graph_vertex_upsert_query_engine_governed(
+                &mut db,
+                cx,
+                &merge("MERGE (n:Item {p: 1}) RETURN labels(n) AS l"),
+                upsert_policy(),
+            )
+            .expect("MERGE ... RETURN labels(n)");
+        assert_eq!(matched, GraphVertexMergeOutcome::Matched(VId(1)));
+        let item = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("Item").unwrap());
+        assert_eq!(
+            labels.value,
+            rows(vec![vec![GraphValue::List(vec![item].into_boxed_slice())]])
+        );
+        txn.finish(&mut db, commit).await.unwrap();
     });
 }
 

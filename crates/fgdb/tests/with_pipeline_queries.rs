@@ -640,27 +640,35 @@ mod transaction_element_properties {
                 ],
                 vec![],
             ];
+            // A statement declares only the parameters it reads: an unused
+            // declaration is refused at preparation.
+            let none = GqlParameters::new();
             let check = |db: &Database<MemVfs>, expected: &[Vec<Vec<QueryValue>>]| {
                 for (index, text) in statements.iter().enumerate() {
-                    let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                    let params = if text.contains("$elements") {
+                        &params
+                    } else {
+                        &none
+                    };
+                    let prepared = PreparedNativeRead::prepare(text, params, symbols).unwrap();
                     assert_eq!(
-                        rows(prepared.execute(db, &cx, &params, policy()).unwrap()),
+                        rows(prepared.execute(db, &cx, params, policy()).unwrap()),
                         expected[index],
                         "current {text}"
                     );
                     assert_eq!(
-                        rows(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+                        rows(pinned.query(&cx, text, params, symbols, policy()).unwrap()),
                         old[index],
                         "saved {text}"
                     );
                     let native = match prepared {
                         PreparedNativeRead::Aggregate(template) => {
-                            Some(template.bind_parameters(&params).unwrap())
+                            Some(template.bind_parameters(params).unwrap())
                         }
                         PreparedNativeRead::PipelineAggregate(template)
                             if !template.requires_relational_input() =>
                         {
-                            Some(template.bind_parameters(&params).unwrap())
+                            Some(template.bind_parameters(params).unwrap())
                         }
                         _ => None,
                     };
@@ -1007,8 +1015,14 @@ mod transaction_element_properties {
                 ),
                 (EDGE_OUTPUT, vec![Some(70), Some(900)]),
             ] {
+                // Only OUTPUT reads $elements; an unused declaration refuses.
+                let bound = if text.contains("$elements") {
+                    params.clone()
+                } else {
+                    GqlParameters::new()
+                };
                 assert_eq!(
-                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    rows(read(&txn, &db, &c.query(), text, &bound)),
                     vec![vec![scalar_list(&values)]],
                     "staged aggregate output {text}"
                 );
@@ -1093,8 +1107,14 @@ mod transaction_element_properties {
                 ),
                 (EDGE_OUTPUT, vec![Some(7), Some(8)]),
             ] {
+                // Only OUTPUT reads $elements; an unused declaration refuses.
+                let bound = if text.contains("$elements") {
+                    params.clone()
+                } else {
+                    GqlParameters::new()
+                };
                 assert_eq!(
-                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    rows(read(&txn, &db, &c.query(), text, &bound)),
                     vec![vec![scalar_list(&values)]],
                     "rolled-back aggregate output at saved basis {text}"
                 );

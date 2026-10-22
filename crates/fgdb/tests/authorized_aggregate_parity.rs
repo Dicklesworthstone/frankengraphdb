@@ -1016,6 +1016,13 @@ mod aggregate_output_properties {
                     Some(GraphCountSource::Vertices),
                 ),
             ] {
+                // A text declares only the parameters it reads: an unused
+                // declaration is refused at preparation.
+                let args = if text.contains("$elements") {
+                    args.clone()
+                } else {
+                    GqlParameters::new()
+                };
                 let query = prepare_output(text, &args).bind_parameters(&args).unwrap();
                 assert_eq!(query.count_summary_source(), summary, "{text}");
                 let expected = db
