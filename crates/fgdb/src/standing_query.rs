@@ -62,6 +62,11 @@ pub struct StandingQueryStats {
     /// Parallel edges count separately; a self-loop counts once.
     /// Recursive/triangle views report work/scratch and delta_rows only;
     /// their affected_vertices/affected_edges counters remain zero.
+    ///
+    /// A relational circuit node (set, join, projection, filter, reduction,
+    /// window, group, replay) reads no graph. Both affected counters are then
+    /// the sum over its distinct graph sources that maintained the same tick,
+    /// each counted once however many paths reach it.
     pub affected_edges: u64,
     pub work_units: u64,
     pub scratch_entries: u64,
@@ -312,6 +317,46 @@ pub(crate) enum StandingQuery {
 }
 
 impl StandingQuery {
+    /// The earlier registry entries a relational node reads. Graph engines
+    /// read the commit delta itself and return None.
+    fn relational_inputs(&self) -> Option<Vec<usize>> {
+        match self {
+            Self::Set(query) => Some(query.inputs.to_vec()),
+            Self::Join(query) => Some(query.inputs.to_vec()),
+            Self::Projection(query) => Some(vec![query.input]),
+            Self::Filter(query) => Some(vec![query.input]),
+            Self::Reduction(query) => Some(vec![query.input]),
+            Self::Window(query) => Some(vec![query.input]),
+            Self::Group(query) => Some(vec![query.input]),
+            Self::Replay(query) => Some(vec![query.source.index]),
+            _ => None,
+        }
+    }
+
+    fn maintained(&self) -> Option<(CommitSeq, &StandingQueryStats)> {
+        Some(match self {
+            Self::Released => return None,
+            Self::Aggregate(query)
+            | Self::ProjectedAggregate { source: query, .. }
+            | Self::Rows { source: query, .. } => (query.frontier, &query.stats),
+            Self::Reachability(query) => (query.frontier, &query.stats),
+            Self::Closure(query) => (query.frontier, &query.stats),
+            Self::Triangles(query) => (query.frontier, &query.stats),
+            Self::TriangleCounts(query) => (query.frontier, &query.stats),
+            Self::Components(query) => (query.frontier, &query.stats),
+            Self::CoreNumbers(query) => (query.frontier, &query.stats),
+            Self::Set(query) => (query.frontier, &query.stats),
+            Self::Join(query) => (query.frontier, &query.stats),
+            Self::Projection(query) => (query.frontier, &query.stats),
+            Self::Filter(query) => (query.frontier, &query.stats),
+            Self::Reduction(query) => (query.frontier, &query.stats),
+            Self::Window(query) => (query.frontier, &query.stats),
+            Self::Group(query) => (query.frontier, &query.stats),
+            Self::Constant(query) => (query.frontier, &query.stats),
+            Self::Replay(query) => (query.frontier, &query.stats),
+        })
+    }
+
     fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
         match self {
             Self::Released => (
@@ -908,6 +953,37 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
             StandingQuery::Replay(query) => query.maintain(batch, prior, &mut meter),
         };
+        // A relational node reads no graph: its affected identities are the
+        // ones its graph sources re-derived in this tick.
+        if result.is_ok()
+            && let Some(inputs) = query.relational_inputs()
+        {
+            let (vertices, edges) = source_affected(prior, inputs, batch.commit_seq());
+            meter.stats.affected_vertices = vertices;
+            meter.stats.affected_edges = edges;
+        }
         query.record(batch.commit_seq(), result, meter.stats);
     }
+}
+
+/// The affected counters of the distinct graph sources under `inputs` that
+/// maintained tick `at`. Every input names an earlier entry, so the walk ends.
+fn source_affected(queries: &[StandingQuery], inputs: Vec<usize>, at: CommitSeq) -> (u64, u64) {
+    let mut pending = inputs;
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut vertices, mut edges) = (0_u64, 0_u64);
+    while let Some(index) = pending.pop() {
+        let Some(query) = queries.get(index).filter(|_| seen.insert(index)) else {
+            continue;
+        };
+        if let Some(inputs) = query.relational_inputs() {
+            pending.extend(inputs);
+        } else if let Some((frontier, stats)) = query.maintained()
+            && frontier == at
+        {
+            vertices = vertices.saturating_add(stats.affected_vertices);
+            edges = edges.saturating_add(stats.affected_edges);
+        }
+    }
+    (vertices, edges)
 }
