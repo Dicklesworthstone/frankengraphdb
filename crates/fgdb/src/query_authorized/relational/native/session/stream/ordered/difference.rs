@@ -147,7 +147,12 @@ where
         Ok(Box::pin(async move {
             let mut cursor = execution.await?;
             while let Some((weight, row)) = cursor.next_change().await? {
-                cursor.checked_callback(visitor(weight, row)).await?;
+                // Invoke the visitor inside the guarded poll, not before it: a
+                // visitor that unwinds while building its future must leave the
+                // pin guard armed, so dropping the cursor closes the session.
+                cursor
+                    .checked_callback(async { visitor(weight, row).await })
+                    .await?;
             }
             Ok(cursor.columns().to_vec())
         }))
