@@ -245,6 +245,7 @@ fn case_has_list(
                 let result = ahead.next()?;
                 if list_operand_at(result, &ahead, row)?
                     || dynamic_column_at(result, &ahead, row)?
+                    || element_column_at(result, &ahead, row)?
                     || composite_result_at(result, &ahead)?
                 {
                     return Ok(true);
@@ -289,6 +290,43 @@ fn dynamic_column_at(
             .iter()
             .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::Any)
     }))
+}
+
+/// Whether `token` (with `lexer` just past it) is a bare row column holding a
+/// graph element: a vertex, edge or path, or a list of vertices or edges. The
+/// scalar program cannot carry one, so a CASE that returns it (`CASE WHEN c
+/// THEN a ELSE b END`) is read in the value language. A property read or a
+/// call on the name stays with the scalar program.
+fn element_column_at(
+    token: Token<'_>,
+    lexer: &Lexer<'_>,
+    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+) -> Result<bool, GraphPatternTextError> {
+    let TokenKind::Word(word) = token.kind else {
+        return Ok(false);
+    };
+    if matches!(
+        lexer.clone().next()?.kind,
+        TokenKind::Punct(b'(' | b'.' | b'[')
+    ) {
+        return Ok(false);
+    }
+    Ok(row.is_some_and(|schema| {
+        schema
+            .iter()
+            .any(|(name, kind)| name.text == word && is_element_column(*kind))
+    }))
+}
+
+fn is_element_column(kind: GraphSetColumnType) -> bool {
+    matches!(
+        kind,
+        GraphSetColumnType::Vertex
+            | GraphSetColumnType::Edge
+            | GraphSetColumnType::Path
+            | GraphSetColumnType::Vertices
+            | GraphSetColumnType::Edges
+    )
 }
 
 /// The column domain of one graph input: a property is a stored value, a bare
@@ -1908,6 +1946,24 @@ impl<'a> Parser<'a> {
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
+        self.row_bare_column(row, |kind| kind == GraphSetColumnType::List)
+    }
+
+    /// A bare row column holding a graph element (element_column_at).
+    pub(super) fn row_element_column(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        self.row_bare_column(row, is_element_column)
+    }
+
+    /// The visible row column named by the current word when no property
+    /// read, call or subscript follows it and its type is accepted.
+    fn row_bare_column(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        accepts: impl Fn(GraphSetColumnType) -> bool,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
         let (Some(schema), TokenKind::Word(word)) = (row, self.current.kind) else {
             return Ok(None);
         };
@@ -1922,7 +1978,7 @@ impl<'a> Parser<'a> {
         let visible = self.visible_width(schema);
         Ok(schema[..visible]
             .iter()
-            .position(|(name, kind)| name.text == word && *kind == GraphSetColumnType::List))
+            .position(|(name, kind)| name.text == word && accepts(*kind)))
     }
 
     /// Whether a list-typed row column (row_list_column) is compared here
@@ -2015,6 +2071,7 @@ impl<'a> Parser<'a> {
         // (case_has_list routes its CASE here): the value reader reads it.
         if !list_operand_at(self.current, &self.lexer, row)?
             && !composite_result_at(self.current, &self.lexer)?
+            && !element_column_at(self.current, &self.lexer, row)?
         {
             return Ok(false);
         }

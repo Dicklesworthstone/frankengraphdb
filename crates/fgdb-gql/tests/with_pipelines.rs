@@ -681,6 +681,36 @@ fn plus_concatenates_list_columns_after_with() {
     );
 }
 
+/// A CASE after WITH may return a graph element: the arm's vertex itself,
+/// not a scalar, in both the searched and the simple form. A missing ELSE is
+/// NULL. Each row is compared with a plain `RETURN x, n` over the same rows.
+#[test]
+fn case_returns_the_vertex_a_with_row_carries() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1, 2, 3].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    let plain = rows("MATCH (n) WITH n, n.p AS x RETURN x, n ORDER BY x");
+    assert_eq!(ints(&plain, 0), [1, 2, 3].map(Some));
+    for text in [
+        "MATCH (n) WITH n, n.p AS x RETURN x, CASE WHEN x > 1 THEN n END AS chosen ORDER BY x",
+        "MATCH (n) WITH n, n.p AS x RETURN x, CASE WHEN x > 1 THEN n ELSE null END AS chosen ORDER BY x",
+        "MATCH (n) WITH n, n.p AS x RETURN x, CASE x WHEN 1 THEN null ELSE n END AS chosen ORDER BY x",
+    ] {
+        let chosen = rows(text);
+        assert_eq!(ints(&chosen, 0), [1, 2, 3].map(Some), "{text}");
+        assert!(chosen[0].get(1).unwrap().is_null(), "{text}");
+        for (row, expected) in chosen.iter().zip(&plain).skip(1) {
+            let value = row.get(1).unwrap();
+            assert!(matches!(value, GraphValue::Vertex(_)), "{text}: {value:?}");
+            assert_eq!(value, expected.get(1).unwrap(), "{text}");
+        }
+    }
+}
+
 /// openCypher rand() (fgdb-13l85): a float in [0, 1), drawn as a pure
 /// function of its call site, the row's ordinal in its projection stage and
 /// the comprehension elements in force. Rows, sites and elements draw

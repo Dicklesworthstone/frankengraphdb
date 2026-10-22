@@ -467,6 +467,11 @@ impl<'a> Parser<'a> {
             self.advance()?;
             return Ok(ReadValueTemplate::Column(column));
         }
+        // A vertex, edge or path column is a whole CASE result too.
+        if let Some(column) = self.row_element_column(row)? {
+            self.advance()?;
+            return Ok(ReadValueTemplate::Column(column));
+        }
         if self.list_case_follows(row)? {
             return self.list_case_value(columns, nesting, at);
         }
