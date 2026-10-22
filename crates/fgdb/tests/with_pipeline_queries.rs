@@ -1384,3 +1384,60 @@ mod transaction_element_properties {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 }
+
+/// An UNWIND-rooted RETURN may order by an item that combines aggregate
+/// results (`COUNT(*) + 1`, `size(COLLECT(x))`). It ranks the computed output
+/// tuple and pages it, exactly as aggregating in a WITH and computing in the
+/// RETURN does. Both forms run through the native read dispatcher.
+#[test]
+fn unwound_aggregates_order_by_combined_items() {
+    use fgdb::{QueryResult, QueryValue};
+    let ((), report) = run_async_under_lab(0x71f0_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let db = Database::open_memory(&commit, keys()).await.unwrap();
+        // A combined item keeps the exact aggregate domain (Integer) while a
+        // WITH-staged count reads back as Int64; compare the numbers.
+        let number = |cell: &QueryValue| -> Option<i128> {
+            match cell {
+                QueryValue::Count(count) => Some(i128::from(*count)),
+                QueryValue::Integer(value) => Some(*value),
+                QueryValue::Value(value) => match value.as_scalar() {
+                    Some(CanonicalScalar::Int(value)) => Some(i128::from(*value)),
+                    Some(CanonicalScalar::Null) => None,
+                    _ => panic!("an integer or NULL"),
+                },
+                QueryValue::Average(_) => panic!("no averages here"),
+            }
+        };
+        let rows = |text: &str| -> Vec<Vec<Option<i128>>> {
+            match db.query(&cx, text, &GqlParameters::new(), symbols, policy()) {
+                Ok(QueryResult::Rows { rows, .. }) => rows
+                    .iter()
+                    .map(|row| row.iter().map(number).collect())
+                    .collect(),
+                other => panic!("{text}: {other:?}"),
+            }
+        };
+        for (combined, staged) in [
+            (
+                "UNWIND [1, 2, 2, 3, 3, 3] AS e RETURN e, COUNT(*) + 1 AS c ORDER BY c DESC, e",
+                "UNWIND [1, 2, 2, 3, 3, 3] AS e WITH e, COUNT(*) AS n RETURN e, n + 1 AS c ORDER BY c DESC, e",
+            ),
+            (
+                "UNWIND [1, 2, 2, 3, 3, 3] AS e RETURN e, -COUNT(*) AS c ORDER BY c LIMIT 2",
+                "UNWIND [1, 2, 2, 3, 3, 3] AS e WITH e, COUNT(*) AS n RETURN e, -n AS c ORDER BY c LIMIT 2",
+            ),
+            (
+                "UNWIND [1, 2, 2] AS e RETURN size(COLLECT(e)) AS k ORDER BY k",
+                "UNWIND [1, 2, 2] AS e WITH COLLECT(e) AS items RETURN size(items) AS k ORDER BY k",
+            ),
+        ] {
+            let ranked = rows(combined);
+            assert_eq!(ranked, rows(staged), "{combined}");
+            assert!(!ranked.is_empty(), "{combined}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

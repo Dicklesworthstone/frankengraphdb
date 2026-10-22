@@ -89,6 +89,16 @@ impl PreparedGraphSetAggregate {
         Ok(self)
     }
 
+    /// Rank by the computed output tuple, as
+    /// PreparedGraphAggregate::with_projected_order_by does.
+    pub fn with_projected_order_by(
+        mut self,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_projected_order_by(ordering)?;
+        Ok(self)
+    }
+
     /// Keys and arguments address the completed relation's column schema.
     /// The usual nine exact aggregate functions and group-result clauses are
     /// unchanged; counts/sums/averages never narrow into CanonicalScalar.

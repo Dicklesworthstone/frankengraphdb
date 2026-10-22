@@ -7,9 +7,10 @@ mod inputs;
 mod rows;
 
 use super::*;
+use crate::algebra::GraphValueOrder;
 use crate::pipeline_aggregate_text::{
     GraphPipelineAggregateTextError as Error, GraphPipelineAggregateTextErrorKind as Kind,
-    PipelineSummary, PreparedGraphPipelineAggregateText,
+    PipelineOutput, PipelineSummary, PreparedGraphPipelineAggregateText,
 };
 use crate::set_text::{ReadFilterOp, ReadPageNumber};
 use crate::{
@@ -643,6 +644,7 @@ impl PreparedGraphPipelineAggregateText {
             let _ = bind_having(&having, &having_columns, None, having_at)?;
         }
         let mut ordering = Vec::new();
+        let mut projected_ordering = Vec::new();
         let mut offset = ReadPageNumber::Literal(0);
         let mut count = None;
         if let Some(ReadStageTemplate::Page {
@@ -652,12 +654,25 @@ impl PreparedGraphPipelineAggregateText {
             ..
         }) = parser.row_page(&output_schema)?
         {
+            // A combined item ranks the computed output tuple, as the MATCH
+            // aggregate does: every key then addresses that tuple, whose
+            // rows hold one value per written item. Other queries keep their
+            // evaluation-column ordering and exact transcripts.
+            let projected = order.iter().any(|key| computed_at.contains(&key.column));
             for key in order {
-                if computed_at.contains(&key.column) {
-                    return Err(expected(
-                        aggregate_at,
-                        "ORDER BY a key or a single aggregate, not a combined aggregate expression",
-                    ));
+                if projected {
+                    if projected_ordering
+                        .iter()
+                        .any(|prior: &GraphValueOrder| prior.column == key.column)
+                    {
+                        return Err(expected(aggregate_at, "unique ORDER BY column"));
+                    }
+                    projected_ordering.push(GraphValueOrder {
+                        column: key.column,
+                        descending: key.descending,
+                        nulls_first: key.nulls_first,
+                    });
+                    continue;
                 }
                 let column = having_columns[key.column];
                 if ordering
@@ -710,7 +725,12 @@ impl PreparedGraphPipelineAggregateText {
             count,
             aggregate_at,
             having_at,
-            output,
+            output: output.map(|items| {
+                Box::new(PipelineOutput {
+                    items,
+                    ordering: projected_ordering,
+                })
+            }),
         })
     }
 
@@ -744,8 +764,13 @@ impl PreparedGraphPipelineAggregateText {
         .map_err(|kind| build(self.aggregate_at, kind))?;
         if let Some(output) = &self.output {
             query = query
-                .with_output_projection(bind_output(output, &values)?)
+                .with_output_projection(bind_output(&output.items, &values)?)
                 .map_err(|kind| build(self.aggregate_at, kind))?;
+            if !output.ordering.is_empty() {
+                query = query
+                    .with_projected_order_by(&output.ordering)
+                    .map_err(|kind| build(self.aggregate_at, kind))?;
+            }
         }
         if !self.having.is_empty() {
             let expression = bind_having(

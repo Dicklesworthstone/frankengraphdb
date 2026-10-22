@@ -1073,9 +1073,9 @@ fn a_leading_unwind_joined_by_match_feeds_an_aggregate_return() {
 /// fgdb-4avot: a terminal RETURN after WITH may combine aggregate results with
 /// arithmetic and grouping keys (`SUM(x) * 10 / COUNT(x)`, `x + COUNT(*)`), as
 /// the plain MATCH ... RETURN facade already does. The rows equal that
-/// facade's answer over the same data. A non-aggregate operand that is not a
-/// grouping key refuses, as in openCypher, and v1 refuses ORDER BY or HAVING
-/// over a combined item.
+/// facade's answer over the same data. ORDER BY may rank a combined item, as
+/// in that facade. A non-aggregate operand that is not a grouping key refuses,
+/// as in openCypher, and HAVING over a combined item still refuses.
 #[test]
 fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
     let graph = |text: &str| {
@@ -1117,10 +1117,29 @@ fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
         assert_eq!(combined, reference, "{with}");
         assert!(!combined.is_empty(), "{with}");
     }
+    // ORDER BY over a combined item ranks the computed output tuple, as the
+    // graph facade does. The rows are compared in delivered order.
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d ORDER BY d DESC, x",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS d ORDER BY d DESC, x",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, x + COUNT(*) AS s ORDER BY s LIMIT 2",
+            "MATCH (n) RETURN n.p AS x, n.p + COUNT(*) AS s ORDER BY s LIMIT 2",
+        ),
+    ] {
+        let ordered = run(&pipeline(with), &input, wide()).value;
+        assert_eq!(ordered, run(&graph(plain), &input, wide()).value, "{with}");
+        assert_eq!(
+            ordered.len(),
+            if with.contains("LIMIT") { 2 } else { 3 },
+            "{with}"
+        );
+    }
     for text in [
         // y is not a grouping key of the RETURN.
         "MATCH (n) WITH n.p AS x, n.p AS y RETURN x, y + COUNT(*) AS z",
-        "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d ORDER BY d",
         "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d HAVING x > 1",
     ] {
         assert!(

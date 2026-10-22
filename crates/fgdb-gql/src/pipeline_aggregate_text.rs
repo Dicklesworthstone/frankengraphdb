@@ -138,11 +138,22 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) count: Option<ReadPageNumber>,
     pub(crate) aggregate_at: usize,
     pub(crate) having_at: usize,
-    /// When a RETURN item combines aggregate results (`sum(v) * 10 /
-    /// count(v)`, fgdb-4avot): every item, in written order, over the
-    /// evaluation row of all keys then all summaries. Output rows then carry
-    /// these values only, and the slots address them in order.
-    pub(crate) output: Option<Vec<crate::set_text::ReadProjectionTemplate>>,
+    /// Present when a RETURN item combines aggregate results (fgdb-4avot).
+    pub(crate) output: Option<Box<PipelineOutput>>,
+}
+
+/// A RETURN with an item that combines aggregate results (`sum(v) * 10 /
+/// count(v)`, fgdb-4avot).
+#[derive(Clone)]
+pub(crate) struct PipelineOutput {
+    /// Every item, in written order, over the evaluation row of all keys then
+    /// all summaries. Output rows carry these values only, and the slots
+    /// address them in order.
+    pub(crate) items: Vec<crate::set_text::ReadProjectionTemplate>,
+    /// ORDER BY over a combined item ranks this computed tuple: each key is
+    /// a written item's position (with_projected_order_by), and the
+    /// evaluation `ordering` is then empty. Otherwise this is empty.
+    pub(crate) ordering: Vec<crate::algebra::GraphValueOrder>,
 }
 impl core::fmt::Debug for PreparedGraphPipelineAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -262,7 +273,16 @@ impl PreparedGraphPipelineAggregateText {
         // without one keeps its exact bytes.
         if let Some(output) = &self.output {
             bytes.extend_from_slice(b"fgdb:pipeline-aggregate-output:v1\0");
-            crate::set_text::append_projection_transcript(&mut bytes, output);
+            crate::set_text::append_projection_transcript(&mut bytes, &output.items);
+            if !output.ordering.is_empty() {
+                bytes.extend_from_slice(b"fgdb:pipeline-aggregate-projected-order:v1\0");
+                ordinal(&mut bytes, output.ordering.len());
+                for order in &output.ordering {
+                    ordinal(&mut bytes, order.column);
+                    bytes.push(u8::from(order.descending));
+                    bytes.push(u8::from(order.nulls_first));
+                }
+            }
         }
         bytes
     }
@@ -339,7 +359,12 @@ impl PreparedGraphPipelineAggregateText {
         if !self.having.is_empty() {
             operators.push("SelectHaving");
         }
-        if !self.ordering.is_empty() {
+        if !self.ordering.is_empty()
+            || self
+                .output
+                .as_ref()
+                .is_some_and(|output| !output.ordering.is_empty())
+        {
             operators.push("OrderByAggregate");
         }
         if self.output_distinct {
