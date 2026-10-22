@@ -1058,7 +1058,8 @@ mod tests {
             (hash.finalize(), workspace, output.witness.edges_scanned)
         }
 
-        let mut fixtures: Vec<(String, usize, Vec<(usize, usize)>)> = Vec::new();
+        type DirectedFixture = (String, usize, Vec<(usize, usize)>);
+        let mut fixtures: Vec<DirectedFixture> = Vec::new();
         let n = 4096;
         fixtures.push((
             "hub_with_neighbor_cycle".to_owned(),
