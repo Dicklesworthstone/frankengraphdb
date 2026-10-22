@@ -1295,10 +1295,14 @@ fn keyed_second_endpoint_uses_typed_adjacency_on_live_historical_and_pinned_read
         let basis = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
         let bounded = GqlQueryPolicy::new(16, 16, 10_000, 10_000);
+        // The bound-edge source admits one snapshot record per edge it reaches
+        // from the indexed endpoint (vertex reads are not records): the one
+        // incoming or outgoing edge of VId(256), or both for undirected. The
+        // label-only control below must admit far more and refuses at 16.
         for (direction, expected, records) in [
-            (GlaDirection::Forward, vec![VId(255)], 3),
-            (GlaDirection::Reverse, vec![VId(257)], 3),
-            (GlaDirection::Undirected, vec![VId(255), VId(257)], 5),
+            (GlaDirection::Forward, vec![VId(255)], 1),
+            (GlaDirection::Reverse, vec![VId(257)], 1),
+            (GlaDirection::Undirected, vec![VId(255), VId(257)], 2),
         ] {
             let pattern = indexed_second_endpoint(direction, true);
             assert!(matches!(
