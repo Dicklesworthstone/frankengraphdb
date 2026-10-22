@@ -582,8 +582,12 @@ fn authorized_native_expressions_mask_hidden_payloads_and_preserve_original_writ
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// openCypher MERGE binds every match (TCK Merge5 [3]: two parallel
+/// relationships give `count(r) = 2`), so `SET e.w = e.w + 1` updates both
+/// edges and allocates nothing. Each matched edge is one SET action: a
+/// one-action budget refuses before any write, two actions succeed.
 #[test]
-fn parallel_relationship_ambiguity_refuses_before_computed_actions_or_allocation() {
+fn a_merge_over_parallel_relationships_updates_each_without_allocating() {
     let ((), report) = run_async_under_lab(0xed7e_2007, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -596,38 +600,49 @@ fn parallel_relationship_ambiguity_refuses_before_computed_actions_or_allocation
         batch.add_edge(EId(91), VId(1), VId(2), vec![(W, CanonicalScalar::Int(7))]);
         db.write(&commit, batch).await.unwrap();
         let before = db.frontier().unwrap();
-        let error = db
-            .query_write(
+        let statement = format!("{HEAD} SET e.w=e.w+1");
+        assert!(
+            db.query_write(
                 &txcx,
                 &query,
                 &commit,
-                &format!("{HEAD} SET e.w=e.w+1"),
+                &statement,
                 &GqlParameters::new(),
                 symbols,
                 R,
                 policy(1, 1),
-                |_| -> Result<ElementId, ()> { panic!("ambiguous MERGE cannot allocate") },
+                |_| -> Result<ElementId, ()> { panic!("a matched MERGE cannot allocate") },
             )
             .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
-                GraphWriteProgramError::EdgeUpsert {
-                    source: GqlQueryError::Source(GraphEdgeUpsertError::Merge(_)),
-                    ..
-                }
-            ))
-        ));
+            .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), before);
-        assert_eq!(
-            db.edge(EId(90)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(5).into())]
-        );
-        assert_eq!(
-            db.edge(EId(91)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(7).into())]
-        );
+        for (eid, w) in [(EId(90), 5), (EId(91), 7)] {
+            assert_eq!(
+                db.edge(eid).unwrap().unwrap().props,
+                vec![(W, CanonicalScalar::Int(w).into())]
+            );
+        }
+        db.query_write(
+            &txcx,
+            &query,
+            &commit,
+            &statement,
+            &GqlParameters::new(),
+            symbols,
+            R,
+            policy(2, 2),
+            |_| -> Result<ElementId, ()> { panic!("a matched MERGE cannot allocate") },
+        )
+        .await
+        .unwrap();
+        assert!(db.frontier().unwrap() > before);
+        for (eid, w) in [(EId(90), 6), (EId(91), 8)] {
+            assert_eq!(
+                db.edge(eid).unwrap().unwrap().props,
+                vec![(W, CanonicalScalar::Int(w).into())]
+            );
+        }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
