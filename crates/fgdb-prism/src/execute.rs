@@ -23,8 +23,8 @@ pub struct FnxExecutionLimits {
     /// row bound per undirected edge, plus initialization and conversion.
     /// CDLP includes graph-law checks, histogram initialization, all synchronous
     /// passes and result conversion, including a zero-iteration result.
-    /// Directed clustering bounds each outgoing row's scans by its vertex's
-    /// incoming plus outgoing degree, with neighborhood preparation included.
+    /// Directed clustering includes weak-neighbor preparation and bounds each
+    /// forward intersection by the smaller endpoint's incidence degree.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }

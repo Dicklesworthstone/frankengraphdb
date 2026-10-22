@@ -343,8 +343,8 @@ const SIGNATURES: &[FnxSignature] = &[
         numeric_profile: "fgdb-directed-clustering-exact-count-f64-ratio-v1",
         rng_policy: "none",
         graph_laws: "explicit directed simple projection; unweighted; self-loops ignored; neighbors are the union of predecessors and successors; directed arcs among distinct neighbors / (d*(d-1)); degree below two yields zero",
-        complexity: "O(|V| + |E| + sum_v deg_weak(v) * deg_out(v))",
-        execution_kernel: "fgdb-prism/directed-clustering-neighbor-union-v1",
+        complexity: crate::directed_clustering::COMPLEXITY,
+        execution_kernel: "fgdb-prism/directed-clustering-oriented-multiplicity-v2",
     },
 ];
 
