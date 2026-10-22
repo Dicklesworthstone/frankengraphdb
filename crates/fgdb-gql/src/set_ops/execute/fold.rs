@@ -298,9 +298,23 @@ where
                     return Ok(());
                 }
                 let result = (|| {
-                    let mut rows =
-                        projection::UnwindRows::new(row, value, &mut |event| meter.event(event))
-                            .map_err(|error| projected(error, row_at))?;
+                    // The same host reader as Project, so an UNWIND list can
+                    // read carried elements' properties. It is released before
+                    // the window takes the source back.
+                    let mut read = |element, key| {
+                        source.element_property(element, key).map(|read| {
+                            read.map_err(|error| {
+                                GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                            })
+                        })
+                    };
+                    let mut rows = projection::UnwindRows::new(
+                        row,
+                        value,
+                        &mut |event| meter.event(event),
+                        &mut read,
+                    )
+                    .map_err(|error| projected(error, row_at))?;
                     while let Some((row, next)) =
                         rows.next_with_control(&mut |event| meter.event(event))?
                     {

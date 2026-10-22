@@ -1540,14 +1540,25 @@ pub(super) struct UnwindRows {
 }
 
 impl UnwindRows {
+    /// `read` is the host's element reader, as for a projection: an UNWIND
+    /// list such as `[x IN items | x.p]` reads the properties of carried
+    /// vertices and edges at the source's cut.
     pub(super) fn new<E>(
         row: GraphValueRow,
         value: &GraphSetValue,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        read: &mut ElementRead<'_, E>,
     ) -> Result<Self, ProjectionFailure<E>> {
         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
         let column = row.len();
-        let list = evaluate_value(value, &row, column, control)?;
+        let list = evaluate_value_at(
+            value,
+            &row,
+            column,
+            control,
+            0,
+            &mut Evaluation::new(None, read),
+        )?;
         Self::from_evaluated(row, list, control)
     }
 

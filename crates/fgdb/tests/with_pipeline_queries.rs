@@ -493,6 +493,67 @@ fn path_elements_read_their_properties_at_the_query_cut() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// An UNWIND list that reads carried elements' properties evaluates with the
+/// source's element reader, at the query's own cut, like a RETURN projection.
+/// ORDER BY keeps the resident executor; an unordered LIMIT folds the UNWIND
+/// into its page. Both refused with IncompatibleOperands before.
+#[test]
+fn unwound_comprehensions_read_carried_element_properties() {
+    let ((), report) = run_async_under_lab(0x71f0_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let mut edges = WriteBatch::new(R);
+        edges.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
+        edges.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(8))]);
+        let old = db.write(&commit, edges).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        db.write(&commit, change(2, 20)).await.unwrap();
+        let ints = |rows: Vec<GraphValueRow>| -> Vec<i64> {
+            rows.iter()
+                .map(|row| {
+                    assert_eq!(row.len(), 1);
+                    let Some(CanonicalScalar::Int(value)) = row.get(0).unwrap().as_scalar() else {
+                        panic!("an integer")
+                    };
+                    *value
+                })
+                .collect()
+        };
+        let carried = query(
+            "MATCH (n) WITH [n, n] AS items UNWIND [x IN items | x.p] AS v RETURN v ORDER BY v",
+        );
+        let path = query(
+            "MATCH p = (a)-[:R]->(b)-[:R]->(c) \
+             UNWIND [x IN nodes(p) | x.p] + [e IN relationships(p) | e.p] AS v RETURN v LIMIT 10",
+        );
+        for (prepared, now, before) in [
+            (
+                &carried,
+                vec![0, 0, 1, 1, 3, 3, 20, 20],
+                vec![0, 0, 1, 1, 2, 2, 3, 3],
+            ),
+            (&path, vec![1, 20, 3, 7, 8], vec![1, 2, 3, 7, 8]),
+        ] {
+            let live = db
+                .execute_graph_set_governed(&cx, prepared, policy())
+                .unwrap();
+            assert_eq!(ints(live.value), now);
+            let session = pinned
+                .execute_graph_set_governed(&cx, prepared, policy())
+                .unwrap();
+            assert_eq!(ints(session.value), before);
+            let history = db
+                .execute_graph_set_governed_at(&cx, prepared, old, policy())
+                .unwrap();
+            assert_eq!(ints(history.value), before);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 mod transaction_element_properties {
     use super::*;
     use fgdb::{PreparedNativeRead, QueryError, QueryResult, QueryValue, WriteTxn};

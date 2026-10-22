@@ -412,20 +412,31 @@ where
         ))?,
         SetNode::Unwind { input, value } => {
             let input = run(input, source, meter, operand)?;
+            let mut read = |element, key| {
+                source.element_property(element, key).map(|read| {
+                    read.map_err(|error| {
+                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                    })
+                })
+            };
             let mut output = Vec::new();
             for (row_at, row) in input.into_iter().enumerate() {
-                let mut rows =
-                    projection::UnwindRows::new(row, value, &mut |event| meter.event(event))
-                        .map_err(|error| match error {
-                            projection::ProjectionFailure::Control(error) => error,
-                            projection::ProjectionFailure::Arithmetic { column, error } => {
-                                GqlQueryError::Source(GraphSetExecutionError::Projection {
-                                    row: row_at,
-                                    column,
-                                    error,
-                                })
-                            }
-                        })?;
+                let mut rows = projection::UnwindRows::new(
+                    row,
+                    value,
+                    &mut |event| meter.event(event),
+                    &mut read,
+                )
+                .map_err(|error| match error {
+                    projection::ProjectionFailure::Control(error) => error,
+                    projection::ProjectionFailure::Arithmetic { column, error } => {
+                        GqlQueryError::Source(GraphSetExecutionError::Projection {
+                            row: row_at,
+                            column,
+                            error,
+                        })
+                    }
+                })?;
                 while let Some((row, next)) =
                     rows.next_with_control(&mut |event| meter.event(event))?
                 {

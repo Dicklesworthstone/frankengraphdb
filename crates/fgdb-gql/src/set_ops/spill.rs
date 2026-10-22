@@ -686,20 +686,24 @@ impl SpillSetStage {
                     },
                 )?,
             )),
-            Operation::Unwind { value, .. } => {
-                StageRows::Unwind(projection::UnwindRows::new(row, value, &mut event).map_err(
-                    |error| match error {
-                        projection::ProjectionFailure::Control(error) => error,
-                        projection::ProjectionFailure::Arithmetic { column, error } => {
-                            SpillSetRowError::Native(GraphSetExecutionError::Projection {
-                                row: row_index,
-                                column,
-                                error,
-                            })
-                        }
-                    },
-                )?)
-            }
+            Operation::Unwind { value, .. } => StageRows::Unwind(
+                projection::UnwindRows::new(
+                    row,
+                    value,
+                    &mut event,
+                    &mut projection::no_element_reads,
+                )
+                .map_err(|error| match error {
+                    projection::ProjectionFailure::Control(error) => error,
+                    projection::ProjectionFailure::Arithmetic { column, error } => {
+                        SpillSetRowError::Native(GraphSetExecutionError::Projection {
+                            row: row_index,
+                            column,
+                            error,
+                        })
+                    }
+                })?,
+            ),
         };
         Ok(SpillSetRows { state })
     }
