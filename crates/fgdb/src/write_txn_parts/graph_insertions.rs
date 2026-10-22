@@ -339,16 +339,29 @@ impl WriteTxn {
                                 || cx.checkpoint(),
                             )
                             .map_err(|error| error.map_source(insertion))?;
-                        let (stats, vertices, edges) = workspace
-                            .txn
-                            .stage_graph_insert_batch(
-                                database,
-                                cx,
-                                prepared.relation(),
-                                proposal,
-                                true,
-                            )
-                            .map_err(|error| error.map_source(insertion))?;
+                        let (stats, vertices, edges) = match frozen.as_mut() {
+                            // Held with the chain's MERGE creations and staged
+                            // once after this last step.
+                            Some(frozen) => {
+                                let (stats, batches, vertices, edges) =
+                                    graph_insert_batches(cx, prepared.relation(), proposal, true)
+                                        .map_err(|error| error.map_source(insertion))?;
+                                for batch in batches {
+                                    frozen.defer(batch);
+                                }
+                                (stats, vertices, edges)
+                            }
+                            None => workspace
+                                .txn
+                                .stage_graph_insert_batch(
+                                    database,
+                                    cx,
+                                    prepared.relation(),
+                                    proposal,
+                                    true,
+                                )
+                                .map_err(|error| error.map_source(insertion))?,
+                        };
                         receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
                         (stats, unreturned(&stats))
                     }
@@ -878,53 +891,10 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
     > {
         use fgdb_gql::GqlQueryError;
-        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
+        use fgdb_gql::insertion::GraphInsertError;
         let source = |error| GqlQueryError::Source(GraphInsertError::Source(error));
-        let stats = proposal.stats();
-        // Preserve the preexisting stats-only physical path: identity result
-        // vectors exist only for the explicit returning API.
-        let mut vertices = retain_identities.then(Vec::new);
-        let mut edges = retain_identities.then(Vec::new);
-        // Vertex declarations must lead the shared initializer prefix.
-        // Edge groups retain declaration order within each relation.
-        let mut batch = WriteBatch::new(relation);
-        let mut groups = std::collections::BTreeMap::new();
-        for intent in proposal.into_intents() {
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            match intent {
-                GraphInsertIntent::Vertex {
-                    vertex,
-                    labels,
-                    properties,
-                } => {
-                    if let Some(vertices) = &mut vertices {
-                        vertices.push(vertex);
-                    }
-                    batch.create_vertex_values(vertex, labels, properties);
-                }
-                GraphInsertIntent::Edge {
-                    edge,
-                    relation,
-                    source,
-                    destination,
-                    properties,
-                } => {
-                    if let Some(edges) = &mut edges {
-                        edges.push(edge);
-                    }
-                    groups
-                        .entry(relation)
-                        .or_insert_with(|| WriteBatch::new(relation))
-                        .add_edge_values(edge, source, destination, properties);
-                }
-            }
-        }
-        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
-        if !batch.is_empty() {
-            batches.push(batch);
-        }
-        batches.extend(groups.into_values());
+        let (stats, mut batches, vertices, edges) =
+            graph_insert_batches(cx, relation, proposal, retain_identities)?;
         if let Some(independent) = independent {
             if !batches.is_empty() {
                 self.ensure_database(database).map_err(source)?;
@@ -959,12 +929,81 @@ impl WriteTxn {
                 self.write_atomic(database, batches).map_err(source)?;
             }
         }
-        Ok((
-            stats,
-            vertices.unwrap_or_default(),
-            edges.unwrap_or_default(),
-        ))
+        Ok((stats, vertices, edges))
     }
+}
+
+/// One creation's statistics, write batches and (when retained) created
+/// identities, in declaration order.
+type InsertBatches = (
+    fgdb_gql::insertion::GraphInsertStats,
+    Vec<WriteBatch>,
+    Vec<VId>,
+    Vec<EId>,
+);
+
+/// A creation's write batches in staging order: its vertices lead, then each
+/// relation's edges in declaration order. Staged as they are, or held by a
+/// frozen chain (fgdb-0s2pq) and staged with its other creations.
+fn graph_insert_batches<A>(
+    cx: &fgdb_types::QueryCx,
+    relation: RelationId,
+    proposal: fgdb_gql::insertion::GraphInsertBatch,
+    retain_identities: bool,
+) -> Result<InsertBatches, TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>> {
+    use fgdb_gql::GqlQueryError;
+    use fgdb_gql::insertion::GraphInsertIntent;
+    let stats = proposal.stats();
+    // Preserve the preexisting stats-only physical path: identity result
+    // vectors exist only for the explicit returning API.
+    let mut vertices = retain_identities.then(Vec::new);
+    let mut edges = retain_identities.then(Vec::new);
+    // Vertex declarations must lead the shared initializer prefix.
+    // Edge groups retain declaration order within each relation.
+    let mut batch = WriteBatch::new(relation);
+    let mut groups = std::collections::BTreeMap::new();
+    for intent in proposal.into_intents() {
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        match intent {
+            GraphInsertIntent::Vertex {
+                vertex,
+                labels,
+                properties,
+            } => {
+                if let Some(vertices) = &mut vertices {
+                    vertices.push(vertex);
+                }
+                batch.create_vertex_values(vertex, labels, properties);
+            }
+            GraphInsertIntent::Edge {
+                edge,
+                relation,
+                source,
+                destination,
+                properties,
+            } => {
+                if let Some(edges) = &mut edges {
+                    edges.push(edge);
+                }
+                groups
+                    .entry(relation)
+                    .or_insert_with(|| WriteBatch::new(relation))
+                    .add_edge_values(edge, source, destination, properties);
+            }
+        }
+    }
+    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+    let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches.extend(groups.into_values());
+    Ok((
+        stats,
+        batches,
+        vertices.unwrap_or_default(),
+        edges.unwrap_or_default(),
+    ))
 }
 
 #[cfg(test)]
@@ -1464,6 +1503,9 @@ mod chain_materialization_tests {
             "UNWIND [{s: 1, d: 2}, {s: 2, d: 1}] AS row MERGE (a:Target {p: row.s}) \
              MERGE (b:Target {p: row.d}) MERGE (a)-[:R]->(b)",
             "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k})",
+            // A final CREATE: nothing in the statement reads what it makes.
+            "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k}) \
+             CREATE (a)-[:R]->(b)",
         ] {
             assert!(frozen_chain(&chain(text)), "{text}");
         }
@@ -1473,6 +1515,8 @@ mod chain_materialization_tests {
              MERGE (b:Source {p: k})",
             // RETURN reads the staged state.
             "UNWIND [1, 2] AS k MERGE (a:Target {p: k}) MERGE (b:Source {p: k}) RETURN a, b",
+            // A CREATE a later MERGE could find.
+            "UNWIND [1, 2] AS k CREATE (c:Copy {p: k}) WITH k MERGE (b:Copy {p: k})",
         ] {
             assert!(!frozen_chain(&chain(text)), "{text}");
         }

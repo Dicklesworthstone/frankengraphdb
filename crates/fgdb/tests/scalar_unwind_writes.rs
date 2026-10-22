@@ -2232,64 +2232,78 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
         let cx = contexts.query();
         let commit = contexts.commit();
         let txcx = contexts.txn();
-        let statement = "UNWIND $rows AS row MERGE (a:Entity {id: row.s}) \
-                         MERGE (b:Entity {id: row.d}) MERGE (a)-[:R]->(b)";
-        let mut records = Vec::new();
-        for rows in [1000_i64, 2000, 4000] {
-            // Half as many ids as rows, so endpoints repeat across rows and
-            // each pair (s, d) repeats once the cycle wraps.
-            let ids = rows / 2;
-            let pairs: Vec<(i64, i64)> = (0..rows).map(|i| (i % ids, (i * 7 + 1) % ids)).collect();
-            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let input = args(
-                pairs
-                    .iter()
-                    .map(|(s, d)| object(vec![("s", int(*s)), ("d", int(*d))]))
-                    .collect(),
+        // The relationship clause merges each distinct pair once, or a final
+        // CREATE adds one relationship per row (the frozen chain holds both).
+        for write in ["MERGE", "CREATE"] {
+            let statement = format!(
+                "UNWIND $rows AS row MERGE (a:Entity {{id: row.s}}) \
+                 MERGE (b:Entity {{id: row.d}}) {write} (a)-[:R]->(b)"
             );
-            let issued = AtomicU64::new(0);
-            let mut txn = db.begin(&txcx).unwrap();
-            let result = txn
-                .query_write(
-                    &mut db,
-                    &cx,
-                    statement,
-                    &input,
-                    symbols,
-                    R,
-                    GraphWriteProgramPolicy::new(
-                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
-                        3 * rows as u64,
-                        2 * rows as u64,
-                        rows as u64,
-                    ),
-                    |request| {
-                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
-                        Ok::<_, Infallible>(match request.request {
-                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
-                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
-                        })
-                    },
-                )
-                .unwrap_or_else(|error| panic!("{rows} rows: {error:?}"));
-            let QueryResult::Write { receipt, .. } = result else {
-                panic!("a RETURN-less write returns its receipt")
-            };
-            records.push(receipt.stats().selection.snapshot_records);
-            txn.finish(&mut db, &commit).await.unwrap();
-            // One vertex per id and one relationship per distinct pair.
-            let distinct: std::collections::BTreeSet<(i64, i64)> = pairs.iter().copied().collect();
-            let vertices = db.vertices().unwrap();
-            assert_eq!(vertices.len() as i64, ids, "{rows} rows");
-            assert_eq!(db.edges().unwrap().len(), distinct.len(), "{rows} rows");
-            assert_eq!(
-                issued.load(Ordering::Relaxed),
-                ids as u64 + distinct.len() as u64,
-                "{rows} rows"
-            );
+            let mut records = Vec::new();
+            for rows in [1000_i64, 2000, 4000] {
+                // Half as many ids as rows, so endpoints repeat across rows and
+                // each pair (s, d) repeats once the cycle wraps.
+                let ids = rows / 2;
+                let pairs: Vec<(i64, i64)> =
+                    (0..rows).map(|i| (i % ids, (i * 7 + 1) % ids)).collect();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let input = args(
+                    pairs
+                        .iter()
+                        .map(|(s, d)| object(vec![("s", int(*s)), ("d", int(*d))]))
+                        .collect(),
+                );
+                let issued = AtomicU64::new(0);
+                let mut txn = db.begin(&txcx).unwrap();
+                let result = txn
+                    .query_write(
+                        &mut db,
+                        &cx,
+                        &statement,
+                        &input,
+                        symbols,
+                        R,
+                        GraphWriteProgramPolicy::new(
+                            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                            3 * rows as u64,
+                            2 * rows as u64,
+                            rows as u64,
+                        ),
+                        |request| {
+                            let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                            Ok::<_, Infallible>(match request.request {
+                                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                            })
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("{write}, {rows} rows: {error:?}"));
+                let QueryResult::Write { receipt, .. } = result else {
+                    panic!("a RETURN-less write returns its receipt")
+                };
+                records.push(receipt.stats().selection.snapshot_records);
+                txn.finish(&mut db, &commit).await.unwrap();
+                // One vertex per id; one relationship per distinct pair, or per
+                // row for CREATE.
+                let distinct: std::collections::BTreeSet<(i64, i64)> =
+                    pairs.iter().copied().collect();
+                let edges = if write == "MERGE" {
+                    distinct.len()
+                } else {
+                    pairs.len()
+                };
+                let vertices = db.vertices().unwrap();
+                assert_eq!(vertices.len() as i64, ids, "{write}, {rows} rows");
+                assert_eq!(db.edges().unwrap().len(), edges, "{write}, {rows} rows");
+                assert_eq!(
+                    issued.load(Ordering::Relaxed),
+                    ids as u64 + edges as u64,
+                    "{write}, {rows} rows"
+                );
+            }
+            // Linear, not quadratic, in the batch size.
+            assert!(records[2] <= 5 * records[0], "{write}: {records:?}");
         }
-        // Linear, not quadratic, in the batch size.
-        assert!(records[2] <= 5 * records[0], "{records:?}");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -2298,11 +2312,12 @@ fn chained_unwind_merges_commit_linearly_and_merge_shared_endpoints_once() {
 fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
     // fgdb-0s2pq: the frozen chain holds its creations until its last step.
     // Its graph must equal the unfrozen chain's, which applies each clause to
-    // every row before the next: each MERGE run over all rows, clause by
+    // every row before the next: each clause run over all rows, clause by
     // clause, as ordinary statements. Covered: repeated keys and pairs,
     // committed vertices and edges, a vertex staged earlier in the same
-    // transaction, a float key equal to an integer one, a self-loop, and a
-    // MERGE whose labels are a superset. Clause order is observable: rows
+    // transaction, a float key equal to an integer one, a self-loop, a MERGE
+    // whose labels are a superset, and a final CREATE in place of the
+    // relationship MERGE. Clause order is observable: rows
     // (6, 7.0) then (7, 6) create the integer 7 in the first clause, which
     // the second clause's 7.0 then finds.
     let ((), report) = run_async_under_lab(0x7363_2a41, |root| async move {
@@ -2408,10 +2423,16 @@ fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
             1_000,
             1_000,
         );
-        for labels in [":Entity", ":Entity:Other"] {
+        // The relationship clause merges, or creates as a final CREATE.
+        for (labels, write) in [
+            (":Entity", "MERGE"),
+            (":Entity:Other", "MERGE"),
+            (":Entity", "CREATE"),
+            (":Entity:Other", "CREATE"),
+        ] {
             let chain = format!(
                 "UNWIND $rows AS row MERGE (a{labels} {{id: row.s}}) \
-                 MERGE (b:Entity {{id: row.d}}) MERGE (a)-[:R]->(b)"
+                 MERGE (b:Entity {{id: row.d}}) {write} (a)-[:R]->(b)"
             );
             let mut frozen = open().await;
             let mut transaction = frozen.begin(&txcx).unwrap();
@@ -2441,7 +2462,9 @@ fn a_frozen_merge_chain_writes_the_graph_of_one_statement_per_merge() {
             let statements = [
                 format!("MERGE (a{labels} {{id: $s}})"),
                 "MERGE (b:Entity {id: $d})".to_owned(),
-                format!("MATCH (a{labels} {{id: $s}}), (b:Entity {{id: $d}}) MERGE (a)-[:R]->(b)"),
+                format!(
+                    "MATCH (a{labels} {{id: $s}}), (b:Entity {{id: $d}}) {write} (a)-[:R]->(b)"
+                ),
             ];
             for (clause, statement) in statements.iter().enumerate() {
                 for (s, d) in &rows {

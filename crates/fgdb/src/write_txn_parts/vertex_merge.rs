@@ -156,16 +156,19 @@ impl FrozenCreations {
 
 /// Whether a write chain runs frozen (fgdb-0s2pq): every step is an
 /// action-free vertex MERGE or a relationship MERGE whose selection reads only
-/// the previous step's rows, with at most one relationship MERGE and no
-/// RETURN. Such a chain's effects are pure creations. Each lookup sees the
-/// chain-entry overlay plus the chain's own held vertices, and the
-/// relationship MERGE finds no relationship on a held vertex, so holding
-/// every creation until the end gives the sequential chain's answer.
+/// the previous step's rows, with at most one relationship MERGE, at most a
+/// final CREATE over the previous step's rows, and no RETURN. Such a chain's
+/// effects are pure creations. Each lookup sees the chain-entry overlay plus
+/// the chain's own held vertices, and the relationship MERGE finds no
+/// relationship on a held vertex. Nothing reads what the final CREATE makes.
+/// So holding every creation until the end gives the sequential chain's
+/// answer.
 fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
     use fgdb_gql::GraphWriteChainStep;
     let mut vertex_steps = 0;
     let mut edge_steps = 0;
-    for step in chain.steps() {
+    let last = chain.steps().len().saturating_sub(1);
+    for (at, step) in chain.steps().iter().enumerate() {
         match step {
             GraphWriteChainStep::VertexMerge(merge) => {
                 if merge.actions().is_some() {
@@ -192,6 +195,11 @@ fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
             {
                 edge_steps += 1;
             }
+            GraphWriteChainStep::Insert(insert)
+                if at == last
+                    && insert
+                        .relational_selection()
+                        .is_some_and(|relation| !relation.reads_graph()) => {}
             _ => return false,
         }
     }
