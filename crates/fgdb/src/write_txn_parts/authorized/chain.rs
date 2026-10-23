@@ -20,6 +20,9 @@ use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
+#[path = "chain_merges.rs"]
+mod merges;
+
 type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type Receipt = (
     GraphInsertStats,
@@ -239,7 +242,7 @@ fn finish_mutation_statistics(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Execute a creation and mutation chain under one capability and one completion.
+    /// Execute creation, mutation and relationship MERGE chains under one capability.
     ///
     /// Every graph leaf uses the same masked transaction overlay as an
     /// authorized single insertion. Every original intent passes its ordinary
@@ -259,8 +262,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// counts share one statement limit; projection and deletion proof share the
     /// same native work/scratch allowance. Restricted deletion retains the
     /// capability-only refusal that prevents probing hidden fields or incidence.
-    /// MERGE steps currently refuse during preflight, before opening a transaction
-    /// or allocating an identity.
+    /// Relationship MERGE keeps the native whole-input pair reducer, including
+    /// parallel matches and private continuation rows. Vertex MERGE still refuses
+    /// during preflight, before opening a transaction or allocating an identity.
     /// Native unknown/recovery outcomes and the existing authorized insertion's
     /// durable-identity and security boundaries apply unchanged.
     #[allow(clippy::too_many_arguments)]
@@ -334,6 +338,10 @@ impl<V: Vfs + Clone> Database<V> {
         let mut reads = chain.returns_rows();
         for (step, statement) in chain.steps().iter().enumerate() {
             execution.checkpoint().map_err(source)?;
+            if merges::preflight(statement, scope)? {
+                reads = true;
+                continue;
+            }
             let mutation = match statement {
                 GraphWriteChainStep::Mutation(mutation) => Some(mutation.as_ref()),
                 GraphWriteChainStep::MutationQuery(query) => Some(query.mutation()),
@@ -405,161 +413,183 @@ impl<V: Vfs + Clone> Database<V> {
                         mutation_effects,
                         at == last && chain.returns_rows(),
                     );
-                    let (proposal, mut returning) = query_cx.with_restriction(|| {
-                        let controls = RefCell::new(&mut execution);
-                        let database = RefCell::new(&mut *self);
-                        let mut graph = ChainSource {
-                            transaction: workspace.transaction(),
-                            database: &database,
-                            cx: query_cx,
+                    let (stats, returning, effects) = if matches!(
+                        statement,
+                        GraphWriteChainStep::EdgeMerge(_)
+                            | GraphWriteChainStep::EdgeMergeRows { .. }
+                            | GraphWriteChainStep::EdgeMergeQuery(_)
+                    ) {
+                        let (stats, returning) = merges::execute(
+                            workspace.transaction(),
+                            self,
+                            query_cx,
+                            statement,
+                            allowance,
+                            rows.take(),
                             scope,
-                            execution: &controls,
-                        };
-                        let allocate =
-                            |request| database.borrow_mut().allocate_identity(query_cx, request);
-                        let checkpoint = || {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            controls.borrow_mut().checkpoint()
-                        };
-                        match statement {
-                            GraphWriteChainStep::Query(query) => {
-                                let proposal = query
-                                    .execute_governed_over(
-                                        rows.take(),
-                                        allowance,
-                                        graph,
-                                        allocate,
-                                        checkpoint,
-                                    )
-                                    .map_err(|error| {
-                                        error.map_source(GraphWriteChainError::Insert)
-                                    })?;
-                                let (creation, returning) = proposal.into_parts();
-                                Ok((Proposal::Insert(query.insertion(), creation), returning))
-                            }
-                            GraphWriteChainStep::Insert(insertion) => {
-                                let proposal = insertion
-                                    .execute_governed_over(
-                                        rows.take(),
-                                        allowance,
-                                        graph,
-                                        allocate,
-                                        checkpoint,
-                                    )
-                                    .map_err(|error| {
-                                        error.map_source(|error| {
-                                            GraphWriteChainError::Insert(
-                                                GraphInsertQueryError::Insertion(error),
-                                            )
-                                        })
-                                    })?;
-                                let stats = proposal.stats();
-                                let returning = GqlQueryExecution {
-                                    value: Vec::new(),
-                                    rows: GqlExecutionStats {
-                                        snapshot_records: stats.selection.snapshot_records,
-                                        result_rows: 0,
-                                    },
-                                    evaluator: stats.evaluator,
-                                };
-                                Ok((Proposal::Insert(insertion, proposal), returning))
-                            }
-                            GraphWriteChainStep::Mutation(mutation) => {
-                                let policy = GraphMutationPolicy::new(
-                                    allowance.query,
-                                    allowance.max_mutation_effects,
-                                );
-                                let proposal = mutation
-                                    .execute_governed_over(
-                                        rows.take(),
-                                        policy,
-                                        |pattern, budget| graph.pattern(pattern, budget),
-                                        checkpoint,
-                                    )
-                                    .map_err(|error| error.map_source(mutation_error))?;
-                                let stats = proposal.stats();
-                                let returning = GqlQueryExecution {
-                                    value: Vec::new(),
-                                    rows: GqlExecutionStats {
-                                        snapshot_records: stats.selection.snapshot_records,
-                                        result_rows: 0,
-                                    },
-                                    evaluator: stats.evaluator,
-                                };
-                                Ok((Proposal::Mutation(mutation, proposal, policy), returning))
-                            }
-                            GraphWriteChainStep::MutationQuery(query) => {
-                                let policy = GraphMutationPolicy::new(
-                                    allowance.query,
-                                    allowance.max_mutation_effects,
-                                );
-                                let proposal = query
-                                    .execute_governed_over(
-                                        rows.take(),
-                                        policy,
-                                        |pattern, budget| graph.pattern(pattern, budget),
-                                        checkpoint,
-                                    )
-                                    .map_err(|error| {
-                                        error.map_source(GraphWriteChainError::Mutation)
-                                    })?;
-                                let (mutation, returning) = proposal.into_parts();
-                                Ok((
-                                    Proposal::Mutation(query.mutation(), mutation, policy),
-                                    returning,
-                                ))
-                            }
-                            _ => Err(source(WriteTxnError::AuthorizedChainStepUnsupported {
-                                step: at,
-                            })),
-                        }
-                    })?;
-                    let (stats, effects) = match proposal {
-                        Proposal::Insert(insertion, proposal) => {
-                            let (stats, _, _) = insert::stage_proposal(
-                                workspace.transaction(),
-                                self,
-                                query_cx,
-                                insertion,
-                                proposal,
-                                &mut execution,
-                                false,
-                            )
-                            .map_err(|error| {
-                                error.map_source(|error| {
-                                    GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(
-                                        error,
-                                    ))
-                                })
-                            })?;
-                            (stats, 0)
-                        }
-                        Proposal::Mutation(mutation, proposal, policy) => {
-                            let (staging_policy, tail) =
-                                mutation_staging_policy(policy, proposal.stats(), &returning)?;
-                            let (staged, _, _) = mutation::stage_proposal(
-                                workspace.transaction(),
-                                self,
-                                query_cx,
-                                mutation,
-                                proposal,
-                                staging_policy,
+                            &mut execution,
+                        )?;
+                        (stats, returning, 0)
+                    } else {
+                        let (proposal, mut returning) = query_cx.with_restriction(|| {
+                            let controls = RefCell::new(&mut execution);
+                            let database = RefCell::new(&mut *self);
+                            let mut graph = ChainSource {
+                                transaction: workspace.transaction(),
+                                database: &database,
+                                cx: query_cx,
                                 scope,
-                                &mut execution,
-                                false,
-                            )
-                            .map_err(|error| error.map_source(mutation_error))?;
-                            finish_mutation_statistics(&mut returning, staged, tail)?;
-                            (
-                                GraphInsertStats {
-                                    selection: returning.rows,
-                                    evaluator: returning.evaluator,
-                                    created_vertices: 0,
-                                    created_edges: 0,
-                                },
-                                staged.effects,
-                            )
-                        }
+                                execution: &controls,
+                            };
+                            let allocate = |request| {
+                                database.borrow_mut().allocate_identity(query_cx, request)
+                            };
+                            let checkpoint = || {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                controls.borrow_mut().checkpoint()
+                            };
+                            match statement {
+                                GraphWriteChainStep::Query(query) => {
+                                    let proposal = query
+                                        .execute_governed_over(
+                                            rows.take(),
+                                            allowance,
+                                            graph,
+                                            allocate,
+                                            checkpoint,
+                                        )
+                                        .map_err(|error| {
+                                            error.map_source(GraphWriteChainError::Insert)
+                                        })?;
+                                    let (creation, returning) = proposal.into_parts();
+                                    Ok((Proposal::Insert(query.insertion(), creation), returning))
+                                }
+                                GraphWriteChainStep::Insert(insertion) => {
+                                    let proposal = insertion
+                                        .execute_governed_over(
+                                            rows.take(),
+                                            allowance,
+                                            graph,
+                                            allocate,
+                                            checkpoint,
+                                        )
+                                        .map_err(|error| {
+                                            error.map_source(|error| {
+                                                GraphWriteChainError::Insert(
+                                                    GraphInsertQueryError::Insertion(error),
+                                                )
+                                            })
+                                        })?;
+                                    let stats = proposal.stats();
+                                    let returning = GqlQueryExecution {
+                                        value: Vec::new(),
+                                        rows: GqlExecutionStats {
+                                            snapshot_records: stats.selection.snapshot_records,
+                                            result_rows: 0,
+                                        },
+                                        evaluator: stats.evaluator,
+                                    };
+                                    Ok((Proposal::Insert(insertion, proposal), returning))
+                                }
+                                GraphWriteChainStep::Mutation(mutation) => {
+                                    let policy = GraphMutationPolicy::new(
+                                        allowance.query,
+                                        allowance.max_mutation_effects,
+                                    );
+                                    let proposal = mutation
+                                        .execute_governed_over(
+                                            rows.take(),
+                                            policy,
+                                            |pattern, budget| graph.pattern(pattern, budget),
+                                            checkpoint,
+                                        )
+                                        .map_err(|error| error.map_source(mutation_error))?;
+                                    let stats = proposal.stats();
+                                    let returning = GqlQueryExecution {
+                                        value: Vec::new(),
+                                        rows: GqlExecutionStats {
+                                            snapshot_records: stats.selection.snapshot_records,
+                                            result_rows: 0,
+                                        },
+                                        evaluator: stats.evaluator,
+                                    };
+                                    Ok((Proposal::Mutation(mutation, proposal, policy), returning))
+                                }
+                                GraphWriteChainStep::MutationQuery(query) => {
+                                    let policy = GraphMutationPolicy::new(
+                                        allowance.query,
+                                        allowance.max_mutation_effects,
+                                    );
+                                    let proposal = query
+                                        .execute_governed_over(
+                                            rows.take(),
+                                            policy,
+                                            |pattern, budget| graph.pattern(pattern, budget),
+                                            checkpoint,
+                                        )
+                                        .map_err(|error| {
+                                            error.map_source(GraphWriteChainError::Mutation)
+                                        })?;
+                                    let (mutation, returning) = proposal.into_parts();
+                                    Ok((
+                                        Proposal::Mutation(query.mutation(), mutation, policy),
+                                        returning,
+                                    ))
+                                }
+                                _ => Err(source(WriteTxnError::AuthorizedChainStepUnsupported {
+                                    step: at,
+                                })),
+                            }
+                        })?;
+                        let (stats, effects) = match proposal {
+                            Proposal::Insert(insertion, proposal) => {
+                                let (stats, _, _) = insert::stage_proposal(
+                                    workspace.transaction(),
+                                    self,
+                                    query_cx,
+                                    insertion,
+                                    proposal,
+                                    &mut execution,
+                                    false,
+                                )
+                                .map_err(|error| {
+                                    error.map_source(|error| {
+                                        GraphWriteChainError::Insert(
+                                            GraphInsertQueryError::Insertion(error),
+                                        )
+                                    })
+                                })?;
+                                (stats, 0)
+                            }
+                            Proposal::Mutation(mutation, proposal, policy) => {
+                                let (staging_policy, tail) =
+                                    mutation_staging_policy(policy, proposal.stats(), &returning)?;
+                                let (staged, _, _) = mutation::stage_proposal(
+                                    workspace.transaction(),
+                                    self,
+                                    query_cx,
+                                    mutation,
+                                    proposal,
+                                    staging_policy,
+                                    scope,
+                                    &mut execution,
+                                    false,
+                                )
+                                .map_err(|error| error.map_source(mutation_error))?;
+                                finish_mutation_statistics(&mut returning, staged, tail)?;
+                                (
+                                    GraphInsertStats {
+                                        selection: returning.rows,
+                                        evaluator: returning.evaluator,
+                                        created_vertices: 0,
+                                        created_edges: 0,
+                                    },
+                                    staged.effects,
+                                )
+                            }
+                        };
+
+                        (stats, returning, effects)
                     };
                     let observed = u128::from(mutation_effects) + u128::from(effects);
                     if observed > u128::from(policy.max_mutation_effects) {

@@ -879,3 +879,20 @@ fn mixed_chains_preserve_host_effect_limits_and_rollback_the_creation_prefix() {
         .await;
     });
 }
+
+#[test]
+fn relationship_merge_chains_share_the_hosts_creation_allowance() {
+    run(async |cx| {
+        threshold_case(
+            cx,
+            "chain-merge-edge",
+            policy(0, 2, 0),
+            policy(0, 2, 1),
+            "CREATE (a:Person {name:'NewA'}),(b:Person {name:'NewB'}) \
+             MERGE (a)-[r:KNOWS {age:9}]->(b) RETURN r.age AS age",
+            4,
+            2,
+        )
+        .await;
+    });
+}

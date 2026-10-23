@@ -570,3 +570,64 @@ fn zero_row_mixed_chains_update_remove_and_delete_with_one_completion_each() {
         fixture.stop(cx, 3, 2, 0).await;
     });
 }
+
+#[test]
+fn relationship_merge_chain_continues_after_created_and_existing_matches() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "merge-chain-continuation", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                     MERGE (a)-[r:KNOWS]->(b) CREATE (b)-[:KNOWS]->(a)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after_create = state(cx, &mut observer).await;
+        assert_eq!(
+            (after_create.0.rows.len(), after_create.1.rows.len()),
+            (2, 2)
+        );
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                     MERGE (a)-[r:KNOWS]->(b) \
+                     CREATE (c:Person {name:'Followup'}),(c)-[:KNOWS]->(b)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
+        let after_match = state(cx, &mut observer).await;
+        assert_eq!((after_match.0.rows.len(), after_match.1.rows.len()), (3, 3));
+        assert_eq!(
+            after_match
+                .1
+                .rows
+                .iter()
+                .filter(|row| {
+                    row[0] == WireValue::Text("Ada".into())
+                        && row[1] == WireValue::Text("Bob".into())
+                })
+                .count(),
+            1,
+            "a matched MERGE created a duplicate relationship"
+        );
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 2, 3, 3).await;
+    });
+}
