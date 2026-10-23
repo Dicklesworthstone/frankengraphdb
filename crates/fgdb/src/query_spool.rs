@@ -20,8 +20,10 @@ pub use aggregate::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
+#[cfg(test)]
+use sort::ordered_input;
 pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};
-pub(crate) use sort::{SpoolOrder, SpoolOrderLimits, ordered_input, ordered_program};
+pub(crate) use sort::{SpoolOrder, SpoolOrderLimits, ordered_program};
 
 #[derive(Debug)]
 pub enum NativeSpoolError {

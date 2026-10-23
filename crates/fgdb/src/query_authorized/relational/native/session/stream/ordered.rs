@@ -464,7 +464,7 @@ type BoundOrder = (
 enum ProjectionPhase {
     Scan,
     Direct(GraphSetRowPull),
-    Staged(AsyncSpillSetPlan),
+    Staged(Box<AsyncSpillSetPlan>),
 }
 impl ProjectionPhase {
     fn into_source(
@@ -494,7 +494,7 @@ impl ProjectionPhase {
                 SpoolOrder {
                     columns: plan.source_columns().to_vec(),
                     tail,
-                    stages: Some(plan),
+                    stages: Some(*plan),
                 },
             ),
         }

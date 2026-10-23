@@ -1267,7 +1267,7 @@ impl PreparedGraphSet {
             Ok(Some(GraphSetOrderedProjection::Direct { pull, tail }))
         } else {
             spill::AsyncSpillSetPlan::compile(self)
-                .map(GraphSetOrderedProjection::Staged)
+                .map(|plan| GraphSetOrderedProjection::Staged(Box::new(plan)))
                 .map(Some)
         }
     }
@@ -1337,7 +1337,7 @@ pub enum GraphSetOrderedProjection {
         pull: GraphSetRowPull,
         tail: crate::scan_stream::ScanSortTail,
     },
-    Staged(spill::AsyncSpillSetPlan),
+    Staged(Box<spill::AsyncSpillSetPlan>),
 }
 
 /// A relation that pulls row by row (PreparedGraphSet::row_pull): one

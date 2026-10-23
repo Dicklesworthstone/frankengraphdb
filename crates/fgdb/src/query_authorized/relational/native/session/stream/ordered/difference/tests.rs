@@ -227,7 +227,7 @@ fn value(n: i64) -> Vec<QueryValue> {
 }
 fn refusal<T>(result: Result<T>, expected: AuthorizationError) {
     assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
-        if matches!(*error, QueryError::Authorization(actual) if actual == expected)));
+        if matches!(*error, QueryError::Authorization(actual) if actual == expected))); // ubs:ignore[rust.security.constant-time-compare] Typed public diagnostic enums contain no token bytes or keys (fgdb-warden::Error).
 }
 async fn collect<C: FnMut() -> u64 + Send>(
     session: &mut Session<'_, C>,
@@ -692,6 +692,36 @@ fn computed_source_order_and_signed_projection_work_share_the_live_permit() {
         let authority = authority();
         let pool = MemoryPool::new(262_144, 0).unwrap();
         let params = GqlParameters::new();
+        let (mut ordered, _, _) =
+            session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
+        let prepared = ordered
+            .prepare(
+                &cx,
+                "MATCH (n) RETURN n.p + 1 AS x,NULL AS marker ORDER BY x DESC SKIP 1 LIMIT 2",
+                &params,
+            )
+            .unwrap();
+        let mut cursor = ordered
+            .execute_ordered(&cx, &prepared, &params)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(cursor.columns(), ["x", "marker"]);
+        let mut rows = Vec::new();
+        while let Some(row) = cursor.next_row().await.unwrap() {
+            rows.push(cells(&row));
+        }
+        assert_eq!(
+            rows,
+            [8, 6].map(|p| {
+                let mut row = value(p);
+                row.push(QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)));
+                row
+            })
+        );
+        drop(cursor);
+        drop(ordered);
+        assert_eq!(pool.used(), 0);
         for (left, right) in [(before, after), (after, before)] {
             for suffix in ["", " LIMIT 0"] {
                 let (mut scoped, _, _) =
