@@ -665,7 +665,8 @@ impl<'a> Parser<'a> {
         {
             return Ok(true);
         }
-        Ok(self.list_operand_here(None)? || self.list_chain_follows(None)?)
+        Ok(self.list_operand_here(return_projection::Route::NONE)?
+            || self.list_chain_follows(return_projection::Route::NONE)?)
     }
 
     /// `SET n = {k: v, ...}` (openCypher replace, Set4): the listed

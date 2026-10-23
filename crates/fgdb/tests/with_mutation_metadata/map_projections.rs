@@ -621,3 +621,29 @@ fn explicitly_deleted_computed_targets_keep_runtime_metadata_checks() {
         });
     }
 }
+
+#[test]
+fn a_case_detach_target_after_with_deletes_the_vertex_its_arm_selects() {
+    // After WITH, a CASE target reads its vertex results as row values: the
+    // arm the row selects is deleted with its cascade, the other survives.
+    for (condition, deleted, kept) in [("prior = 7", 2_u128, 1_u128), ("prior <> 7", 1, 2)] {
+        run(async |commit, cx, txcx| {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let survivor = db.vertex(VId(BASE + kept)).unwrap();
+            assert!(survivor.is_some());
+            let statement = format!(
+                "MATCH (a)-[r:R]->(b) WITH a,b,r.p AS prior \
+                 DETACH DELETE CASE WHEN {condition} THEN b ELSE a END RETURN prior"
+            );
+            let result = apply(&mut db, commit, cx, txcx, &statement, 1)
+                .await
+                .unwrap();
+            assert_eq!(rows(result, &["prior"]), vec![vec![int(7)]]);
+            assert!(db.vertex(VId(BASE + deleted)).unwrap().is_none());
+            assert!(db.edge(EId(BASE + 10)).unwrap().is_none());
+            assert_eq!(db.vertex(VId(BASE + kept)).unwrap(), survivor);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+    }
+}
