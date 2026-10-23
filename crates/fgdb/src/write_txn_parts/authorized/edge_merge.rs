@@ -449,7 +449,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
     selected: Option<(GqlQueryExecution<GraphValueRow>, Option<usize>)>,
-    mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
+    frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -569,7 +569,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
         )
     })?;
     if let Some(batch) = proposal.creation {
-        if let Some(held) = frozen.as_deref_mut() {
+        if let Some(held) = frozen {
             super::chain::stage_batch(transaction, database, cx, batch, Some(held), execution)
                 .map_err(source)?;
         } else {
