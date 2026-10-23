@@ -1014,3 +1014,57 @@ fn existence_predicates_combine_with_any_predicate_in_a_where() {
         );
     }
 }
+
+/// A pattern comprehension among a grouping WITH's items (fgdb-1f8f7, TCK
+/// Pattern2 [8], [9]): the WITH's graph head gathers it into a hidden list
+/// column, as a RETURN's head does, and the grouping reads that column, as a
+/// key or inside an aggregate's argument. The path-capturing form needs edge
+/// identities: multipart_optional_reads holds it.
+#[test]
+fn a_grouping_with_reads_pattern_comprehensions_its_head_gathers() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let row = |cells: Vec<GraphValue>| GraphValueRow::from_owned_values(cells);
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    // Inside an aggregate's argument: every edge once.
+    assert_eq!(
+        execute("MATCH (n) WITH sum(size([(n)-->() | 1])) AS total RETURN total"),
+        vec![row(vec![int(EDGES.len() as i64)])]
+    );
+    // A projection reading the pattern's own local: each n's target values,
+    // grouped (vertex 4 has none: the empty list is its key).
+    let mut expected: Vec<GraphValueRow> = (1..=4)
+        .map(|n| {
+            let targets: Vec<GraphValue> = EDGES
+                .iter()
+                .filter(|&&(from, _, _)| from == VId(n))
+                .map(|&(_, _, to)| int(p(to.0)))
+                .collect();
+            row(vec![
+                GraphValue::List(targets.into_boxed_slice()),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+            ])
+        })
+        .collect();
+    expected.sort();
+    let grouped = execute("MATCH (n) WITH [(n)-->(m) | m.p] AS ps, count(*) AS c RETURN ps, c");
+    let grouped: Vec<GraphValueRow> = grouped
+        .into_iter()
+        .map(|row| {
+            let cells: Vec<GraphValue> = row
+                .values()
+                .iter()
+                .map(|cell| match cell.as_scalar() {
+                    // count(*) delivers a count cell; compare as an integer.
+                    Some(CanonicalScalar::Int(n)) => int(*n),
+                    _ => cell.clone(),
+                })
+                .collect();
+            GraphValueRow::from_owned_values(cells)
+        })
+        .collect();
+    assert_eq!(sorted(grouped), expected);
+}

@@ -1253,3 +1253,23 @@ fn a_later_match_reads_an_earlier_relationship_at_an_implicit_with() {
         assert_eq!(calls, 0, "{refused}");
     }
 }
+
+/// openCypher Pattern2 [8]: a path-capturing pattern comprehension among a
+/// grouping WITH's items is a hidden list column of the WITH's graph head,
+/// one list per row; the grouping keys on it beside count(b). Each n's
+/// paths are its out-edges, the parallel 1 -R-> 2 edges two distinct paths.
+#[test]
+fn a_grouping_with_keys_on_a_path_comprehension() {
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
+    let mut expected: Vec<_> = (1..=4)
+        .filter(|&n| out(n) > 0)
+        .map(|n| GraphValueRow::from_owned_values(vec![int(out(n)), int(out(n))]))
+        .collect();
+    expected.sort();
+    let mut rows = identified_rows(
+        "MATCH (n)-->(b) WITH [p = (n)-->() | p] AS ps, count(b) AS c RETURN size(ps) AS s, c",
+    );
+    rows.sort();
+    assert_eq!(rows, expected);
+}

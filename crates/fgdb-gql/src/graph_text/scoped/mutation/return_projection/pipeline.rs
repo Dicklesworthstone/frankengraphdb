@@ -195,6 +195,16 @@ fn hidden_boundary_column<'a>(
     hidden_boundary_value(head, at, ReadValueTemplate::Column(column))
 }
 
+/// The (end, column) of the hoisted expression that starts at `at` over a row
+/// of `width`, if one does.
+fn hoisted_span(reads: Option<&HoistedReads>, width: usize, at: usize) -> Option<(usize, usize)> {
+    let (row, spans) = reads?;
+    (*row == width)
+        .then(|| spans.iter().find(|&&(start, _, _)| start == at))
+        .flatten()
+        .map(|&(_, end, column)| (end, column))
+}
+
 /// A hidden output of the boundary under the next free private name.
 fn hidden_boundary_value<'a>(
     head: &mut GraphProjectionHead<'a>,
@@ -1036,14 +1046,28 @@ impl<'a> Parser<'a> {
         &mut self,
         width: usize,
     ) -> Result<Option<usize>, GraphPatternTextError> {
-        let Some((row, spans)) = self.existence_reads.as_ref() else {
-            return Ok(None);
-        };
-        let at = self.current.at;
-        let Some(&(_, end, column)) = spans
-            .iter()
-            .find(|&&(start, _, _)| *row == width && start == at)
-        else {
+        let span = hoisted_span(self.existence_reads.as_ref(), width, self.current.at);
+        self.take_hoisted(span)
+    }
+
+    /// The hidden list column of the pattern comprehension that starts at the
+    /// current token (hoist_comprehension) over a row of `width`, consuming
+    /// the comprehension. `None` consumes nothing.
+    #[inline(never)]
+    pub(in crate::graph_text) fn comprehension_read(
+        &mut self,
+        width: usize,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let span = hoisted_span(self.comprehension_reads.as_ref(), width, self.current.at);
+        self.take_hoisted(span)
+    }
+
+    /// Step past a hoisted expression that ends at `end`, returning its column.
+    fn take_hoisted(
+        &mut self,
+        span: Option<(usize, usize)>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let Some((end, column)) = span else {
             return Ok(None);
         };
         while self.current.at < end && !matches!(self.current.kind, TokenKind::End) {

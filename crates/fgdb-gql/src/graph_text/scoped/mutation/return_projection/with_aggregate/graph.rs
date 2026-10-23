@@ -99,8 +99,28 @@ impl<'a> Parser<'a> {
         let mut previous = None;
         let mut depth = 0_usize;
         let mut end = None;
+        // The pattern comprehensions this head gathers (hoist_comprehension),
+        // and the end of the one the scan is stepping over.
+        let mut comprehensions = Vec::new();
+        let mut skip_until = 0_usize;
         loop {
             let token = lexer.next()?;
+            if token.at < skip_until {
+                continue;
+            }
+            if matches!(token.kind, TokenKind::Punct(b'['))
+                && let Some(span) =
+                    self.hoist_comprehension(&lexer, token, &mut outputs, &mut inputs, width)?
+            {
+                skip_until = span.1;
+                comprehensions.push(span);
+                if let Some(slot) = item.get_mut(item_len) {
+                    *slot = Some(token.kind);
+                }
+                item_len += 1;
+                previous = Some(TokenKind::Punct(b']'));
+                continue;
+            }
             let named = matches!(previous, Some(TokenKind::Punct(b'.')))
                 || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
             match token.kind {
@@ -300,12 +320,62 @@ impl<'a> Parser<'a> {
                 scoped: Vec::new(),
             });
         }
+        self.comprehension_reads =
+            (!comprehensions.is_empty()).then_some((outputs.len(), comprehensions));
         Ok(GraphProjectionHead {
             with: true,
             plain: false,
             inputs,
             outputs,
         })
+    }
+
+    /// A pattern comprehension at `token` (the scan's `lexer` just past it)
+    /// among a grouping WITH's items: this graph head gathers it into a hidden
+    /// list column, as a RETURN's own head gathers one (fgdb-1f8f7), and the
+    /// grouping stage reads that column where the comprehension stands
+    /// (comprehension_read), as a key or an aggregate's argument. Returns its
+    /// (start, end, column), or None when no comprehension starts here.
+    fn hoist_comprehension(
+        &mut self,
+        lexer: &Lexer<'a>,
+        token: Token<'a>,
+        outputs: &mut Vec<(Name<'a>, ReadValueTemplate)>,
+        inputs: &mut Vec<Projection<'a>>,
+        width: usize,
+    ) -> Result<Option<(usize, usize, usize)>, GraphSetTextError> {
+        let saved = (self.lexer.clone(), self.current);
+        self.lexer = lexer.clone();
+        self.current = token;
+        let hoisted = (|| -> Result<Option<(usize, usize, usize)>, GraphSetTextError> {
+            if !self.starts_pattern_comprehension()? {
+                return Ok(None);
+            }
+            let mut template = self.pattern_comprehension(inputs, &[], &mut None, 0)?;
+            // The head places its graph inputs after the incoming columns.
+            let columns: Vec<usize> = (0..inputs.len()).map(|input| width + input).collect();
+            crate::graph_text::aggregate::remap_output_columns(&mut template, &columns);
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let name = HIDDEN_NAMES
+                .iter()
+                .copied()
+                .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
+                .ok_or_else(|| expected(token.at, "bounded grouping pattern comprehensions"))?;
+            outputs.push((
+                Name {
+                    text: name,
+                    at: token.at,
+                },
+                template,
+            ));
+            Ok(Some((token.at, self.current.at, outputs.len() - 1)))
+        })();
+        (self.lexer, self.current) = saved;
+        hoisted
     }
 
     /// The hidden head column reading `variable.property`, appended after the
