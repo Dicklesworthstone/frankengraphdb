@@ -1254,3 +1254,94 @@ fn a_later_match_reads_an_earlier_relationship_at_an_implicit_with() {
         assert_eq!(calls, 0, "{refused}");
     }
 }
+
+/// openCypher Pattern2 [8]: a path-capturing pattern comprehension among a
+/// grouping WITH's items is a hidden list column of the WITH's graph head,
+/// one list per row; the grouping keys on it beside count(b). Each n's
+/// paths are its out-edges, the parallel 1 -R-> 2 edges two distinct paths.
+#[test]
+fn a_grouping_with_keys_on_a_path_comprehension() {
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
+    let mut expected: Vec<_> = (1..=4)
+        .filter(|&n| out(n) > 0)
+        .map(|n| GraphValueRow::from_owned_values(vec![int(out(n)), int(out(n))]))
+        .collect();
+    expected.sort();
+    let mut rows = identified_rows(
+        "MATCH (n)-->(b) WITH [p = (n)-->() | p] AS ps, count(b) AS c RETURN size(ps) AS s, c",
+    );
+    rows.sort();
+    assert_eq!(rows, expected);
+}
+
+/// `nodes(x)` and `relationships(x)` of a path VALUE rather than a graph
+/// binding: an unwound path, a grouping key (TCK With6 [4]), a list
+/// comprehension local (TCK List12 [4], [5]). Each fixture edge is one
+/// one-hop path, the parallel 1 -R-> 2 edges two distinct ones. NULL is
+/// NULL.
+#[test]
+fn path_functions_read_path_values() {
+    let vertices = |ids: &[u128]| GraphValue::Vertices(ids.iter().map(|&id| VId(id)).collect());
+    let edges = |ids: &[u128]| GraphValue::Edges(ids.iter().map(|&id| EId(id)).collect());
+    let row = |cells: Vec<GraphValue>| GraphValueRow::from_owned_values(cells);
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let unwound = sorted(
+        EDGES
+            .iter()
+            .enumerate()
+            .map(|(at, &(source, _, target))| {
+                row(vec![
+                    vertices(&[source.0, target.0]),
+                    edges(&[at as u128 + 1]),
+                ])
+            })
+            .collect(),
+    );
+    assert_eq!(
+        sorted(identified_rows(
+            "MATCH p = (a)-[:R]->(b) WITH collect(p) AS ps UNWIND ps AS q \
+             RETURN nodes(q) AS ns, relationships(q) AS rs"
+        )),
+        unwound
+    );
+    let keyed = sorted(
+        EDGES
+            .iter()
+            .map(|&(source, _, target)| row(vec![vertices(&[source.0, target.0])]))
+            .collect(),
+    );
+    assert_eq!(
+        sorted(identified_rows(
+            "MATCH p = (a)-[:R]->(b) WITH p, count(*) AS c RETURN nodes(p) AS ns"
+        )),
+        keyed
+    );
+    let heads = identified_rows(
+        "MATCH p = (a)-[:R]->(b) WITH [x IN collect(p) | head(nodes(x))] AS hs, \
+         [x IN collect(p) | size(relationships(x))] AS sizes RETURN hs, sizes",
+    );
+    assert_eq!(heads.len(), 1);
+    let mut found: Vec<GraphValue> = heads[0].values()[0].as_list().unwrap().to_vec();
+    found.sort();
+    let mut sources: Vec<GraphValue> = EDGES
+        .iter()
+        .map(|&(source, _, _)| GraphValue::Vertex(source))
+        .collect();
+    sources.sort();
+    assert_eq!(found, sources);
+    assert_eq!(
+        heads[0].values()[1].as_list().unwrap(),
+        vec![GraphValue::Scalar(CanonicalScalar::Int(1)); EDGES.len()].as_slice()
+    );
+    assert_eq!(
+        identified_rows("UNWIND [null] AS q RETURN nodes(q) AS ns, relationships(q) AS rs"),
+        vec![row(vec![
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ])]
+    );
+}

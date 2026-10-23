@@ -15,6 +15,69 @@ pub(super) enum Head<'a> {
     },
 }
 
+/// Whether the RETURN at the current token has both a pattern comprehension
+/// and an aggregate call among its items (`MATCH (n) RETURN count([p =
+/// (n)-->() | p])`, TCK Pattern2 [6]). The graph aggregate facade reads no
+/// comprehension, so such a RETURN reads its MATCH through an implicit
+/// `WITH *`, whose head gathers the comprehension (hoist_boundary_reads).
+fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> {
+    const AGGREGATES: [&str; 10] = [
+        "COUNT",
+        "SUM",
+        "SUM_INT",
+        "AVG",
+        "AVG_INT",
+        "MIN",
+        "MAX",
+        "COLLECT",
+        "PERCENTILEDISC",
+        "PERCENTILECONT",
+    ];
+    let saved = (parser.lexer.clone(), parser.current);
+    let mut lexer = parser.lexer.clone();
+    let (mut comprehension, mut aggregate) = (false, false);
+    let mut depth = 0_usize;
+    let found = loop {
+        let token = match lexer.next() {
+            Ok(token) => token,
+            Err(error) => break Err(error.into()),
+        };
+        match token.kind {
+            TokenKind::End => break Ok(comprehension && aggregate),
+            TokenKind::Word(word)
+                if depth == 0
+                    && ["ORDER", "SKIP", "OFFSET", "LIMIT", "UNION"]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end)) =>
+            {
+                break Ok(comprehension && aggregate);
+            }
+            TokenKind::Word(word)
+                if AGGREGATES
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name))
+                    && matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'('))) =>
+            {
+                aggregate = true;
+            }
+            TokenKind::Punct(b'[') => {
+                parser.lexer = lexer.clone();
+                parser.current = token;
+                match parser.starts_pattern_comprehension() {
+                    Ok(starts) => comprehension |= starts,
+                    Err(error) => break Err(error.into()),
+                }
+                depth += 1;
+            }
+            TokenKind::Punct(b'(' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    };
+    (parser.lexer, parser.current) = saved;
+    found
+}
+
 pub(super) fn prefix<'a>(
     parser: &mut Parser<'a>,
     statement: &'a str,
@@ -77,6 +140,8 @@ pub(super) fn prefix<'a>(
             parser.lexer = lexer;
             parser.current = at_where;
             head
+        } else if parser.is_word("RETURN") && return_gathers_comprehension(parser)? {
+            parser.implicit_with_head()?
         } else {
             if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
                 return Err(expected(

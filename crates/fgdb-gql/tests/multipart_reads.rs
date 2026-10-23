@@ -1014,3 +1014,165 @@ fn existence_predicates_combine_with_any_predicate_in_a_where() {
         );
     }
 }
+
+/// A pattern comprehension among a grouping WITH's items (fgdb-1f8f7, TCK
+/// Pattern2 [8], [9]): the WITH's graph head gathers it into a hidden list
+/// column, as a RETURN's head does, and the grouping reads that column, as a
+/// key or inside an aggregate's argument. The path-capturing form needs edge
+/// identities: multipart_optional_reads holds it.
+#[test]
+fn a_grouping_with_reads_pattern_comprehensions_its_head_gathers() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let row = |cells: Vec<GraphValue>| GraphValueRow::from_owned_values(cells);
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    // Inside an aggregate's argument: every edge once.
+    assert_eq!(
+        execute("MATCH (n) WITH sum(size([(n)-->() | 1])) AS total RETURN total"),
+        vec![row(vec![int(EDGES.len() as i64)])]
+    );
+    // A projection reading the pattern's own local: each n's target values,
+    // grouped (vertex 4 has none: the empty list is its key).
+    let mut expected: Vec<GraphValueRow> = (1..=4)
+        .map(|n| {
+            let targets: Vec<GraphValue> = EDGES
+                .iter()
+                .filter(|&&(from, _, _)| from == VId(n))
+                .map(|&(_, _, to)| int(p(to.0)))
+                .collect();
+            row(vec![
+                GraphValue::List(targets.into_boxed_slice()),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+            ])
+        })
+        .collect();
+    expected.sort();
+    let grouped = execute("MATCH (n) WITH [(n)-->(m) | m.p] AS ps, count(*) AS c RETURN ps, c");
+    let grouped: Vec<GraphValueRow> = grouped
+        .into_iter()
+        .map(|row| {
+            let cells: Vec<GraphValue> = row
+                .values()
+                .iter()
+                .map(|cell| match cell.as_scalar() {
+                    // count(*) delivers a count cell; compare as an integer.
+                    Some(CanonicalScalar::Int(n)) => int(*n),
+                    _ => cell.clone(),
+                })
+                .collect();
+            GraphValueRow::from_owned_values(cells)
+        })
+        .collect();
+    assert_eq!(sorted(grouped), expected);
+}
+
+/// A pattern comprehension anywhere in a WITH's row scope, its WHERE, pages
+/// and RETURN, in the first UNWIND after a MATCH, or in a root MATCH's WHERE
+/// at an implicit `WITH *` (fgdb-1f8f7): the head gathers it into a hidden
+/// list column, once per row, which the stage reads where it stands. One
+/// that names an enclosing list comprehension, quantifier or reduce local
+/// stays where it stands, refused as before, in a grouping WITH too; one that
+/// reads a binding its row does not carry under its own name refuses.
+#[test]
+fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let by_degree = |keep: &dyn Fn(i64) -> bool| -> Vec<GraphValueRow> {
+        (1..=4)
+            .filter(|&n| keep(out(n)))
+            .map(|n| vertices(&[n]))
+            .collect()
+    };
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n WHERE size([(n)-->() | 1]) > 1 RETURN n"
+        )),
+        by_degree(&|degree| degree > 1)
+    );
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WHERE size([(n)-->() | 1]) = 1 RETURN n"
+        )),
+        by_degree(&|degree| degree == 1)
+    );
+    // A page: degrees 3, 1, 1, 0, ties broken by identity.
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n ORDER BY size([(n)-->() | 1]) DESC, n LIMIT 2 RETURN n"
+        )),
+        vec![vertices(&[1]), vertices(&[2])]
+    );
+    // A RETURN after the WITH, the comprehension reading its own local, and
+    // one inside a list comprehension that reads no local of it.
+    let expected: Vec<GraphValueRow> = (1..=4)
+        .map(|n| {
+            let targets: Vec<GraphValue> = EDGES
+                .iter()
+                .filter(|&&(from, _, _)| from == VId(n))
+                .map(|&(_, _, to)| int(p(to.0)))
+                .collect();
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(n)),
+                GraphValue::List(targets.into_boxed_slice()),
+                GraphValue::List(Box::new([int(1 + out(n)), int(2 + out(n))])),
+            ])
+        })
+        .collect();
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n RETURN n, [(n)-->(m) | m.p] AS ps, \
+             [x IN [1, 2] | x + size([(n)-->() | 1])] AS shifted"
+        )),
+        expected
+    );
+    // A plain WITH's own WHERE reads a MATCH binding it drops, as its
+    // property reads do: the sources of edges into a vertex with no out-edge.
+    let mut sinks: Vec<GraphValueRow> = EDGES
+        .iter()
+        .filter(|&&(_, _, to)| out(to.0) == 0)
+        .map(|&(from, _, _)| vertices(&[from.0]))
+        .collect();
+    sinks.sort();
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n)-->(m) WITH n WHERE size([(m)-->() | 1]) = 0 RETURN n"
+        )),
+        sinks
+    );
+    // The first UNWIND after a MATCH: one row per out-edge.
+    let mut pairs: Vec<GraphValueRow> = EDGES
+        .iter()
+        .map(|&(from, _, to)| vertices(&[from.0, to.0]))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        sorted(execute("MATCH (n) UNWIND [(n)-->(m) | m] AS t RETURN n, t")),
+        pairs
+    );
+    for text in [
+        // An enclosing element local: gathered once per row, the
+        // comprehension would read a fresh node for it.
+        "MATCH (n) WITH n RETURN [x IN [n] | size([(x)-->() | 1])] AS l",
+        "MATCH (n) WITH [x IN [n] | size([(x)-->() | 1])] AS l, count(*) AS c RETURN l, c",
+        "MATCH (n) WITH reduce(a = 0, x IN [n] | a + size([(x)-->() | 1])) AS l, \
+         count(*) AS c RETURN l, c",
+        "MATCH (n) WITH any(x IN [n] WHERE size([(x)-->() | 1]) > 0) AS l, \
+         count(*) AS c RETURN l, c",
+        // A binding the row renames or drops.
+        "MATCH (n)-->(k) WITH n AS k RETURN [(k)-->() | 1] AS l",
+        "MATCH (n)-->(m) WITH n RETURN [(m)-->() | 1] AS l",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

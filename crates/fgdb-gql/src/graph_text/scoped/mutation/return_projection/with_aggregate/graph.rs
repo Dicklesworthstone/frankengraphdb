@@ -99,8 +99,51 @@ impl<'a> Parser<'a> {
         let mut previous = None;
         let mut depth = 0_usize;
         let mut end = None;
+        // The pattern comprehensions this head gathers (hoist_comprehension),
+        // the end of the one the scan is stepping over, and the element
+        // locals bound so far. Under OPTIONAL MATCH an imported binding is
+        // the nullable re-matched copy, so no comprehension may read it.
+        let mut comprehensions = Vec::new();
+        let mut skip_until = 0_usize;
+        let mut locals: Vec<&'a str> = Vec::new();
+        let imported: Vec<&'a str> = if optional {
+            incoming.iter().map(|(name, _)| name.text).collect()
+        } else {
+            Vec::new()
+        };
         loop {
             let token = lexer.next()?;
+            if token.at < skip_until {
+                continue;
+            }
+            if let TokenKind::Word(word) = token.kind
+                && pipeline::binds_local(previous, lexer.clone().next()?.kind)
+            {
+                locals.push(word);
+            }
+            if matches!(token.kind, TokenKind::Punct(b'['))
+                && let Some(span) = self.hoist_comprehension(
+                    &lexer,
+                    token,
+                    &mut outputs,
+                    &mut inputs,
+                    width,
+                    pipeline::HoistGuard {
+                        names: &HIDDEN_NAMES,
+                        locals: &locals,
+                        refused: &imported,
+                    },
+                )?
+            {
+                skip_until = span.1;
+                comprehensions.push(span);
+                if let Some(slot) = item.get_mut(item_len) {
+                    *slot = Some(token.kind);
+                }
+                item_len += 1;
+                previous = Some(TokenKind::Punct(b']'));
+                continue;
+            }
             let named = matches!(previous, Some(TokenKind::Punct(b'.')))
                 || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
             match token.kind {
@@ -300,6 +343,8 @@ impl<'a> Parser<'a> {
                 scoped: Vec::new(),
             });
         }
+        self.comprehension_reads =
+            (!comprehensions.is_empty()).then_some((outputs.len(), comprehensions));
         Ok(GraphProjectionHead {
             with: true,
             plain: false,

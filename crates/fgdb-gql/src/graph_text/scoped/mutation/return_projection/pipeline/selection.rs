@@ -471,6 +471,9 @@ impl<'a> Parser<'a> {
                 if let Some(column) = parser.boundary_read(schema.len())? {
                     return Ok(Some(column));
                 }
+                if let Some(column) = parser.comprehension_read(schema.len())? {
+                    return Ok(Some(column));
+                }
                 if let TokenKind::Word(word) = parser.current.kind
                     && let Some(column) = schema[..visible]
                         .iter()

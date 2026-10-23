@@ -2265,6 +2265,16 @@ impl<'a> Parser<'a> {
                 let operand = self.row_operand(schema)?;
                 self.read_value_template(operand, at)?
             }
+        } else if let Some(column) = self.comprehension_read(schema.len())? {
+            // A graph head already gathered this pattern comprehension into
+            // a hidden column (hoist_comprehension).
+            ReadValueTemplate::Column(column)
+        } else if self.at_hoisted_comprehension()
+            && let Some(resolve) = resolve.as_mut()
+            && let Some(column) = resolve.leaf(self)?
+        {
+            // A resolved scope addresses its row through its resolver.
+            self.read_value_template(Operand::Column(column), at)?
         } else if self.starts_pattern_comprehension()? {
             // `[(n)-->(m) | m.p]` (fgdb-7nwox) reads the MATCH bindings of a
             // graph projection; a row or aggregate scope has none to correlate.
@@ -2455,6 +2465,11 @@ impl<'a> Parser<'a> {
             )?;
             self.punct(b')', ")")?;
             value
+        } else if let Some(function) = self.path_value_function(inputs.is_some(), schema)? {
+            // nodes(x) or relationships(x) over a path value.
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.value_function_call(function, inputs.as_deref_mut(), schema, resolve, depth)?
         } else if let Some(function) = self.value_function()? {
             // reverse() and split() (fgdb-13l85).
             self.advance()?;
@@ -2784,6 +2799,54 @@ impl<'a> Parser<'a> {
         self.random_sites = site.checked_add(1).ok_or_else(overflow)?;
         let scope = u32::try_from(self.elements.len()).map_err(|_| overflow())?;
         Ok(ReadValueTemplate::Random { site, scope })
+    }
+
+    /// `nodes(x)` or `relationships(x)` (also `edges(x)`) whose lone argument
+    /// is a path VALUE rather than a graph binding: a list, quantifier or
+    /// reduce local (`[x IN collect(p) | nodes(x)]`), or a row column no graph
+    /// read carries (an unwound path, a grouping key). A graph binding of a
+    /// `graph` scope and a path a boundary already reads keep their graph
+    /// readers, and NULL and unknown names their own answers. Only lexical
+    /// lookahead: nothing is consumed.
+    fn path_value_function(
+        &self,
+        graph: bool,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Option<crate::GraphValueFunction>, GraphPatternTextError> {
+        let (function, path) = if self.is_word("NODES") {
+            (crate::GraphValueFunction::PathNodes, GraphPathFunction::Nodes)
+        } else if self.is_word("RELATIONSHIPS") || self.is_word("EDGES") {
+            (
+                crate::GraphValueFunction::PathRelationships,
+                GraphPathFunction::Edges,
+            )
+        } else {
+            return Ok(None);
+        };
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let TokenKind::Word(name) = lexer.next()?.kind else {
+            return Ok(None);
+        };
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b')')) {
+            return Ok(None);
+        }
+        if self.elements.contains(&name) {
+            return Ok(Some(function));
+        }
+        if graph
+            && (self.syntax.variables.iter().any(|variable| variable.text == name)
+                || self.syntax.names_path(name)
+                || self.syntax.visible_edge(name).is_some())
+        {
+            return Ok(None);
+        }
+        let carried = self.boundary_reads.as_ref().is_some_and(|boundary| {
+            (boundary.functions.iter()).any(|&(read, known, _)| read == name && known == path)
+        });
+        Ok((!carried && schema.iter().any(|(column, _)| column.text == name)).then_some(function))
     }
 
     /// REVERSE or SPLIT directly followed by `(` (fgdb-13l85).
