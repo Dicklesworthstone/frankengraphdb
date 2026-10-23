@@ -205,6 +205,49 @@ fn hoisted_span(reads: Option<&HoistedReads>, width: usize, at: usize) -> Option
         .map(|&(_, end, column)| (end, column))
 }
 
+/// What a hoisted pattern comprehension's hidden column is named from, and
+/// what the comprehension may not read (hoist_comprehension).
+pub(super) struct HoistGuard<'g, 'a> {
+    pub(super) names: &'g [&'static str],
+    /// Element locals of enclosing list comprehensions, quantifiers and
+    /// reduces (binds_local): such a comprehension is not hoisted.
+    pub(super) locals: &'g [&'a str],
+    /// Bindings the reading row does not carry under their own names: such a
+    /// comprehension refuses.
+    pub(super) refused: &'g [&'a str],
+}
+
+/// Whether the word between `previous` and `next` binds an element local:
+/// `[x IN`, `any(x IN`, `reduce(acc = 0, x IN` (also `, x IN`) or a reduce
+/// accumulator `reduce(acc =`. A pattern comprehension a graph head gathers
+/// once per row must read none (hoist_comprehension); a false positive only
+/// leaves a comprehension unhoisted.
+pub(super) fn binds_local(previous: Option<TokenKind<'_>>, next: TokenKind<'_>) -> bool {
+    match next {
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => {
+            matches!(previous, Some(TokenKind::Punct(b'[' | b'(' | b',')))
+        }
+        TokenKind::Punct(b'=') => matches!(previous, Some(TokenKind::Punct(b'('))),
+        _ => false,
+    }
+}
+
+/// Whether `head` carries the MATCH binding `name` unchanged under its own
+/// name (`offset` is where its graph inputs start).
+fn carries_own(head: &GraphProjectionHead<'_>, offset: usize, name: &str) -> bool {
+    head.outputs.iter().any(|(output, value)| {
+        output.text == name
+            && matches!(value, ReadValueTemplate::Column(column)
+            if column.checked_sub(offset)
+                .and_then(|input| head.inputs.get(input))
+                .is_some_and(|input| {
+                    input.variable.text == name
+                        && input.property.is_none()
+                        && input.collect.is_none()
+                }))
+    })
+}
+
 /// A hidden output of the boundary under the next free private name.
 fn hidden_boundary_value<'a>(
     head: &mut GraphProjectionHead<'a>,
@@ -449,12 +492,31 @@ impl<'a> Parser<'a> {
         let mut binders: Vec<&'a str> = Vec::new();
         let mut before_return = head.plain && !unwind && pending.is_none();
         let mut functions = Vec::new();
+        // Pattern comprehensions in the head's own scope, before any later
+        // WITH: hidden list columns (hoist_comprehension), the end of the one
+        // the scan is stepping over, and the element locals bound so far. A
+        // DISTINCT head hoists none. Before the RETURN, a plain WITH's WHERE
+        // and pages read a dropped MATCH binding as that binding (`scoped`),
+        // so only one an output shadows refuses there.
+        let mut comprehensions = Vec::new();
+        let mut skip_until = 0_usize;
+        let mut locals: Vec<&'a str> = Vec::new();
+        let uncarried: Vec<&'a str> = (self.visible_graph_bindings())
+            .map(|binding| binding.text)
+            .filter(|name| !carries_own(head, offset, name))
+            .collect();
+        let shadowed: Vec<&'a str> = (uncarried.iter().copied())
+            .filter(|name| head.outputs.iter().any(|(output, _)| output.text == *name))
+            .collect();
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
         let mut depth = 0_usize;
         loop {
             let token = lexer.next()?;
+            if token.at < skip_until {
+                continue;
+            }
             let after_dot = matches!(window[2], Some(TokenKind::Punct(b'.')));
             if let TokenKind::Word(word) = token.kind
                 && depth == 0
@@ -465,6 +527,34 @@ impl<'a> Parser<'a> {
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
+            }
+            if let TokenKind::Word(word) = token.kind
+                && !after_dot
+                && binds_local(window[2], lexer.clone().next()?.kind)
+            {
+                locals.push(word);
+            }
+            if matches!(token.kind, TokenKind::Punct(b'['))
+                && carried.is_none()
+                && pending.is_none()
+                && !self.syntax.distinct
+                && let Some(span) = self.hoist_comprehension(
+                    &lexer,
+                    token,
+                    &mut head.outputs,
+                    &mut head.inputs,
+                    offset,
+                    HoistGuard {
+                        names: &BOUNDARY_READ_NAMES,
+                        locals: &locals,
+                        refused: if before_return { &shadowed } else { &uncarried },
+                    },
+                )?
+            {
+                skip_until = span.1;
+                comprehensions.push(span);
+                window = [window[1], window[2], Some(TokenKind::Punct(b']'))];
+                continue;
             }
             match token.kind {
                 TokenKind::End => break,
@@ -716,6 +806,9 @@ impl<'a> Parser<'a> {
             });
         }
         self.existence_reads = (!existence.is_empty()).then_some((head.outputs.len(), existence));
+        if !comprehensions.is_empty() {
+            self.comprehension_reads = Some((head.outputs.len(), comprehensions));
+        }
         Ok(())
     }
 
@@ -772,6 +865,19 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Punct(b'(') => {
                     pattern_predicate_follows(token.kind, &mut lexer.clone())?
+                }
+                // A pattern comprehension's own pattern is no predicate: the
+                // boundary scan hoists it whole (hoist_comprehension).
+                TokenKind::Punct(b'[') => {
+                    self.lexer = lexer.clone();
+                    self.current = token;
+                    if self.starts_pattern_comprehension()? {
+                        skip_group(&mut lexer)?;
+                        previous = Some(TokenKind::Punct(b']'));
+                        token = lexer.next()?;
+                        continue;
+                    }
+                    false
                 }
                 _ => false,
             };
@@ -854,19 +960,6 @@ impl<'a> Parser<'a> {
         scope: usize,
         at: usize,
     ) -> Result<(), GraphSetTextError> {
-        let carried = |name: &str| {
-            head.outputs.iter().any(|(output, value)| {
-                output.text == name
-                    && matches!(value, ReadValueTemplate::Column(column)
-                    if column.checked_sub(offset)
-                        .and_then(|input| head.inputs.get(input))
-                        .is_some_and(|input| {
-                            input.variable.text == name
-                                && input.property.is_none()
-                                && input.collect.is_none()
-                        }))
-            })
-        };
         let body = &self.syntax.scopes[scope].body;
         let outer = |name: &Name<'a>| {
             self.syntax
@@ -879,7 +972,7 @@ impl<'a> Parser<'a> {
             .chain(&body.captures)
             .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
             .filter(|name| outer(name))
-            .find(|name| !carried(name.text));
+            .find(|name| !carries_own(head, offset, name.text));
         match read {
             Some(name) => Err(expected(
                 name.at.max(at),
@@ -1060,6 +1153,81 @@ impl<'a> Parser<'a> {
     ) -> Result<Option<usize>, GraphPatternTextError> {
         let span = hoisted_span(self.comprehension_reads.as_ref(), width, self.current.at);
         self.take_hoisted(span)
+    }
+
+    /// A pattern comprehension at `token` (the scan's `lexer` just past it)
+    /// that this graph head gathers into a hidden list column named from
+    /// `guard.names` (fgdb-1f8f7), as a RETURN's own head gathers one: a
+    /// grouping WITH's items (with_graph_head), or the WHERE, pages and
+    /// RETURN of a WITH's row (hoist_boundary_reads). The stage that reads it
+    /// takes that column where the comprehension stands (comprehension_read).
+    /// `width` is where the head's graph inputs start in its column space.
+    /// A head gathers once per row, so a comprehension naming an enclosing
+    /// element local (`guard.locals`) stays where it stands, refused there as
+    /// before, and one naming a binding in `guard.refused` refuses. Returns
+    /// its (start, end, column), or None.
+    pub(super) fn hoist_comprehension(
+        &mut self,
+        lexer: &Lexer<'a>,
+        token: Token<'a>,
+        outputs: &mut Vec<(Name<'a>, ReadValueTemplate)>,
+        inputs: &mut Vec<Projection<'a>>,
+        width: usize,
+        guard: HoistGuard<'_, 'a>,
+    ) -> Result<Option<(usize, usize, usize)>, GraphSetTextError> {
+        let saved = (self.lexer.clone(), self.current);
+        self.lexer = lexer.clone();
+        self.current = token;
+        let hoisted = (|| -> Result<Option<(usize, usize, usize)>, GraphSetTextError> {
+            if !self.starts_pattern_comprehension()? {
+                return Ok(None);
+            }
+            let mut scan = lexer.clone();
+            let mut previous = token.kind;
+            let mut depth = 1_usize;
+            while depth > 0 {
+                let next = scan.next()?;
+                match next.kind {
+                    TokenKind::End => break,
+                    TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
+                    TokenKind::Word(word) if !matches!(previous, TokenKind::Punct(b'.' | b':')) => {
+                        if guard.locals.contains(&word) {
+                            return Ok(None);
+                        }
+                        if guard.refused.contains(&word) {
+                            return Err(expected(
+                                next.at,
+                                "a pattern comprehension over bindings its row carries under their own names",
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+                previous = next.kind;
+            }
+            let mut template = self.pattern_comprehension(inputs, &[], &mut None, 0)?;
+            let columns: Vec<usize> = (0..inputs.len()).map(|input| width + input).collect();
+            crate::graph_text::aggregate::remap_output_columns(&mut template, &columns);
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let name = (guard.names.iter().copied())
+                .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
+                .ok_or_else(|| expected(token.at, "at most 16 hidden pattern comprehensions"))?;
+            outputs.push((
+                Name {
+                    text: name,
+                    at: token.at,
+                },
+                template,
+            ));
+            Ok(Some((token.at, self.current.at, outputs.len() - 1)))
+        })();
+        (self.lexer, self.current) = saved;
+        hoisted
     }
 
     /// Step past a hoisted expression that ends at `end`, returning its column.
