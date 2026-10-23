@@ -3434,7 +3434,7 @@ pub(crate) fn range_values<E>(
 /// How many members range(start, end, step) has: none when `end` lies
 /// before `start` in the step's direction. A zero step is a typed error.
 /// Every member lies between `start` and `end`, so each fits an i64.
-fn range_member_count(
+pub(crate) fn range_member_count(
     start: i64,
     end: i64,
     step: i64,

@@ -90,6 +90,9 @@ pub struct RowProjectionSpec {
     filter: Box<[GraphSetPredicateOp]>,
     // Only the checked UNWIND constructor expands the last evaluated cell.
     expand_last: bool,
+    // That cell holds the bounds of an UNWIND range(), whose members the
+    // expansion generates instead of reading a materialized list.
+    expand_range: bool,
 }
 impl RowProjectionSpec {
     pub fn new(
@@ -132,6 +135,7 @@ impl RowProjectionSpec {
             quantifier,
             filter: Box::new([]),
             expand_last: false,
+            expand_range: false,
         })
     }
 
@@ -203,6 +207,7 @@ impl RowProjectionSpec {
             quantifier: GraphSetQuantifier::All,
             filter: code.to_vec().into_boxed_slice(),
             expand_last: false,
+            expand_range: false,
         })
     }
 
@@ -407,7 +412,14 @@ impl IncrementalRowProjection {
                 |column, error| RowProjectionError::Expression { column, error },
             )?;
             if self.spec.expand_last {
-                unwind::append(&row, weight, limbs, control, &mut updates)?;
+                unwind::append(
+                    &row,
+                    weight,
+                    limbs,
+                    self.spec.expand_range,
+                    control,
+                    &mut updates,
+                )?;
             } else {
                 let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
                 charge(control, ZSetEvent::ScratchEntry)?;

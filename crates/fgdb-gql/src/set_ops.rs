@@ -36,8 +36,8 @@ pub use procedure::{
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
-    evaluate_order, evaluate_value, map_keys, no_element_reads, overlay_map, range_values,
-    slice_bounds, temporal_arithmetic, temporal_field, temporal_field_name,
+    evaluate_order, evaluate_value, map_keys, no_element_reads, overlay_map, range_member_count,
+    range_values, slice_bounds, temporal_arithmetic, temporal_field, temporal_field_name,
     temporal_field_scratch_entries, timestamp_text, value_function,
 };
 pub use projection::{
