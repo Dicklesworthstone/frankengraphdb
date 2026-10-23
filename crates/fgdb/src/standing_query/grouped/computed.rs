@@ -11,6 +11,7 @@ use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphAggregateError};
 pub(super) fn contributions<'a>(
     query: &PreparedGraphAggregate,
     mut binding: impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
+    edge: Option<EdgeBinding<'_>>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
@@ -20,7 +21,7 @@ pub(super) fn contributions<'a>(
     let mut source = Vec::with_capacity(columns.len());
     for column in columns {
         meter.charge(ZSetEvent::Work)?;
-        source.push(projected_value(*column, &mut binding, meter)?);
+        source.push(projected_value(*column, &mut binding, edge, meter)?);
     }
     // Eager source projection retains all declared dependencies, including
     // operands used only in lazy branches or otherwise unused computed columns.

@@ -27,7 +27,7 @@ pub(super) fn primary(key: &GroupKey, index: usize) -> AggregateKey {
 pub(super) fn value_units(value: &GraphValue) -> Result<usize, StandingQueryFailure> {
     match value {
         GraphValue::Scalar(value) => Ok(scalar_units(value)),
-        GraphValue::Vertex(_) => Ok(1),
+        GraphValue::Vertex(_) | GraphValue::Edge(_) => Ok(1),
         _ => Err(StandingQueryFailure::InvalidDelta),
     }
 }

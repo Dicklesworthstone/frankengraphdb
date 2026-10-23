@@ -62,12 +62,13 @@ impl State {
         &mut self,
         query: &PreparedGraphAggregate,
         row: &fgdb_strata::AdjacencyEntry,
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
         vertices: &Vertices,
         output: &mut Vec<grouped::Contribution>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         match &mut self.input {
-            Input::OneHop(state) => state.seed(query, row, vertices, output, meter),
+            Input::OneHop(state) => state.seed(query, row, properties, vertices, output, meter),
             Input::MultiHop(state) => state.seed(row, vertices, meter),
         }
     }
@@ -131,6 +132,9 @@ struct OneHopState {
     scope: Option<scoped::Shape>,
     witnesses: BTreeMap<VId, u64>,
     edges: BTreeMap<EId, (RelationId, Endpoints)>,
+    // Present only for a definition that reads edge fields. Each entry holds
+    // only its projected keys, never another graph or a complete payload copy.
+    properties: BTreeMap<EId, EdgeProperties>,
     incident: BTreeMap<VId, BTreeSet<EId>>,
 }
 
@@ -147,6 +151,33 @@ struct OneHopPatch {
     created: BTreeMap<EId, (RelationId, Endpoints)>,
     removed: BTreeSet<EId>,
     witnesses: BTreeMap<VId, u64>,
+    properties: BTreeMap<EId, EdgeProperties>,
+}
+
+fn retained_properties<'a>(
+    query: &PreparedGraphAggregate,
+    properties: impl IntoIterator<Item = (&'a PropertyKeyId, &'a CanonicalPropertyValue)>,
+    meter: &mut Meter<'_>,
+) -> Result<Option<EdgeProperties>, StandingQueryFailure> {
+    if !query
+        .input_pattern()
+        .value_columns()
+        .iter()
+        .any(|column| matches!(column, ValueProjection::EdgeProperty { .. }))
+    {
+        return Ok(None);
+    }
+    // Reserve the retained edge binding even when every requested key is absent.
+    meter.charge(ZSetEvent::ScratchEntry)?;
+    let mut fields = BTreeMap::new();
+    for (key, value) in properties {
+        meter.charge(ZSetEvent::Work)?;
+        if needs_edge_property(query, *key) {
+            meter.units(ZSetEvent::ScratchEntry, 1 + stored_units(value))?;
+            fields.insert(*key, value.clone());
+        }
+    }
+    Ok(Some(fields))
 }
 
 /// Additional compiled shapes beyond flat scans. Scope semantics are selected
@@ -210,6 +241,7 @@ impl OneHopState {
             scope,
             witnesses: BTreeMap::new(),
             edges: BTreeMap::new(),
+            properties: BTreeMap::new(),
             incident: BTreeMap::new(),
         })
     }
@@ -243,6 +275,7 @@ impl OneHopState {
         &self,
         query: &PreparedGraphAggregate,
         pair: Endpoints,
+        edge: EdgeBinding<'_>,
         vertices: &Vertices,
         patch: &VertexPatch,
         sign: i128,
@@ -257,16 +290,23 @@ impl OneHopState {
         let reverse = [(dst, target), (src, source)];
         match self.direction {
             GlaDirection::Forward => {
-                grouped::binding_contributions(query, &forward, sign, output, meter)
+                grouped::binding_contributions(query, &forward, Some(edge), sign, output, meter)
             }
             GlaDirection::Reverse => {
-                grouped::binding_contributions(query, &reverse, sign, output, meter)
+                grouped::binding_contributions(query, &reverse, Some(edge), sign, output, meter)
             }
             GlaDirection::Undirected => {
-                grouped::binding_contributions(query, &forward, sign, output, meter)?;
+                grouped::binding_contributions(query, &forward, Some(edge), sign, output, meter)?;
                 // One undirected self-loop is one edge occurrence, not two.
                 if src != dst {
-                    grouped::binding_contributions(query, &reverse, sign, output, meter)?;
+                    grouped::binding_contributions(
+                        query,
+                        &reverse,
+                        Some(edge),
+                        sign,
+                        output,
+                        meter,
+                    )?;
                 }
                 Ok(())
             }
@@ -285,6 +325,7 @@ impl OneHopState {
         &mut self,
         query: &PreparedGraphAggregate,
         row: &fgdb_strata::AdjacencyEntry,
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
         vertices: &Vertices,
         output: &mut Vec<grouped::Contribution>,
         meter: &mut Meter<'_>,
@@ -298,6 +339,11 @@ impl OneHopState {
         }
         let pair = (row.src, row.dst);
         reserve_edge(pair, meter)?;
+        let properties = retained_properties(
+            query,
+            properties.iter().map(|(key, value)| (key, value)),
+            meter,
+        )?;
         if let Some(scope) = self.scope {
             let mut changes = BTreeMap::new();
             scope.contribute(
@@ -321,9 +367,24 @@ impl OneHopState {
                 self.witnesses.insert(vid, count);
             }
         } else {
-            self.contribute(query, pair, vertices, &BTreeMap::new(), 1, output, meter)?;
+            self.contribute(
+                query,
+                pair,
+                EdgeBinding {
+                    id: row.eid,
+                    props: properties.as_ref(),
+                },
+                vertices,
+                &BTreeMap::new(),
+                1,
+                output,
+                meter,
+            )?;
         }
         self.insert(row.eid, row.relation, pair);
+        if let Some(properties) = properties {
+            self.properties.insert(row.eid, properties);
+        }
         Ok(())
     }
 
@@ -347,6 +408,7 @@ impl OneHopState {
         }
         let mut created = BTreeMap::new();
         let mut removed = BTreeSet::new();
+        let mut properties = BTreeMap::new();
         // Canonical coordinate order is not an execution schedule. A later
         // coordinate can create an edge named by an earlier cascade, so stage
         // every relevant creation before inspecting deletions.
@@ -362,6 +424,7 @@ impl OneHopState {
                     src,
                     relation,
                     dst,
+                    props,
                     ..
                 } = row
                 {
@@ -378,6 +441,13 @@ impl OneHopState {
                     meter.charge(ZSetEvent::ScratchEntry)?;
                     reserve_edge(pair, meter)?;
                     created.insert(*eid, (*relation, pair));
+                    if let Some(fields) = retained_properties(
+                        query,
+                        props.iter().map(|(key, value)| (key, value)),
+                        meter,
+                    )? {
+                        properties.insert(*eid, fields);
+                    }
                     touch(&mut affected, *eid, meter)?;
                 }
             }
@@ -390,6 +460,45 @@ impl OneHopState {
             for row in &entry.rows {
                 meter.charge(ZSetEvent::Work)?;
                 match row {
+                    DeltaRow::Property {
+                        elem: ElementId::Edge(eid),
+                        property,
+                        before,
+                        after,
+                    } if needs_edge_property(query, *property) => {
+                        let known = created.get(eid).or_else(|| self.edges.get(eid));
+                        if !self.relation.matches(entry.relation) {
+                            if known.is_some() {
+                                return Err(StandingQueryFailure::InvalidDelta);
+                            }
+                            continue;
+                        }
+                        if known.is_none_or(|(relation, _)| *relation != entry.relation) {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
+                        if !properties.contains_key(eid) {
+                            let old = self
+                                .properties
+                                .get(eid)
+                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                            let fields = retained_properties(query, old, meter)?
+                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                            properties.insert(*eid, fields);
+                        }
+                        let fields = properties
+                            .get_mut(eid)
+                            .ok_or(StandingQueryFailure::InvalidDelta)?;
+                        if fields.get(property) != before.as_ref() {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
+                        if let Some(value) = after {
+                            meter.units(ZSetEvent::ScratchEntry, 1 + stored_units(value))?;
+                            fields.insert(*property, value.clone());
+                        } else {
+                            fields.remove(property);
+                        }
+                        touch(&mut affected, *eid, meter)?;
+                    }
                     DeltaRow::DeleteEdge { eid, .. } => {
                         let known = created.get(eid).or_else(|| self.edges.get(eid));
                         if !self.relation.matches(entry.relation) {
@@ -405,6 +514,18 @@ impl OneHopState {
                         }
                         touch(&mut removed, *eid, meter)?;
                         touch(&mut affected, *eid, meter)?;
+                    }
+                    DeltaRow::Counter {
+                        elem: ElementId::Edge(eid),
+                        ..
+                    }
+                    | DeltaRow::Escrow {
+                        subject: ElementId::Edge(eid),
+                        ..
+                    } if self.properties.contains_key(eid) || properties.contains_key(eid) => {
+                        // These deltas do not carry a canonical stored-field
+                        // after-image. Never publish an unchanged value as fresh.
+                        return Err(StandingQueryFailure::InvalidDelta);
                     }
                     DeltaRow::DeleteVertex {
                         vid,
@@ -454,7 +575,19 @@ impl OneHopState {
                         meter,
                     )?;
                 } else {
-                    self.contribute(query, pair, vertices, &empty, -1, output, meter)?;
+                    self.contribute(
+                        query,
+                        pair,
+                        EdgeBinding {
+                            id: eid,
+                            props: self.properties.get(&eid),
+                        },
+                        vertices,
+                        &empty,
+                        -1,
+                        output,
+                        meter,
+                    )?;
                 }
             }
             if !removed.contains(&eid) {
@@ -478,7 +611,19 @@ impl OneHopState {
                         meter,
                     )?;
                 } else {
-                    self.contribute(query, pair, vertices, staged, 1, output, meter)?;
+                    self.contribute(
+                        query,
+                        pair,
+                        EdgeBinding {
+                            id: eid,
+                            props: properties.get(&eid).or_else(|| self.properties.get(&eid)),
+                        },
+                        vertices,
+                        staged,
+                        1,
+                        output,
+                        meter,
+                    )?;
                 }
             }
         }
@@ -499,6 +644,7 @@ impl OneHopState {
             created,
             removed,
             witnesses,
+            properties,
         })
     }
 
@@ -511,6 +657,7 @@ impl OneHopState {
             }
         }
         for &eid in &patch.removed {
+            self.properties.remove(&eid);
             if let Some((_, (src, dst))) = self.edges.remove(&eid) {
                 for vid in [src, dst] {
                     if let std::collections::btree_map::Entry::Occupied(mut entry) =
@@ -532,13 +679,19 @@ impl OneHopState {
                 self.insert(eid, relation, pair);
             }
         }
+        for (eid, fields) in patch.properties {
+            if !patch.removed.contains(&eid) {
+                self.properties.insert(eid, fields);
+            }
+        }
     }
 }
 
 /// Admit the ordinary full Strata edge read used only for initialization and
 /// rebuild. It returns properties too, so charge those payloads even though
-/// fixed-hop inputs retain only identities, relations and endpoints. These
-/// logical reservations do not claim byte-accurate accounting or spill.
+/// fixed-hop inputs retain topology and only one-hop inputs that project edge
+/// fields retain those fields. These logical reservations do not claim
+/// byte-accurate accounting or spill.
 pub(super) fn admit_snapshot(
     snapshot: &crate::Snapshot,
     records: &mut u64,
