@@ -47,16 +47,9 @@ impl WriteTxn {
                         .txn
                         .admit_mutation(database, input.relation())
                         .map_err(source)?;
-                    let proposal = input
-                        .execute_governed(
-                            remaining.mutations,
-                            |pattern, allowance| {
-                                workspace.txn.execute_graph_pattern_governed(
-                                    database, cx, pattern, allowance,
-                                )
-                            },
-                            || cx.checkpoint(),
-                        )
+                    let proposal = workspace
+                        .txn
+                        .collect_graph_mutation_over(database, cx, input, remaining.mutations, None)
                         .map_err(GraphWriteStepError::Mutation)?;
                     let stats = proposal.stats();
                     let mut batch = WriteBatch::new(input.relation());

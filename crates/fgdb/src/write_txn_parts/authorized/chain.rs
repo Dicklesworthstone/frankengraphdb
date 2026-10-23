@@ -613,6 +613,25 @@ impl<V: Vfs + Clone> Database<V> {
                                 scope,
                                 execution: &controls,
                             };
+                            let transaction = graph.transaction;
+                            let elements = |element, key| {
+                                // A named hidden field retains the chain's
+                                // explicit-refusal contract. Allowed keys still
+                                // admit arbitrary carried identities and both
+                                // edge endpoints before reading a property.
+                                if !scope.allows_property(key) {
+                                    return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                                }
+                                selection::mutation_element_property(
+                                    transaction,
+                                    &database.borrow(),
+                                    query_cx,
+                                    element,
+                                    key,
+                                    scope,
+                                    &controls,
+                                )
+                            };
                             let allocate = |request| {
                                 database.borrow_mut().allocate_identity(query_cx, request)
                             };
@@ -669,10 +688,11 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = mutation
-                                        .execute_governed_over(
+                                        .execute_governed_over_reading(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
+                                            elements,
                                             checkpoint,
                                         )
                                         .map_err(|error| error.map_source(mutation_error))?;
@@ -693,10 +713,11 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = query
-                                        .execute_governed_over(
+                                        .execute_governed_over_reading(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
+                                            elements,
                                             checkpoint,
                                         )
                                         .map_err(|error| {

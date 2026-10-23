@@ -668,17 +668,9 @@ impl WriteTxn {
                             allowance.query,
                             allowance.max_mutation_effects,
                         );
-                        let proposal = step
-                            .execute_governed_over(
-                                rows.take(),
-                                policy,
-                                |pattern, budget| {
-                                    workspace.txn.execute_graph_pattern_governed(
-                                        database, cx, pattern, budget,
-                                    )
-                                },
-                                || cx.checkpoint(),
-                            )
+                        let proposal = workspace
+                            .txn
+                            .collect_graph_mutation_over(database, cx, step, policy, rows.take())
                             .map_err(|error| error.map_source(mutation))?;
                         let (targets, edges) = mutation_targets(&proposal);
                         let stats = workspace.txn.stage_mutation_intents(
@@ -699,16 +691,14 @@ impl WriteTxn {
                             allowance.query,
                             allowance.max_mutation_effects,
                         );
-                        let proposal = query
-                            .execute_governed_over(
-                                rows.take(),
+                        let proposal = workspace
+                            .txn
+                            .collect_graph_mutation_query_over(
+                                database,
+                                cx,
+                                query,
                                 policy,
-                                |pattern, budget| {
-                                    workspace.txn.execute_graph_pattern_governed(
-                                        database, cx, pattern, budget,
-                                    )
-                                },
-                                || cx.checkpoint(),
+                                rows.take(),
                             )
                             .map_err(|error| error.map_source(GraphWriteChainError::Mutation))?;
                         let (batch, returning) = proposal.into_parts();

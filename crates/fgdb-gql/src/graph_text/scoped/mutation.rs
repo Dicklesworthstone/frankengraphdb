@@ -1494,6 +1494,17 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             )
             .into());
         }
+        // This owned-row step builds its bound input directly, bypassing
+        // UnresolvedGraphText::resolve. Its computed element fields still
+        // need the same catalog binding before actions or RETURN are bound.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let input = crate::set_text::BoundSetTextInput {
             selection: None,
             parameters: parser.syntax.parameters.clone(),

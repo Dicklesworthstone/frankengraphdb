@@ -299,6 +299,8 @@ impl PreparedGraphMutationQuery {
 
     /// [`Self::execute_governed`] with the host's element property reader
     /// (fgdb-694ga), as [`PreparedGraphMutation::execute_governed_reading`].
+    /// RETURN retains its existing final binding semantics; this reader never
+    /// substitutes old values for them.
     pub fn execute_governed_reading<E, C>(
         &self,
         policy: GraphMutationPolicy,
@@ -306,13 +308,26 @@ impl PreparedGraphMutationQuery {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            PropertyKeyId,
-        ) -> Result<Option<CanonicalPropertyValue>, E>,
+        elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
-        self.execute_with(None, policy, source, Some(&mut elements), checkpoint)
+        self.execute_governed_over_reading(None, policy, source, elements, checkpoint)
+    }
+
+    /// [`Self::execute_governed_reading`] over already admitted chain rows.
+    /// Both source callbacks use the same authority and frozen overlay.
+    pub fn execute_governed_over_reading<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(owned, policy, source, Some(&mut elements), checkpoint)
     }
 
     fn execute_with<E, C>(

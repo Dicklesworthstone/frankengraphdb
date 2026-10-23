@@ -91,14 +91,22 @@ impl PreparedGraphMutation {
                 input.execute_governed_reading(policy, patterns, elements, checkpoint)
             }
             (None, None) => input.execute_governed(policy, patterns, checkpoint),
-            (Some(rows), _) => input.execute_with_source(
-                policy,
-                &mut crate::set_ops::WithOwnedRows {
+            (Some(rows), mut elements) => {
+                let mut read =
+                    |element, key| elements.as_mut().map(|reader| (*reader)(element, key));
+                let mut source = crate::set_ops::BorrowedSource {
                     source: &mut patterns,
-                    rows: Some(rows),
-                },
-                checkpoint,
-            ),
+                    elements: Some(&mut read),
+                };
+                input.execute_with_source(
+                    policy,
+                    &mut crate::set_ops::WithOwnedRows {
+                        source: &mut source,
+                        rows: Some(rows),
+                    },
+                    checkpoint,
+                )
+            }
         }
         .map_err(|error| error.map_source(GraphMutationError::InputRelation))
     }

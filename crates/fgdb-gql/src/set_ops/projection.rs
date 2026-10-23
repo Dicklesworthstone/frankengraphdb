@@ -1765,16 +1765,7 @@ pub(crate) fn evaluate_value<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
-    let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E> = control;
-    let control = &mut control;
-    evaluate_value_at(
-        value,
-        row,
-        column,
-        control,
-        0,
-        &mut Evaluation::new(None, &mut no_element_reads),
-    )
+    evaluate_value_reading(value, row, column, control, &mut no_element_reads)
 }
 
 /// `evaluate_value` with the host's element property reader (fgdb-xnd7x):

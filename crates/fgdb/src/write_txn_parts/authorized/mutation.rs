@@ -177,6 +177,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 &element_failure,
                                 element,
                                 key,
+                                &controls,
                             )
                         },
                         || {
@@ -448,6 +449,7 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     &element_failure,
                     element,
                     key,
+                    &execution,
                 )
             },
             || {
@@ -467,12 +469,11 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     })
 }
 
-/// `x.key` of an element a mutation computes (fgdb-694ga), a governed point
-/// read of the transaction overlay at the statement's frozen cut. Every
-/// element here came out of a pattern admitted under this capability, so
-/// only the property scope remains: a property the capability cannot see
-/// reads exactly as an absent one, as the pattern tables mask it (FG-INV-20).
-fn scoped_element_property<V: Vfs + Clone>(
+/// Admit arbitrary computed identities through the same signed scope as the
+/// graph source, preserving the query's typed interruption channel. Parameter
+/// lists and chain rows carry no authority of their own (FG-INV-20).
+#[allow(clippy::too_many_arguments)]
+fn scoped_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
     database: &Database<V>,
     cx: &QueryCx,
@@ -480,11 +481,23 @@ fn scoped_element_property<V: Vfs + Clone>(
     failure: &RefCell<Option<Box<asupersync::error::Error>>>,
     element: ElementId,
     key: fgdb_delta_types::PropertyKeyId,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
 ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError> {
-    if !scope.allows_property(key) {
-        return Ok(None);
+    match selection::mutation_element_property(
+        transaction,
+        database,
+        cx,
+        element,
+        key,
+        scope,
+        execution,
+    ) {
+        Err(WriteTxnError::Interrupted(error)) => {
+            *failure.borrow_mut() = Some(error);
+            Ok(None)
+        }
+        result => result,
     }
-    transaction.element_property_with_checkpoint(database, cx, failure, element, key)
 }
 
 // Both mutation surfaces authorize the same original intents. The projected

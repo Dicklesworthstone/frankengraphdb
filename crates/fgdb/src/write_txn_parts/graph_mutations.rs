@@ -87,32 +87,8 @@ impl WriteTxn {
                 ))
             })?;
         cx.with_restriction(|| {
-            // `x.key` of an element the statement computes reads the overlay
-            // before its own effects, as a governed point read (fgdb-694ga).
-            let element_failure = std::cell::RefCell::new(None);
-            let proposal = query.execute_governed_reading(
-                policy,
-                |pattern, budget| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
-                },
-                |element, key| {
-                    self.element_property_with_checkpoint(
-                        database,
-                        cx,
-                        &element_failure,
-                        element,
-                        key,
-                    )
-                },
-                || match element_failure.borrow_mut().take() {
-                    Some(error) => Err(error),
-                    None => cx.checkpoint(),
-                },
-            );
-            let proposal = match element_failure.into_inner() {
-                Some(error) => Err(GqlQueryError::Interrupted(error)),
-                None => proposal,
-            }?;
+            let proposal =
+                self.collect_graph_mutation_query_over(database, cx, query, policy, None)?;
             let (batch, returning) = proposal.into_parts();
             let stats = self.stage_mutation_intents(
                 database,
@@ -298,32 +274,8 @@ impl WriteTxn {
         self.admit_mutation(database, mutation.relation())
             .map_err(source)?;
         cx.with_restriction(|| {
-            // `x.key` of an element the statement computes reads the overlay
-            // before its own effects, as a governed point read (fgdb-694ga).
-            let element_failure = std::cell::RefCell::new(None);
-            let proposal = mutation.execute_governed_reading(
-                policy,
-                |pattern, budget| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
-                },
-                |element, key| {
-                    self.element_property_with_checkpoint(
-                        database,
-                        cx,
-                        &element_failure,
-                        element,
-                        key,
-                    )
-                },
-                || match element_failure.borrow_mut().take() {
-                    Some(error) => Err(error),
-                    None => cx.checkpoint(),
-                },
-            );
-            let proposal = match element_failure.into_inner() {
-                Some(error) => Err(GqlQueryError::Interrupted(error)),
-                None => proposal,
-            }?;
+            let proposal =
+                self.collect_graph_mutation_over(database, cx, mutation, policy, None)?;
             let (targets, edges) = if retain_targets {
                 mutation_targets(&proposal)
             } else {
@@ -339,6 +291,69 @@ impl WriteTxn {
             )?;
             Ok((stats, targets, edges))
         })
+    }
+
+    // Selection and computed-element RHS reads borrow one immutable workspace
+    // until the complete proposal exists. Chains and frozen UNWIND programs
+    // use this same owner, so a row never sees an earlier row's assignments.
+    fn collect_graph_mutation_over<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        mutation: &fgdb_gql::PreparedGraphMutation,
+        policy: fgdb_gql::GraphMutationPolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+    ) -> Result<
+        fgdb_gql::GraphMutationBatch,
+        TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
+    > {
+        let failure = std::cell::RefCell::new(None);
+        let result = mutation.execute_governed_over_reading(
+            owned,
+            policy,
+            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |element, key| {
+                self.element_property_with_checkpoint(database, cx, &failure, element, key)
+            },
+            || match failure.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => cx.checkpoint(),
+            },
+        );
+        match failure.into_inner() {
+            Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+            None => result,
+        }
+    }
+
+    fn collect_graph_mutation_query_over<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphMutationQuery,
+        policy: fgdb_gql::GraphMutationPolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+    ) -> Result<
+        fgdb_gql::GraphMutationQueryBatch,
+        TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
+    > {
+        let failure = std::cell::RefCell::new(None);
+        let result = query.execute_governed_over_reading(
+            owned,
+            policy,
+            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |element, key| {
+                self.element_property_with_checkpoint(database, cx, &failure, element, key)
+            },
+            || match failure.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => cx.checkpoint(),
+            },
+        );
+        match failure.into_inner() {
+            Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+            None => result,
+        }
     }
 }
 

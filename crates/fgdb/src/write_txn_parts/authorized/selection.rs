@@ -4,14 +4,16 @@
 use super::{Database, Error, Execution, Vfs, WriteTxn, WriteTxnError};
 use crate::query::QueryError;
 use crate::write_txn::overlay_scan::OverlayRows;
-use crate::write_txn::{PointReadField, ProjectionReadAttempt, point_payload_admission};
+use crate::write_txn::{
+    PointReadField, ProjectionReadAttempt, point_find, point_payload_admission,
+};
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
 use fgdb_gql::{
     GlaExecutionEvent, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphPatternFactorExecution, PreparedGraphPatternFactors,
 };
-use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, QueryCx};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, QueryCx, VId};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
@@ -84,6 +86,201 @@ pub(super) fn property<V: Vfs + Clone, E>(
         .unwrap_or_else(|| CanonicalScalar::Null.into());
     attempt.accepted = true;
     Ok(value)
+}
+
+// Parameter lists may carry arbitrary identities. Resolve only the metadata
+// needed for authorization, through the same canonical overlay as field reads.
+// Visibility retains its signed label operands and lifetime witnesses, without
+// turning unrelated hidden fields into dependencies or charging hidden searches.
+fn mutation_vertex_visible<V: Vfs + Clone>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    scope: &PlannerPredicates,
+    poll: &mut impl FnMut() -> Result<(), WriteTxnError>,
+) -> Result<bool, WriteTxnError> {
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut control = |_| poll();
+    let field = PointReadField::VertexExistence;
+    let exists = transaction
+        .point_projection_with_control(
+            database,
+            element,
+            field,
+            &mut control,
+            &core::convert::identity,
+        )?
+        .exists;
+    transaction.point_reads.borrow_mut().record(element, field);
+    let mut present = Vec::new();
+    for label in scope.vertex_label_dependencies() {
+        let field = PointReadField::Label(label);
+        let projected = transaction.point_projection_with_control(
+            database,
+            element,
+            field,
+            &mut control,
+            &core::convert::identity,
+        )?;
+        transaction.point_reads.borrow_mut().record(element, field);
+        if projected.label {
+            present.push(label);
+        }
+    }
+    attempt.accepted = true;
+    Ok(exists && scope.allows_vertex(&present))
+}
+
+fn mutation_edge_topology<V: Vfs + Clone>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    edge: EId,
+    poll: &mut impl FnMut() -> Result<(), WriteTxnError>,
+) -> Result<Option<(VId, fgdb_delta_types::RelationId, VId)>, WriteTxnError> {
+    use fgdb_delta_types::DeltaRow;
+    let snapshot = transaction.query_snapshot(database)?;
+    let element = ElementId::Edge(edge);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut control = |_| poll();
+    let coordinate = snapshot.adjacency_index().statement_at_controlled(
+        &snapshot.blocks,
+        edge,
+        transaction.basis,
+        &mut control,
+    )?;
+    let mut topology = coordinate.map(|(block, row)| {
+        let edge = &snapshot.blocks[block][row];
+        (edge.src, edge.relation, edge.dst)
+    });
+    if let Some(prepared) = &transaction.prepared {
+        for coordinate in prepared.template.coordinate_entries() {
+            control(crate::gql_exec::source::SourceEvent::Work)?;
+            for effect in &coordinate.rows {
+                control(crate::gql_exec::source::SourceEvent::Work)?;
+                match effect {
+                    DeltaRow::CreateEdge {
+                        eid,
+                        src,
+                        relation,
+                        dst,
+                        ..
+                    } if *eid == edge => {
+                        topology = Some((*src, *relation, *dst));
+                    }
+                    DeltaRow::DeleteEdge { eid, .. } if *eid == edge => topology = None,
+                    DeltaRow::DeleteVertex {
+                        sorted_retired_incident_edges,
+                        ..
+                    } => {
+                        if point_find(sorted_retired_incident_edges, edge, |id| *id, &mut control)?
+                            .is_some()
+                        {
+                            topology = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    transaction
+        .point_reads
+        .borrow_mut()
+        .record(element, PointReadField::EdgeTopology);
+    attempt.accepted = true;
+    Ok(topology)
+}
+
+/// Admit an arbitrary carried identity before reading its field: keys first,
+/// then vertex visibility, or relationship type AND both endpoint visibilities.
+/// Absent and hidden inputs read as NULL. The shared expression evaluator meters
+/// its logical copy; physical searches only poll, and the same signed permit
+/// admits selected payload before cloning it. All reads use the frozen overlay.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    element: ElementId,
+    key: PropertyKeyId,
+    scope: &PlannerPredicates,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
+    if !scope.allows_property(key) {
+        return Ok(None);
+    }
+    // Reserve the visibility witnesses and temporary label slots before any
+    // hidden metadata is examined. This worst-case bound depends only on the
+    // signed predicate and caller-supplied value kind, including missing and
+    // hidden identities. Physical probes consume no further signed allowance.
+    let labels = u64::try_from(scope.vertex_label_dependencies().count())
+        .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+    let vertex_slots = labels
+        .checked_mul(2)
+        .and_then(|slots| slots.checked_add(2))
+        .ok_or(WriteTxnError::Authorization(Error::TooLarge))?;
+    let slots = match element {
+        ElementId::Vertex(_) => vertex_slots,
+        ElementId::Edge(_) => vertex_slots
+            .checked_mul(2)
+            .and_then(|slots| slots.checked_add(2))
+            .ok_or(WriteTxnError::Authorization(Error::TooLarge))?,
+    };
+    cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+    execution.borrow_mut().work(slots)?;
+    let mut poll = || {
+        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        execution.borrow_mut().poll()
+    };
+    poll()?;
+    match element {
+        ElementId::Vertex(vertex) => {
+            if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
+                return Ok(None);
+            }
+        }
+        ElementId::Edge(edge) => {
+            let Some((source, relation, target)) =
+                mutation_edge_topology(transaction, database, edge, &mut poll)?
+            else {
+                return Ok(None);
+            };
+            if !scope.allows_relation(relation) {
+                return Ok(None);
+            }
+            for vertex in [source, target] {
+                if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    property(
+        transaction,
+        database,
+        element,
+        key,
+        scope,
+        || {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.borrow_mut().poll()
+        },
+        &mut |_| {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.borrow_mut().checkpoint()
+        },
+        core::convert::identity,
+    )
+    .map(Some)
 }
 
 /// A [`property`] value for a consumer that holds only a scalar: a stored

@@ -112,6 +112,10 @@ impl<'a> PointProjection<'a> {
             ..Self::default()
         };
         match field {
+            // Authorization of a supplied element needs its lifetime without
+            // reading any property or label payload. Creation already set
+            // `exists`; canonical retirement resets the projection below.
+            PointReadField::VertexExistence => {}
             PointReadField::Property(requested) => {
                 projected.property = point_find(properties, requested, |(key, _)| *key, control)?
                     .map(|(_, value)| value);
@@ -119,7 +123,7 @@ impl<'a> PointProjection<'a> {
             PointReadField::Label(requested) => {
                 projected.label = point_find(labels, requested, |label| *label, control)?.is_some();
             }
-            _ => unreachable!("only explicit property and label accessors project a point"),
+            _ => unreachable!("only existence, property and label accessors project a point"),
         }
         Ok(projected)
     }

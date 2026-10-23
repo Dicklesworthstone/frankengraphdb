@@ -606,6 +606,7 @@ type ErasedSource<'a, E, C> = Box<
 /// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every
 /// other statement. `elements` is the host's element property reader
 /// (fgdb-694ga); `None` keeps `x.key` of a computed element a typed error.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute<'a, E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
@@ -633,6 +634,7 @@ pub(super) fn execute<'a, E, C>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_erased<E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
@@ -1111,6 +1113,89 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn computed_element_rhs_uses_the_frozen_reader_and_preserves_its_failure() {
+        use crate::algebra::GraphValue;
+        use crate::{GraphElementKey, GraphSetValue};
+        let mutation = PreparedGraphMutation::prepare(
+            query(),
+            RelationId(1),
+            vec![GraphMutationAction::SetProperty {
+                target: 0,
+                key: PropertyKeyId(2),
+                value: GraphMutationValue::Composite(GraphSetValue::MapGet {
+                    map: Box::new(GraphSetValue::Column(0)),
+                    key: "p".into(),
+                    property: GraphElementKey::Property(PropertyKeyId(1)),
+                }),
+            }],
+        )
+        .unwrap();
+        let source = |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| {
+            Ok::<_, GqlQueryError<&'static str, ()>>(GqlQueryExecution {
+                value: vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ])],
+                rows: GqlExecutionStats {
+                    snapshot_records: 1,
+                    result_rows: 1,
+                },
+                evaluator: GlaExecutionStats::default(),
+            })
+        };
+        // Old hosts retain the explicit unsupported-read refusal.
+        assert!(matches!(
+            mutation.execute_governed(policy(), source, || Ok(())),
+            Err(GqlQueryError::Source(GraphMutationError::Arithmetic { .. }))
+        ));
+        let mut reads = Vec::new();
+        let batch = mutation
+            .execute_governed_reading(
+                policy(),
+                source,
+                |element, key| {
+                    reads.push((element, key));
+                    Ok(Some(CanonicalScalar::Int(17).into()))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(reads, [(ElementId::Vertex(VId(1)), PropertyKeyId(1))]);
+        assert_eq!(
+            batch.intents(),
+            &[GraphMutationIntent::Property {
+                vertex: VId(1),
+                key: PropertyKeyId(2),
+                value: Some(CanonicalScalar::Int(17).into()),
+            }]
+        );
+        let failure = mutation.execute_governed_reading(
+            policy(),
+            source,
+            |_, _| Err("point read failed"),
+            || Ok(()),
+        );
+        assert!(matches!(
+            failure,
+            Err(GqlQueryError::Source(GraphMutationError::Source(
+                "point read failed"
+            )))
+        ));
+        let zero = GraphMutationPolicy::new(policy().query, 0);
+        assert!(matches!(
+            mutation.execute_governed_reading(
+                zero,
+                source,
+                |_, _| Ok(Some(CanonicalScalar::Int(17).into())),
+                || Ok(())
+            ),
+            Err(GqlQueryError::Source(
+                GraphMutationError::EffectLimit { .. }
+            ))
+        ));
+    }
+
     #[test]
     fn repeated_assignments_collapse_but_disagreement_never_selects_a_last_writer() {
         let values = [CanonicalScalar::Int(7), CanonicalScalar::Int(7)];

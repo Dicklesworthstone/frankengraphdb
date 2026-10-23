@@ -189,6 +189,16 @@ impl PlannerPredicates {
             .all(|clause| original_labels.iter().any(|label| clause.contains(label)))
     }
 
+    /// Label memberships on which this signed visibility predicate depends.
+    /// A transactional reader retains these positive AND negative fields so a
+    /// later label change cannot invalidate its admission. Repeated labels
+    /// across conjunctive clauses may occur; this is not a metadata grant.
+    pub fn vertex_label_dependencies(&self) -> impl Iterator<Item = LabelId> + '_ {
+        self.label_clauses
+            .iter()
+            .flat_map(|clause| clause.iter().copied())
+    }
+
     /// Label names used in WHERE, labels(), certificates and metadata must
     /// satisfy EVERY label scope, even if the vertex itself was admitted.
     #[must_use]

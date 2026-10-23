@@ -801,7 +801,8 @@ impl PreparedGraphMutation {
     /// m.q = m.p * 3`) reads `elements(element, key)` at the statement's
     /// frozen selection cut, under the same authorization as `source`.
     /// `Ok(None)` is an absent property. Without a reader that read stays a
-    /// typed error.
+    /// typed error. The reader retains its point witnesses and never observes
+    /// this statement's own proposed assignments.
     pub fn execute_governed_reading<E, C>(
         &self,
         policy: GraphMutationPolicy,
@@ -809,17 +810,31 @@ impl PreparedGraphMutation {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            PropertyKeyId,
-        ) -> Result<Option<CanonicalPropertyValue>, E>,
+        elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        self.execute_governed_over_reading(None, policy, source, elements, checkpoint)
+    }
+
+    /// [`Self::execute_governed_reading`] over a chain's owned input.
+    /// Owned identities are not new authority: the host must admit them under
+    /// the same scope as the graph source before any field is read.
+    pub fn execute_governed_over_reading<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
         collect::execute(
             self,
             policy,
             None,
-            None,
+            owned,
             source,
             Some(&mut elements),
             checkpoint,
