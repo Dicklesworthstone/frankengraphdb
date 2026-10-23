@@ -795,9 +795,12 @@ impl<'a> Parser<'a> {
         else {
             return Ok(None);
         };
-        // A comprehension, quantifier or reduce local shadows every hidden
-        // read of the same name, whichever scan found the name.
-        if boundary.width != width || self.elements.contains(&alias) {
+        // A local shadows value reads. A word before `(` is a function call;
+        // metadata_source below checks that call's actual source alias.
+        if boundary.width != width
+            || (self.elements.contains(&alias)
+                && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+        {
             return Ok(None);
         }
         if self.label_test.is_some() {
