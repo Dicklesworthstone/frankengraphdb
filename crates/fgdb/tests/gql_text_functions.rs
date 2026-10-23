@@ -714,3 +714,52 @@ fn opencypher_text_functions_route_through_reads_paths_and_set() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// openCypher: STARTS WITH, ENDS WITH and CONTAINS over a stored value that is
+/// not text are NULL in RETURN, as they are UNKNOWN in WHERE (TCK String8-10
+/// [8]). One vertex whose property holds an integer no longer fails the whole
+/// projection.
+#[test]
+fn text_predicates_over_non_text_values_are_null_in_return() {
+    let ((), report) = run_async_under_lab(0x7e87_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, t) in [
+            (1, text("Alpha")),
+            (2, CanonicalScalar::Int(5)),
+            (3, CanonicalScalar::Bool(true)),
+        ] {
+            batch.create_vertex(VId(id), vec![], vec![(T, t)]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let projection = query(
+            "MATCH (n) RETURN n, n.t STARTS WITH 'A' AS s, n.t ENDS WITH 'a' AS e, \
+             n.t CONTAINS 'lp' AS c, 'Alpha' STARTS WITH n.t AS r ORDER BY n",
+        );
+        let null = || CanonicalScalar::Null;
+        assert_eq!(
+            cells(
+                &db.execute_graph_set_governed(&cx, &projection, policy())
+                    .unwrap()
+                    .value
+            ),
+            vec![
+                vec![CanonicalScalar::Bool(true); 4],
+                vec![null(), null(), null(), null()],
+                vec![null(), null(), null(), null()],
+            ]
+        );
+        let filtered = query("MATCH (n) WHERE n.t STARTS WITH 'A' RETURN n");
+        assert_eq!(
+            ids(&db
+                .execute_graph_set_governed(&cx, &filtered, policy())
+                .unwrap()
+                .value),
+            vec![VId(1)]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

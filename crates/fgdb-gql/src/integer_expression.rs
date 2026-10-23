@@ -1150,8 +1150,13 @@ impl GraphIntegerExpression {
                 | Instruction::Contains => {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
-                    let a = left.text().map_err(failure)?;
-                    let b = right.text().map_err(failure)?;
+                    let (a, b) = if matches!(op, Instruction::Concat) {
+                        (left.text(), right.text())
+                    } else {
+                        (predicate_text(left.text()), predicate_text(right.text()))
+                    };
+                    let a = a.map_err(failure)?;
+                    let b = b.map_err(failure)?;
                     let result = if let (Some(a), Some(b)) = (a, b) {
                         charge_payload(a.len(), false, control)?;
                         charge_payload(b.len(), false, control)?;
@@ -1522,6 +1527,18 @@ fn scalar_boolean(value: &CanonicalScalar) -> Result<Option<bool>, GraphIntegerE
         CanonicalScalar::Null => Ok(None),
         CanonicalScalar::Bool(value) => Ok(Some(*value)),
         _ => Err(GraphIntegerErrorKind::NonBoolean),
+    }
+}
+
+/// openCypher: STARTS WITH, ENDS WITH and CONTAINS over a scalar that is not
+/// text are NULL, as they are in WHERE (TCK String8-10 [8]). Concatenation
+/// still requires text.
+fn predicate_text(
+    text: Result<Option<&str>, GraphIntegerErrorKind>,
+) -> Result<Option<&str>, GraphIntegerErrorKind> {
+    match text {
+        Err(GraphIntegerErrorKind::NonText) => Ok(None),
+        text => text,
     }
 }
 
