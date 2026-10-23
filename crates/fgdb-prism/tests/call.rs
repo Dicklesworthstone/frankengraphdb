@@ -1008,7 +1008,7 @@ fn global_l1_pagerank_retains_accuracy_when_the_population_grows() {
 
     let global = bind("CALL fnx.pagerank(l1_tol => 0.001, max_iter => 1000, weighted => false)");
     let legacy = bind("CALL fnx.pagerank(tol => 0.001, max_iter => 1000, weighted => false)");
-    let mut first = None;
+    let mut first: Option<(_, Vec<f64>)> = None;
     for copies in [1_usize, 32] {
         let population = copies * 3;
         let vertices: Vec<VId> = (0..population as u128).map(VId).collect();
