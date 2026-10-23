@@ -265,6 +265,62 @@ fn candidate_input_counts_only_real_graph_sources_and_preserves_occurrences() {
     assert_eq!(result.rows.snapshot_records, 18);
 }
 
+/// A required continuation's WHERE that the graph predicate refuses, here a
+/// computed graph operand against an imported column, filters after an
+/// implicit `WITH *` before an aggregate RETURN too (fgdb-c6hvm): the same
+/// template and rows as the explicit `WITH *` spelling. An OPTIONAL
+/// continuation's WHERE belongs to its left join and still refuses before
+/// any catalog call.
+#[test]
+fn an_aggregate_reads_a_refused_continuation_where_after_the_join() {
+    let template = |text: &str| {
+        PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    // SCORES are 1, 2, 2, 3: e = 2 meets two b rows from each of two a rows.
+    for (implicit, explicit, expected) in [
+        (
+            "MATCH (a) WITH a.p AS e MATCH (b) WHERE b.p * 1 = e \
+             RETURN e, COUNT(*) AS rows ORDER BY e",
+            "MATCH (a) WITH a.p AS e MATCH (b) WITH * WHERE b.p * 1 = e \
+             RETURN e, COUNT(*) AS rows ORDER BY e",
+            &[(1, 1), (2, 4), (3, 1)][..],
+        ),
+        (
+            "UNWIND [1, 3] AS w MATCH (b) WHERE b.p * 1 = w RETURN w, COUNT(*) AS rows ORDER BY w",
+            "UNWIND [1, 3] AS w MATCH (b) WITH * WHERE b.p * 1 = w \
+             RETURN w, COUNT(*) AS rows ORDER BY w",
+            &[(1, 1), (3, 1)][..],
+        ),
+    ] {
+        assert_eq!(template(implicit), template(explicit), "{implicit}");
+        let rows = execute(implicit);
+        assert_eq!(rows, execute(explicit), "{implicit}");
+        let observed: Vec<_> = rows
+            .iter()
+            .map(|row| (row.keys().to_vec(), row.values()[0].as_count()))
+            .collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|&(key, count)| (vec![scalar(key)], Some(count)))
+            .collect();
+        assert_eq!(observed, expected, "{implicit}");
+    }
+    let mut calls = 0;
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(
+            "MATCH (a) WITH a.p AS e OPTIONAL MATCH (b) WHERE b.p * 1 = e RETURN COUNT(*) AS rows",
+            |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 0);
+}
+
 #[test]
 fn wide_sums_and_fractional_averages_never_narrow_to_scalar_integers() {
     let rows = execute(

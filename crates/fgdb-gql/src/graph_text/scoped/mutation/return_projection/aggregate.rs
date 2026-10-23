@@ -290,20 +290,48 @@ impl PreparedGraphPipelineAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, Error> {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
-            .with_zones(resolve.time_zones());
+        let zones = resolve.time_zones();
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let multipart = crate::set_text::multipart::has_continuation(&tokens)
-            || Parser::deferred_where_continues(
-                statement,
-                declarations,
-                &tokens,
-                parser.zones.as_ref(),
-            );
+            || Parser::deferred_where_continues(statement, declarations, &tokens, zones.as_ref());
         let leading_match =
             !multipart && crate::set_text::multipart::leading_rows_then_match(&tokens);
-        let (head, mut stages, schema, depth) =
-            rows::prefix(&mut parser, statement, multipart, leading_match)?;
+        let prefix = |deferred: &[usize]| -> Result<_, Error> {
+            let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+                .with_zones(zones.clone());
+            parser.deferred_wheres = deferred.to_vec();
+            let prefix = rows::prefix(&mut parser, statement, multipart, leading_match)?;
+            Ok((parser, prefix))
+        };
+        // A required continuation's WHERE the graph predicate refused filters
+        // after an implicit `WITH *`, as unresolved_read_input re-reads it for
+        // a plain RETURN (fgdb-c6hvm): one refused WHERE at a time, reporting
+        // the first error if the statement stays refused. The prefix resolves
+        // no symbol, so a re-read never repeats a catalog call.
+        let (mut parser, (head, mut stages, schema, depth)) = match prefix(&[]) {
+            Ok(read) => read,
+            Err(error) => {
+                let mut deferred = Vec::new();
+                let mut offset = error.offset;
+                let mut read = None;
+                while let Some(at) =
+                    crate::set_text::multipart::continuation_where_at(&tokens, offset)
+                {
+                    if deferred.contains(&at) {
+                        break;
+                    }
+                    deferred.push(at);
+                    match prefix(&deferred) {
+                        Ok(again) => {
+                            read = Some(again);
+                            break;
+                        }
+                        Err(next) => offset = next.offset,
+                    }
+                }
+                read.ok_or(error)?
+            }
+        };
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(
