@@ -29,6 +29,8 @@
 //!   writes and connection-scoped reusable read templates via
 //!   `PREPARE`/`PREPARED`, `EXECUTE_PREPARED`, and
 //!   `RELEASE_PREPARED`/`PREPARED_RELEASED`.
+//!   Authorized `CREATE`/`INSERT` chains may carry bindings across `WITH`;
+//!   `MERGE`, `SET`, `REMOVE`, and `DELETE` chain steps are refused explicitly.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
@@ -39,6 +41,11 @@
 //!   (`BoltCompatProfileV1`: reads, explicit read-only transactions, and
 //!   bounded no-`RETURN` autocommit writes) over the same authorized execution
 //!   boundary; optional TLS 1.3 protects every configured listener.
+//! - Trusted embedding hosts can compact and scrub a served database through
+//!   [`Server::compact_database`] and [`Server::scrub_database`] while its
+//!   writer lease remains held. Maintenance shares ordinary write admission,
+//!   snapshot publication, and supervised recovery. These host operations are
+//!   not remote endpoints or rights granted by a query capability.
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
@@ -278,6 +285,50 @@ impl core::fmt::Display for ServerError {
 }
 impl core::error::Error for ServerError {}
 
+/// A trusted host's maintenance request could not complete. Engine failures
+/// retain their typed source; lifecycle diagnostics are never sent to a client.
+#[derive(Debug)]
+pub enum MaintenanceError {
+    UnknownDatabase(String),
+    Interrupted,
+    Draining,
+    DatabaseUnavailable(DatabaseStatus),
+    Engine(fgdb::RebuildError),
+}
+
+impl MaintenanceError {
+    fn unavailable(cx: &Cx, database: &Served) -> Self {
+        if cx.checkpoint().is_err() {
+            Self::Interrupted
+        } else {
+            Self::DatabaseUnavailable(database.db.status())
+        }
+    }
+}
+
+impl core::fmt::Display for MaintenanceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownDatabase(name) => write!(f, "database {name:?} is not served"),
+            Self::Interrupted => f.write_str("database maintenance was interrupted"),
+            Self::Draining => f.write_str("the server is draining"),
+            Self::DatabaseUnavailable(status) => {
+                write!(f, "database maintenance is unavailable: {status:?}")
+            }
+            Self::Engine(error) => write!(f, "database maintenance failed: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for MaintenanceError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Engine(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// A type-erased connection or request future: one `Send` proof per task
 /// instead of one through every nested engine future (the same reason the
 /// engine erases its commit boundary futures).
@@ -456,6 +507,79 @@ impl Server {
         self.databases
             .get(name)
             .map(|database| database.db.status())
+    }
+
+    /// Consolidate a served database without relinquishing its writer lease
+    /// or advancing its committed frontier. Existing readers keep their
+    /// immutable snapshots; later readers use the compacted publication.
+    ///
+    /// This is a trusted host operation, like opening a database, not a query
+    /// capability or remote administration route. The caller chooses when to
+    /// run it; no background pacing policy is implied. Ambiguous publication,
+    /// including cancellation during root publication, fences the database and
+    /// wakes its recovery worker before another request can reuse the old writer.
+    pub async fn compact_database(&self, cx: &Cx, name: &str) -> Result<(), MaintenanceError> {
+        let (served, _operation) = self.maintenance_admission(cx, name)?;
+        let mut database = served
+            .db
+            .write(cx)
+            .await
+            .map_err(|_| MaintenanceError::unavailable(cx, served))?;
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        database
+            .compact(&contexts.commit())
+            .await
+            .map_err(MaintenanceError::Engine)
+    }
+
+    /// Verify the served database's published capsules and current Strata
+    /// generation, repairing capsule redundancy where the engine can do so.
+    /// This uses the same trusted host authority and writer admission as
+    /// [`Server::compact_database`].
+    ///
+    /// A clean sweep preserves readers and the committed frontier. The
+    /// returned summary can report lost objects: such a report, an I/O error,
+    /// or cancellation leaves the handle fenced for supervised authoritative
+    /// recovery. Call [`Server::database_status`] to inspect recovery progress.
+    pub async fn scrub_database(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Result<fgdb::ScrubSummary, MaintenanceError> {
+        let (served, _operation) = self.maintenance_admission(cx, name)?;
+        let mut database = served
+            .db
+            .write(cx)
+            .await
+            .map_err(|_| MaintenanceError::unavailable(cx, served))?;
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        database
+            .scrub(&contexts.commit())
+            .await
+            .map_err(|error| MaintenanceError::Engine(error.into()))
+    }
+
+    fn maintenance_admission(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Result<(&Served, recovery::Operation), MaintenanceError> {
+        cx.checkpoint().map_err(|_| MaintenanceError::Interrupted)?;
+        if self.shutdown.is_triggered() {
+            return Err(MaintenanceError::Draining);
+        }
+        let database = self
+            .databases
+            .get(name)
+            .ok_or_else(|| MaintenanceError::UnknownDatabase(name.to_owned()))?;
+        let operation = database
+            .db
+            .enter()
+            .map_err(|_| MaintenanceError::unavailable(cx, database))?;
+        // Keep this operation alive until after the writer drops, including
+        // cancellation: drain/recovery must not retire the worker while a
+        // maintenance operation can still publish or fence its handle.
+        Ok((database, operation))
     }
 
     async fn join_database_workers(&self, cx: &Cx) {
