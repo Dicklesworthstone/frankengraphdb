@@ -17,6 +17,7 @@ impl PreparedGraphWriteChain {
         match self.steps.last()? {
             GraphWriteChainStep::Query(query) => Some(query.column_types()),
             GraphWriteChainStep::EdgeMergeQuery(query) => Some(query.column_types()),
+            GraphWriteChainStep::EdgeUpsertQuery { query, .. } => Some(query.column_types()),
             GraphWriteChainStep::VertexMergeQuery(query) => Some(query.column_types()),
             GraphWriteChainStep::MutationQuery(query) => Some(query.column_types()),
             _ => None,

@@ -199,6 +199,134 @@ async fn refuse_without_rows(cx: &Cx, client: &mut Client, text: &str, code: Err
 }
 
 #[test]
+fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "relationship-action-import", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+            MERGE (b:Person {name:row.d}) MERGE (a)-[r:KNOWS]->(b) \
+            ON CREATE SET r.age=row.w ON MATCH SET r.age=row.w";
+        let parameters = || {
+            vec![(
+                "rows".into(),
+                WireValue::List(
+                    [("Ada", "Bob", 3), ("Bob", "Cy", 5), ("Cy", "Cy", 7)]
+                        .into_iter()
+                        .map(|(source, target, weight)| {
+                            WireValue::Map(vec![
+                                ("d".into(), WireValue::Text(target.into())),
+                                ("s".into(), WireValue::Text(source.into())),
+                                ("w".into(), WireValue::Int(weight)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )]
+        };
+        committed(
+            writer
+                .execute(cx, ExecuteMode::Write, statement, parameters())
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let imported = state(cx, &mut observer).await;
+        assert_eq!((imported.0.rows.len(), imported.1.rows.len()), (3, 3));
+        assert_eq!(
+            imported
+                .1
+                .rows
+                .iter()
+                .map(|row| row[3].clone())
+                .collect::<Vec<_>>(),
+            vec![WireValue::Int(3), WireValue::Int(5), WireValue::Int(7)]
+        );
+        let repeated = writer
+            .execute(cx, ExecuteMode::Write, statement, parameters())
+            .await
+            .unwrap();
+        assert!(repeated.columns.is_empty() && repeated.rows.is_empty());
+        assert_eq!(
+            repeated.outcome,
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1
+            }
+        );
+        assert_eq!(state(cx, &mut observer).await, imported);
+
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "UNWIND [1,2] AS delta MERGE (a:Person {name:'Ada'}) \
+                 MERGE (b:Person {name:'Bob'}) MERGE (a)-[r:KNOWS]->(b) \
+                 ON MATCH SET r.age=r.age+delta",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
+        let updated = state(cx, &mut observer).await;
+        assert_eq!(
+            updated
+                .1
+                .rows
+                .iter()
+                .map(|row| row[3].clone())
+                .collect::<Vec<_>>(),
+            vec![WireValue::Int(6), WireValue::Int(5), WireValue::Int(7)]
+        );
+        refuse_without_rows(
+            cx,
+            &mut writer,
+            "UNWIND [1] AS delta MERGE (a:Person {name:'Ada'}) \
+             MERGE (b:Person {name:'Bob'}) MERGE (a)-[r:KNOWS]->(b) \
+             ON MATCH SET r.age=99 RETURN r.age AS weight",
+            ErrorCode::Budget,
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, updated);
+        let (mut columns, mut rows) = (0, 0);
+        let failure = writer
+            .execute_streaming(
+                cx,
+                ExecuteMode::Write,
+                "UNWIND [1,2] AS delta MERGE (a:Person {name:'Ada'}) \
+                 MERGE (b:Person {name:'Bob'}) MERGE (a)-[r:KNOWS]->(b) \
+                 ON MATCH SET r.age=10/(2-delta)",
+                vec![],
+                |_| {
+                    columns += 1;
+                    Ok(())
+                },
+                |_| {
+                    rows += 1;
+                    Ok(())
+                },
+            )
+            .await;
+        let Err(ClientError::Server { message, .. }) = failure else {
+            panic!("late relationship arithmetic must refuse: {failure:?}");
+        };
+        assert!(
+            message.contains("DivisionByZero") || message.contains("division by zero"),
+            "not an arithmetic refusal: {message}"
+        );
+        assert_eq!((columns, rows), (0, 0));
+        assert_eq!(state(cx, &mut observer).await, updated);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 2, 3, 3).await;
+    });
+}
+
+#[test]
 fn write_only_zero_row_grant_creates_but_never_acquires_read_rights() {
     run(async |cx| {
         let fixture = Fixture::start(cx, "write-only", |_| {}).await;

@@ -224,6 +224,12 @@ fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
     let last = chain.steps().len().saturating_sub(1);
     for (at, step) in chain.steps().iter().enumerate() {
         match step {
+            // Relationship actions may change an existing edge or its match
+            // key. Held creations currently index vertices only, so these
+            // steps retain the ordinary occurrence-by-occurrence overlay.
+            GraphWriteChainStep::EdgeUpsert(_)
+            | GraphWriteChainStep::EdgeUpsertRows { .. }
+            | GraphWriteChainStep::EdgeUpsertQuery { .. } => return false,
             GraphWriteChainStep::VertexMerge(merge) => {
                 // ON CREATE acts only on the vertex its row's MERGE created,
                 // which the chain holds. ON MATCH and a trailing SET update

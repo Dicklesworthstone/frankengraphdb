@@ -19,6 +19,7 @@ struct ParsedEdgeMerge<'a> {
     relation: Name<'a>,
     properties: Vec<super::merge::MergeProperty<'a>>,
     undirected: bool,
+    actions: Option<super::merge::ParsedEdgeRowActions<'a>>,
 }
 /// A relationship MERGE over a WITH row: the pattern, its source and
 /// destination row columns, and its RETURN.
@@ -37,6 +38,52 @@ fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeM
 }
 
 impl<'a> Parser<'a> {
+    /// A plain SET may also write carried endpoints. Keep that existing
+    /// mutation family intact unless every assignment targets this edge.
+    fn edge_only_set(&self, relationship: Option<Name<'a>>) -> Result<bool, GraphPatternTextError> {
+        let Some(relationship) = relationship.filter(|_| self.is_word("SET")) else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        let (mut depth, mut target, mut property) = (0usize, true, false);
+        loop {
+            let token = lexer.next()?;
+            if target {
+                if !matches!(token.kind, TokenKind::Word(word) if word == relationship.text) {
+                    return Ok(false);
+                }
+                let accessor = lexer.next()?;
+                if !matches!(accessor.kind, TokenKind::Punct(b'.' | b'+')) {
+                    return Ok(false);
+                }
+                target = false;
+                property = matches!(accessor.kind, TokenKind::Punct(b'.'));
+                continue;
+            } else {
+                match token.kind {
+                    TokenKind::End | TokenKind::Punct(b';') => return Ok(true),
+                    TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                    TokenKind::Punct(b',') if depth == 0 => target = true,
+                    TokenKind::Word(word)
+                        if depth == 0
+                            && !property
+                            && [
+                                "ON", "RETURN", "WITH", "CREATE", "MERGE", "SET", "REMOVE",
+                                "DELETE", "DETACH", "MATCH", "UNWIND", "OPTIONAL",
+                            ]
+                            .iter()
+                            .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                    {
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+            property = matches!(token.kind, TokenKind::Punct(b'.'));
+        }
+    }
+
     /// `MERGE (a)-[r:R {k: v}]->(b)`, its reverse arrow, or no arrow for an
     /// undirected MERGE. The relationship variable and the property map are
     /// optional; a named variable must be distinct from every MATCH binding
@@ -107,6 +154,7 @@ impl<'a> Parser<'a> {
             relation,
             properties,
             undirected: !incoming && !outgoing,
+            actions: None,
         })
     }
 
@@ -352,6 +400,7 @@ impl PreparedGraphEdgeMergeText {
                 destination,
                 properties,
                 undirected: parsed.undirected,
+                row_actions: None,
             },
             returning,
         ))
@@ -528,7 +577,7 @@ impl PreparedGraphEdgeMergeText {
         returning: Option<bool>,
     ) -> Result<(RowMerge<'a>, bool), GraphEdgeMergeTextError> {
         parser.write_row_scope = true;
-        let parsed = parser.edge_merge_pattern()?;
+        let mut parsed = parser.edge_merge_pattern()?;
         let endpoint = |name: Name<'_>| {
             schema
                 .iter()
@@ -554,6 +603,19 @@ impl PreparedGraphEdgeMergeText {
                 ),
             )
             .into());
+        }
+        // A chained ON/SET clause belongs to this occurrence-preserving
+        // MERGE. A plain SET on a different carried element remains the
+        // existing terminal mutation step.
+        let edge_set = parser.edge_only_set(parsed.relationship)?;
+        if parser.chain_write && (parser.is_word("ON") || edge_set) {
+            let relationship = parsed.relationship.ok_or_else(|| {
+                error(
+                    parser.current.at,
+                    GraphPatternTextErrorKind::Expected("a named MERGE relationship for ON/SET"),
+                )
+            })?;
+            parsed.actions = Some(parser.edge_row_actions(relationship, schema)?);
         }
         let continues = parser.chain_write && parser.at_chained_write()?;
         // In a chain, a WITH head after the pattern is a query step whose
@@ -651,6 +713,10 @@ impl PreparedGraphEdgeMergeText {
         let returning = parsed_return
             .map(|parsed| parsed.resolve(&mut symbol))
             .transpose()?;
+        let row_actions = parsed
+            .actions
+            .map(|actions| actions.resolve(&mut symbol))
+            .transpose()?;
         Ok((
             Self {
                 input: EdgeMergeTextInput::Row {
@@ -662,6 +728,7 @@ impl PreparedGraphEdgeMergeText {
                 destination,
                 properties,
                 undirected: parsed.undirected,
+                row_actions,
             },
             returning,
         ))
@@ -682,6 +749,15 @@ impl PreparedGraphEdgeMergeText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphEdgeMerge, GraphEdgeMergeTextError> {
         let values = self.input.checked_arguments(arguments)?;
+        self.bind_values(&values)
+    }
+
+    /// The chain has already checked its parameter table; share that one
+    /// admitted value vector between selection, actions and RETURN.
+    pub(crate) fn bind_values(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphEdgeMerge, GraphEdgeMergeTextError> {
         let mut properties = Vec::with_capacity(self.properties.len());
         for (key, template) in &self.properties {
             let value = match template {
@@ -696,14 +772,14 @@ impl PreparedGraphEdgeMergeText {
         // be created.
         let merge = match &self.input {
             EdgeMergeTextInput::Match(selection) => PreparedGraphEdgeMerge::prepare(
-                selection.bind_values(&values)?,
+                selection.bind_values(values)?,
                 self.relation,
                 self.source,
                 self.destination,
                 properties,
             ),
             EdgeMergeTextInput::Row { input, .. } => PreparedGraphEdgeMerge::prepare_relation(
-                input.bind_values(&values)?,
+                input.bind_values(values)?,
                 self.relation,
                 self.source,
                 self.destination,
@@ -715,6 +791,81 @@ impl PreparedGraphEdgeMergeText {
             merge.with_undirected()
         } else {
             merge
+        })
+    }
+
+    /// Bind the property-only action templates to a distinct chain family.
+    /// The plain MERGE definition and RETURN compiler keep their semantics.
+    pub(crate) fn bind_row_upsert(
+        &self,
+        merge: &PreparedGraphEdgeMerge,
+        values: &[GqlParameterValue],
+    ) -> Result<Option<crate::PreparedGraphEdgeUpsertRows>, GraphEdgeMergeTextError> {
+        use crate::{
+            GraphEdgeMergeRowAction as EdgeAction, GraphEdgeMergeRowInput as EdgeInput,
+            GraphEdgeUpsertAction, GraphEdgeUpsertValue, GraphVertexMergeRowAction as VertexAction,
+            GraphVertexMergeRowInput as VertexInput, GraphVertexUpsertAction,
+        };
+        let Some(templates) = &self.row_actions else {
+            return Ok(None);
+        };
+        let bind = |templates: &[crate::mutation_text::VertexMergeRowActionTemplate]| {
+            super::merge::bind_row_actions(templates, values)?
+                .into_iter()
+                .map(|action| {
+                    Ok(match action {
+                        VertexAction::Vertex(GraphVertexUpsertAction::SetProperty {
+                            key,
+                            value,
+                        }) => EdgeAction::Edge(GraphEdgeUpsertAction {
+                            key,
+                            value: GraphEdgeUpsertValue::Literal(value),
+                        }),
+                        VertexAction::Vertex(GraphVertexUpsertAction::SetStored { key, value }) => {
+                            EdgeAction::Edge(GraphEdgeUpsertAction {
+                                key,
+                                value: GraphEdgeUpsertValue::Stored(value),
+                            })
+                        }
+                        VertexAction::Expression { key, inputs, value } => EdgeAction::Expression {
+                            key,
+                            inputs: inputs
+                                .into_iter()
+                                .map(|input| match input {
+                                    VertexInput::Property(key) => EdgeInput::Property(key),
+                                    VertexInput::Column(column) => EdgeInput::Column(column),
+                                })
+                                .collect(),
+                            value,
+                        },
+                        VertexAction::Value { key, value } => EdgeAction::Value {
+                            key,
+                            value: crate::GraphEdgeMergeRowComputed(value),
+                        },
+                        VertexAction::Vertex(_) => {
+                            return Err(GraphEdgeMergeTextError::from(error(
+                                self.input.return_at(),
+                                GraphPatternTextErrorKind::Expected(
+                                    "a relationship property assignment",
+                                ),
+                            )));
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, GraphEdgeMergeTextError>>()
+        };
+        crate::PreparedGraphEdgeUpsertRows::prepare(
+            merge.clone(),
+            crate::GraphEdgeMergeRowActions {
+                on_match: bind(&templates.on_match)?,
+                on_create: bind(&templates.on_create)?,
+                after: bind(&templates.after)?,
+            },
+        )
+        .map(Some)
+        .map_err(|kind| GraphEdgeMergeTextError {
+            offset: self.input.return_at(),
+            kind: GraphEdgeMergeTextErrorKind::RowActionsBuild(kind),
         })
     }
 }

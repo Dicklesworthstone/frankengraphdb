@@ -525,6 +525,7 @@ impl PreparedGraphEdgeUpsertText {
             destination,
             properties,
             undirected: parsed.undirected,
+            row_actions: None,
         };
         Ok((
             Self {

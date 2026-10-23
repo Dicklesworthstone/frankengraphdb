@@ -168,37 +168,38 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
             // This tuple already passed the one masked selection. Transfer it
             // and the cumulative prefix to the ordinary collector, not a fake
             // pattern, a text rewrite, or an unchecked privileged graph read.
-            let (merge_stats, resolved) = edge_merge::apply_occurrence(
-                transaction,
-                database,
-                cx,
-                input.merge(),
-                remaining,
-                scope,
-                execution,
-                GqlQueryExecution {
-                    value: vec![row],
-                    rows: GqlExecutionStats {
-                        snapshot_records: records,
-                        result_rows: 1,
+            let (merge_stats, resolved, _) =
+                edge_merge::apply_occurrence::<crate::write_txn::EdgeUpsertOccurrences, _, _>(
+                    transaction,
+                    database,
+                    cx,
+                    input.merge(),
+                    remaining,
+                    scope,
+                    execution,
+                    GqlQueryExecution {
+                        value: vec![row],
+                        rows: GqlExecutionStats {
+                            snapshot_records: records,
+                            result_rows: 1,
+                        },
+                        evaluator: stats.evaluator,
                     },
-                    evaluator: stats.evaluator,
-                },
-                row_at,
-            )
-            .map_err(|error| {
-                error.map_source(|error| {
-                    GraphEdgeUpsertError::Merge(match error {
-                        GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                            GraphEdgeMergeError::CreationLimit {
-                                limit: policy.merge.max_created_edges,
-                                observed: u128::from(stats.created_edges) + observed,
+                    row_at,
+                )
+                .map_err(|error| {
+                    error.map_source(|error| {
+                        GraphEdgeUpsertError::Merge(match error {
+                            GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                                GraphEdgeMergeError::CreationLimit {
+                                    limit: policy.merge.max_created_edges,
+                                    observed: u128::from(stats.created_edges) + observed,
+                                }
                             }
-                        }
-                        error => error,
+                            error => error,
+                        })
                     })
-                })
-            })?;
+                })?;
             stats.evaluator = merge_stats.evaluator;
             stats.overlay_edges = stats
                 .overlay_edges

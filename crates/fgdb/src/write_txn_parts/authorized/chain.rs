@@ -558,6 +558,22 @@ impl<V: Vfs + Clone> Database<V> {
                         )?
                     } else if matches!(
                         statement,
+                        GraphWriteChainStep::EdgeUpsert(_)
+                            | GraphWriteChainStep::EdgeUpsertRows { .. }
+                            | GraphWriteChainStep::EdgeUpsertQuery { .. }
+                    ) {
+                        merges::execute_actions(
+                            workspace.transaction(),
+                            self,
+                            query_cx,
+                            statement,
+                            allowance,
+                            rows.take(),
+                            scope,
+                            &mut execution,
+                        )?
+                    } else if matches!(
+                        statement,
                         GraphWriteChainStep::EdgeMerge(_)
                             | GraphWriteChainStep::EdgeMergeRows { .. }
                             | GraphWriteChainStep::EdgeMergeQuery(_)

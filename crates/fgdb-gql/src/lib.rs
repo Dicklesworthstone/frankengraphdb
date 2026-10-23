@@ -21,6 +21,7 @@ mod edge_merge_query;
 pub mod edge_stream;
 mod edge_upsert;
 mod edge_upsert_query;
+mod edge_upsert_rows;
 mod edge_upsert_text;
 mod evidence_artifact;
 mod evidence_cursor;
@@ -140,6 +141,10 @@ pub use edge_upsert::{
 pub use edge_upsert_query::{
     GraphEdgeReturnBinding, GraphEdgeUpsertBatchStats, GraphEdgeUpsertQueryBuildError,
     GraphEdgeUpsertQueryError, PreparedGraphEdgeUpsertQuery,
+};
+pub use edge_upsert_rows::{
+    GraphEdgeMergeRowAction, GraphEdgeMergeRowActions, GraphEdgeMergeRowComputed,
+    GraphEdgeMergeRowInput, PreparedGraphEdgeUpsertRows,
 };
 pub use edge_upsert_text::{
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,

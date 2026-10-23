@@ -294,6 +294,7 @@ impl WriteTxn {
                         step,
                         GraphWriteChainStep::Query(_)
                             | GraphWriteChainStep::EdgeMergeQuery(_)
+                            | GraphWriteChainStep::EdgeUpsertQuery { .. }
                             | GraphWriteChainStep::VertexMergeQuery(_)
                             | GraphWriteChainStep::MutationQuery(_)
                     );
@@ -311,6 +312,24 @@ impl WriteTxn {
                 let edge_merge = GraphEdgeMergePolicy::new(allowance.query)
                     .with_creation_limit(allowance.max_edges);
                 let (stats, returning) = match step {
+                    GraphWriteChainStep::EdgeUpsert(_)
+                    | GraphWriteChainStep::EdgeUpsertRows { .. }
+                    | GraphWriteChainStep::EdgeUpsertQuery { .. } => {
+                        let (stats, returning, receipt, spent) =
+                            workspace.txn.execute_graph_edge_upsert_chain_step(
+                                database,
+                                cx,
+                                step,
+                                allowance,
+                                rows.take(),
+                                &mut allocate,
+                            )?;
+                        effects = spent;
+                        if let Some(receipt) = receipt {
+                            receipts.push(receipt);
+                        }
+                        (stats, returning)
+                    }
                     GraphWriteChainStep::Query(query) => {
                         let proposal = query
                             .execute_governed_over(

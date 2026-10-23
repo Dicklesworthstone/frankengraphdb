@@ -542,17 +542,27 @@ impl PreparedGraphWriteChainText {
                         .input
                         .checked_arguments(&own)
                         .map_err(crate::GraphEdgeMergeTextError::from)?;
-                    let bound = merge.bind_parameters(&own)?;
+                    let bound = merge.bind_values(&values)?;
+                    let upsert = merge.bind_row_upsert(&bound, &values)?;
                     // A RETURN, or a WITH head another write reads.
                     steps.push(match returning {
                         Some(returning) => {
                             let query = returning.bind(bound, &values)?;
                             previous = Some(query.column_types().to_vec());
-                            GraphWriteChainStep::EdgeMergeQuery(Box::new(query))
+                            match upsert {
+                                Some(upsert) => GraphWriteChainStep::EdgeUpsertQuery {
+                                    upsert: Box::new(upsert),
+                                    query: Box::new(query),
+                                },
+                                None => GraphWriteChainStep::EdgeMergeQuery(Box::new(query)),
+                            }
                         }
                         None => {
                             previous = None;
-                            GraphWriteChainStep::EdgeMerge(Box::new(bound))
+                            match upsert {
+                                Some(upsert) => GraphWriteChainStep::EdgeUpsert(Box::new(upsert)),
+                                None => GraphWriteChainStep::EdgeMerge(Box::new(bound)),
+                            }
                         }
                     });
                 }
@@ -564,7 +574,12 @@ impl PreparedGraphWriteChainText {
                     {
                         reads_previous(input.owned.as_deref(), &previous, merge.input.return_at())?;
                     }
-                    let bound = merge.bind_parameters(&own)?;
+                    let values = merge
+                        .input
+                        .checked_arguments(&own)
+                        .map_err(crate::GraphEdgeMergeTextError::from)?;
+                    let bound = merge.bind_values(&values)?;
+                    let upsert = merge.bind_row_upsert(&bound, &values)?;
                     // Its rows: the row's visible columns, then the edge. The
                     // row is the previous write's, or a MATCH-led first step's
                     // own read row, which no owned leaf carries.
@@ -572,9 +587,15 @@ impl PreparedGraphWriteChainText {
                     output.truncate(*keep);
                     output.push(GraphSetColumnType::Edge);
                     previous = Some(output);
-                    steps.push(GraphWriteChainStep::EdgeMergeRows {
-                        merge: Box::new(bound),
-                        keep: *keep,
+                    steps.push(match upsert {
+                        Some(upsert) => GraphWriteChainStep::EdgeUpsertRows {
+                            upsert: Box::new(upsert),
+                            keep: *keep,
+                        },
+                        None => GraphWriteChainStep::EdgeMergeRows {
+                            merge: Box::new(bound),
+                            keep: *keep,
+                        },
                     });
                 }
                 ChainTextStep::Mutation(step) => {

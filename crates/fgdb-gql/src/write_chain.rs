@@ -145,6 +145,7 @@ impl core::error::Error for GraphWriteChainTextError {
 pub enum GraphWriteChainError<E, A> {
     Insert(GraphInsertQueryError<E, A>),
     EdgeMerge(GraphEdgeMergeQueryError<E, A>),
+    EdgeUpsert(crate::GraphEdgeUpsertQueryError<E, A>),
     VertexMerge(crate::GraphVertexMergeRowsQueryError<E, A>),
     /// A SET, REMOVE or DELETE step, or its RETURN.
     Mutation(GraphMutationQueryError<E>),
@@ -159,6 +160,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
         match self {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
+            Self::EdgeUpsert(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
             Self::Mutation(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
@@ -172,6 +174,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
         match self {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
+            Self::EdgeUpsert(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
             Self::Mutation(error) => Some(error),
             Self::Read(error) => Some(error),
@@ -198,6 +201,19 @@ pub enum GraphWriteChainStep {
         merge: Box<PreparedGraphEdgeMerge>,
         keep: usize,
     },
+    /// A final relationship MERGE with ON/SET actions and no RETURN.
+    EdgeUpsert(Box<crate::PreparedGraphEdgeUpsertRows>),
+    /// Action-bearing relationship MERGE whose private occurrences feed the
+    /// next write. Only the visible prefix and resolved edge are carried.
+    EdgeUpsertRows {
+        upsert: Box<crate::PreparedGraphEdgeUpsertRows>,
+        keep: usize,
+    },
+    /// ON/SET clauses followed by the ordinary edge MERGE RETURN or WITH.
+    EdgeUpsertQuery {
+        upsert: Box<crate::PreparedGraphEdgeUpsertRows>,
+        query: Box<PreparedGraphEdgeMergeQuery>,
+    },
     /// A vertex MERGE over the previous write's rows (or one empty row, or
     /// a leading UNWIND's rows, as the first write). Its rows are the input
     /// row and the merged vertex.
@@ -219,6 +235,9 @@ impl core::fmt::Debug for GraphWriteChainStep {
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
             Self::EdgeMergeQuery(_) => "EdgeMergeQuery([REDACTED])",
             Self::EdgeMergeRows { .. } => "EdgeMergeRows([REDACTED])",
+            Self::EdgeUpsert(_) => "EdgeUpsert([REDACTED])",
+            Self::EdgeUpsertRows { .. } => "EdgeUpsertRows([REDACTED])",
+            Self::EdgeUpsertQuery { .. } => "EdgeUpsertQuery([REDACTED])",
             Self::VertexMerge(_) => "VertexMerge([REDACTED])",
             Self::VertexMergeQuery(_) => "VertexMergeQuery([REDACTED])",
             Self::Mutation(_) => "Mutation([REDACTED])",
@@ -251,9 +270,10 @@ impl GraphWriteChainStep {
             (Self::VertexMerge(merge), ElementId::Vertex(vertex)) => {
                 (merge.keep, GraphValue::Vertex(vertex))
             }
-            (Self::EdgeMergeRows { keep, .. }, ElementId::Edge(edge)) => {
-                (*keep, GraphValue::Edge(edge))
-            }
+            (
+                Self::EdgeMergeRows { keep, .. } | Self::EdgeUpsertRows { keep, .. },
+                ElementId::Edge(edge),
+            ) => (*keep, GraphValue::Edge(edge)),
             _ => return Err(invalid().into()),
         };
         let prefix = input.values().get(..keep).ok_or_else(invalid)?;
@@ -365,6 +385,7 @@ impl PreparedGraphWriteChain {
         match self.steps.last() {
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
+            Some(GraphWriteChainStep::EdgeUpsertQuery { query, .. }) => query.columns(),
             Some(GraphWriteChainStep::VertexMergeQuery(query)) => query.columns(),
             Some(GraphWriteChainStep::MutationQuery(query)) => query.columns(),
             _ => &[],
@@ -379,6 +400,7 @@ impl PreparedGraphWriteChain {
             Some(
                 GraphWriteChainStep::Query(_)
                     | GraphWriteChainStep::EdgeMergeQuery(_)
+                    | GraphWriteChainStep::EdgeUpsertQuery { .. }
                     | GraphWriteChainStep::VertexMergeQuery(_)
                     | GraphWriteChainStep::MutationQuery(_)
             )

@@ -2,6 +2,8 @@
 // rollback boundary. Each SET clause freezes inputs before its writes; the
 // following clause reads canonical staged effects, never a second graph model.
 
+include!("edge_upsert_rows.rs");
+
 type EdgeUpsertActionResult<T, E, A, C> =
     Result<T, fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeUpsertError<E, A>, C>>;
 

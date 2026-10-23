@@ -82,6 +82,23 @@ type ParsedUpsertClauses<'a> = (
     Vec<ParsedUpsertAction<'a>>,
 );
 
+/// Property-only use of the shared row-action grammar by relationship MERGE.
+/// Labels are refused before symbol resolution, and no source text executes.
+pub(super) struct ParsedEdgeRowActions<'a>(ParsedUpsertClauses<'a>);
+
+impl<'a> ParsedEdgeRowActions<'a> {
+    pub(super) fn resolve(
+        self,
+        symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
+    ) -> Result<VertexMergeRowActionTemplates, GraphPatternTextError> {
+        Ok(VertexMergeRowActionTemplates {
+            on_match: resolve_row_actions(self.0.0, symbol)?,
+            on_create: resolve_row_actions(self.0.1, symbol)?,
+            after: resolve_row_actions(self.0.2, symbol)?,
+        })
+    }
+}
+
 /// Pins the action resolver's argument to one inferred source lifetime. A bare
 /// closure parameter here has no type at its definition (E0282), and spelling it
 /// with `'_` would make the closure higher-ranked over a lifetime the symbol
@@ -318,6 +335,26 @@ impl<'a> Parser<'a> {
         Ok((on_match, on_create, after))
     }
 
+    pub(super) fn edge_row_actions(
+        &mut self,
+        variable: Name<'a>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<ParsedEdgeRowActions<'a>, GraphVertexUpsertTextError> {
+        let clauses = self.upsert_branch_actions(variable, Some(row))?;
+        for actions in [&clauses.0, &clauses.1, &clauses.2] {
+            for action in actions {
+                if let ParsedUpsertAction::Label { label } = action {
+                    return Err(error(
+                        label.at,
+                        GraphPatternTextErrorKind::Expected("a relationship property assignment"),
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(ParsedEdgeRowActions(clauses))
+    }
+
     /// One simultaneous SET clause. The native scalar compiler owns operator
     /// precedence, lazy CASE/COALESCE, limits and parameter type admission.
     fn upsert_assignments(
@@ -333,7 +370,7 @@ impl<'a> Parser<'a> {
             if actual.text != variable.text {
                 return Err(error(
                     actual.at,
-                    GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                    GraphPatternTextErrorKind::Expected("the MERGE variable"),
                 )
                 .into());
             }
@@ -489,7 +526,7 @@ impl<'a> Parser<'a> {
                     if source.text != variable.text {
                         return Err(error(
                             source.at,
-                            GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                            GraphPatternTextErrorKind::Expected("the MERGE variable"),
                         ));
                     }
                     parser.punct(b'.', ".")?;
@@ -607,6 +644,77 @@ fn resolve_row_actions<'a>(
                     key: property_symbol(symbol, key)?,
                     value: Box::new(value),
                     at,
+                }
+            }
+        });
+    }
+    Ok(actions)
+}
+
+/// Bind the shared row-action grammar once. Relationship MERGE converts the
+/// property-only subset into its own explicitly typed action definition.
+pub(super) fn bind_row_actions(
+    templates: &[VertexMergeRowActionTemplate],
+    values: &[crate::GqlParameterValue],
+) -> Result<Vec<crate::GraphVertexMergeRowAction>, GraphVertexUpsertTextError> {
+    let mut actions = Vec::with_capacity(templates.len());
+    for template in templates {
+        actions.push(match template {
+            VertexMergeRowActionTemplate::Vertex(template) => {
+                crate::GraphVertexMergeRowAction::Vertex(match template {
+                    VertexUpsertActionTemplate::Property { key, value } => match value {
+                        VertexUpsertValueTemplate::Bound(value) => {
+                            GraphVertexUpsertAction::SetProperty {
+                                key: *key,
+                                value: value.clone(),
+                            }
+                        }
+                        VertexUpsertValueTemplate::Parameter { index, at } => {
+                            GraphVertexUpsertAction::SetProperty {
+                                key: *key,
+                                value: scalar(values[*index].clone(), *at)?,
+                            }
+                        }
+                        VertexUpsertValueTemplate::Composite { value, at } => {
+                            constant_list_action(*key, value, values, *at)?
+                        }
+                    },
+                    VertexUpsertActionTemplate::Label { label, present } => {
+                        GraphVertexUpsertAction::SetLabel {
+                            label: *label,
+                            present: *present,
+                        }
+                    }
+                    VertexUpsertActionTemplate::Expression { at, .. } => {
+                        return Err(error(
+                            *at,
+                            GraphPatternTextErrorKind::Expected("a row expression"),
+                        )
+                        .into());
+                    }
+                })
+            }
+            VertexMergeRowActionTemplate::Expression {
+                key,
+                inputs,
+                program,
+                at,
+            } => crate::GraphVertexMergeRowAction::Expression {
+                key: *key,
+                inputs: inputs.clone(),
+                value: super::integer::bind_integer(program, values, *at)?,
+            },
+            VertexMergeRowActionTemplate::Value { key, value, at } => {
+                crate::GraphVertexMergeRowAction::Value {
+                    key: *key,
+                    value: crate::GraphVertexMergeRowComputed(
+                        return_projection::bind_read_value(value, values).map_err(|error| {
+                            GraphVertexUpsertTextError {
+                                offset: *at,
+                                ..GraphVertexUpsertTextError::from(error)
+                            }
+                        })?,
+                    ),
                 }
             }
         });
@@ -2469,75 +2577,8 @@ impl PreparedGraphVertexMergeRowsText {
                 GraphVertexMergeRowsInput::Relation(Box::new(input.bind_values(&values)?))
             }
         };
-        let bind_actions = |templates: &[VertexMergeRowActionTemplate]| -> Result<
-            Vec<crate::GraphVertexMergeRowAction>,
-            GraphVertexUpsertTextError,
-        > {
-            let mut actions = Vec::with_capacity(templates.len());
-            for template in templates {
-                actions.push(match template {
-                    VertexMergeRowActionTemplate::Vertex(template) => {
-                        crate::GraphVertexMergeRowAction::Vertex(match template {
-                            VertexUpsertActionTemplate::Property { key, value } => match value {
-                                VertexUpsertValueTemplate::Bound(value) => {
-                                    GraphVertexUpsertAction::SetProperty {
-                                        key: *key,
-                                        value: value.clone(),
-                                    }
-                                }
-                                VertexUpsertValueTemplate::Parameter { index, at } => {
-                                    GraphVertexUpsertAction::SetProperty {
-                                        key: *key,
-                                        value: scalar(values[*index].clone(), *at)?,
-                                    }
-                                }
-                                VertexUpsertValueTemplate::Composite { value, at } => {
-                                    constant_list_action(*key, value, &values, *at)?
-                                }
-                            },
-                            VertexUpsertActionTemplate::Label { label, present } => {
-                                GraphVertexUpsertAction::SetLabel {
-                                    label: *label,
-                                    present: *present,
-                                }
-                            }
-                            VertexUpsertActionTemplate::Expression { at, .. } => {
-                                // resolve_row_actions builds row expressions.
-                                return Err(error(
-                                    *at,
-                                    GraphPatternTextErrorKind::Expected("a row expression"),
-                                )
-                                .into());
-                            }
-                        })
-                    }
-                    VertexMergeRowActionTemplate::Expression {
-                        key,
-                        inputs,
-                        program,
-                        at,
-                    } => crate::GraphVertexMergeRowAction::Expression {
-                        key: *key,
-                        inputs: inputs.clone(),
-                        value: super::integer::bind_integer(program, &values, *at)?,
-                    },
-                    VertexMergeRowActionTemplate::Value { key, value, at } => {
-                        crate::GraphVertexMergeRowAction::Value {
-                            key: *key,
-                            value: crate::GraphVertexMergeRowComputed(
-                                return_projection::bind_read_value(value, &values).map_err(
-                                    |error| GraphVertexUpsertTextError {
-                                        offset: *at,
-                                        ..GraphVertexUpsertTextError::from(error)
-                                    },
-                                )?,
-                            ),
-                        }
-                    }
-                });
-            }
-            Ok(actions)
-        };
+        let bind_actions =
+            |templates: &[VertexMergeRowActionTemplate]| bind_row_actions(templates, &values);
         let actions = match &self.actions {
             Some(templates) => Some(Box::new(crate::GraphVertexMergeRowActions {
                 on_match: bind_actions(&templates.on_match)?,

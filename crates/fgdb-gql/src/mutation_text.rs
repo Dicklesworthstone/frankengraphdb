@@ -645,6 +645,8 @@ pub struct PreparedGraphEdgeMergeText {
     pub(crate) destination: usize,
     pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
     pub(crate) undirected: bool,
+    /// Chain-only ON/SET templates, compiled by the shared row-action grammar.
+    pub(crate) row_actions: Option<VertexMergeRowActionTemplates>,
 }
 
 /// `MATCH ... MERGE (a)-[r:R {k: v}]->(b) RETURN ...` (fgdb-at06q). Every
@@ -699,6 +701,9 @@ pub enum GraphEdgeMergeTextErrorKind {
     /// A RETURN expression, page or projection name after MERGE (fgdb-at06q).
     Relation(crate::GraphSetTextErrorKind),
     ReturnBuild(crate::GraphEdgeMergeQueryBuildError),
+    /// The shared row-action compiler's syntax, typing or expression refusal.
+    RowActions(Box<crate::GraphVertexUpsertTextErrorKind>),
+    RowActionsBuild(crate::GraphEdgeUpsertBuildError),
 }
 impl From<crate::GraphSetTextError> for GraphEdgeMergeTextError {
     fn from(error: crate::GraphSetTextError) -> Self {
@@ -720,6 +725,14 @@ impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
         }
     }
 }
+impl From<crate::GraphVertexUpsertTextError> for GraphEdgeMergeTextError {
+    fn from(error: crate::GraphVertexUpsertTextError) -> Self {
+        Self {
+            offset: error.offset,
+            kind: GraphEdgeMergeTextErrorKind::RowActions(Box::new(error.kind)),
+        }
+    }
+}
 impl core::fmt::Display for GraphEdgeMergeTextErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -727,6 +740,8 @@ impl core::fmt::Display for GraphEdgeMergeTextErrorKind {
             Self::Build(error) => error.fmt(f),
             Self::Relation(kind) => kind.fmt(f),
             Self::ReturnBuild(error) => error.fmt(f),
+            Self::RowActions(error) => error.fmt(f),
+            Self::RowActionsBuild(error) => error.fmt(f),
         }
     }
 }
@@ -736,7 +751,10 @@ impl GraphEdgeMergeTextErrorKind {
         match self {
             Self::Query(kind) => kind.class(),
             Self::Relation(kind) => kind.class(),
-            Self::Build(_) | Self::ReturnBuild(_) => crate::GqlRefusalClass::Statement,
+            Self::RowActions(kind) => kind.class(),
+            Self::Build(_) | Self::ReturnBuild(_) | Self::RowActionsBuild(_) => {
+                crate::GqlRefusalClass::Statement
+            }
         }
     }
 }

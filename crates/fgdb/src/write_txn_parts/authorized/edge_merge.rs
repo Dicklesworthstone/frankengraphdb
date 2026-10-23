@@ -412,7 +412,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
 /// The caller owns the frozen input and cumulative source/evaluator prefix.
 /// This crate-private seam grants no new permit and never re-runs MATCH.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
+pub(super) fn apply_occurrence<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
     cx: &QueryCx,
@@ -422,7 +422,7 @@ pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     selected: GqlQueryExecution<GraphValueRow>,
     occurrence: usize,
-) -> Result<(GraphEdgeMergeStats, crate::write_txn::EdgeUpsertOccurrences), Fault> {
+) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     apply_with_input(
         transaction,
         database,
@@ -435,7 +435,6 @@ pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
         Some((selected, Some(occurrence))),
         None,
     )
-    .map(|(stats, outcomes, _)| (stats, outcomes))
 }
 
 #[allow(clippy::too_many_arguments)]

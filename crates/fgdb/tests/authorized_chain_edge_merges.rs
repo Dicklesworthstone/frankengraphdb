@@ -113,6 +113,394 @@ fn int(value: i64) -> GraphValue {
 }
 
 #[test]
+fn relationship_action_imports_bind_weights_retry_without_creation_and_reopen() {
+    lab(0xc4a1_3114, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 0), NOW).unwrap();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let before = db.frontier().unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "rows",
+                [(1, 2, 5), (2, 3, 7), (3, 3, -2)]
+                    .into_iter()
+                    .map(|(source, target, weight)| {
+                        GraphValue::map(vec![
+                            ("s".into(), int(source)),
+                            ("d".into(), int(target)),
+                            ("w".into(), int(weight)),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let original = parameters.canonical_bytes();
+        let program = chain_with(
+            "UNWIND $rows AS row MERGE (a:Visible {p:row.s}) \
+             MERGE (b:Visible {p:row.d}) MERGE (a)-[e:R]->(b) \
+             ON CREATE SET e.p=row.w ON MATCH SET e.p=row.w",
+            &parameters,
+        );
+        for attempt in 0..2 {
+            let mut bounded = policy(0).with_mutation_limit(3);
+            if attempt == 1 {
+                bounded.max_vertices = 0;
+                bounded.max_edges = 0;
+            }
+            let (stats, result, completion) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (stats.created_vertices, stats.created_edges),
+                if attempt == 0 { (3, 3) } else { (0, 0) }
+            );
+            assert!(result.value.is_empty());
+            assert_eq!(result.rows.result_rows, 0);
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                if attempt == 0 {
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: frontier,
+                    }
+                } else {
+                    EmbeddedTxnCompletion::ReadClosed {
+                        snapshot_seq: frontier,
+                        validated_through: frontier,
+                    }
+                }
+            );
+        }
+        let vertices = db.vertices().unwrap();
+        let edges = db.edges().unwrap();
+        let identity = |id| {
+            vertices.iter().find(|row| row.vid == id).unwrap().props[0]
+                .1
+                .clone()
+        };
+        let mut weighted: Vec<_> = edges
+            .iter()
+            .map(|edge| {
+                assert_eq!(edge.props.len(), 1);
+                assert_eq!(edge.props[0].0, P);
+                (
+                    identity(edge.entry.src),
+                    identity(edge.entry.dst),
+                    edge.props[0].1.clone(),
+                )
+            })
+            .collect();
+        weighted.sort();
+        let value = |n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n));
+        assert_eq!(
+            weighted,
+            vec![
+                (value(1), value(2), value(5)),
+                (value(2), value(3), value(7)),
+                (value(3), value(3), value(-2)),
+            ]
+        );
+        assert_eq!(parameters.canonical_bytes(), original);
+        let frontier = db.frontier().unwrap();
+        assert_eq!(txn.outstanding_obligations(), 0);
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(db.vertices().unwrap(), vertices);
+        assert_eq!(db.edges().unwrap(), edges);
+    });
+}
+
+#[test]
+fn relationship_actions_visit_each_parallel_match_per_occurrence_before_final_return() {
+    lab(0xc4a1_3115, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 4), NOW).unwrap();
+        let program = chain(
+            "UNWIND [1,2] AS delta MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) \
+             MERGE (a)-[e:S]->(b) ON CREATE SET e.secret=99 \
+             ON MATCH SET e.p=e.p+delta SET e.q=e.p \
+             RETURN e AS edge,e.p AS weight,e.q AS after ORDER BY edge",
+        );
+        for limit in [8, 7] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(S);
+            for id in 1..=2 {
+                seed.create_vertex(
+                    VId(id as u128),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(id))],
+                );
+            }
+            for (id, weight) in [(21, 10), (22, 20)] {
+                seed.add_edge(
+                    EId(id),
+                    VId(1),
+                    VId(2),
+                    vec![(P, CanonicalScalar::Int(weight))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let mut bounded = policy(4).with_mutation_limit(limit);
+            bounded.max_vertices = 0;
+            bounded.max_edges = 0;
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await;
+            if limit == 8 {
+                let (stats, result, _) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+                assert_eq!(result.rows.result_rows, 4);
+                assert_eq!(
+                    result
+                        .value
+                        .iter()
+                        .map(GraphValueRow::values)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        &[GraphValue::Edge(EId(21)), int(13), int(13)][..],
+                        &[GraphValue::Edge(EId(21)), int(13), int(13)][..],
+                        &[GraphValue::Edge(EId(22)), int(23), int(23)][..],
+                        &[GraphValue::Edge(EId(22)), int(23), int(23)][..],
+                    ],
+                    "RETURN reads the final overlay for every retained occurrence"
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                assert_eq!(db.edges().unwrap().len(), 2);
+            } else {
+                let error = result.unwrap_err();
+                assert!(format!("{error:?}").contains("EffectLimit"), "{error:?}");
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn relationship_actions_mask_hidden_rhs_and_admit_only_selected_branch_writes() {
+    lab(0xc4a1_3116, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 2), NOW).unwrap();
+        let mut absent = None;
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(S);
+            for id in 1..=2 {
+                seed.create_vertex(
+                    VId(id as u128),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(id))],
+                );
+            }
+            let mut properties = vec![(P, CanonicalScalar::Int(7))];
+            if hidden {
+                properties.push((SECRET, CanonicalScalar::Int(99)));
+            }
+            properties.push((Q, CanonicalScalar::Int(9)));
+            seed.add_edge(EId(21), VId(1), VId(2), properties);
+            db.write(&commit, seed).await.unwrap();
+            let program = chain(
+                "UNWIND [1,2] AS x MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) \
+                 MERGE (a)-[e:S]->(b) ON CREATE SET e.secret=0 \
+                 ON MATCH SET e.q=e.secret RETURN e.q AS q",
+            );
+            let (stats, result, _) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(2).with_mutation_limit(2),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(result.value.len(), 2);
+            for row in &result.value {
+                assert_eq!(row.values(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
+            }
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 1);
+            assert!(!edges[0].props.iter().any(|(key, _)| *key == Q));
+            assert_eq!(edges[0].props.iter().any(|(key, _)| *key == SECRET), hidden);
+            let observed = (stats, result.value);
+            if let Some(expected) = &absent {
+                assert_eq!(
+                    &observed, expected,
+                    "hidden and absent RHS have identical visible work"
+                );
+            } else {
+                absent = Some(observed);
+            }
+            let before = (db.frontier().unwrap(), db.vertices().unwrap(), edges);
+            for tail in [
+                "MERGE (a)-[e:S]->(b) ON MATCH SET e.secret=99",
+                "MERGE (a)-[e:R]->(b) ON CREATE SET e.secret=99",
+                "MERGE (a)-[e:S]->(b) SET e.secret=99",
+            ] {
+                let program = chain(&format!(
+                    "CREATE (marker:Visible {{p:99}}) MERGE (a:Visible {{p:1}}) \
+                     MERGE (b:Visible {{p:2}}) {tail}"
+                ));
+                let error = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(0),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    authorization(&error),
+                    Some(Error::ScopeDenied),
+                    "{tail}: {error:?}"
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn vertex_and_relationship_actions_share_one_effect_cap_and_rollback_late_errors() {
+    lab(0xc4a1_3117, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 0), NOW).unwrap();
+        let program = chain(
+            "UNWIND [1,2] AS x MERGE (a:Visible {p:1}) \
+             ON CREATE SET a.q=1 ON MATCH SET a.q=a.q+1 \
+             MERGE (b:Visible {p:2}) MERGE (a)-[e:R]->(b) \
+             ON CREATE SET e.p=1 ON MATCH SET e.p=e.p+1",
+        );
+        for limit in [4, 3] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(0).with_mutation_limit(limit),
+                    || NOW,
+                )
+                .await;
+            if limit == 4 {
+                let (stats, result, _) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+                assert!(result.value.is_empty());
+                assert_eq!(result.rows.result_rows, 0);
+                assert_eq!(
+                    db.edges().unwrap()[0].props,
+                    vec![(P, CanonicalScalar::Int(2).into())]
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            } else {
+                let error = result.unwrap_err();
+                assert!(format!("{error:?}").contains("EffectLimit"), "{error:?}");
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+                assert!(db.edges().unwrap().is_empty());
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let program = chain(
+            "UNWIND [1,2] AS x CREATE (marker:Visible {p:x}) \
+             MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) MERGE (a)-[e:R]->(b) \
+             ON CREATE SET e.p=7 ON MATCH SET e.p=7/(2-x)",
+        );
+        let error = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("DivisionByZero"), "{error:?}");
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn whole_pair_reduction_preserves_parallel_orientation_and_private_bag_rows() {
     lab(0xc4a1_3101, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
