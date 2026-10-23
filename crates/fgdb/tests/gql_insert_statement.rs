@@ -1887,3 +1887,160 @@ fn readme_insert_example_runs_through_database_query_write() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-cpny9 (TCK Set1 [6], [7], Delete4 [3]): a SET, REMOVE or DELETE after
+/// a CREATE writes the elements that CREATE made, row by row, as the chain's
+/// last step. Its right-hand sides read what the CREATE wrote, and its RETURN
+/// reads the values the statement left.
+#[test]
+fn a_write_after_create_updates_what_the_create_made() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4aa, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str, params: GqlParameters| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &params,
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let labelled = |db: &Database<MemVfs>, label: LabelId| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .collect::<Vec<_>>()
+        };
+        let rows = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("a chain with RETURN answers rows")
+            };
+            rows
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let stored = |value: i64| -> CanonicalPropertyValue { CanonicalScalar::Int(value).into() };
+
+        // SET reads the created value and RETURN the one it set.
+        let set = write(
+            &mut db,
+            "CREATE (n:Person {p: 1}) SET n.p = n.p + 1, n.q = 5 RETURN n.p AS p, n.q AS q",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(set), [vec![int(2), int(5)]]);
+        let people = labelled(&db, PERSON);
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].props, vec![(P, stored(2)), (Q, stored(5))]);
+
+        // Each UNWIND row's CREATE is set by that row; without RETURN the
+        // chain answers its receipt, with the SET's effects.
+        let unwound = write(
+            &mut db,
+            "UNWIND [1, 2, 3] AS i CREATE (n:Copy) SET n.p = i * 10",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = unwound else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 3);
+        assert_eq!(receipt.stats().mutation_effects, 3);
+        assert_eq!(receipt.steps().len(), 2);
+        let mut copies = labelled(&db, COPY)
+            .into_iter()
+            .map(|vertex| vertex.props)
+            .collect::<Vec<_>>();
+        copies.sort();
+        assert_eq!(
+            copies,
+            [10, 20, 30].map(|value| vec![(P, stored(value))]).to_vec()
+        );
+
+        // A matched element's property feeds the SET of what the CREATE made.
+        let matched = write(
+            &mut db,
+            "MATCH (a:Source) CREATE (b:Person) SET b.q = a.p RETURN b.q AS q ORDER BY q",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(matched), [vec![int(10)], vec![int(20)]]);
+        assert_eq!(labelled(&db, PERSON).len(), 3);
+
+        // A WITH head between the writes, and a parameter.
+        let headed = write(
+            &mut db,
+            "CREATE (n:Person) WITH n SET n.p = $v RETURN n.p AS p",
+            GqlParameters::new().with_int64("v", 11).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(headed), [vec![int(11)]]);
+
+        // REMOVE after CREATE: the property never survives the statement.
+        let removed = write(
+            &mut db,
+            "CREATE (n:Copy {p: 3, q: 4}) REMOVE n.p RETURN n.q AS q",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(removed), [vec![int(4)]]);
+        assert!(
+            labelled(&db, COPY)
+                .iter()
+                .any(|vertex| vertex.props == vec![(Q, stored(4))])
+        );
+
+        // CREATE then DELETE (TCK Delete4 [3]): the vertex is made and gone.
+        let vertices = db.vertices().unwrap().len();
+        let deleted = write(
+            &mut db,
+            "MATCH (a:Source) CREATE (n:Person) DELETE n",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = deleted else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(db.vertices().unwrap().len(), vertices);
+
+        // A SET is the last write: another write after it refuses, and
+        // nothing is written.
+        let before = db.frontier().unwrap();
+        assert!(
+            write(
+                &mut db,
+                "CREATE (n:Person) SET n.p = 1 CREATE (m:Copy)",
+                GqlParameters::new(),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

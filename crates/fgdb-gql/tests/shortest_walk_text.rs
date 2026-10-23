@@ -312,7 +312,11 @@ fn native_shortest_selection_flows_through_write_scripts_without_another_matcher
         panic!("wrong native write dispatch")
     };
     assert_eq!(
-        modes(update.selection()),
+        modes(
+            update
+                .selection()
+                .expect("a MATCH mutation reads a graph selection")
+        ),
         vec![GraphWalkSearch::AllShortest]
     );
     assert_eq!(

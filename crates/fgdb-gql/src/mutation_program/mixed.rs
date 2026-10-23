@@ -127,6 +127,7 @@ impl GraphWriteProgramPolicy {
             self.max_created_vertices,
             self.max_created_edges,
         )
+        .with_mutation_limit(self.mutations.max_effects)
     }
     #[must_use]
     pub const fn vertex_merge_policy(self) -> GraphVertexMergePolicy {

@@ -458,7 +458,10 @@ fn map_expansion_statistics_are_catalog_bounded_in_both_program_meters() {
     ] {
         check_bound(
             PreparedGraphMutation::prepare(
-                mutation.selection().clone(),
+                mutation
+                    .selection()
+                    .expect("a MATCH mutation reads a graph selection")
+                    .clone(),
                 R,
                 vec![GraphMutationAction::ClearProperties {
                     target,

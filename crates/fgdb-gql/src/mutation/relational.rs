@@ -28,7 +28,25 @@ impl PreparedGraphMutation {
             .single_pattern_input()
             .ok_or(GraphMutationBuildError::RequiresSingleGraphSource)?
             .clone();
-        Self::prepare_input(selection, Some(input), relation, actions)
+        Self::prepare_input(Some(selection), Some(input), relation, actions)
+    }
+
+    /// A chain step's SET, REMOVE or DELETE over the previous write's rows
+    /// (fgdb-cpny9): `input` reads only its one owned leaf, never the graph,
+    /// and every action addresses its row. It runs only through
+    /// [`Self::execute_governed_over`] with those rows.
+    pub(crate) fn prepare_owned(
+        input: PreparedGraphSet,
+        relation: RelationId,
+        actions: Vec<GraphMutationAction>,
+    ) -> Result<Self, GraphMutationBuildError> {
+        input
+            .check_parent_depth()
+            .map_err(GraphMutationBuildError::RelationalInput)?;
+        if input.reads_graph() {
+            return Err(GraphMutationBuildError::RequiresSingleGraphSource);
+        }
+        Self::prepare_input(None, Some(input), relation, actions)
     }
 
     #[must_use]
@@ -36,28 +54,47 @@ impl PreparedGraphMutation {
         self.input_relation.as_ref()
     }
 
+    /// `owned` are a chain step's input rows, read by the input relation's
+    /// one owned leaf; a definition with no such leaf refuses them, never
+    /// drops them.
     pub(super) fn select_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
+        owned: Option<Vec<GraphValueRow>>,
         source: impl FnOnce(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphMutationError<E>, C>> {
+        let owned_unavailable = || {
+            GqlQueryError::Source(GraphMutationError::InputRelation(
+                crate::GraphSetExecutionError::OwnedRowsUnavailable,
+            ))
+        };
         let Some(input) = &self.input_relation else {
-            return source(&self.selection, policy)
+            let (Some(selection), None) = (&self.selection, owned) else {
+                return Err(owned_unavailable());
+            };
+            return source(selection, policy)
                 .map_err(|error| error.map_source(GraphMutationError::Source));
         };
         let mut source = Some(source);
-        input
-            .execute_governed(
+        let mut patterns = |pattern: &PreparedGraphPattern<GraphValueRow>,
+                            remaining: GqlQueryPolicy| {
+            source.take().expect("preparation admitted one graph leaf")(pattern, remaining)
+        };
+        match owned {
+            None => input.execute_governed(policy, patterns, checkpoint),
+            Some(rows) => input.execute_with_source(
                 policy,
-                |pattern, remaining| {
-                    source.take().expect("preparation admitted one graph leaf")(pattern, remaining)
+                &mut crate::set_ops::WithOwnedRows {
+                    source: &mut patterns,
+                    rows: Some(rows),
                 },
                 checkpoint,
-            )
-            .map_err(|error| error.map_source(GraphMutationError::InputRelation))
+            ),
+        }
+        .map_err(|error| error.map_source(GraphMutationError::InputRelation))
     }
 }

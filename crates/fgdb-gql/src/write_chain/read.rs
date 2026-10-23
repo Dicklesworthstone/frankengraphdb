@@ -18,6 +18,7 @@ impl PreparedGraphWriteChain {
             GraphWriteChainStep::Query(query) => Some(query.column_types()),
             GraphWriteChainStep::EdgeMergeQuery(query) => Some(query.column_types()),
             GraphWriteChainStep::VertexMergeQuery(query) => Some(query.column_types()),
+            GraphWriteChainStep::MutationQuery(query) => Some(query.column_types()),
             _ => None,
         }
     }

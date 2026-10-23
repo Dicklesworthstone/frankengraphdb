@@ -471,7 +471,10 @@ impl GraphMutationBatch {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphMutation {
-    selection: PreparedGraphPattern<GraphValueRow>,
+    /// The graph source. `None` only for a chain step over the previous
+    /// write's rows (fgdb-cpny9), whose input relation reads its one owned
+    /// leaf and never the graph.
+    selection: Option<PreparedGraphPattern<GraphValueRow>>,
     input_relation: Option<crate::PreparedGraphSet>,
     columns: Vec<GraphSetColumnType>,
     relation: RelationId,
@@ -526,9 +529,8 @@ impl PreparedGraphMutation {
             .map(|action| match action {
                 GraphMutationAction::ClearProperties { keep, .. } => self
                     .selection
-                    .plan()
-                    .reverse_catalog
                     .as_ref()
+                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
                     .map_or(0, |catalog| {
                         catalog
                             .properties
@@ -561,11 +563,11 @@ impl PreparedGraphMutation {
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
-        Self::prepare_input(selection, None, relation, actions)
+        Self::prepare_input(Some(selection), None, relation, actions)
     }
 
     fn prepare_input(
-        selection: PreparedGraphPattern<GraphValueRow>,
+        selection: Option<PreparedGraphPattern<GraphValueRow>>,
         input_relation: Option<crate::PreparedGraphSet>,
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
@@ -579,13 +581,14 @@ impl PreparedGraphMutation {
                 observed: actions.len(),
             });
         }
-        let columns: Vec<_> = match &input_relation {
-            Some(input) => input.column_types().to_vec(),
-            None => selection
+        let columns: Vec<_> = match (&input_relation, &selection) {
+            (Some(input), _) => input.column_types().to_vec(),
+            (None, Some(selection)) => selection
                 .value_columns()
                 .iter()
                 .map(GraphSetColumnType::from)
                 .collect(),
+            (None, None) => return Err(GraphMutationBuildError::RequiresSingleGraphSource),
         };
         let deleting = actions[0].deletes();
         let detaching = actions[0].detaches();
@@ -646,9 +649,8 @@ impl PreparedGraphMutation {
                 // catalog: one name per property identity, or a removal could
                 // land on the wrong key.
                 let injective = selection
-                    .plan()
-                    .reverse_catalog
                     .as_ref()
+                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
                     .is_some_and(|catalog| {
                         let mut names = std::collections::BTreeSet::new();
                         catalog.properties.values().all(|name| names.insert(name))
@@ -717,8 +719,16 @@ impl PreparedGraphMutation {
     #[must_use]
     /// Actual graph source for the trusted reader. Actions address the completed
     /// input_relation schema when present, not this leaf's private columns.
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        &self.selection
+    /// `None` for a chain step over the previous write's rows.
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        self.selection.as_ref()
+    }
+    /// The selection's label and property names, when it carries them. A
+    /// chain step over owned rows has none.
+    pub(crate) fn reverse_catalog(&self) -> Option<&crate::graph_text::ReverseSymbolCatalog> {
+        self.selection
+            .as_ref()
+            .and_then(|selection| selection.plan().reverse_catalog.as_deref())
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -743,7 +753,23 @@ impl PreparedGraphMutation {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
-        collect::execute(self, policy, None, source, checkpoint).map(|(batch, _)| batch)
+        self.execute_governed_over(None, policy, source, checkpoint)
+    }
+
+    /// A chain step's write (fgdb-cpny9): `owned` are the rows the previous
+    /// write of the statement returned, read by the input relation's one
+    /// owned leaf. `None` is [`Self::execute_governed`].
+    pub fn execute_governed_over<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute(self, policy, None, owned, source, checkpoint).map(|(batch, _)| batch)
     }
 
     /// Application transcript, not a durable format or authorization permit.
@@ -751,9 +777,16 @@ impl PreparedGraphMutation {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:graph-mutation:v1\0".to_vec();
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        let input = self.selection.canonical_bytes();
-        bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(&input);
+        // A chain step over owned rows has no graph source: its length is
+        // u64::MAX, which no encoded selection reaches.
+        match &self.selection {
+            Some(selection) => {
+                let input = selection.canonical_bytes();
+                bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&input);
+            }
+            None => bytes.extend_from_slice(&u64::MAX.to_be_bytes()),
+        }
         bytes.extend_from_slice(&(self.actions.len() as u64).to_be_bytes());
         for action in &self.actions {
             let target = action.target().map_or(u64::MAX, |target| target as u64);

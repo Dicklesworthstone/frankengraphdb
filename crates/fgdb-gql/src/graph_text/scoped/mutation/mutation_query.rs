@@ -1160,7 +1160,7 @@ impl<'a> Parser<'a> {
 }
 
 impl MutationReturnTemplate {
-    fn bind(
+    pub(super) fn bind(
         &self,
         mutation: PreparedGraphMutation,
         values: &[GqlParameterValue],

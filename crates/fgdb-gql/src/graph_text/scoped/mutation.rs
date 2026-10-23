@@ -1302,70 +1302,7 @@ impl PreparedGraphMutationText {
     ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
         let values = self.checked_arguments(arguments)?;
         let at = self.selection.return_at;
-        let mut actions = Vec::new();
-        for action in &self.actions {
-            actions.push(match action {
-                MutationActionTemplate::Bound(action) => action.clone(),
-                MutationActionTemplate::ParameterProperty {
-                    target,
-                    key,
-                    parameter,
-                } => GraphMutationAction::SetProperty {
-                    target: *target,
-                    key: *key,
-                    value: GraphMutationValue::Literal(scalar(values[*parameter].clone(), at)?),
-                },
-                MutationActionTemplate::IntegerProperty {
-                    target,
-                    key,
-                    program,
-                    at,
-                } => GraphMutationAction::SetProperty {
-                    target: *target,
-                    key: *key,
-                    value: GraphMutationValue::Expression(integer::bind_integer(
-                        program, &values, *at,
-                    )?),
-                },
-                MutationActionTemplate::CompositeProperty { target, key, value } => {
-                    GraphMutationAction::SetProperty {
-                        target: *target,
-                        key: *key,
-                        value: GraphMutationValue::Composite(return_projection::bind_read_value(
-                            value, &values,
-                        )?),
-                    }
-                }
-                MutationActionTemplate::ValueProperty {
-                    target,
-                    key,
-                    value,
-                    at,
-                } => GraphMutationAction::SetProperty {
-                    target: *target,
-                    key: *key,
-                    value: GraphMutationValue::Composite(
-                        return_projection::bind_read_value(value, &values).map_err(|error| {
-                            GraphMutationTextError {
-                                offset: *at,
-                                ..GraphMutationTextError::from(error)
-                            }
-                        })?,
-                    ),
-                },
-                MutationActionTemplate::DeleteValue { value, detach, at } => {
-                    GraphMutationAction::DeleteValue {
-                        value: return_projection::bind_read_value(value, &values).map_err(
-                            |error| GraphMutationTextError {
-                                offset: *at,
-                                ..GraphMutationTextError::from(error)
-                            },
-                        )?,
-                        detach: *detach,
-                    }
-                }
-            });
-        }
+        let actions = Self::bind_actions(&self.actions, &values, at)?;
         if let Some(row) = &self.row {
             // The read relation's rows, each the WITH row its actions index.
             let input = row.bind_values(&values)?;
@@ -1395,6 +1332,79 @@ impl PreparedGraphMutationText {
         PreparedGraphMutation::prepare_relation(input, self.relation, actions)
             .map_err(|error| build_error(at, error))
     }
+
+    /// Each action template, bound with the statement's checked arguments.
+    fn bind_actions(
+        templates: &[MutationActionTemplate],
+        values: &[GqlParameterValue],
+        at: usize,
+    ) -> Result<Vec<GraphMutationAction>, GraphMutationTextError> {
+        let mut actions = Vec::new();
+        for action in templates {
+            actions.push(match action {
+                MutationActionTemplate::Bound(action) => action.clone(),
+                MutationActionTemplate::ParameterProperty {
+                    target,
+                    key,
+                    parameter,
+                } => GraphMutationAction::SetProperty {
+                    target: *target,
+                    key: *key,
+                    value: GraphMutationValue::Literal(scalar(values[*parameter].clone(), at)?),
+                },
+                MutationActionTemplate::IntegerProperty {
+                    target,
+                    key,
+                    program,
+                    at,
+                } => GraphMutationAction::SetProperty {
+                    target: *target,
+                    key: *key,
+                    value: GraphMutationValue::Expression(integer::bind_integer(
+                        program, values, *at,
+                    )?),
+                },
+                MutationActionTemplate::CompositeProperty { target, key, value } => {
+                    GraphMutationAction::SetProperty {
+                        target: *target,
+                        key: *key,
+                        value: GraphMutationValue::Composite(return_projection::bind_read_value(
+                            value, values,
+                        )?),
+                    }
+                }
+                MutationActionTemplate::ValueProperty {
+                    target,
+                    key,
+                    value,
+                    at,
+                } => GraphMutationAction::SetProperty {
+                    target: *target,
+                    key: *key,
+                    value: GraphMutationValue::Composite(
+                        return_projection::bind_read_value(value, values).map_err(|error| {
+                            GraphMutationTextError {
+                                offset: *at,
+                                ..GraphMutationTextError::from(error)
+                            }
+                        })?,
+                    ),
+                },
+                MutationActionTemplate::DeleteValue { value, detach, at } => {
+                    GraphMutationAction::DeleteValue {
+                        value: return_projection::bind_read_value(value, values).map_err(
+                            |error| GraphMutationTextError {
+                                offset: *at,
+                                ..GraphMutationTextError::from(error)
+                            },
+                        )?,
+                        detach: *detach,
+                    }
+                }
+            });
+        }
+        Ok(actions)
+    }
 }
 
 /// Where the next write of a chain starts, and the row it reads: the previous
@@ -1418,6 +1428,156 @@ impl<'a> ChainContinuation<'a> {
     }
 }
 
+impl crate::mutation_text::PreparedGraphMutationRowsText {
+    /// The SET, REMOVE or DELETE of a chain over the row the previous write
+    /// left (`CREATE (n:P) SET n.name = $name RETURN n.name`, fgdb-cpny9), as
+    /// the last write: a RETURN or the end of the statement follows. Its
+    /// actions are the WITH-row actions of `MATCH ... WITH ... SET`
+    /// (fgdb-sl4ym), over that row instead of a read pipeline.
+    pub(crate) fn prepare_chained<'a, R>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+        from: ChainContinuation<'a>,
+    ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let (columns, types) = from.owned_columns();
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones())
+            .resume_after(from.boundary, &from.parameters, from.at)?;
+        let at = parser.current.at;
+        parser.write_row_scope = true;
+        let row = from.row;
+        let (mut projections, parsed_actions) = parser.mutation_actions(Some(&row))?;
+        let returning = if parser.is_word("RETURN") {
+            let scope = mutation_query::ReturnScope {
+                labels_changed: parsed_actions.iter().any(|action| {
+                    !matches!(
+                        action.kind,
+                        ActionKind::Property { .. }
+                            | ActionKind::RowProperty { .. }
+                            | ActionKind::Clear { .. }
+                    )
+                }),
+                deleting: parsed_actions.iter().any(|action| {
+                    matches!(
+                        action.kind,
+                        ActionKind::Delete { detach: true }
+                            | ActionKind::RowDelete { detach: true, .. }
+                    )
+                }),
+            };
+            Some(parser.mutation_return(&mut projections, scope, Some(&row))?)
+        } else {
+            None
+        };
+        parser.end()?;
+        parser.write_row_scope = false;
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
+        if !projections.is_empty() {
+            return Err(error(
+                statement.len(),
+                GraphPatternTextErrorKind::Expected("a write that reads only the WITH row"),
+            )
+            .into());
+        }
+        let input = crate::set_text::BoundSetTextInput {
+            selection: None,
+            parameters: parser.syntax.parameters.clone(),
+            parameter_offsets: parser.syntax.parameter_offsets.clone(),
+            return_at: statement.len(),
+            projection: None,
+            quantifier: crate::GraphSetQuantifier::All,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            correlations: Vec::new(),
+            row_fields: Vec::new(),
+            owned: Some(Box::new((columns, types))),
+        };
+        let mut cache = BTreeMap::new();
+        let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+            let key = (kind, name.text.to_owned());
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
+            let value = resolve
+                .resolve_symbol(kind, name.text)
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+            if value.kind() != kind {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
+            }
+            cache.insert(key, value);
+            Ok(value)
+        };
+        let actions = action_templates(parsed_actions, &mut symbol)?;
+        let returning = returning
+            .map(|returning| returning.resolve(&mut symbol))
+            .transpose()?;
+        Ok((
+            Self {
+                relation,
+                actions,
+                input,
+                at,
+            },
+            returning,
+        ))
+    }
+
+    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.input.parameter_schema()
+    }
+
+    /// The previous write's row this step reads.
+    pub(crate) fn owned_column_types(&self) -> Option<&[crate::GraphSetColumnType]> {
+        self.input
+            .owned
+            .as_deref()
+            .map(|(_, types)| types.as_slice())
+    }
+
+    /// The mutation over the owned rows, with these exact arguments.
+    pub(crate) fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
+        let values = self.input.checked_arguments(arguments)?;
+        self.bind_values(&values)
+    }
+
+    fn bind_values(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
+        let actions = PreparedGraphMutationText::bind_actions(&self.actions, values, self.at)?;
+        let input = self.input.bind_values(values)?;
+        PreparedGraphMutation::prepare_owned(input, self.relation, actions)
+            .map_err(|error| build_error(self.at, error))
+    }
+
+    /// The mutation and its RETURN over the owned rows.
+    pub(crate) fn bind_query(
+        &self,
+        returning: &MutationReturnTemplate,
+        arguments: &GqlParameters,
+    ) -> Result<crate::PreparedGraphMutationQuery, GraphMutationTextError> {
+        let values = self.input.checked_arguments(arguments)?;
+        returning.bind(self.bind_values(&values)?, &values)
+    }
+}
+
 impl<'a> Parser<'a> {
     /// At `MERGE`: whether its pattern is a relationship, `(a)-` or `(a)<-`,
     /// read with native tokens and without consuming the parser's own.
@@ -1432,12 +1592,19 @@ impl<'a> Parser<'a> {
             && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
     }
 
-    /// The next write of a chain this slice compiles: a CREATE, or a vertex
-    /// or relationship MERGE over the carried row.
+    /// The next write of a chain this slice compiles: a CREATE, a vertex or
+    /// relationship MERGE over the carried row, or a SET, REMOVE, DELETE or
+    /// DETACH DELETE of it (fgdb-cpny9).
     pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
         Ok(self.is_word("CREATE")
             || (self.is_word("MERGE")
-                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+            || self.is_word("SET")
+            || self.is_word("REMOVE")
+            || self.is_word("DELETE")
+            || (self.is_word("DETACH")
+                && matches!(self.lexer.clone().next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))))
     }
 
     /// The continuation a chained WITH tail left, at the next write.
