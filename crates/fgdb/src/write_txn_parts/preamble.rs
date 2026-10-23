@@ -417,6 +417,11 @@ pub enum WriteTxnError {
     /// it. Refused before any observation; create through the authorized
     /// insertion surfaces, which allocate.
     AuthorizedClientIdentity,
+    /// The authorized chain host does not yet execute this native write
+    /// family. Rejected for the whole statement before opening a workspace.
+    AuthorizedChainStepUnsupported {
+        step: usize,
+    },
     NoPreparedWrite,
     Finished,
     /// The supplied database is not the opened handle that began this txn.
@@ -489,6 +494,10 @@ impl core::fmt::Display for WriteTxnError {
             Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
             Self::AuthorizedClientIdentity => formatter.write_str(
                 "authorized creation takes an engine-allocated identity, not a chosen one",
+            ),
+            Self::AuthorizedChainStepUnsupported { step } => write!(
+                formatter,
+                "authorized write chain step {step} is not a supported creation step"
             ),
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
@@ -563,6 +572,7 @@ impl core::error::Error for WriteTxnError {
             Self::Write(source) => Some(source),
             Self::AuthorizedMutationRefused
             | Self::AuthorizedClientIdentity
+            | Self::AuthorizedChainStepUnsupported { .. }
             | Self::NoPreparedWrite
             | Self::Finished
             | Self::WrongDatabase

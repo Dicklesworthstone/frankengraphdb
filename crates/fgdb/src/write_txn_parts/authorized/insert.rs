@@ -464,7 +464,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
 // Both insertion result surfaces stage identical original intents. Only the
 // identity-receipt API requests per-identity output charging and ID vectors.
 #[allow(clippy::too_many_arguments)]
-fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
     query_cx: &QueryCx,

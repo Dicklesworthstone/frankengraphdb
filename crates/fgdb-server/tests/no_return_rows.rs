@@ -425,3 +425,74 @@ fn stats_only_dispatch_keeps_the_hosts_cumulative_creation_ceiling() {
         fixture.stop(cx, 1, 1, 0).await;
     });
 }
+
+#[test]
+fn authorized_creation_chain_keeps_private_rows_and_commits_once() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "creation-chain", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::Write, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada',age:1}) WITH a \
+                     CREATE (b:Person {name:'Bob',age:2}),(a)-[:KNOWS]->(b)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after = state(cx, &mut observer).await;
+        assert_eq!((after.0.rows.len(), after.1.rows.len()), (2, 1));
+        assert_eq!(after.1.rows[0][0], WireValue::Text("Ada".into()));
+        assert_eq!(after.1.rows[0][1], WireValue::Text("Bob".into()));
+        // Private WITH input needs no delivered-row allowance, but RETURN
+        // still requires read authority even when its final limit is zero.
+        refuse_without_rows(
+            cx,
+            &mut writer,
+            "CREATE (a:Person) WITH a CREATE (b:Person) RETURN 1 AS value LIMIT 0",
+            ErrorCode::PermissionDenied,
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, after);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 2, 1).await;
+    });
+}
+
+#[test]
+fn authorized_creation_chain_refusal_rolls_back_every_step() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "chain-late-refusal", |config| {
+            config.write_policy.max_created_vertices = 1;
+        })
+        .await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 100)).await;
+        let before = state(cx, &mut writer).await;
+        let failure = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {name:'First'}) WITH a \
+                 CREATE (b:Person {name:'Second'}) RETURN b.name AS name",
+                vec![],
+            )
+            .await;
+        let Err(ClientError::Server { message, .. }) = failure else {
+            panic!("the shared creation allowance must refuse: {failure:?}");
+        };
+        assert!(
+            message.contains("limit") || message.contains("budget"),
+            "{message}"
+        );
+        assert_eq!(state(cx, &mut writer).await, before);
+        writer.close(cx).await.unwrap();
+        fixture.stop(cx, 0, 0, 0).await;
+    });
+}

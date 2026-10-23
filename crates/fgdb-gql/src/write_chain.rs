@@ -61,6 +61,21 @@ pub struct PreparedGraphWriteChainText {
     pub(crate) steps: Vec<ChainTextStep>,
 }
 
+impl PreparedGraphWriteChainText {
+    /// Definition-only result classification. This performs no parameter
+    /// binding, source expansion, identity allocation or graph observation.
+    #[must_use]
+    pub fn returns_rows(&self) -> bool {
+        match self.steps.last() {
+            Some(ChainTextStep::Insert(step)) => step.1.is_some(),
+            Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
+            Some(ChainTextStep::Mutation(step)) => step.1.is_some(),
+            Some(ChainTextStep::VertexMerge(step)) => step.returning.is_some(),
+            Some(ChainTextStep::EdgeMergeRows(_)) | None => false,
+        }
+    }
+}
+
 impl core::fmt::Debug for PreparedGraphWriteChainText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphWriteChainText")

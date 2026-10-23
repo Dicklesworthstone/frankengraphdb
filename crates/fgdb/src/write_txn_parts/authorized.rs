@@ -18,6 +18,8 @@ use std::collections::BTreeSet;
 
 // This file is loaded through #[path] from write_txn.rs, so its children resolve
 // like mod.rs children (in write_txn_parts/). Name the real location.
+#[path = "authorized/chain.rs"]
+mod chain;
 #[path = "authorized/deletion.rs"]
 mod deletion;
 #[path = "authorized/edge_merge.rs"]
