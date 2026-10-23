@@ -266,7 +266,9 @@ impl<V: Vfs> Driver<'_, V> {
             // Do not retain an obsolete decoded block while allocating its
             // replacement, and never attach partial heads to a continuation.
             *continuation = None;
-            let state = self.prepare_incident(cx, request, true, observe).await?;
+            let state = self
+                .prepare_incident(cx, request, true, EdgePropertyAccess::Read, observe)
+                .await?;
             *continuation = Some(Continuation {
                 next: request,
                 state: Some(state),
@@ -276,7 +278,10 @@ impl<V: Vfs> Driver<'_, V> {
         let Some(state) = saved.state.as_mut() else {
             return Ok(None);
         };
-        let candidate = self.root.advance(state, cx, observe).await?;
+        let candidate = self
+            .root
+            .advance(state, cx, EdgePropertyAccess::Read, observe)
+            .await?;
         let exhausted = state.heads.is_empty();
         let result = match candidate {
             Some(candidate) => Some(
@@ -301,11 +306,16 @@ impl<V: Vfs> Driver<'_, V> {
         request: Incidence,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
-        let mut state = self.prepare_incident(cx, request, false, observe).await?;
+        let mut state = self
+            .prepare_incident(cx, request, false, EdgePropertyAccess::Read, observe)
+            .await?;
         // The admission validator fixes each EId's endpoints and relation.
         // Therefore routing includes EVERY version/restatement of this EId;
         // native advance sees the same creation/publication order as root scan.
-        let candidate = self.root.advance(&mut state, cx, observe).await?;
+        let candidate = self
+            .root
+            .advance(&mut state, cx, EdgePropertyAccess::Read, observe)
+            .await?;
         drop(state);
         match candidate {
             Some(candidate) => self
@@ -322,6 +332,7 @@ impl<V: Vfs> Driver<'_, V> {
         cx: &QueryCx,
         request: Incidence,
         retained: bool,
+        properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<State, BufferedScanError<C>> {
         self.root.work.step(cx, observe)?;
@@ -353,7 +364,9 @@ impl<V: Vfs> Driver<'_, V> {
             let Some(block) = block else {
                 break;
             };
-            self.root.load(&mut state, cx, block, observe).await?;
+            self.root
+                .load(&mut state, cx, block, properties, observe)
+                .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let mut ordinal = 0;
             if let Some(after) = request.after {

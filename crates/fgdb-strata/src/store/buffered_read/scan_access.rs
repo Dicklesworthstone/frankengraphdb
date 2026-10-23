@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::tiered::edge_scan::{
-    BufferedEdgeDirection, BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork,
+    BufferedEdgeDirection, BufferedEdgeScan, BufferedEdgeScanEvent, EdgePropertyAccess,
+    EdgeScanWork,
 };
 
 mod retained;
@@ -192,6 +193,7 @@ impl<V: Vfs> BufferedPartition<V> {
         &mut self,
         cx: &QueryCx,
         at: usize,
+        properties: EdgePropertyAccess,
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<BufferedValue<BufferedBlockImage>, BufferedScanError<C>> {
@@ -201,11 +203,21 @@ impl<V: Vfs> BufferedPartition<V> {
             work.step(cx, observe)?;
         }
         let charge = self.reserve_scan_workspace(cx)?;
-        let image = self
-            .block_controlled(cx, at, Admission::ScanBypass, &mut || {
-                work.step(cx, observe)
-            })
-            .await?;
+        let image = match properties {
+            EdgePropertyAccess::Read => {
+                self.block_controlled(cx, at, Admission::ScanBypass, &mut || {
+                    work.step(cx, observe)
+                })
+                .await?
+            }
+            EdgePropertyAccess::Skip => {
+                // Admission proved the joint block/property digest. Refault the
+                // authenticated topology and verify its locator identity, then
+                // drop those locators without fetching any property sidecar.
+                let (entries, _) = self.block_keys(cx, at, Admission::ScanBypass).await?;
+                (entries, None)
+            }
+        };
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         // Decoder temporaries are gone. Retain the immutable block image's
         // ownership, not a full decoder workspace throughout the traversal.

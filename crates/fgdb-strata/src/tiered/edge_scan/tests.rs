@@ -592,6 +592,259 @@ fn every_relation_root_control_refuses_and_fuses_without_leaking_reservations() 
 }
 
 #[test]
+fn topology_pulls_match_full_history_and_upgrade_properties_when_interleaved() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for cut in 0..=5 {
+            let before = view.stats().misses;
+            let mut full = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut full_ids = Vec::new();
+            let mut full_rows = Vec::new();
+            while let Some(candidate) = full
+                .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+            {
+                full_ids.push(candidate.eid);
+                if let Some(row) = candidate.row {
+                    full_rows.push(row.as_ref().clone());
+                }
+            }
+            drop(full);
+            let full_faults = view.stats().misses - before;
+            assert_eq!(full_rows, expected(cut), "complete oracle at {cut}");
+            assert_eq!(pool.used(), baseline);
+
+            let before = view.stats().misses;
+            let mut topology = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut ids = Vec::new();
+            let mut rows = Vec::new();
+            while let Some(candidate) = topology
+                .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+            {
+                ids.push(candidate.eid);
+                if let Some(row) = candidate.row {
+                    rows.push(*row.entry());
+                }
+            }
+            drop(topology);
+            let topology_faults = view.stats().misses - before;
+            assert_eq!(ids, full_ids, "including invisible identities at {cut}");
+            assert_eq!(
+                rows,
+                expected(cut)
+                    .into_iter()
+                    .map(|row| row.entry)
+                    .collect::<Vec<_>>()
+            );
+            assert!(topology_faults > 0);
+            // Every fixture block has a sidecar. Both live paths perform the
+            // same topology faults; only the full incumbent fetches sidecars.
+            assert_eq!(full_faults, 2 * topology_faults, "cut {cut}");
+            assert_eq!(pool.used(), baseline);
+        }
+
+        // All three S identities share one active block. A complete pull after
+        // a topology pull must upgrade that block instead of returning [] props.
+        let mut scan = view.edge_scan_relation(&cx, CommitSeq(5), S).unwrap();
+        let first = scan
+            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.eid, EId(0));
+        drop(first);
+        let second = scan
+            .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.eid, EId(2));
+        assert_eq!(
+            second.row.as_ref().unwrap().props,
+            [(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(20)))]
+        );
+        drop(second);
+        let held = scan
+            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        assert_eq!(held.entry().eid, EId(8));
+        drop(scan);
+        drop(view);
+        assert!(pool.used() > 0, "returned topology keeps its reservation");
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn topology_skips_sidecar_faults_but_authenticates_topology_and_initial_admission() {
+    run(|contexts, path| async move {
+        for property_patch in [false, true] {
+            let path = path.join(if property_patch {
+                "property"
+            } else {
+                "topology"
+            });
+            std::fs::create_dir(&path).unwrap();
+            let (store, id) = fixture(&contexts, &path, false).await;
+            let cx = contexts.query();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            let block = view.root().blocks[2].block_id;
+            let corrupt = if property_patch {
+                let bytes = store
+                    .get_bytes(&cx, DeltaBlockVersion(block))
+                    .await
+                    .unwrap();
+                crate::decode_block_with_properties(&bytes)
+                    .unwrap()
+                    .1
+                    .unwrap()
+                    .0
+            } else {
+                block
+            };
+            let fault_path = store.path(corrupt);
+            let mut bytes = std::fs::read(&fault_path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            std::fs::write(&fault_path, bytes).unwrap();
+            let baseline = pool.used();
+            let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            if property_patch {
+                let mut rows = Vec::new();
+                while let Some(candidate) = scan
+                    .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                {
+                    if let Some(row) = candidate.row {
+                        rows.push(*row.entry());
+                    }
+                }
+                assert_eq!(
+                    rows,
+                    expected(5)
+                        .into_iter()
+                        .map(|row| row.entry)
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                assert!(matches!(
+                    scan.next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                        .await,
+                    Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                        BufferError::ChecksumMismatch
+                    )))
+                ));
+                assert!(scan.is_finished());
+            }
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+            let mut full = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            assert!(matches!(
+                full.next(&cx).await,
+                Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+            ));
+            drop(full);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            assert!(
+                store
+                    .open_buffered_root(&cx, id, pool.clone(), limits())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                pool.used(),
+                0,
+                "initial admission still verifies every sidecar"
+            );
+        }
+    });
+}
+
+#[test]
+fn topology_controls_refuse_at_every_prefix_and_release_the_charged_merge() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut total = 0;
+        {
+            let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            while scan
+                .next_topology_candidate_with(&cx, &mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                })
+                .await
+                .unwrap()
+                .is_some()
+            {}
+        }
+        assert!(total > 0);
+        for stop in 0..total {
+            let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            let mut seen = 0;
+            loop {
+                match scan
+                    .next_topology_candidate_with(&cx, &mut |_| {
+                        let at = seen;
+                        seen += 1;
+                        if at == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Err(BufferedScanError::Control(at)) => {
+                        assert_eq!(at, stop);
+                        assert_eq!(seen, stop + 1);
+                        break;
+                    }
+                    other => panic!("expected topology refusal {stop}, got {other:?}"),
+                }
+            }
+            assert!(scan.is_finished());
+            assert!(
+                scan.next_topology_candidate_with(&cx, &mut |_| -> Result<(), ()> {
+                    panic!("fused topology source")
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline, "control {stop}");
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn relation_pruning_skips_excluded_faults_but_never_skips_initial_admission() {
     run(|contexts, path| async move {
         for property_patch in [false, true] {
@@ -1029,6 +1282,31 @@ fn missing_endpoints_are_errors_only_for_visible_selected_edges() {
             assert_eq!(failed, refuses);
             assert!(scan.is_finished());
             drop(scan);
+            assert_eq!(pool.used(), baseline);
+
+            // The topology-only count still proves both endpoint lifetimes.
+            // It must refuse the same visible dangling edge as the complete
+            // record stream, while an excluded relation stays unobserved.
+            let count = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_incidence_scan(VId(1), relation, BufferedEdgeDirection::Outgoing, None)
+                .count_visible(&cx)
+                .await;
+            assert_eq!(
+                matches!(&count, Err(BufferedReadError::DanglingEndpoint)),
+                refuses
+            );
+            if !refuses {
+                let wanted = expected(cut)
+                    .into_iter()
+                    .filter(|edge| {
+                        edge.entry.src == VId(1)
+                            && relation.is_none_or(|selected| selected == edge.entry.relation)
+                    })
+                    .count();
+                assert_eq!(count.unwrap(), wanted as u64);
+            }
             assert_eq!(pool.used(), baseline);
         }
         drop(view);

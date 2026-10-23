@@ -236,6 +236,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// edges each count once. No partial count escapes a source/work/memory or
     /// cancellation failure. All history and endpoint reads use one cumulative
     /// scan allowance, and this does not bypass owner-level visibility rules.
+    /// Edge-property sidecars are not faulted for a count; initial open still
+    /// authenticates them, and endpoint payloads use the ordinary resolver.
     pub async fn incident_edge_count(
         &mut self,
         cx: &QueryCx,
@@ -259,14 +261,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         direction: BufferedEdgeDirection,
         as_of: CommitSeq,
     ) -> Result<u64, BufferedReadError> {
-        let mut scan = self.stream_adjacency_at(cx, vertex, relation, direction, as_of, None)?;
-        let mut count = 0_u64;
-        while scan.next(cx).await?.is_some() {
-            count = count
-                .checked_add(1)
-                .ok_or(BufferedReadError::SizeOverflow)?;
-        }
-        Ok(count)
+        self.stream_adjacency_at(cx, vertex, relation, direction, as_of, None)?
+            .count_visible(cx)
+            .await
     }
 }
 
