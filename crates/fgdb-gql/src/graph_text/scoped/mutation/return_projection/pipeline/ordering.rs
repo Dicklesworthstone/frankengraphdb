@@ -307,6 +307,31 @@ impl<'a> Parser<'a> {
                         parser.advance()?;
                         return Ok(Some(column));
                     }
+                    // `RETURN n{.name, .age} AS person ORDER BY person.age`:
+                    // an entry of an alias whose value may be a map (a map
+                    // projection or literal, properties(n)) reads that
+                    // output, and the value reader applies `.age` to it. A
+                    // graph element's alias and a name that is a binding keep
+                    // the property reads below; a scalar or stored value's
+                    // alias has no entries.
+                    if matches!(next.kind, TokenKind::Punct(b'.'))
+                        && !parser.visible_graph_bindings().any(|name| name.text == word)
+                        && let Some(column) = head.outputs[..visible]
+                            .iter()
+                            .position(|(name, _)| name.text == word)
+                        && {
+                            let types: Vec<_> = (incoming.iter().map(|(_, kind)| *kind))
+                                .chain(head.inputs.iter().map(projection_type))
+                                .collect();
+                            head.outputs[column]
+                                .1
+                                .column_type(&types, &parser.syntax.parameters)
+                                == GraphSetColumnType::Any
+                        }
+                    {
+                        parser.advance()?;
+                        return Ok(Some(column));
+                    }
                     let at = parser.current.at;
                     let graph_function = matches!(next.kind, TokenKind::Punct(b'('))
                         && [

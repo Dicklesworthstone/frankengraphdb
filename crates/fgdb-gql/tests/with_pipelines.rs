@@ -2393,3 +2393,41 @@ fn percentiles_aggregate_in_a_pipelines_with_stage() {
         "{failure:?}"
     );
 }
+
+/// `RETURN ... AS alias ORDER BY alias.key` where the alias holds a computed
+/// map, a map projection or literal, orders by that entry, as openCypher
+/// does (`RETURN n{.name, .age} AS person ORDER BY person.age`). A graph
+/// element's alias keeps reading the element's property.
+#[test]
+fn a_return_page_orders_by_an_entry_of_a_map_alias() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value
+    };
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let map = |key: &str, n: i64| {
+        GraphValueRow::from_owned_values(vec![GraphValue::map(vec![(key.into(), int(n))]).unwrap()])
+    };
+    assert_eq!(
+        rows("MATCH (n) RETURN n{.p} AS m ORDER BY m.p DESC"),
+        vec![map("p", 3), map("p", 2), map("p", 1)]
+    );
+    assert_eq!(
+        rows("MATCH (n) RETURN {k: n.p * 10} AS m ORDER BY m.k"),
+        vec![map("k", 10), map("k", 20), map("k", 30)]
+    );
+    // A stored value's alias has no entries: `n.p AS v ORDER BY v.p`
+    // refuses (multipart_optional_reads pins the multipart form).
+    assert!(
+        PreparedGraphSetText::prepare("MATCH (n) RETURN n.p AS v ORDER BY v.p", symbols).is_err()
+    );
+    // A graph element's alias: p is 3, 1, 2 for vertices 0, 1, 2.
+    let ordered: Vec<_> = rows("MATCH (n) RETURN n AS x ORDER BY x.p")
+        .iter()
+        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+        .collect();
+    assert_eq!(ordered, [VId(1), VId(2), VId(0)]);
+}

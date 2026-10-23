@@ -974,7 +974,8 @@ fn consecutive_optional_matches_join_clause_by_clause() {
 /// last part bare is that element's property, as in a single-part RETURN
 /// (TCK With3 [1], WithOrderBy4 [15]: `RETURN r AS rel ORDER BY rel.id`). The
 /// element may be new in this part or carried and matched again. An alias of
-/// a value has no properties.
+/// a scalar or stored value has no properties; a map value's alias reads its
+/// entries (with_pipelines a_return_page_orders_by_an_entry_of_a_map_alias).
 #[test]
 fn a_later_part_orders_by_a_property_of_an_element_alias() {
     for (aliased, direct) in [
