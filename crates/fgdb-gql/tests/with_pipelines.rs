@@ -2302,3 +2302,44 @@ fn ordering_a_dynamically_typed_column_keeps_null_predicate_precedence() {
         }
     }
 }
+
+/// A list-comprehension element orders as a dynamically typed value does
+/// (TCK WithOrderBy1 [45], lists): `[x IN values WHERE x < value]` compares
+/// lists element by element instead of refusing, so the rank of every value
+/// among the others matches its position under ORDER BY.
+#[test]
+fn a_comprehension_element_orders_lists_element_by_element() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    let ranked = rows(
+        "WITH [[2, 2], [2, -2], [1, 2], [], [1], [300, 0], [1, -20], [2, -2, 100]] AS values \
+         WITH values, size(values) AS numOfValues UNWIND values AS value \
+         WITH size([x IN values WHERE x < value]) AS x, value, numOfValues ORDER BY value \
+         WITH numOfValues, collect(x) AS orderedX \
+         RETURN orderedX = range(0, numOfValues - 1) AS equal",
+    );
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(
+        ranked[0].get(0).unwrap().as_scalar(),
+        Some(&CanonicalScalar::Bool(true))
+    );
+    // [1] and [1, 5] precede [2]; [2, 0] and [3] do not.
+    let kept = rows(
+        "WITH [[1], [1, 5], [2, 0], [3]] AS values \
+         RETURN size([x IN values WHERE x < [2]]) AS n",
+    );
+    assert_eq!(ints(&kept, 0), [Some(2)]);
+    // A null predicate still binds tighter (TCK Precedence1 [23]): each
+    // non-null element keeps `(x < b IS NULL) = (x < (b IS NULL))`, for
+    // every b, NULL included.
+    let precedence = rows(
+        "UNWIND [true, false, null] AS b \
+         RETURN size([x IN [true, false] \
+         WHERE coalesce((x < b IS NULL) = (x < (b IS NULL)), false)]) AS n",
+    );
+    assert_eq!(ints(&precedence, 0), [Some(2), Some(2), Some(2)]);
+}

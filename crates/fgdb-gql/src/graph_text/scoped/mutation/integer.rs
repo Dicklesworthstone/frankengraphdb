@@ -610,7 +610,67 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         let row = self.routing_row(columns);
-        Ok(self.list_column_compared(row)? || self.any_column_ordered(row)?)
+        Ok(self.list_column_compared(row)?
+            || self.any_column_ordered(row)?
+            || self.local_ordered(row)?)
+    }
+
+    /// Whether a bare list-comprehension element (fgdb-20foe) is ordered
+    /// here, `<`, `<=`, `>` or `>=`, against a list literal or a bare
+    /// dynamically typed row column: `[x IN values WHERE x < value]` over
+    /// lists (TCK WithOrderBy1 [45]). Both sides may then be lists, which
+    /// order element by element (any_column_ordered). Against any other
+    /// operand the element keeps the scalar program, which aggregate output
+    /// expressions require (`[x IN collect(n.p) WHERE x > 1]`).
+    fn local_ordered(
+        &self,
+        row: Option<&[(Name<'a>, crate::GraphSetColumnType)]>,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        if !self.elements.contains(&word) {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut right = match lexer.next()?.kind {
+            TokenKind::Punct(b'<' | b'>') => lexer.next()?,
+            _ => return Ok(false),
+        };
+        match right.kind {
+            // `<>` is not an ordering.
+            TokenKind::Punct(b'>') => return Ok(false),
+            TokenKind::Punct(b'=') => right = lexer.next()?,
+            _ => {}
+        }
+        // The right operand must also end where the comparison does, as for
+        // a column (any_column_ordered): `x < value IS NULL` keeps the scalar
+        // program and its precedence.
+        match right.kind {
+            TokenKind::Punct(b'[') => super::return_projection::skip_group(&mut lexer)?,
+            TokenKind::Word(name) => {
+                let dynamic = !self.elements.contains(&name)
+                    && row.is_some_and(|schema| {
+                        schema[..self.visible_width(schema)]
+                            .iter()
+                            .any(|(column, kind)| {
+                                column.text == name && *kind == crate::GraphSetColumnType::Any
+                            })
+                    });
+                if !dynamic
+                    || matches!(
+                        lexer.clone().next()?.kind,
+                        TokenKind::Punct(b'.' | b'(' | b'[')
+                    )
+                {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(!super::return_projection::tighter_than_comparison(
+            &mut lexer,
+        )?)
     }
 
     /// Whether the `+`/`-` chain here has a list operand, which the value
@@ -771,20 +831,35 @@ impl<'a> Parser<'a> {
         Ok(self.scalar_let_value(operand, slots, at)?)
     }
 
-    /// One side of a composite comparison. A dynamically typed bare column
-    /// that no tighter operator follows is read whole (any_column_ordered
-    /// routed its ordering here): the composite reader would hand it back to
-    /// the scalar compiler, which would see the same comparison again.
-    /// Everything else is list_operand_value: a sum such as `y + [3]`, or
-    /// `b IS NOT NULL`, which binds tighter than the comparison.
+    /// One side of a composite comparison. A comprehension element or a
+    /// dynamically typed bare column that no tighter operator follows is read
+    /// whole (any_column_ordered and local_ordered routed its ordering here):
+    /// the composite reader would hand it back to the scalar compiler, which
+    /// would see the same comparison again. Everything else is
+    /// list_operand_value: a sum such as `y + [3]`, or `b IS NOT NULL`,
+    /// which binds tighter than the comparison.
     fn comparison_operand(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        if let Some(column) = self.row_any_column(self.routing_row(columns))?
-            && !super::return_projection::tighter_than_comparison(&mut self.lexer.clone())?
+        let tighter = super::return_projection::tighter_than_comparison(&mut self.lexer.clone())?;
+        // A comprehension element shadows every row name (local_ordered).
+        if let TokenKind::Word(word) = self.current.kind
+            && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
+        {
+            if !tighter
+                && !matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'.' | b'(' | b'[')
+                )
+            {
+                self.advance()?;
+                return Ok(ReadValueTemplate::Local(self.elements.len() - 1 - binding));
+            }
+        } else if let Some(column) = self.row_any_column(self.routing_row(columns))?
+            && !tighter
         {
             return self.bare_column_value(columns, column);
         }
