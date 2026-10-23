@@ -92,6 +92,17 @@ pub(super) fn constant_unwind_size<E, C, Checkpoint>(
 where
     Checkpoint: FnMut() -> Result<(), C>,
 {
+    // range() counts from its bounds as UNWIND streams it (fgdb-85aal),
+    // never from a materialized list that the list bound would cap.
+    if let GraphSetValue::Range { start, end, step } = value {
+        let members = projection::constant_range_members(
+            (start, end, step.as_deref()),
+            column,
+            &mut |event| meter.event(event),
+        )
+        .map_err(|error| projected(error, 0))?;
+        return Ok(Amount::from_u128(members));
+    }
     let value = projection::evaluate_value(value, &GraphValueRow::unit(), column, &mut |event| {
         meter.event(event)
     })

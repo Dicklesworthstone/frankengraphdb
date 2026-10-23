@@ -776,6 +776,25 @@ impl SpillSetStage {
                 .await
                 .map_err(expression_error)?,
             )),
+            // range() streams its members instead of materializing them
+            // (fgdb-85aal), exactly as the synchronous UnwindRows::new does.
+            Operation::Unwind {
+                value: GraphSetValue::Range { start, end, step },
+                ..
+            } => {
+                control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+                StageRows::Unwind(
+                    projection::unwind_range_async(
+                        row,
+                        (start, end, step.as_deref()),
+                        control,
+                        source,
+                        reserve_frame,
+                    )
+                    .await
+                    .map_err(expression_error)?,
+                )
+            }
             Operation::Unwind { value, .. } => {
                 control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
                 let list = projection::evaluate_value_async(

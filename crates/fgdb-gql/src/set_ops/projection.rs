@@ -1535,8 +1535,24 @@ mod property_copy_tests {
 /// its original prefix. Consuming a step makes a control refusal terminal.
 pub(super) struct UnwindRows {
     prefix: GraphValueRow,
-    values: std::vec::IntoIter<GraphValue>,
-    values_capacity: usize,
+    members: UnwindMembers,
+}
+
+/// What an UNWIND step moves next: an evaluated list's elements, or the
+/// members of `range(start, end, step)`, generated in order (fgdb-85aal).
+/// A range is never materialized, so the list-value bound does not cap the
+/// rows it unwinds. Each member charges the scratch entry its list element
+/// would have, and the query policy bounds the output.
+enum UnwindMembers {
+    List {
+        values: std::vec::IntoIter<GraphValue>,
+        capacity: usize,
+    },
+    Range {
+        next: i128,
+        step: i128,
+        remaining: i128,
+    },
 }
 
 impl UnwindRows {
@@ -1551,15 +1567,64 @@ impl UnwindRows {
     ) -> Result<Self, ProjectionFailure<E>> {
         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
         let column = row.len();
-        let list = evaluate_value_at(
-            value,
-            &row,
-            column,
-            control,
-            0,
-            &mut Evaluation::new(None, read),
-        )?;
+        let mut evaluation = Evaluation::new(None, read);
+        if let GraphSetValue::Range { start, end, step } = value {
+            // The range call's own node charge, as evaluate_value_at makes
+            // it, and then the same bounds its Range arm reads.
+            control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+            evaluation.nodes += 1;
+            let bounds = synchronous::range_bounds(
+                start,
+                end,
+                step.as_deref(),
+                &row,
+                column,
+                control,
+                0,
+                &mut evaluation,
+                &|_| Ok::<(), E>(()),
+            )?;
+            return Self::from_range(row, bounds, control);
+        }
+        let list = evaluate_value_at(value, &row, column, control, 0, &mut evaluation)?;
         Self::from_evaluated(row, list, control)
+    }
+
+    /// UNWIND over range() from its evaluated bounds (range_bounds). A NULL
+    /// bound makes range() NULL, which unwinds nothing; otherwise a zero step
+    /// is the typed error range() itself raises.
+    pub(super) fn from_range<E>(
+        row: GraphValueRow,
+        bounds: Option<(i64, i64, i64)>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, ProjectionFailure<E>> {
+        let Some((start, end, step)) = bounds else {
+            // The scratch entry the NULL result of range() reserves.
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            return Ok(Self {
+                prefix: row,
+                members: UnwindMembers::List {
+                    values: Vec::new().into_iter(),
+                    capacity: 0,
+                },
+            });
+        };
+        let remaining =
+            range_member_count(start, end, step).map_err(|kind| ProjectionFailure::Arithmetic {
+                column: row.len(),
+                error: GraphIntegerError {
+                    instruction: 0,
+                    kind,
+                },
+            })?;
+        Ok(Self {
+            prefix: row,
+            members: UnwindMembers::Range {
+                next: i128::from(start),
+                step: i128::from(step),
+                remaining,
+            },
+        })
     }
 
     pub(super) fn from_evaluated<E>(
@@ -1590,11 +1655,13 @@ impl UnwindRows {
                 });
             }
         };
-        let values_capacity = values.capacity();
+        let capacity = values.capacity();
         Ok(Self {
             prefix: row,
-            values: values.into_iter(),
-            values_capacity,
+            members: UnwindMembers::List {
+                values: values.into_iter(),
+                capacity,
+            },
         })
     }
 
@@ -1603,8 +1670,12 @@ impl UnwindRows {
         visitor: &mut impl FnMut(&[GraphValue], usize) -> Result<(), E>,
     ) -> Result<(), E> {
         visitor(self.prefix.values(), self.prefix.len())?;
-        // IntoIter keeps its original allocation after moving elements out.
-        visitor(self.values.as_slice(), self.values_capacity)
+        match &self.members {
+            // IntoIter keeps its original allocation after moving elements out.
+            UnwindMembers::List { values, capacity } => visitor(values.as_slice(), *capacity),
+            // A range retains no member: each is generated as it moves.
+            UnwindMembers::Range { .. } => visitor(&[], 0),
+        }
     }
 
     /// State allocations remain owned by the caller through the last emitted
@@ -1614,8 +1685,26 @@ impl UnwindRows {
         mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<(GraphValueRow, Self)>, E> {
-        let Some(value) = self.values.next() else {
-            return Ok(None);
+        let value = match &mut self.members {
+            UnwindMembers::List { values, .. } => match values.next() {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            UnwindMembers::Range {
+                next,
+                step,
+                remaining,
+            } => {
+                if *remaining == 0 {
+                    return Ok(None);
+                }
+                // The reservation range_values makes for a listed member.
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let member = i64::try_from(*next).expect("a range member lies within its bounds");
+                *next += *step;
+                *remaining -= 1;
+                GraphValue::Scalar(CanonicalScalar::Int(member))
+            }
         };
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
@@ -2250,23 +2339,12 @@ where
             }
         }
         GraphSetValue::Range { start, end, step } => {
-            let start = projection_await!(
+            let bounds = projection_await!(
                 $mode,
-                integer_part(start, row, column, control, depth, nodes, reserve)
+                range_bounds(start, end, step.as_deref(), row, column, control, depth, nodes, reserve)
             )?;
-            let end = projection_await!(
-                $mode,
-                integer_part(end, row, column, control, depth, nodes, reserve)
-            )?;
-            let step = match step {
-                Some(step) => projection_await!(
-                    $mode,
-                    integer_part(step, row, column, control, depth, nodes, reserve)
-                )?,
-                None => Some(1),
-            };
-            match (start, end, step) {
-                (Some(start), Some(end), Some(step)) => {
+            match bounds {
+                Some((start, end, step)) => {
                     let members =
                         range_values(start, end, step, control).map_err(|error| match error {
                             GraphIntegerEvaluationError::Control(error) => {
@@ -2276,7 +2354,7 @@ where
                         })?;
                     GraphValue::List(members.into_boxed_slice())
                 }
-                _ => {
+                None => {
                     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                     GraphValue::Scalar(CanonicalScalar::Null)
                 }
@@ -2582,6 +2660,49 @@ where
     Ok(GraphValue::Scalar(CanonicalScalar::Null))
 }
 
+/// range()'s bounds over `row`, in order: Some((start, end, step)) when none
+/// is NULL, the step 1 when absent. `depth` is the range call's own depth.
+/// UNWIND reads these to stream the members it would otherwise materialize
+/// (fgdb-85aal).
+#[allow(clippy::too_many_arguments)]
+pub(super) $($asyncness)* fn range_bounds<R, C, M, G>(
+    start: &GraphSetValue,
+    end: &GraphSetValue,
+    step: Option<&GraphSetValue>,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut C,
+    depth: usize,
+    nodes: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<Option<(i64, i64, i64)>, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
+    let start = projection_await!(
+        $mode,
+        integer_part(start, row, column, control, depth, nodes, reserve)
+    )?;
+    let end = projection_await!(
+        $mode,
+        integer_part(end, row, column, control, depth, nodes, reserve)
+    )?;
+    let step = match step {
+        Some(step) => projection_await!(
+            $mode,
+            integer_part(step, row, column, control, depth, nodes, reserve)
+        )?,
+        None => Some(1),
+    };
+    Ok(match (start, end, step) {
+        (Some(start), Some(end), Some(step)) => Some((start, end, step)),
+        _ => None,
+    })
+}
+
 /// An integer bound, step or range endpoint: Some(value), None for NULL, and
 /// any other value a typed NonInteger error.
 $($asyncness)* fn integer_part<R, C, M, G>(
@@ -2715,6 +2836,72 @@ where
         reserve,
         asynchronous::evaluate_value_at(value, row, column, control, 0, &mut nodes, reserve)
     )
+}
+
+/// How many members a row-independent range() unwinds (fgdb-85aal), counted
+/// from its bounds, which evaluate as UnwindRows::new reads them. `column` is
+/// the UNWIND's appended column, which expression errors name.
+pub(super) fn constant_range_members<E>(
+    (start, end, step): (&GraphSetValue, &GraphSetValue, Option<&GraphSetValue>),
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<u128, ProjectionFailure<E>> {
+    control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    let mut read = no_element_reads;
+    let mut evaluation = Evaluation::new(None, &mut read);
+    evaluation.nodes += 1;
+    let bounds = synchronous::range_bounds(
+        start,
+        end,
+        step,
+        &GraphValueRow::unit(),
+        column,
+        control,
+        0,
+        &mut evaluation,
+        &|_| Ok::<(), E>(()),
+    )?;
+    let Some((start, end, step)) = bounds else {
+        return Ok(0);
+    };
+    range_member_count(start, end, step)
+        .map(i128::unsigned_abs)
+        .map_err(|kind| ProjectionFailure::Arithmetic {
+            column,
+            error: GraphIntegerError {
+                instruction: 0,
+                kind,
+            },
+        })
+}
+
+/// UnwindRows::new over a range() value for the async spill evaluator: the
+/// same node charge and bounds, then the same streamed members (fgdb-85aal).
+pub(super) async fn unwind_range_async<E, S, M, G>(
+    row: GraphValueRow,
+    (start, end, step): (&GraphSetValue, &GraphSetValue, Option<&GraphSetValue>),
+    control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+    read: &mut S,
+    reserve: &M,
+) -> Result<UnwindRows, ProjectionFailure<E>>
+where
+    E: Send,
+    S: AsyncSpillElementSource<Error = E>,
+    M: Fn(usize) -> Result<G, E> + Sync,
+    G: Send,
+{
+    control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    let column = row.len();
+    let mut nodes = EvaluationState::new(None, read);
+    nodes.nodes += 1;
+    let bounds = projection_recurse!(
+        asynchronous,
+        reserve,
+        asynchronous::range_bounds(
+            start, end, step, &row, column, control, 0, &mut nodes, reserve
+        )
+    )?;
+    UnwindRows::from_range(row, bounds, control)
 }
 
 /// An openCypher value function (fgdb-13l85) over its evaluated argument:
@@ -3230,19 +3417,11 @@ pub(crate) fn range_values<E>(
             kind,
         })
     };
-    if step == 0 {
-        return Err(failure(Kind::InvalidRangeStep));
-    }
-    let (start, end, step) = (i128::from(start), i128::from(end), i128::from(step));
-    let span = end - start;
-    let count = if span == 0 || (span > 0) == (step > 0) {
-        span / step + 1
-    } else {
-        0
-    };
+    let count = range_member_count(start, end, step).map_err(failure)?;
     if count > GraphValue::MAX_LIST_NODES as i128 {
         return Err(failure(Kind::Overflow));
     }
+    let (start, step) = (i128::from(start), i128::from(step));
     let mut members = Vec::new();
     for at in 0..count {
         control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
@@ -3250,4 +3429,24 @@ pub(crate) fn range_values<E>(
         members.push(GraphValue::Scalar(CanonicalScalar::Int(value)));
     }
     Ok(members)
+}
+
+/// How many members range(start, end, step) has: none when `end` lies
+/// before `start` in the step's direction. A zero step is a typed error.
+/// Every member lies between `start` and `end`, so each fits an i64.
+fn range_member_count(
+    start: i64,
+    end: i64,
+    step: i64,
+) -> Result<i128, crate::GraphIntegerErrorKind> {
+    if step == 0 {
+        return Err(crate::GraphIntegerErrorKind::InvalidRangeStep);
+    }
+    let (start, end, step) = (i128::from(start), i128::from(end), i128::from(step));
+    let span = end - start;
+    Ok(if span == 0 || (span > 0) == (step > 0) {
+        span / step + 1
+    } else {
+        0
+    })
 }

@@ -579,3 +579,77 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
     );
     assert_eq!(calls, 0);
 }
+
+/// UNWIND range() streams its members (fgdb-85aal). Past the 65,536-member
+/// list bound the materialized list refuses with Overflow, so these counts
+/// can only come from the streamed range: the counting fold and the row
+/// executor both read it. Below the bound it equals the materialized list,
+/// and a materialized range is still bounded.
+#[test]
+fn unwind_range_streams_past_the_list_value_bound() {
+    let rows = execute("UNWIND range(1, 70000) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(rows[0].values()[0].as_count(), Some(70_000));
+    let rows = execute("UNWIND range(1, 70000) AS i RETURN COUNT(*) AS rows, SUM(i) AS total");
+    assert_eq!(rows[0].values()[0].as_count(), Some(70_000));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(70_000 * 70_001 / 2));
+    // Every third member of a descending range, then a filter stage:
+    // 100000, 99997, ..., 1 is 33,334 members, the even ones at even steps.
+    let rows = execute(
+        "UNWIND range(100000, 1, -3) AS i WITH i WHERE i % 2 = 0 \
+         RETURN COUNT(*) AS rows, MIN(i) AS low, MAX(i) AS high",
+    );
+    assert_eq!(rows[0].values()[0].as_count(), Some(16_667));
+    assert_eq!(rows[0].values()[1].as_value(), Some(&scalar(4)));
+    assert_eq!(rows[0].values()[2].as_value(), Some(&scalar(100_000)));
+    // range() bounds are row values: each source row unwinds its own range.
+    let rows = execute("MATCH (n) UNWIND range(1, n.p * 30000) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(
+        rows[0].values()[0].as_count(),
+        Some(SCORES.iter().map(|p| *p as u64 * 30_000).sum())
+    );
+    for (streamed, listed) in [
+        (
+            "UNWIND range(-7, 60000, 13) AS i RETURN COUNT(*) AS rows, SUM(i) AS total, MIN(i) AS low",
+            "UNWIND [x IN range(-7, 60000, 13) | x] AS i \
+             RETURN COUNT(*) AS rows, SUM(i) AS total, MIN(i) AS low",
+        ),
+        (
+            "UNWIND range(5, 1) AS i RETURN COUNT(*) AS rows, SUM(i) AS total",
+            "UNWIND [] AS i RETURN COUNT(*) AS rows, SUM(i) AS total",
+        ),
+    ] {
+        assert_eq!(execute(streamed), execute(listed), "{streamed}");
+    }
+    // A NULL bound makes range() NULL, which unwinds nothing.
+    let rows = execute("UNWIND range(1, NULL) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(rows[0].values()[0].as_count(), Some(0));
+    for text in [
+        "UNWIND range(1, 70000, 0) AS i RETURN COUNT(*) AS rows",
+        "UNWIND range(1, 70000, 0) AS i RETURN SUM(i) AS total",
+    ] {
+        let result = run(&prepare(text), wide(), &mut || Ok(()));
+        assert!(
+            matches!(
+                &result,
+                Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                    GraphSetExecutionError::Projection { error, .. }
+                ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::InvalidRangeStep
+            ),
+            "{text}: {result:?}"
+        );
+    }
+    let result = run(
+        &prepare("UNWIND [range(1, 70000)] AS l RETURN COUNT(*) AS rows"),
+        wide(),
+        &mut || Ok(()),
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                GraphSetExecutionError::Projection { error, .. }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::Overflow
+        ),
+        "the list bound still caps a materialized range: {result:?}"
+    );
+}
