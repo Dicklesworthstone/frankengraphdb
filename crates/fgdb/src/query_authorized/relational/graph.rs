@@ -5,6 +5,9 @@ use super::*;
 use fgdb_gql::PreparedGraphAggregate;
 use fgdb_gql::algebra::ValueProjection;
 
+#[path = "graph/count.rs"]
+mod count;
+
 // Group-output evaluation may fail inside an element read before the engine
 // settles its pending work run. Restore the original control error at either
 // checkpoint seam, without charging or polling after the failed read, while
@@ -135,53 +138,86 @@ fn visit_at<Clock: FnMut() -> u64>(
     // in runs.
     work_runs(execution, GqlQueryError::Interrupted, || {
         let mut usage = AdmissionUsage::default();
-        // A filterless COUNT may use only the same unrestricted, exact-cut
-        // core that a normal full scan would replay. Bind the checked
-        // definition and counts before spending anything. Missing/contended
-        // cores, unsupported shapes and scoped capabilities retain the normal
-        // source, including its data errors and visibility checks.
-        let count_summary = (scope.sees_all_incidence() && scope.sees_all_fields())
-            .then(|| {
-                let source = query.count_summary_source()?;
-                let core = ADMITTED.lookup(
-                    snapshot,
-                    AdmissionKey {
+        // A filterless COUNT folds the canonical admission directly into
+        // cardinalities. An unrestricted cached core still replays its exact
+        // transcript; a cold or scoped source admits the same winners without
+        // an edge table. A core without a bounded count summary keeps the
+        // ordinary cached visitor rather than rescanning its history.
+        let count_summary = if let Some(source) = query.count_summary_source() {
+            let core = (scope.sees_all_incidence() && scope.sees_all_fields())
+                .then(|| {
+                    ADMITTED.lookup(
+                        snapshot,
+                        AdmissionKey {
+                            at,
+                            edges: query.input_pattern().plan().reads_edges(),
+                        },
+                    )
+                })
+                .flatten();
+            let mut node = || {
+                execution
+                    .borrow_mut()
+                    .node()
+                    .map_err(GqlQueryError::Interrupted)
+            };
+            let mut poll = || {
+                execution
+                    .borrow_mut()
+                    .poll()
+                    .map_err(GqlQueryError::Interrupted)
+            };
+            let mut control = |event| {
+                execution
+                    .borrow_mut()
+                    .checkpoint()
+                    .map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<ReadError, QueryError>(policy, event)
+            };
+            let counts = if let Some(core) = core {
+                if let Some((examined, matching)) = core.count_source(source) {
+                    core.replay(&mut node, &mut poll, &mut control)
+                        .map_err(|error| {
+                            error.map_source(|error| {
+                                GraphAggregateError::Source(GqlError::Read(error))
+                            })
+                        })?;
+                    Some(count::Input {
+                        records: core.records,
+                        examined,
+                        matching,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                Some(
+                    count::admit(
+                        snapshot,
                         at,
-                        edges: query.input_pattern().plan().reads_edges(),
-                    },
-                )?;
-                let (examined, matching) = core.count_source(source)?;
-                let count = query.prepare_count_summary(source, examined, matching)?;
-                Some((core, count))
+                        source,
+                        scope,
+                        &mut node,
+                        &mut poll,
+                        &mut control,
+                    )
+                    .map_err(|error| {
+                        error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+                    })?,
+                )
+            };
+            counts.map(|counts| {
+                let count = query
+                    .prepare_count_summary(source, counts.examined, counts.matching)
+                    .expect("the checked source counts only its admitted live occurrences");
+                (counts.records, count)
             })
-            .flatten();
-        if let Some((core, count)) = count_summary {
-            core.replay(
-                &mut || {
-                    execution
-                        .borrow_mut()
-                        .node()
-                        .map_err(GqlQueryError::Interrupted)
-                },
-                &mut || {
-                    execution
-                        .borrow_mut()
-                        .poll()
-                        .map_err(GqlQueryError::Interrupted)
-                },
-                &mut |event| {
-                    execution
-                        .borrow_mut()
-                        .checkpoint()
-                        .map_err(GqlQueryError::Interrupted)?;
-                    usage.observe::<ReadError, QueryError>(policy, event)
-                },
-            )
-            .map_err(|error| {
-                error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
-            })?;
+        } else {
+            None
+        };
+        if let Some((records, count)) = count_summary {
             let result = count.execute_governed_with_element_reads(
-                core.records,
+                records,
                 |element, key| {
                     scoped_element_property(
                         snapshot,
@@ -343,7 +379,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// establish physical side-channel isolation. Plain uncaptured definitions
     /// feed the native binding visitor without a projected input bag. Computed,
     /// relational and captured inputs retain their existing materialized path.
-    /// Admitted source tables and aggregate state still reside in memory.
+    /// Filterless counts fold admitted rows without a statement edge table;
+    /// edge counts retain only the visible vertices needed to admit endpoints.
+    /// Other source tables and aggregate state still reside in memory.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_aggregate_authorized(
         &self,

@@ -866,14 +866,9 @@ impl<'a> Tables<'a> {
         node: &mut impl FnMut() -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Option<usize>, Fault> {
-        if !predicates.allows_vertex(&row.labels) {
+        let Some(labels) = visible_vertex_labels(row, predicates) else {
             return Ok(None);
-        }
-        let labels = row
-            .labels
-            .iter()
-            .filter(|&&label| predicates.allows_label(label))
-            .count();
+        };
         charge_vertex(labels, node, control)?;
         self.records += 1;
         self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
@@ -892,7 +887,23 @@ impl<'a> Tables<'a> {
         predicates: &PlannerPredicates,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Option<[usize; 2]>, Fault> {
-        let ((_, src, relation, dst), _) = edge;
+        let admitted = self.admit_edge_endpoints(edge.0, predicates, control)?;
+        if admitted.is_some() {
+            self.edges.push(edge);
+        }
+        Ok(admitted)
+    }
+
+    /// The common visibility and charging boundary for a retained edge and a
+    /// count-only edge. Both endpoints must already belong to the admitted
+    /// vertex table; no edge identity, property or occurrence is observed by
+    /// the evaluator until this succeeds.
+    fn admit_edge_endpoints(
+        &mut self,
+        (_, src, relation, dst): admission::EdgeIdentity,
+        predicates: &PlannerPredicates,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<Option<[usize; 2]>, Fault> {
         self.prepare_edges();
         if !predicates.allows_relation(relation) {
             return Ok(None);
@@ -902,7 +913,6 @@ impl<'a> Tables<'a> {
         };
         charge_edge(control)?;
         self.records += 1;
-        self.edges.push(edge);
         Ok(Some([source, destination]))
     }
 
@@ -1119,6 +1129,17 @@ impl<'a> Tables<'a> {
             .ok()
             .map(|at| &row[at].1)
     }
+}
+
+/// The shared vertex visibility boundary, including only labels this scope
+/// may observe. A count can admit the same row without retaining its payload.
+fn visible_vertex_labels(row: &VertexRow, predicates: &PlannerPredicates) -> Option<usize> {
+    predicates.allows_vertex(&row.labels).then(|| {
+        row.labels
+            .iter()
+            .filter(|&&label| predicates.allows_label(label))
+            .count()
+    })
 }
 
 /// One admitted vertex's live calls: a unit of work, one more per label the

@@ -287,3 +287,392 @@ fn computed_and_paged_relational_inputs_keep_their_own_complete_row_order() {
         );
     }
 }
+
+fn count_definition(text: &str) -> PreparedGraphAggregate {
+    PreparedGraphAggregateText::prepare(text, |kind, name| match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+        (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),
+        _ => symbols(kind, name),
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+}
+
+async fn count_database(cx: &CommitCx) -> Database<MemVfs> {
+    let mut db = database(cx).await;
+    let mut edges = WriteBatch::new(RelationId(1));
+    for (id, from, to) in [
+        (10, 0, 1),
+        (11, 0, 1),
+        (12, 1, 1),
+        (13, 1, 2),
+        (14, 2, 3),
+        (15, u128::MAX, 0),
+    ] {
+        edges.add_edge(EId(id), VId(from), VId(to), vec![]);
+    }
+    db.write(cx, edges).await.unwrap();
+    let mut other = WriteBatch::new(RelationId(2));
+    other.add_edge(EId(20), VId(0), VId(3), vec![]);
+    db.write(cx, other).await.unwrap();
+    let mut change = WriteBatch::new(RelationId(1));
+    // The new winner is hidden by the label scope. Counting must not revive
+    // its earlier visible version or edges through that earlier endpoint.
+    change.set_vertex_label(VId(1), LabelId(1), false);
+    change.set_vertex_label(VId(1), LabelId(99), true);
+    change.set_edge_property(EId(11), P, Some(CanonicalScalar::Int(9)));
+    change.delete_edge(EId(15));
+    db.write(cx, change).await.unwrap();
+    db
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CountEvent {
+    Node,
+    Poll,
+    Source(SourceEvent),
+    Evaluate,
+}
+
+#[derive(Default)]
+struct CountTrace {
+    calls: RefCell<Vec<CountEvent>>,
+    stop: Option<usize>,
+    refused: Cell<bool>,
+}
+
+impl CountTrace {
+    fn observe(&self, event: CountEvent) -> Result<(), QueryError> {
+        assert!(!self.refused.get(), "count called after its first refusal");
+        let mut calls = self.calls.borrow_mut();
+        calls.push(event);
+        if self.stop == Some(calls.len()) {
+            self.refused.set(true);
+            Err(QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Work),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+type CountResult = Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
+>;
+
+// The incumbent is the actual full Tables admission and original native
+// aggregate visitor. It retains and traverses the source, independently of
+// the new cardinality fold; both feed the exact same output definition.
+fn count_run(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphAggregate,
+    scope: &PlannerPredicates,
+    budget: GqlQueryPolicy,
+    folded: bool,
+    trace: &CountTrace,
+) -> CountResult {
+    let mut usage = AdmissionUsage::default();
+    let mut node = || {
+        trace
+            .observe(CountEvent::Node)
+            .map_err(GqlQueryError::Interrupted)
+    };
+    let mut poll = || {
+        trace
+            .observe(CountEvent::Poll)
+            .map_err(GqlQueryError::Interrupted)
+    };
+    let mut control = |event| {
+        trace
+            .observe(CountEvent::Source(event))
+            .map_err(GqlQueryError::Interrupted)?;
+        usage.observe::<ReadError, QueryError>(budget, event)
+    };
+    let result = if folded {
+        let source = query.count_summary_source().unwrap();
+        let input = count::admit(
+            snapshot,
+            at,
+            source,
+            scope,
+            &mut node,
+            &mut poll,
+            &mut control,
+        )
+        .map_err(|error| {
+            error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+        })?;
+        query
+            .prepare_count_summary(source, input.examined, input.matching)
+            .unwrap()
+            .execute_governed::<GqlError, QueryError>(
+                input.records,
+                usage.remaining(budget),
+                || trace.observe(CountEvent::Evaluate),
+            )
+    } else {
+        let tables = Tables::admit(
+            snapshot,
+            query.input_pattern().plan(),
+            at,
+            false,
+            scope,
+            &mut node,
+            &mut poll,
+            &mut control,
+        )
+        .map_err(|error| {
+            error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+        })?;
+        query.execute_governed_with_element_reads(
+            tables.records,
+            tables.vertices.iter().map(|&(vid, _)| vid),
+            tables
+                .edges
+                .iter()
+                .map(|&((_, from, relation, to), _)| (from, relation, to)),
+            |vid, required| Ok::<_, GqlError>(tables.matches(vid, required, scope)),
+            |vid, key| Ok::<_, GqlError>(tables.property(vid, key, scope)),
+            |_, _| Ok::<Option<fgdb_types::CanonicalPropertyValue>, GqlError>(None),
+            usage.remaining(budget),
+            || trace.observe(CountEvent::Evaluate),
+        )
+    };
+    usage.finish(budget, result)
+}
+
+fn count_observation(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphAggregate,
+    scope: &PlannerPredicates,
+    budget: GqlQueryPolicy,
+    folded: bool,
+    stop: Option<usize>,
+) -> (String, Vec<CountEvent>) {
+    let trace = CountTrace {
+        stop,
+        ..CountTrace::default()
+    };
+    let result = count_run(snapshot, at, query, scope, budget, folded, &trace);
+    (format!("{result:?}"), trace.calls.into_inner())
+}
+
+#[test]
+fn count_folds_match_full_tables_at_every_cut_budget_and_interruption() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let db = runtime.block_on(count_database(&contexts.commit()));
+    let issuer = authority();
+    let mut open = grant();
+    open.labels = Scope::All;
+    open.properties = Scope::All;
+    let mut relation = grant();
+    relation.relations = Scope::only([RelationId(2)]);
+    let mut empty = grant();
+    empty.labels = Scope::only([LabelId(500)]);
+    for grant in [open, grant(), relation, empty] {
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        let verified = issuer.verify_at(&token, "main", 100).unwrap();
+        let scope = verified.predicates();
+        for text in [
+            "MATCH (n) RETURN COUNT(*) AS total",
+            "MATCH (n) RETURN COUNT(*) AS total,COUNT(*) AS again HAVING COUNT(*) >= 0 LIMIT 1",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total",
+            "MATCH (a)<-[:R]-(b) RETURN COUNT(*) AS total",
+            "MATCH (a)-[r:S]->(b) RETURN COUNT(*) AS total HAVING COUNT(*) > 0",
+            "MATCH (a)-[:T]->(b) RETURN COUNT(*) AS total LIMIT 0",
+        ] {
+            let query = count_definition(text);
+            assert!(query.count_summary_source().is_some(), "{text}");
+            for cut in 0..=db.frontier().unwrap().0 {
+                let at = CommitSeq(cut);
+                let trace = CountTrace::default();
+                let oracle =
+                    count_run(&db.snapshot, at, &query, scope, policy(), false, &trace).unwrap();
+                let expected = (format!("Ok({oracle:?})"), trace.calls.into_inner());
+                assert_eq!(
+                    count_observation(&db.snapshot, at, &query, scope, policy(), true, None),
+                    expected,
+                    "{text}, cut {cut}, scope {grant:?}"
+                );
+                for stop in 1..=expected.1.len() {
+                    let old = count_observation(
+                        &db.snapshot,
+                        at,
+                        &query,
+                        scope,
+                        policy(),
+                        false,
+                        Some(stop),
+                    );
+                    let new = count_observation(
+                        &db.snapshot,
+                        at,
+                        &query,
+                        scope,
+                        policy(),
+                        true,
+                        Some(stop),
+                    );
+                    assert!(
+                        old.0.starts_with("Err("),
+                        "refusal must reach the incumbent"
+                    );
+                    assert_eq!(new, old, "{text}, cut {cut}, stop {stop}");
+                    assert_eq!(new.1, expected.1[..stop]);
+                }
+                let exact = [
+                    oracle.rows.snapshot_records,
+                    oracle.rows.result_rows,
+                    oracle.evaluator.work_units,
+                    oracle.evaluator.scratch_entries,
+                ];
+                for below in [None, Some(0), Some(1), Some(2), Some(3)] {
+                    let mut limits = exact;
+                    if let Some(dimension) = below {
+                        if limits[dimension] == 0 {
+                            continue;
+                        }
+                        limits[dimension] -= 1;
+                    }
+                    let budget = GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]);
+                    let old =
+                        count_observation(&db.snapshot, at, &query, scope, budget, false, None);
+                    let new =
+                        count_observation(&db.snapshot, at, &query, scope, budget, true, None);
+                    assert_eq!(new, old, "{text}, cut {cut}, boundary {below:?}");
+                    assert_eq!(new.0.starts_with("Ok("), below.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scoped_count_folds_hide_physical_twins_and_preserve_public_delivery_limits() {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let cx = contexts.query();
+    let commit = contexts.commit();
+    let issuer = authority();
+    let mut admitted = grant();
+    admitted.limits.max_nodes = 2;
+    admitted.limits.max_rows = 1;
+    let token = issuer.issue_at(&admitted, 100).unwrap();
+    let verified = issuer.verify_at(&token, "main", 100).unwrap();
+    let scope = verified.predicates();
+    let mut observations = Vec::new();
+    for hidden in [false, true] {
+        let mut db = runtime
+            .block_on(Database::open_memory(
+                &commit,
+                DatabaseKeys::new([0x15; 32], NS, [0x25; 32]),
+            ))
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 0..2 {
+            batch.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+        }
+        batch.add_edge(EId(10), VId(0), VId(1), vec![]);
+        batch.add_edge(EId(11), VId(1), VId(1), vec![]);
+        if hidden {
+            for id in 2..20 {
+                batch.create_vertex(VId(id), vec![LabelId(99)], vec![]);
+                batch.add_edge(EId(id + 100), VId(0), VId(id), vec![]);
+            }
+            batch.set_vertex_label(VId(0), LabelId(99), true);
+        }
+        runtime.block_on(db.write(&commit, batch)).unwrap();
+        let mut graph = Vec::new();
+        for text in [
+            "MATCH (n) RETURN COUNT(*) AS total",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total",
+        ] {
+            let query = count_definition(text);
+            let trace = CountTrace::default();
+            let result = count_run(
+                &db.snapshot,
+                db.frontier().unwrap(),
+                &query,
+                scope,
+                policy(),
+                true,
+                &trace,
+            )
+            .unwrap();
+            let charged: Vec<_> = trace
+                .calls
+                .into_inner()
+                .into_iter()
+                .filter(|event| *event != CountEvent::Poll)
+                .collect();
+            let rows = db
+                .execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    &query,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(rows, result.value);
+            assert_eq!(rows[0].values()[0], GraphAggregateValue::Count(2));
+            graph.push((format!("{result:?}"), charged));
+            for (nodes, rows_limit) in [(1, 1), (2, 0)] {
+                let mut limited = admitted.clone();
+                limited.limits.max_nodes = nodes;
+                limited.limits.max_rows = rows_limit;
+                let token = issuer.issue_at(&limited, 100).unwrap();
+                let result = db.execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    &query,
+                    policy(),
+                    || 100,
+                );
+                assert!(matches!(
+                    result,
+                    Err(QueryError::Authorization(
+                        fgdb_warden::Error::LimitExceeded(_)
+                    ))
+                ));
+            }
+            let paged = count_definition(&format!("{text} LIMIT 0"));
+            let mut limited = admitted.clone();
+            limited.limits.max_nodes = 1;
+            limited.limits.max_rows = 0;
+            let token = issuer.issue_at(&limited, 100).unwrap();
+            assert!(matches!(
+                db.execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    &paged,
+                    policy(),
+                    || 100,
+                ),
+                Err(QueryError::Authorization(
+                    fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Nodes)
+                ))
+            ));
+        }
+        observations.push(graph);
+    }
+    assert_eq!(
+        observations[0], observations[1],
+        "hidden graph changed charged work or counts"
+    );
+}
