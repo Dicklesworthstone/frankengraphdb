@@ -296,32 +296,48 @@ impl PreparedGraphPipelineAggregateText {
             || Parser::deferred_where_continues(statement, declarations, &tokens, zones.as_ref());
         let leading_match =
             !multipart && crate::set_text::multipart::leading_rows_then_match(&tokens);
-        let prefix = |deferred: &[usize]| -> Result<_, Error> {
+        let prefix = |deferred: &[usize], implicit: &[usize]| -> Result<_, Error> {
             let mut parser = Parser::new_with_parameter_types(statement, declarations)?
                 .with_zones(zones.clone());
             parser.deferred_wheres = deferred.to_vec();
-            let prefix = rows::prefix(&mut parser, statement, multipart, leading_match)?;
+            parser.implicit_withs = implicit.to_vec();
+            // An implicit `WITH *` makes the statement multipart.
+            let multipart = multipart || !implicit.is_empty();
+            let leading = leading_match && implicit.is_empty();
+            let prefix = rows::prefix(&mut parser, statement, multipart, leading)?;
             Ok((parser, prefix))
         };
-        // A required continuation's WHERE the graph predicate refused filters
-        // after an implicit `WITH *`, as unresolved_read_input re-reads it for
-        // a plain RETURN (fgdb-c6hvm): one refused WHERE at a time, reporting
-        // the first error if the statement stays refused. The prefix resolves
-        // no symbol, so a re-read never repeats a catalog call.
-        let (mut parser, (head, mut stages, schema, depth)) = match prefix(&[]) {
+        // Refusals re-read as unresolved_read_input re-reads them for a plain
+        // RETURN, one at a time, reporting the first error if the statement
+        // stays refused:
+        // - a required continuation's WHERE the graph predicate refused
+        //   filters after an implicit `WITH *` (fgdb-c6hvm);
+        // - a later MATCH clause that read a name its child scope cannot
+        //   see (an earlier relationship or an imported column) starts a
+        //   new part at an implicit `WITH *`.
+        // The prefix resolves no symbol, so a re-read never repeats a
+        // catalog call.
+        let (mut parser, (head, mut stages, schema, depth)) = match prefix(&[], &[]) {
             Ok(read) => read,
             Err(error) => {
-                let mut deferred = Vec::new();
+                let (mut deferred, mut implicit) = (Vec::new(), Vec::new());
                 let mut offset = error.offset;
                 let mut read = None;
-                while let Some(at) =
-                    crate::set_text::multipart::continuation_where_at(&tokens, offset)
-                {
-                    if deferred.contains(&at) {
+                loop {
+                    if let Some(at) =
+                        crate::set_text::multipart::continuation_where_at(&tokens, offset)
+                            .filter(|at| !deferred.contains(at))
+                    {
+                        deferred.push(at);
+                    } else if let Some(at) =
+                        crate::set_text::multipart::implicit_with_at(&tokens, offset)
+                            .filter(|at| !implicit.contains(at))
+                    {
+                        implicit.push(at);
+                    } else {
                         break;
                     }
-                    deferred.push(at);
-                    match prefix(&deferred) {
+                    match prefix(&deferred, &implicit) {
                         Ok(again) => {
                             read = Some(again);
                             break;

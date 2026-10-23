@@ -463,19 +463,35 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
         let expected: Vec<_> = ids.iter().map(|&id| vertices(&[id])).collect();
         assert_eq!(execute(text), expected, "{text}");
     }
-    // Inside a scope that hides the imported columns: refused before any
-    // catalog call, as before.
+    // An OPTIONAL clause after MATCH (a) would hide the imported column in
+    // a child scope. It starts a new part at an implicit `WITH *`, which
+    // openCypher's clause-by-clause join already draws: the template of the
+    // explicit spelling, and m = 3 held only by vertex 4, reached from 3.
     let text = "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) \
-                WHERE q.p = m RETURN a, q";
-    let mut calls = 0;
-    assert!(
-        PreparedGraphSetText::prepare(text, |kind, name| {
-            calls += 1;
-            symbols(kind, name)
-        })
-        .is_err()
+                WHERE q.p = m RETURN a, q ORDER BY a";
+    let explicit = "MATCH (n) WITH max(n.p) AS m MATCH (a) WITH * OPTIONAL MATCH (a)-[:R]->(q) \
+                    WHERE q.p = m RETURN a, q ORDER BY a";
+    assert_eq!(
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes(),
+        PreparedGraphSetText::prepare(explicit, symbols)
+            .unwrap()
+            .canonical_template_bytes()
     );
-    assert_eq!(calls, 0);
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let row = |a: u128, q: GraphValue| {
+        GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(a)), q])
+    };
+    assert_eq!(
+        execute(text),
+        vec![
+            row(1, null.clone()),
+            row(2, null.clone()),
+            row(3, GraphValue::Vertex(VId(4))),
+            row(4, null),
+        ]
+    );
 }
 
 /// A required continuation's WHERE that is no graph predicate, such as a

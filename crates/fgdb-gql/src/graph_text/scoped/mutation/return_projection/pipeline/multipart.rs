@@ -94,8 +94,10 @@ impl PreparedGraphText {
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
         let multipart = has_continuation(tokens)
             || Parser::deferred_where_continues(statement, declarations, tokens, zones);
-        let read = |deferred: &[usize]| -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
-            if !multipart {
+        let read = |deferred: &[usize],
+                    implicit: &[usize]|
+         -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            if !multipart && implicit.is_empty() {
                 return Ok(UnresolvedReadInput {
                     first: Self::unresolved_for_composition(
                         statement,
@@ -109,9 +111,10 @@ impl PreparedGraphText {
             let mut parser = Parser::new_with_parameter_types(statement, declarations)?
                 .with_zones(zones.cloned());
             parser.deferred_wheres = deferred.to_vec();
+            parser.implicit_withs = implicit.to_vec();
             parser.multipart_read(statement)
         };
-        let error = match read(&[]) {
+        let error = match read(&[], &[]) {
             Err(error) => error,
             read => return read,
         };
@@ -119,17 +122,28 @@ impl PreparedGraphText {
         // refused, such as a computed graph operand against an imported
         // column (`WITH 0 AS e MATCH (n) WHERE toInteger(n.id) = e`, or the
         // same after a leading UNWIND), means what `MATCH ... WITH * WHERE ...`
-        // means: the same rows, filtered after the join. Re-read it that way,
-        // one refused WHERE at a time. A WHERE that parses keeps its join
-        // keys; a still-refused statement reports its first error.
-        let mut deferred = Vec::new();
+        // means: the same rows, filtered after the join. And a later MATCH
+        // clause that reads a name its child scope cannot see, an earlier
+        // clause's relationship (`MATCH (a)-[r]->(b) MATCH (b)-[s]->(c)
+        // WHERE r.w < s.w`) or an imported column, means what it means after
+        // an explicit `WITH *`: openCypher keeps relationship uniqueness per
+        // clause, so the boundary changes no row. Re-read one refusal at a
+        // time. A statement still refused reports its first error.
+        let (mut deferred, mut implicit) = (Vec::new(), Vec::new());
         let mut offset = error.offset;
-        while let Some(at) = crate::set_text::multipart::continuation_where_at(tokens, offset) {
-            if deferred.contains(&at) {
+        loop {
+            if let Some(at) = crate::set_text::multipart::continuation_where_at(tokens, offset)
+                .filter(|at| !deferred.contains(at))
+            {
+                deferred.push(at);
+            } else if let Some(at) = crate::set_text::multipart::implicit_with_at(tokens, offset)
+                .filter(|at| !implicit.contains(at))
+            {
+                implicit.push(at);
+            } else {
                 break;
             }
-            deferred.push(at);
-            match read(&deferred) {
+            match read(&deferred, &implicit) {
                 Ok(read) => return Ok(read),
                 Err(next) => offset = next.offset,
             }
@@ -665,6 +679,7 @@ impl<'a> Parser<'a> {
             && deferred.is_none()
             && !self.is_word("WITH")
             && !(kind.is_none() && self.is_word("UNWIND"))
+            && !self.implicit_withs.contains(&self.current.at)
         {
             return Err(expected(
                 self.current.at,
@@ -833,8 +848,10 @@ impl<'a> Parser<'a> {
         mut inputs: Vec<Projection<'a>>,
         optional: bool,
     ) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
-        // An OPTIONAL part that stopped at the next clause: `WITH *`.
-        let implicit = optional && (self.is_word("OPTIONAL") || self.is_word("MATCH"));
+        // An OPTIONAL part that stopped at the next clause, or any part that
+        // stopped at an implicit boundary (implicit_withs): `WITH *`.
+        let implicit = (optional && (self.is_word("OPTIONAL") || self.is_word("MATCH")))
+            || self.implicit_withs.contains(&self.current.at);
         if !implicit && self.with_has_aggregate()? {
             return self.with_graph_head(incoming, inputs, optional);
         }

@@ -927,6 +927,11 @@ struct Parser<'a> {
     /// filter after an implicit `WITH *`, because the graph predicate refused
     /// them (unresolved_read_input). Every other WHERE parses as before.
     deferred_wheres: Vec<usize>,
+    /// Offsets of MATCH or OPTIONAL MATCH clauses that start a new part at
+    /// an implicit `WITH *`, because they read a name their child scope
+    /// cannot see: an earlier clause's relationship, or an imported column
+    /// (unresolved_read_input).
+    implicit_withs: Vec<usize>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
     /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
     write_row_scope: bool,
@@ -1025,6 +1030,7 @@ impl<'a> Parser<'a> {
             optional_part: false,
             deferred_where: None,
             deferred_wheres: Vec::new(),
+            implicit_withs: Vec::new(),
             write_row_scope: false,
             write_prefix: false,
             chain_write: false,

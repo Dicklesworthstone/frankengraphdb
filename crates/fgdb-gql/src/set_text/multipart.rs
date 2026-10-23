@@ -132,6 +132,56 @@ pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> 
     predicate.filter(|&at| at <= offset)
 }
 
+/// The offset of a top-level MATCH or OPTIONAL MATCH clause that contains
+/// byte `offset` and directly follows another MATCH or OPTIONAL MATCH clause,
+/// if any: the clause unresolved_read_input re-reads after an implicit
+/// `WITH *` when it read a name its child scope cannot see. An OPTIONAL
+/// clause starts at its OPTIONAL keyword.
+pub(crate) fn implicit_with_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
+    ];
+    let mut depth = 0_usize;
+    // The open clause's start and whether it follows a MATCH clause.
+    let mut clause: Option<(usize, bool)> = None;
+    let mut chain = false;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    continue;
+                }
+                let operator = token.word("WITH")
+                    && previous
+                        .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"));
+                // OPTIONAL MATCH is one clause, opened at OPTIONAL.
+                let continued = token.word("MATCH")
+                    && previous.is_some_and(|previous| previous.word("OPTIONAL"));
+                if operator || continued || !CLAUSES.iter().any(|word| token.word(word)) {
+                    continue;
+                }
+                if let Some((start, true)) = clause
+                    && (start..token.at).contains(&offset)
+                {
+                    return Some(start);
+                }
+                if token.word("MATCH") || token.word("OPTIONAL") {
+                    clause = Some((token.at, chain));
+                    chain = true;
+                } else {
+                    clause = None;
+                    chain = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    clause.and_then(|(start, later)| (later && start <= offset).then_some(start))
+}
+
 /// Whether the statement starts with MATCH and a top-level MATCH or
 /// OPTIONAL MATCH clause follows its first top-level WHERE, before any
 /// RETURN or WITH: the only statements whose root WHERE, deferred to the

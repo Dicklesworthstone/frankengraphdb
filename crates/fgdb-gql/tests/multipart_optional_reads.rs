@@ -1186,3 +1186,70 @@ fn an_unwind_directly_after_an_optional_part_reads_its_row() {
         [Some(0), Some(10)]
     );
 }
+
+/// A later MATCH or OPTIONAL MATCH whose WHERE reads an earlier clause's
+/// relationship starts a new part at an implicit `WITH *`. A child scope
+/// captures outer vertices only, and openCypher keeps relationship
+/// uniqueness per clause, so the boundary changes no row: the template and
+/// rows equal the explicit `WITH *` spelling's. A relationship an explicit
+/// WITH dropped stays unknown, and an unknown name still refuses before any
+/// catalog call.
+#[test]
+fn a_later_match_reads_an_earlier_relationship_at_an_implicit_with() {
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    let edge = |id: u128| GraphValue::Edge(EId(id));
+    let pair = |r: GraphValue, s: GraphValue| GraphValueRow::from_owned_values(vec![r, s]);
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    // Edges 1 and 2 are parallel 1 -> 2, edge 3 is 2 -> 3 and edge 4 the
+    // self-loop on 3. `r = s` pairs each edge with itself (4 of 16 pairs).
+    // Same endpoints with `r <> s` keeps the two parallel orders. An
+    // OPTIONAL `s = r` leaving r's target meets r only on the self-loop.
+    for (implicit, explicit, expected) in [
+        (
+            "MATCH (a)-[r:R]->(b) MATCH (x)-[s:R]->(y) WHERE r = s RETURN r, s",
+            "MATCH (a)-[r:R]->(b) WITH * MATCH (x)-[s:R]->(y) WHERE r = s RETURN r, s",
+            (1..=4)
+                .map(|id| pair(edge(id), edge(id)))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) MATCH (a)-[s:R]->(b) WHERE r <> s RETURN r, s",
+            "MATCH (a)-[r:R]->(b) WITH * MATCH (a)-[s:R]->(b) WHERE r <> s RETURN r, s",
+            vec![pair(edge(1), edge(2)), pair(edge(2), edge(1))],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[s:R]->(c) WHERE s = r RETURN r, s",
+            "MATCH (a)-[r:R]->(b) WITH * OPTIONAL MATCH (b)-[s:R]->(c) WHERE s = r RETURN r, s",
+            vec![
+                pair(edge(1), null.clone()),
+                pair(edge(2), null.clone()),
+                pair(edge(3), null.clone()),
+                pair(edge(4), edge(4)),
+            ],
+        ),
+    ] {
+        assert_eq!(template(implicit), template(explicit), "{implicit}");
+        let mut rows = identified_rows(implicit);
+        rows.sort();
+        assert_eq!(rows, expected, "{implicit}");
+    }
+    for refused in [
+        "MATCH (a)-[r:R]->(b) WITH a MATCH (x)-[s:R]->(y) WHERE r = s RETURN a",
+        "MATCH (a)-[r:R]->(b) MATCH (x)-[s:R]->(y) WHERE q = s RETURN a",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(refused, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{refused}"
+        );
+        assert_eq!(calls, 0, "{refused}");
+    }
+}

@@ -607,6 +607,12 @@ impl<'a> Parser<'a> {
             if self.optional_part && (self.is_word("OPTIONAL") || self.is_word("MATCH")) {
                 break;
             }
+            // So does a clause that reads a name its child scope cannot see
+            // (implicit_withs): it starts the next part at an implicit
+            // `WITH *`.
+            if self.implicit_withs.contains(&self.current.at) {
+                break;
+            }
             if self.take_word("OPTIONAL")? {
                 self.match_scope(ScopeKind::Optional)?;
             } else if self.is_word("MATCH") {

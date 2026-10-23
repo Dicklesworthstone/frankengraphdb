@@ -1187,7 +1187,7 @@ impl<'a> Parser<'a> {
         if self.with_has_aggregate()? {
             return self.with_graph_head(&[], Vec::new(), false);
         }
-        if self.is_word("UNWIND") {
+        if self.is_word("UNWIND") || self.implicit_withs.contains(&self.current.at) {
             return self.implicit_with_head();
         }
         let with = self.take_word("WITH")?;
