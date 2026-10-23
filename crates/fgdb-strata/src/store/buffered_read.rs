@@ -1258,7 +1258,24 @@ mod tests {
                 "adjacency needs no property payload"
             );
             drop(found);
-            view.limits.max_work = 3;
+            // Completed ownership measurement (3b3166bf6) adds four events:
+            // the edge owner, property vector, scalar value, and final affine
+            // transfer. Keep the former three-unit case as the first refusal,
+            // and refuse every later measurement boundary before any result.
+            for maximum in 3..=6 {
+                view.limits.max_work = maximum;
+                assert!(matches!(
+                    view.edge_at(&query, EId(1), CommitSeq(1)).await,
+                    Err(BufferedReadError::Limit {
+                        resource: "buffered source work",
+                        requested,
+                        limit,
+                    }) if requested == maximum + 1 && limit == maximum
+                ));
+            }
+            // One directory visit, one topology row and one property read,
+            // followed by those four measured-retention events, admit exactly.
+            view.limits.max_work = 7;
             let found = view
                 .edge_at(&query, EId(1), CommitSeq(1))
                 .await
@@ -1267,6 +1284,7 @@ mod tests {
             assert_eq!(found.entry, entry);
             assert_eq!(found.props, rows[0]);
             drop(found);
+            view.limits.max_work = 3;
             let found = view
                 .adjacency_at(&query, VId(1), None, false, CommitSeq(1), 1)
                 .await
