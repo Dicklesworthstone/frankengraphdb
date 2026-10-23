@@ -617,11 +617,35 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
             .map(|id| vertices(&[id]))
             .to_vec()
     );
-    // Not a top-level AND conjunct: refused before any catalog call, as for
-    // the property form.
+    // Required MATCH predicates that are not join keys now filter the
+    // product after the join, as in the property form (e26cc924e). Keep the
+    // exact former refusal texts as independent bag and ordered-row laws.
+    for (text, ids) in [
+        (
+            "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
+            vec![1, 1, 1, 1, 2, 3, 4],
+        ),
+        (
+            "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",
+            vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4],
+        ),
+    ] {
+        let expected: Vec<_> = ids.into_iter().map(|id| vertices(&[id])).collect();
+        let actual = execute(text);
+        assert_eq!(actual.len(), expected.len(), "{text}");
+        for row in &expected {
+            assert_eq!(
+                actual.iter().filter(|actual| *actual == row).count(),
+                expected.iter().filter(|expected| *expected == row).count(),
+                "{text}, row {row:?}"
+            );
+        }
+        assert_eq!(execute(&format!("{text} ORDER BY b")), expected, "{text}");
+    }
+    // Deferral must not restore an imported name retired by WITH.
     for text in [
-        "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
-        "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",
+        "MATCH (a) WITH a AS kept MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
+        "MATCH (a) WITH a AS kept MATCH (b) WHERE NOT a = b RETURN b",
     ] {
         let mut calls = 0;
         assert!(
