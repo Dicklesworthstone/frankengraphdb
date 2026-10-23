@@ -71,7 +71,7 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
 /// The aliases of `carried` a later plain WITH projects under their own
 /// names (`WITH a, b AS b, a.p AS x` keeps `a` and `b`; `WITH *` keeps all),
 /// read from the token after its WITH. A grouping WITH keeps none: its rows
-/// are groups, and its own graph head owns their reads (fgdb-ezgeq).
+/// are groups. Either kind still reads them in its own items.
 fn later_with_keeps<'a>(
     mut lexer: Lexer<'a>,
     carried: &[&'a str],
@@ -398,22 +398,19 @@ impl<'a> Parser<'a> {
         let mut carried: Option<Vec<&'a str>> = None;
         let mut pending: Option<Vec<&'a str>> = None;
         // Otherwise the token after the projection list is not scanned. If it
-        // already ends the scope (MATCH ..., or a WITH that keeps no carried
-        // element), there is none.
+        // already ends the scope (MATCH ...), there is none. A WITH that keeps
+        // no carried element, grouping or not, still reads them in its own
+        // items (`WITH n WITH n.p AS p`, `WITH n WITH n.q AS k, count(*) AS c`),
+        // and nothing after them.
         if let TokenKind::Word(word) = self.current.kind
             && !unwind
             && ends_boundary_scope(word, None)
         {
-            let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
-            let kept = if word.eq_ignore_ascii_case("WITH") {
-                later_with_keeps(self.lexer.clone(), &incoming)?
-            } else {
-                Vec::new()
-            };
-            if kept.is_empty() {
+            if !word.eq_ignore_ascii_case("WITH") {
                 return Ok(());
             }
-            pending = Some(kept);
+            let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
+            pending = Some(later_with_keeps(self.lexer.clone(), &incoming)?);
         }
         let visible = head.outputs.len();
         let mut reads = Vec::new();
@@ -479,14 +476,15 @@ impl<'a> Parser<'a> {
                             .map(|(name, _)| name.text)
                             .collect()
                     });
-                    let kept = later_with_keeps(lexer.clone(), &incoming)?;
-                    if kept.is_empty() {
+                    // A WITH that receives no carried element has nothing to
+                    // read; one that keeps none still reads them in its items.
+                    if incoming.is_empty() {
                         break;
                     }
                     // The dropped MATCH bindings the first WITH's own WHERE
                     // and pages read are out of scope from here on.
                     before_return = false;
-                    pending = Some(kept);
+                    pending = Some(later_with_keeps(lexer.clone(), &incoming)?);
                 }
                 TokenKind::Word(word)
                     if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>

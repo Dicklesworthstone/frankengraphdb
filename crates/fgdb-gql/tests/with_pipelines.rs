@@ -2080,3 +2080,62 @@ fn a_with_order_by_may_rank_by_a_binding_it_drops() {
         );
     }
 }
+
+/// openCypher: a WITH's items read the row it receives, so they may read a
+/// property of a vertex the previous WITH carried, even when this WITH drops
+/// that vertex (`MATCH (n) WITH n WITH n.p AS p`). Past its items the vertex
+/// is gone. A WITH that kept a scalar beside the read always worked.
+#[test]
+fn a_with_reads_a_carried_vertex_it_drops_in_its_own_items() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    for text in [
+        "MATCH (n) WITH n WITH n.p AS p RETURN p ORDER BY p",
+        "MATCH (n) WITH n, 0 AS zero WITH n.p + zero AS p RETURN p ORDER BY p",
+        "MATCH (n) WITH n AS m WITH m.p AS p RETURN p ORDER BY p",
+        "MATCH (n) WITH n WITH n WITH DISTINCT n.p AS p RETURN p ORDER BY p",
+        "MATCH (n) WITH n, 1 AS one WITH one, n.p AS p RETURN p ORDER BY p",
+    ] {
+        let rows = run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        assert_eq!(ints(&rows, 0), [Some(1), Some(2), Some(3)], "{text}");
+    }
+    for text in [
+        "MATCH (n) WITH n WITH n.p AS p RETURN n.p",
+        "MATCH (n) WITH n WITH n.p AS p WITH p RETURN n.p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// openCypher: a grouping WITH's keys and aggregate arguments read the row it
+/// receives, so they may read a property of a vertex the previous WITH
+/// carried (`MATCH (n) WITH n WHERE ... WITH n.p % 2 AS k, max(n.p) AS m`).
+/// The vertex does not survive the grouping.
+#[test]
+fn a_grouping_with_reads_a_carried_vertex_in_its_keys_and_arguments() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    for text in [
+        "MATCH (n) WITH n WHERE n.p > 1 WITH n.p % 2 AS k, max(n.p) AS m \
+         RETURN k, m ORDER BY k",
+        "MATCH (n) WITH n AS v WHERE v.p > 1 WITH v.p % 2 AS k, max(v.p) AS m \
+         RETURN k, m ORDER BY k",
+    ] {
+        // p > 1 keeps 3 and 2: key 0 holds 2, key 1 holds 3.
+        let rows = run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        assert_eq!(ints(&rows, 0), [Some(0), Some(1)], "{text}");
+        assert_eq!(ints(&rows, 1), [Some(2), Some(3)], "{text}");
+    }
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n WITH n.p % 2 AS k, max(n.p) AS m RETURN n.p",
+            symbols
+        )
+        .is_err()
+    );
+}
