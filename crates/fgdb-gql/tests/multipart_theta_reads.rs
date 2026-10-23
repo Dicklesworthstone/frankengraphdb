@@ -365,6 +365,34 @@ fn computed_carried_operands_keep_required_theta_results_and_direction() {
 }
 
 #[test]
+fn required_boolean_identity_predicates_preserve_complete_theta_bags() {
+    for (predicate, count) in [
+        ("n <> m OR m.p = 2", 14),
+        ("NOT n <> m", 4),
+        ("(n <> m)", 12),
+    ] {
+        // The required MATCH row filter supports these formerly refused texts.
+        // Enumerate the Cartesian product independently of its compiled GLA.
+        let mut expected = Vec::new();
+        for n in 1..=4 {
+            for m in 1..=4 {
+                let keep = match predicate {
+                    "n <> m OR m.p = 2" => n != m || [1, 2, 2, 3][m as usize - 1] == 2,
+                    "NOT n <> m" => n == m,
+                    _ => n != m,
+                };
+                if keep {
+                    expected.push(vertices(&[n, m]));
+                }
+            }
+        }
+        assert_eq!(expected.len(), count);
+        let text = format!("MATCH (n) WITH n MATCH (m) WHERE {predicate} RETURN n,m");
+        assert_eq!(execute(&text), expected, "{text}");
+    }
+}
+
+#[test]
 fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
     // A carried vertex's property re-matches it by identity (fgdb-dhcfo;
     // multipart_reads pins the rows).
@@ -376,9 +404,9 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         .is_ok()
     );
     for text in [
-        "MATCH (n) WITH n MATCH (m) WHERE n <> m OR m.p = 2 RETURN n,m",
-        "MATCH (n) WITH n MATCH (m) WHERE NOT n <> m RETURN n,m",
-        "MATCH (n) WITH n MATCH (m) WHERE (n <> m) RETURN n,m",
+        "MATCH (n) WITH n AS kept MATCH (m) WHERE n <> m OR m.p = 2 RETURN kept,m",
+        "MATCH (n) WITH n AS kept MATCH (m) WHERE NOT n <> m RETURN kept,m",
+        "MATCH (n) WITH n AS kept MATCH (m) WHERE (n <> m) RETURN kept,m",
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
         "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
