@@ -393,6 +393,19 @@ fn required_boolean_identity_predicates_preserve_complete_theta_bags() {
 }
 
 #[test]
+fn computed_required_theta_predicates_compare_complete_joined_rows() {
+    assert!(
+        execute("MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m").is_empty()
+    );
+    // Original t is always positive, so the predicate is false for all16
+    // pairs. Making just n1's t negative admits each of the four m rows.
+    assert_eq!(
+        execute("MATCH (n) WITH n.p - 2 AS t MATCH (m) WHERE m.p > t + m.p RETURN m"),
+        (1..=4).map(|m| vertices(&[m])).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
     // A carried vertex's property re-matches it by identity (fgdb-dhcfo;
     // multipart_reads pins the rows).
@@ -403,12 +416,13 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         )
         .is_ok()
     );
+    let mut unexpected = Vec::new();
     for text in [
         "MATCH (n) WITH n AS kept MATCH (m) WHERE n <> m OR m.p = 2 RETURN kept,m",
         "MATCH (n) WITH n AS kept MATCH (m) WHERE NOT n <> m RETURN kept,m",
         "MATCH (n) WITH n AS kept MATCH (m) WHERE (n <> m) RETURN kept,m",
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
-        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m",
+        "MATCH (n) WITH n.p AS kept MATCH (m) WHERE m.p > t + m.p RETURN m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
         "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
     ] {
@@ -417,7 +431,9 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
             calls += 1;
             symbols(kind, name)
         });
-        assert!(result.is_err(), "{text}");
-        assert_eq!(calls, 0, "{text}");
+        if result.is_ok() || calls != 0 {
+            unexpected.push((text, result.err(), calls));
+        }
     }
+    assert!(unexpected.is_empty(), "{unexpected:?}");
 }
