@@ -791,7 +791,40 @@ impl PreparedGraphMutation {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
-        collect::execute(self, policy, None, owned, source, checkpoint).map(|(batch, _)| batch)
+        collect::execute(self, policy, None, owned, source, None, checkpoint)
+            .map(|(batch, _)| batch)
+    }
+
+    /// [`Self::execute_governed`] with the host's element property reader
+    /// (fgdb-694ga). `x.key` of an element the input relation or a
+    /// right-hand side computes (`WITH collect(n) AS ns UNWIND ns AS m SET
+    /// m.q = m.p * 3`) reads `elements(element, key)` at the statement's
+    /// frozen selection cut, under the same authorization as `source`.
+    /// `Ok(None)` is an absent property. Without a reader that read stays a
+    /// typed error.
+    pub fn execute_governed_reading<E, C>(
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute(
+            self,
+            policy,
+            None,
+            None,
+            source,
+            Some(&mut elements),
+            checkpoint,
+        )
+        .map(|(batch, _)| batch)
     }
 
     /// Application transcript, not a durable format or authorization permit.

@@ -87,13 +87,32 @@ impl WriteTxn {
                 ))
             })?;
         cx.with_restriction(|| {
-            let proposal = query.execute_governed(
+            // `x.key` of an element the statement computes reads the overlay
+            // before its own effects, as a governed point read (fgdb-694ga).
+            let element_failure = std::cell::RefCell::new(None);
+            let proposal = query.execute_governed_reading(
                 policy,
                 |pattern, budget| {
                     self.execute_graph_pattern_governed(database, cx, pattern, budget)
                 },
-                || cx.checkpoint(),
-            )?;
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+                || match element_failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
+            );
+            let proposal = match element_failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => proposal,
+            }?;
             let (batch, returning) = proposal.into_parts();
             let stats = self.stage_mutation_intents(
                 database,
@@ -279,13 +298,32 @@ impl WriteTxn {
         self.admit_mutation(database, mutation.relation())
             .map_err(source)?;
         cx.with_restriction(|| {
-            let proposal = mutation.execute_governed(
+            // `x.key` of an element the statement computes reads the overlay
+            // before its own effects, as a governed point read (fgdb-694ga).
+            let element_failure = std::cell::RefCell::new(None);
+            let proposal = mutation.execute_governed_reading(
                 policy,
                 |pattern, budget| {
                     self.execute_graph_pattern_governed(database, cx, pattern, budget)
                 },
-                || cx.checkpoint(),
-            )?;
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+                || match element_failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
+            );
+            let proposal = match element_failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => proposal,
+            }?;
             let (targets, edges) = if retain_targets {
                 mutation_targets(&proposal)
             } else {

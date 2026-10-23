@@ -373,6 +373,79 @@ fn list_intents_keep_capability_checks_including_forbidden_equal_to_current_writ
     });
 }
 
+/// An authorized write reads `x.key` of an element it computes (fgdb-694ga)
+/// under the capability's property scope, exactly as its pattern reads a
+/// MATCH binding's property: the unwound form writes what `SET n.q = n.p`
+/// writes, under a grant that sees p and under one that does not.
+#[test]
+fn authorized_element_reads_mask_properties_as_pattern_reads_do() {
+    run(async |commit, cx, txcx| {
+        let authority =
+            Authority::new(AuthKey::from_seed(0x7a12), NS, "graph", SchemaEpoch(1), 1).unwrap();
+        let outcome = async |text: &str, sees_p: bool| {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let grant = Grant {
+                branch: "main".into(),
+                labels: Scope::only([L]),
+                relations: Scope::only([R]),
+                properties: if sees_p {
+                    Scope::only([P, Q])
+                } else {
+                    Scope::only([Q])
+                },
+                rights: Rights::ReadWrite,
+                limits: QueryLimits {
+                    max_nodes: 100_000,
+                    max_work: 2_000_000,
+                    max_rows: 100,
+                },
+                expires_at_ms: 10_000,
+            };
+            let token = authority.issue_at(&grant, 100).unwrap();
+            let query = PreparedGraphMutationText::prepare(text, R, Catalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let written = db
+                .execute_graph_mutation_authorized(
+                    txcx,
+                    cx,
+                    commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    GraphMutationPolicy::new(query_policy(100), 100),
+                    || 100,
+                )
+                .await
+                .is_ok();
+            (written, prop(&db, 1, Q), prop(&db, 2, Q))
+        };
+        for sees_p in [true, false] {
+            let direct = outcome("MATCH (n:Item) SET n.q = n.p", sees_p).await;
+            let unwound = outcome(
+                "MATCH (n:Item) WITH collect(n) AS ns UNWIND ns AS m SET m.q = m.p",
+                sees_p,
+            )
+            .await;
+            assert_eq!(unwound, direct, "sees p: {sees_p}");
+            if sees_p {
+                assert_eq!(
+                    unwound,
+                    (
+                        true,
+                        Some(value(1).to_written_property().unwrap()),
+                        Some(value(3).to_written_property().unwrap())
+                    )
+                );
+            }
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
 #[test]
 fn output_allowance_failure_rolls_back_lists_and_limit_zero_does_not_limit_effects() {
     run(async |commit, cx, txcx| {

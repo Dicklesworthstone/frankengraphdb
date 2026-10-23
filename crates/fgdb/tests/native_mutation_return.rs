@@ -313,6 +313,126 @@ fn writes_after_with_target_an_unwound_element() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A write reads `x.key` of an element it computes (fgdb-694ga), in a
+/// right-hand side and in its input relation, at the statement's frozen cut:
+/// the transaction overlay before the statement's own effects. So
+/// `SET m.p = m.p + 1` over an unwound element reads each element's old p,
+/// and a second statement of a transaction reads the first one's staged
+/// write.
+#[test]
+fn writes_read_properties_of_elements_they_compute() {
+    let ((), report) = run_async_under_lab(0xa071_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(
+            fgdb_types::EId(10),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(5))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+            .unwrap()
+        };
+        let read = |db: &Database<_>, vid: VId, key: PropertyKeyId| {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            vertex
+                .props
+                .iter()
+                .find(|(found, _)| *found == key)
+                .map(|(_, value)| value.clone())
+        };
+        let int_prop = |n: i64| {
+            Some(fgdb_types::CanonicalPropertyValue::from(
+                CanonicalScalar::Int(n),
+            ))
+        };
+        // A right-hand side over an unwound element: p is 4 and 7.
+        write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m SET m.id = m.p * 3",
+        )
+        .await;
+        assert_eq!(read(&db, VId(1), ID), int_prop(12));
+        assert_eq!(read(&db, VId(2), ID), int_prop(21));
+        // Every element reads its value before the statement's effects.
+        write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m SET m.p = m.p + 1",
+        )
+        .await;
+        assert_eq!(read(&db, VId(1), P), int_prop(5));
+        assert_eq!(read(&db, VId(2), P), int_prop(8));
+        // The input relation reads elements too, and so does an element a
+        // list subscript computes.
+        write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns WITH ns, [x IN ns | x.p] AS ps \
+             UNWIND ns AS m SET m.id = ps[0] + ps[1]",
+        )
+        .await;
+        assert_eq!(read(&db, VId(1), ID), int_prop(13));
+        assert_eq!(read(&db, VId(2), ID), int_prop(13));
+        write(
+            &mut db,
+            "MATCH (a:L) WITH a, [a][0] AS b SET a.id = b.p * 10",
+        )
+        .await;
+        assert_eq!(read(&db, VId(1), ID), int_prop(50));
+        assert_eq!(read(&db, VId(2), ID), int_prop(80));
+        // A collected relationship's own property.
+        write(
+            &mut db,
+            "MATCH ()-[r:R]->() WITH collect(r) AS rs UNWIND rs AS e SET e.p = e.p * 2",
+        )
+        .await;
+        let edge = db.edge(fgdb_types::EId(10)).unwrap().unwrap();
+        assert!(
+            edge.props.contains(&(P, CanonicalScalar::Int(10).into())),
+            "{edge:?}"
+        );
+        // A second statement of one transaction reads the first one's write.
+        let mut txn = db.begin(&txcx).unwrap();
+        for text in [
+            "MATCH (n:L) SET n.p = 100",
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m SET m.id = m.p + 1",
+        ] {
+            txn.query_write(
+                &mut db,
+                &cx,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .unwrap();
+        }
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(read(&db, VId(1), ID), int_prop(101));
+        assert_eq!(read(&db, VId(2), ID), int_prop(101));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// TCK Delete3: `DELETE p` deletes a matched path's relationships and nodes
 /// (refused while a node keeps another relationship); `DETACH DELETE p`
 /// deletes its nodes with every edge; a NULL OPTIONAL path deletes nothing.

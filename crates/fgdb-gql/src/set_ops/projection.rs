@@ -1766,6 +1766,28 @@ pub(crate) fn evaluate_value<E>(
     )
 }
 
+/// `evaluate_value` with the host's element property reader (fgdb-xnd7x):
+/// a mutation's right-hand side reads `x.key` of an element it computes at
+/// the statement's frozen cut (fgdb-694ga).
+pub(crate) fn evaluate_value_reading<E>(
+    value: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    read: &mut ElementRead<'_, E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E> = control;
+    let control = &mut control;
+    evaluate_value_at(
+        value,
+        row,
+        column,
+        control,
+        0,
+        &mut Evaluation::new(None, read),
+    )
+}
+
 /// Reads one stored property of a vertex or edge value at the executing
 /// source's cut (fgdb-xnd7x). `Ok(None)` is an absent property. `None` means
 /// this host reads no element properties, so the read stays a typed error,

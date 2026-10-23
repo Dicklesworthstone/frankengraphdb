@@ -153,11 +153,13 @@ impl<V: Vfs + Clone> Database<V> {
                 ));
                 let proposal = query_cx.with_restriction(|| {
                     let controls = RefCell::new(&mut execution);
-                    query.execute_governed(
+                    let transaction: &WriteTxn = workspace.transaction();
+                    let element_failure = RefCell::new(None);
+                    let result = query.execute_governed_reading(
                         policy,
                         |pattern, allowance| {
                             selection::select_overlay(
-                                workspace.transaction(),
+                                transaction,
                                 self,
                                 query_cx,
                                 pattern,
@@ -166,11 +168,31 @@ impl<V: Vfs + Clone> Database<V> {
                                 &controls,
                             )
                         },
+                        |element, key| {
+                            scoped_element_property(
+                                transaction,
+                                self,
+                                query_cx,
+                                verified.predicates(),
+                                &element_failure,
+                                element,
+                                key,
+                            )
+                        },
                         || {
+                            if let Some(error) = element_failure.borrow_mut().take() {
+                                return Err(WriteTxnError::Interrupted(error));
+                            }
                             query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                             controls.borrow_mut().checkpoint()
                         },
-                    )
+                    );
+                    match element_failure.into_inner() {
+                        Some(error) => Err(GqlQueryError::Interrupted(WriteTxnError::Interrupted(
+                            error,
+                        ))),
+                        None => result,
+                    }
                 })?;
                 let (mutation, result) = proposal.into_parts();
                 let rows = u64::try_from(result.value.len())
@@ -403,7 +425,8 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // These sequential callback borrows end before staging and
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
-        mutation.execute_governed(
+        let element_failure = RefCell::new(None);
+        let result = mutation.execute_governed_reading(
             policy,
             |pattern, allowance| {
                 selection::select_overlay(
@@ -416,12 +439,52 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     &execution,
                 )
             },
+            |element, key| {
+                scoped_element_property(
+                    transaction,
+                    database,
+                    cx,
+                    scope,
+                    &element_failure,
+                    element,
+                    key,
+                )
+            },
             || {
+                if let Some(error) = element_failure.borrow_mut().take() {
+                    return Err(WriteTxnError::Interrupted(error));
+                }
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 execution.borrow_mut().checkpoint()
             },
-        )
+        );
+        match element_failure.into_inner() {
+            Some(error) => Err(GqlQueryError::Interrupted(WriteTxnError::Interrupted(
+                error,
+            ))),
+            None => result,
+        }
     })
+}
+
+/// `x.key` of an element a mutation computes (fgdb-694ga), a governed point
+/// read of the transaction overlay at the statement's frozen cut. Every
+/// element here came out of a pattern admitted under this capability, so
+/// only the property scope remains: a property the capability cannot see
+/// reads exactly as an absent one, as the pattern tables mask it (FG-INV-20).
+fn scoped_element_property<V: Vfs + Clone>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    scope: &PlannerPredicates,
+    failure: &RefCell<Option<Box<asupersync::error::Error>>>,
+    element: ElementId,
+    key: fgdb_delta_types::PropertyKeyId,
+) -> Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError> {
+    if !scope.allows_property(key) {
+        return Ok(None);
+    }
+    transaction.element_property_with_checkpoint(database, cx, failure, element, key)
 }
 
 // Both mutation surfaces authorize the same original intents. The projected

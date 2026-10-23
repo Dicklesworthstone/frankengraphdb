@@ -94,25 +94,46 @@ fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
 
 /// A composite read value over one input row: a SET right-hand side or a
 /// computed DELETE target (TCK Delete5).
+/// The host's element property reader for a mutation (fgdb-694ga): one
+/// stored property of a vertex or edge, read at the statement's frozen
+/// selection cut, before any of its own effects. `Ok(None)` is an absent
+/// property.
+pub(crate) type MutationElementReader<'r, E> =
+    dyn FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E> + 'r;
+
 fn evaluate_composite<E, C, F: FnMut() -> Result<(), C>>(
     value: &crate::GraphSetValue,
     row: &GraphValueRow,
     row_at: usize,
     action_at: usize,
     meter: &mut Meter<F>,
+    elements: &mut Option<&mut MutationElementReader<'_, E>>,
 ) -> ResultOf<crate::algebra::GraphValue, E, C> {
-    crate::set_ops::evaluate_value(value, row, action_at, &mut |event| meter.event(event)).map_err(
-        |failure| match failure {
-            crate::set_ops::ProjectionFailure::Control(error) => error,
-            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                GqlQueryError::Source(GraphMutationError::Arithmetic {
-                    row: row_at,
-                    action: action_at,
-                    error,
-                })
-            }
-        },
+    // Without a host reader, `x.key` of a computed element stays a typed
+    // error, never a guessed NULL.
+    let mut read = |element: ElementId, key: PropertyKeyId| {
+        elements.as_mut().map(|read| {
+            (*read)(element, key)
+                .map_err(|error| GqlQueryError::Source(GraphMutationError::Source(error)))
+        })
+    };
+    crate::set_ops::evaluate_value_reading(
+        value,
+        row,
+        action_at,
+        &mut |event| meter.event(event),
+        &mut read,
     )
+    .map_err(|failure| match failure {
+        crate::set_ops::ProjectionFailure::Control(error) => error,
+        crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+            GqlQueryError::Source(GraphMutationError::Arithmetic {
+                row: row_at,
+                action: action_at,
+                error,
+            })
+        }
+    })
 }
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ResultOf<(), E, C>
@@ -583,7 +604,8 @@ type ErasedSource<'a, E, C> = Box<
 >;
 
 /// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every
-/// other statement.
+/// other statement. `elements` is the host's element property reader
+/// (fgdb-694ga); `None` keeps `x.key` of a computed element a typed error.
 pub(super) fn execute<'a, E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
@@ -594,6 +616,7 @@ pub(super) fn execute<'a, E, C>(
         GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
     + 'a,
+    elements: Option<&mut MutationElementReader<'_, E>>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     // The mutation engine is compiled once per error-type pair, not once per
@@ -605,6 +628,7 @@ pub(super) fn execute<'a, E, C>(
         bindings,
         owned,
         Box::new(source),
+        elements,
         &mut checkpoint,
     )
 }
@@ -615,10 +639,17 @@ fn execute_erased<E, C>(
     bindings: Option<&[GraphMutationBinding]>,
     owned: Option<Vec<GraphValueRow>>,
     source: ErasedSource<'_, E, C>,
+    mut elements: Option<&mut MutationElementReader<'_, E>>,
     mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let selected = mutation.select_governed(policy.query, owned, source, &mut checkpoint)?;
+    let selected = mutation.select_governed(
+        policy.query,
+        owned,
+        source,
+        elements.as_deref_mut(),
+        &mut checkpoint,
+    )?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphMutationError::InvalidSourceStatistics,
@@ -690,7 +721,14 @@ fn execute_erased<E, C>(
             let computed;
             let target_value = match (action, action.target()) {
                 (GraphMutationAction::DeleteValue { value, .. }, _) => {
-                    computed = evaluate_composite(value, row, row_at, action_at, &mut meter)?;
+                    computed = evaluate_composite(
+                        value,
+                        row,
+                        row_at,
+                        action_at,
+                        &mut meter,
+                        &mut elements,
+                    )?;
                     if !(computed.is_null()
                         || element(&computed).is_some()
                         || matches!(computed, crate::algebra::GraphValue::Path(_)))
@@ -806,22 +844,14 @@ fn execute_erased<E, C>(
                             Value::Computed(value)
                         }
                         GraphMutationValue::Composite(value) => {
-                            let value = crate::set_ops::evaluate_value(
+                            let value = evaluate_composite(
                                 value,
                                 row,
+                                row_at,
                                 action_at,
-                                &mut |event| meter.event(event),
-                            )
-                            .map_err(|failure| match failure {
-                                crate::set_ops::ProjectionFailure::Control(error) => error,
-                                crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                                    GqlQueryError::Source(GraphMutationError::Arithmetic {
-                                        row: row_at,
-                                        action: action_at,
-                                        error,
-                                    })
-                                }
-                            })?;
+                                &mut meter,
+                                &mut elements,
+                            )?;
                             // Scalars move. Lists reserve the distinct storage
                             // representation before the canonical conversion.
                             match value {

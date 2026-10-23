@@ -56,7 +56,8 @@ impl PreparedGraphMutation {
 
     /// `owned` are a chain step's input rows, read by the input relation's
     /// one owned leaf; a definition with no such leaf refuses them, never
-    /// drops them.
+    /// drops them. `elements` reads `x.key` of an element the relation
+    /// computes (fgdb-694ga); without it that read stays a typed error.
     pub(super) fn select_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
@@ -65,6 +66,7 @@ impl PreparedGraphMutation {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphMutationError<E>, C>> {
         let owned_unavailable = || {
@@ -84,9 +86,12 @@ impl PreparedGraphMutation {
                             remaining: GqlQueryPolicy| {
             source.take().expect("preparation admitted one graph leaf")(pattern, remaining)
         };
-        match owned {
-            None => input.execute_governed(policy, patterns, checkpoint),
-            Some(rows) => input.execute_with_source(
+        match (owned, elements) {
+            (None, Some(elements)) => {
+                input.execute_governed_reading(policy, patterns, elements, checkpoint)
+            }
+            (None, None) => input.execute_governed(policy, patterns, checkpoint),
+            (Some(rows), _) => input.execute_with_source(
                 policy,
                 &mut crate::set_ops::WithOwnedRows {
                     source: &mut patterns,

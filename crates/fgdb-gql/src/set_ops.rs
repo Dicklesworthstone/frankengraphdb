@@ -36,9 +36,10 @@ pub use procedure::{
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
-    evaluate_order, evaluate_value, map_keys, no_element_reads, overlay_map, range_member_count,
-    range_values, slice_bounds, temporal_arithmetic, temporal_field, temporal_field_name,
-    temporal_field_scratch_entries, timestamp_text, value_function,
+    evaluate_order, evaluate_value, evaluate_value_reading, map_keys, no_element_reads,
+    overlay_map, range_member_count, range_values, slice_bounds, temporal_arithmetic,
+    temporal_field, temporal_field_name, temporal_field_scratch_entries, timestamp_text,
+    value_function,
 };
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
@@ -974,6 +975,32 @@ impl PreparedGraphSet {
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let patterns: &mut DynPatterns<'_, E, C> = &mut source;
         let mut source = PatternSource { patterns };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed` plus the host's element property reader
+    /// (fgdb-xnd7x) and no procedure host: a mutation's input relation
+    /// (fgdb-694ga), whose CALL sources stay refused.
+    pub(crate) fn execute_governed_reading<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let mut source = WithElementReads {
+            source: PatternSource { patterns },
+            elements,
+        };
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
     }

@@ -292,6 +292,38 @@ impl PreparedGraphMutationQuery {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(owned, policy, source, None, checkpoint)
+    }
+
+    /// [`Self::execute_governed`] with the host's element property reader
+    /// (fgdb-694ga), as [`PreparedGraphMutation::execute_governed_reading`].
+    pub fn execute_governed_reading<E, C>(
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(None, policy, source, Some(&mut elements), checkpoint)
+    }
+
+    fn execute_with<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
         // Every engine below (selection, aggregate, ordering, tail) sees one
@@ -310,6 +342,7 @@ impl PreparedGraphMutationQuery {
             Some(&self.bindings),
             owned,
             source,
+            elements,
             &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
