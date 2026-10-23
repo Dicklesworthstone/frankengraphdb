@@ -243,7 +243,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .vertex_scan(cx, as_of)
             .map_err(read_failure)?;
         while let Some(candidate) = scan
-            .next_candidate_with(cx, &mut |event| {
+            .next_topology_candidate_with(cx, &mut |event| {
                 control(match event {
                     BufferedScanEvent::Work => SourceEvent::Work,
                     BufferedScanEvent::Identity(_) => SourceEvent::ScratchEntry,
@@ -258,14 +258,14 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             control(SourceEvent::Work)?;
             if selection
                 .vertex_label
-                .is_some_and(|label| row.labels.binary_search(&label).is_err())
+                .is_some_and(|label| row.labels().binary_search(&label).is_err())
             {
                 continue;
             }
-            debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
+            debug_assert!(vertices.last().is_none_or(|last| *last < row.vid()));
             push_prism_staged(
                 &mut vertices,
-                row.vid,
+                row.vid(),
                 "vertices",
                 limits.max_vertices,
                 staged_bytes,

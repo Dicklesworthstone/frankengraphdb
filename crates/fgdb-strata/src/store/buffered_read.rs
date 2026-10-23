@@ -283,9 +283,65 @@ impl PatchDescriptor {
 /// still produce a candidate, so a query can account for its complete source
 /// work without inferring that every visited identity was a visible record.
 #[derive(Debug)]
-pub struct BufferedVertexCandidate {
+pub struct BufferedVertexCandidate<T = BufferedValue<VertexRow>> {
     pub vid: VId,
-    pub row: Option<BufferedValue<VertexRow>>,
+    pub row: Option<T>,
+}
+
+/// Identity, lifetime and labels from an authenticated historical vertex.
+/// Property payloads were not requested. This owner deliberately exposes no
+/// complete VertexRow, so a skipped property cannot be mistaken for absence.
+/// The patch's complete bytes were validated during initial root admission.
+#[derive(Debug)]
+pub struct BufferedVertexTopology(BufferedValue<VertexRow>);
+
+impl BufferedVertexTopology {
+    pub fn vid(&self) -> VId {
+        self.0.vid
+    }
+
+    pub fn birth_ordinal(&self) -> u64 {
+        self.0.birth_ordinal
+    }
+
+    pub fn created_at(&self) -> CommitSeq {
+        self.0.created_at
+    }
+
+    pub fn retired_at(&self) -> Option<CommitSeq> {
+        self.0.retired_at
+    }
+
+    pub fn labels(&self) -> &[fgdb_delta_types::LabelId] {
+        &self.0.labels
+    }
+
+    /// The actual reservation held independently of the scan and its view.
+    pub fn charged_bytes(&self) -> usize {
+        self.0.charged_bytes()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VertexPropertyAccess {
+    Read,
+    Skip,
+}
+
+impl VertexPropertyAccess {
+    fn copy_row(self, row: &VertexRow) -> VertexRow {
+        match self {
+            Self::Read => row.clone(),
+            Self::Skip => VertexRow {
+                vid: row.vid,
+                birth_ordinal: row.birth_ordinal,
+                created_at: row.created_at,
+                retired_at: row.retired_at,
+                labels: row.labels.clone(),
+                props: Vec::new(),
+            },
+        }
+    }
 }
 
 /// One governed source boundary. Identity admission precedes that identity's
@@ -331,6 +387,7 @@ struct VertexScanHead {
 
 struct DecodedVertexPatch {
     patch: usize,
+    properties: VertexPropertyAccess,
     rows: VertexPatchRows,
 }
 
@@ -683,6 +740,42 @@ impl<V: Vfs> BufferedPartition<V> {
         }
     }
 
+    // Only checksum-verified bytes pinned from this admitted generation reach
+    // this selector. Initial admission already proved full property codecs,
+    // object identity, format profile and all cross-patch history laws.
+    fn decode_scan_patch(
+        &self,
+        at: usize,
+        bytes: &[u8],
+        properties: VertexPropertyAccess,
+    ) -> Result<VertexPatchRows, BufferedReadError> {
+        let descriptor = self.patches[at];
+        let reference = &self.root.vertex_patches[at];
+        let rows = match properties {
+            VertexPropertyAccess::Read => crate::root::resolve_patch_ref(
+                self.store.k_oid.expose(),
+                self.store.namespace,
+                at,
+                reference,
+                bytes,
+                self.store.decode_resolver(),
+            )
+            .map_err(StoreError::MalformedRoot)?,
+            VertexPropertyAccess::Skip => crate::vertex::decode_admitted_patch_topology(bytes)
+                .map_err(StoreError::MalformedPatch)?,
+        };
+        if rows.len() != descriptor.rows
+            || rows.first().map(|row| (row.vid, row.created_at)) != descriptor.first
+            || rows.last().map(|row| row.vid) != descriptor.last
+            || (properties == VertexPropertyAccess::Skip
+                && crate::vertex::span_of_rows(&rows)
+                    != Some((reference.first_seq, reference.last_seq)))
+        {
+            return Err(BufferError::InvalidLoad.into());
+        }
+        Ok(rows)
+    }
+
     /// Resolve one vertex through an admitted interval directory. Every patch
     /// that can restate its history remains a candidate; publication ordinal
     /// breaks equal-version ties independently of directory traversal order.
@@ -936,13 +1029,14 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         &mut self,
         cx: &QueryCx,
         at: usize,
+        properties: VertexPropertyAccess,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.patch == at)
-        {
+        if self.active.as_ref().is_some_and(|active| {
+            active.patch == at
+                && (properties == VertexPropertyAccess::Skip
+                    || active.properties == VertexPropertyAccess::Read)
+        }) {
             return Ok(());
         }
         let descriptor = self.partition.patches[at];
@@ -962,23 +1056,17 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             .partition
             .pin(cx, descriptor.extent, Admission::ScanBypass)
             .await?;
-        let rows = crate::root::resolve_patch_ref(
-            self.partition.store.k_oid.expose(),
-            self.partition.store.namespace,
-            at,
-            &self.partition.root.vertex_patches[at],
-            bytes.as_ref(),
-            self.partition.store.decode_resolver(),
-        )
-        .map_err(StoreError::MalformedRoot)
-        .map_err(BufferedReadError::from)?;
-        if rows.len() != descriptor.rows {
-            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
-        }
+        let rows = self
+            .partition
+            .decode_scan_patch(at, bytes.as_ref(), properties)?;
         drop(bytes);
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         self.active = Some(BufferedValue {
-            value: DecodedVertexPatch { patch: at, rows },
+            value: DecodedVertexPatch {
+                patch: at,
+                properties,
+                rows,
+            },
             _charge: charge,
         });
         Ok(())
@@ -987,6 +1075,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
     async fn next_candidate_inner<C: Send>(
         &mut self,
         cx: &QueryCx,
+        properties: VertexPropertyAccess,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
         if !self.initialized {
@@ -1016,7 +1105,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                 break;
             }
             self.observe(cx, observe)?;
-            self.load_patch(cx, head.patch, observe).await?;
+            self.load_patch(cx, head.patch, properties, observe).await?;
             let active = self
                 .active
                 .as_ref()
@@ -1033,7 +1122,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                 // positions in ascending order. The final eligible statement
                 // therefore incorporates every later retirement restatement.
                 match winning_row.as_mut() {
-                    Some(winner) => winner.value = row.clone(),
+                    Some(winner) => winner.value = properties.copy_row(row),
                     None => {
                         let charge = self
                             .partition
@@ -1041,7 +1130,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
                             .reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)
                             .map_err(BufferedReadError::Buffer)?;
                         winning_row = Some(BufferedValue {
-                            value: row.clone(),
+                            value: properties.copy_row(row),
                             _charge: charge,
                         });
                     }
@@ -1081,6 +1170,37 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         cx: &QueryCx,
         observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, VertexPropertyAccess::Read, observe)
+            .await
+    }
+
+    /// Read identities, lifetimes and labels without decoding vertex property
+    /// values. Initial root admission still validates every property and each
+    /// refault checks the exact admitted extent checksum. FGSV stores properties
+    /// inline, so the same patch bytes are read; scalar/collection allocation
+    /// and resolver work are skipped. Complete and topology pulls may alternate:
+    /// a complete pull refaults a topology-only active patch when necessary.
+    pub async fn next_topology_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate<BufferedVertexTopology>>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, VertexPropertyAccess::Skip, observe)
+            .await
+            .map(|candidate| {
+                candidate.map(|candidate| BufferedVertexCandidate {
+                    vid: candidate.vid,
+                    row: candidate.row.map(BufferedVertexTopology),
+                })
+            })
+    }
+
+    async fn next_candidate_with_access<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        properties: VertexPropertyAccess,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
         if self.done {
             self.finish();
             return Ok(None);
@@ -1088,7 +1208,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
         // Leave terminal set while the future can suspend. Dropping that
         // future must never restart after partially consuming one identity.
         self.done = true;
-        let result = self.next_candidate_inner(cx, observe).await;
+        let result = self.next_candidate_inner(cx, properties, observe).await;
         if matches!(result, Ok(Some(_))) && !self.heads.is_empty() {
             self.done = false;
         } else {

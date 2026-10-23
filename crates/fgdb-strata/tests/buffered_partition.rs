@@ -2172,3 +2172,260 @@ fn compact_vertex_admission_matches_the_canonical_publication_history_validator(
         }
     });
 }
+
+#[test]
+fn vertex_topology_scan_matches_complete_history_at_every_retained_cut() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for cut in 0..=5 {
+            let expected = {
+                let mut scan = view.vertex_scan(&cx, CommitSeq(cut)).unwrap();
+                let mut expected = Vec::new();
+                while let Some(candidate) = scan
+                    .next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                {
+                    expected.push((
+                        candidate.vid,
+                        candidate.row.map(|row| {
+                            assert!(!row.props.is_empty());
+                            (
+                                row.vid,
+                                row.birth_ordinal,
+                                row.created_at,
+                                row.retired_at,
+                                row.labels.clone(),
+                            )
+                        }),
+                    ));
+                }
+                expected
+            };
+            let mut scan = view.vertex_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut actual = Vec::new();
+            let mut admitted = Vec::new();
+            let mut observe = |event| {
+                if let BufferedScanEvent::Identity(vid) = event {
+                    admitted.push(vid);
+                }
+                Ok::<_, ()>(())
+            };
+            while let Some(candidate) = scan
+                .next_topology_candidate_with(&cx, &mut observe)
+                .await
+                .unwrap()
+            {
+                actual.push((
+                    candidate.vid,
+                    candidate.row.map(|row| {
+                        (
+                            row.vid(),
+                            row.birth_ordinal(),
+                            row.created_at(),
+                            row.retired_at(),
+                            row.labels().to_vec(),
+                        )
+                    }),
+                ));
+            }
+            assert_eq!(actual, expected, "historical cut {cut}");
+            assert_eq!(
+                admitted,
+                actual.iter().map(|(vid, _)| *vid).collect::<Vec<_>>(),
+                "invisible identities retain their source admission"
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_topology_and_complete_pulls_can_share_a_patch_without_losing_properties() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let rows: Vec<_> = (1..=4)
+            .map(|vid| {
+                let mut row = scan_vertex(vid, 1, None, 0);
+                row.labels = vec![LabelId(vid as u64)];
+                row.props = vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::List(
+                        fgdb_types::CanonicalList::try_new(vec![
+                            CanonicalScalar::ucs_basic_text(&"payload".repeat(300))
+                                .unwrap()
+                                .into(),
+                            CanonicalScalar::Int(vid as i64).into(),
+                        ])
+                        .unwrap(),
+                    ),
+                )];
+                row
+            })
+            .collect();
+        let patch = store
+            .put_patch(&commit, &encode_patch(&rows).unwrap())
+            .await
+            .unwrap();
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(1),
+                    blocks: vec![],
+                    vertex_patches: vec![PatchRef {
+                        patch_id: patch.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let before = view.stats().bypasses;
+        let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
+        let first = scan
+            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let second = scan.next(&cx).await.unwrap().unwrap();
+        let third = scan
+            .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+            .unwrap()
+            .row
+            .unwrap();
+        let fourth = scan.next(&cx).await.unwrap().unwrap();
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        assert_eq!(first.vid(), VId(1));
+        assert_eq!(first.labels(), &[LabelId(1)]);
+        assert_eq!(second.as_ref(), &rows[1]);
+        assert_eq!(third.vid(), VId(3));
+        assert_eq!(third.labels(), &[LabelId(3)]);
+        assert_eq!(fourth.as_ref(), &rows[3]);
+        assert!(
+            third.charged_bytes() < second.charged_bytes(),
+            "reusing a full patch must not copy its unused properties"
+        );
+        assert_eq!(first.charged_bytes(), third.charged_bytes());
+        drop(scan);
+        assert_eq!(
+            view.stats().bypasses - before,
+            2,
+            "Skip->Read refaults once; Read->Skip and the later Read reuse the full patch"
+        );
+        drop(view);
+        assert_eq!(
+            pool.used(),
+            first.charged_bytes()
+                + second.charged_bytes()
+                + third.charged_bytes()
+                + fourth.charged_bytes(),
+            "each returned row retains its own exact reservation"
+        );
+        drop((first, second, third, fourth));
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn vertex_topology_refusal_at_each_work_boundary_fuses_and_refunds() {
+    run(|contexts, dir| async move {
+        let (store, id) = vertex_scan_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let total = {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            while scan
+                .next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+                .is_some()
+            {}
+            scan.work_used()
+        };
+        for fail_at in 0..total {
+            let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+            let mut observed = 0;
+            let mut observe = |event| {
+                if event == BufferedScanEvent::Work {
+                    if observed == fail_at {
+                        return Err(fail_at);
+                    }
+                    observed += 1;
+                }
+                Ok(())
+            };
+            loop {
+                match scan.next_topology_candidate_with(&cx, &mut observe).await {
+                    Ok(Some(_)) => {}
+                    Err(BufferedScanError::Control(at)) => {
+                        assert_eq!(at, fail_at);
+                        break;
+                    }
+                    other => panic!("expected refusal at {fail_at}, got {other:?}"),
+                }
+            }
+            assert_eq!(scan.work_used(), fail_at);
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            assert!(
+                scan.next_topology_candidate_with(&cx, &mut observe)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline, "source event {fail_at}");
+        }
+        // Property bytes remain authenticated even though their values are
+        // skipped after admission. Corrupt a property in a later restatement:
+        // no already-visited historical winner may escape this failed pull.
+        let path = store.path(view.root().vertex_patches[1].patch_id);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+        let mut scan = view.vertex_scan(&cx, CommitSeq(5)).unwrap();
+        assert!(matches!(
+            scan.next_topology_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                .await,
+            Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                BufferError::ChecksumMismatch
+            )))
+        ));
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        drop(scan);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
