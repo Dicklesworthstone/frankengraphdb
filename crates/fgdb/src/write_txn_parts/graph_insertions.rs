@@ -763,6 +763,13 @@ impl WriteTxn {
                         .map_err(source)?;
                 }
             }
+            // Continuation rows belong to the next write, never to an
+            // implicit public RETURN. A terminal MERGE may retain them for
+            // its private execution; keep that buffer behind this boundary.
+            if !chain.returns_rows() {
+                returning.value.clear();
+                returning.rows.result_rows = 0;
+            }
             // Whole-statement counters, as every write RETURN reports them.
             returning.rows.snapshot_records = used.selection.snapshot_records;
             returning.evaluator = used.evaluator;

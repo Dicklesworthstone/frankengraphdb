@@ -123,7 +123,10 @@ fn relationship_action_imports_bind_weights_retry_without_creation_and_reopen() 
         let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
             .await
             .unwrap();
-        let before = db.frontier().unwrap();
+        let initial = db.frontier().unwrap();
+        assert_eq!(initial.0, 0);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
         let parameters = GqlParameters::new()
             .with_list(
                 "rows",
@@ -148,6 +151,8 @@ fn relationship_action_imports_bind_weights_retry_without_creation_and_reopen() 
             &parameters,
         );
         for attempt in 0..2 {
+            let before = db.frontier().unwrap();
+            let graph_before = (db.vertices().unwrap(), db.edges().unwrap());
             let mut bounded = policy(0).with_mutation_limit(3);
             if attempt == 1 {
                 bounded.max_vertices = 0;
@@ -175,20 +180,24 @@ fn relationship_action_imports_bind_weights_retry_without_creation_and_reopen() 
             assert_eq!(result.rows.result_rows, 0);
             let frontier = db.frontier().unwrap();
             assert_eq!(frontier.0, before.0 + 1);
+            // Explicit SET intents remain a committed write even when their
+            // values normalize to no change (transaction_completion's no-op law).
             assert_eq!(
                 completion,
-                if attempt == 0 {
-                    EmbeddedTxnCompletion::WriteCommitted {
-                        commit_seq: frontier,
-                    }
-                } else {
-                    EmbeddedTxnCompletion::ReadClosed {
-                        snapshot_seq: frontier,
-                        validated_through: frontier,
-                    }
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier,
                 }
             );
+            assert_eq!(db.delta_since(before).unwrap().count(), 1);
+            if attempt == 1 {
+                assert_eq!(
+                    (db.vertices().unwrap(), db.edges().unwrap()),
+                    graph_before,
+                    "retry preserves every identity and property"
+                );
+            }
         }
+        assert_eq!(db.frontier().unwrap().0, initial.0 + 2);
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         let identity = |id| {

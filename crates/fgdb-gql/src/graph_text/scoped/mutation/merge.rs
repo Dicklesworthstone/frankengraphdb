@@ -1924,6 +1924,61 @@ struct ParsedVertexRowsReturn<'r, 'a> {
 }
 
 impl<'a> ParsedVertexRowsReturn<'_, 'a> {
+    /// Carry future reads as final-state MERGE bindings. The following
+    /// write receives these cells as its preimage; a terminal mutation still
+    /// overlays its own assignments before evaluating RETURN.
+    fn hoist_continuation_reads(
+        &mut self,
+        requested: Vec<(Name<'a>, Name<'a>)>,
+    ) -> Result<Option<BoundaryReads<'a>>, GraphPatternTextError> {
+        let visible = self.output.len();
+        let mut reads = Vec::new();
+        for (alias, key) in requested {
+            let Some(at) = self.output[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                self.grouping.as_ref(),
+                &self.projection[at].value,
+            ) else {
+                continue;
+            };
+            let (binding, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                self.bindings[binding]
+            else {
+                continue;
+            };
+            let property = match binding {
+                RowsBinding::Vertex => RowsBinding::Property(key),
+                RowsBinding::Input(column) => RowsBinding::InputProperty(column, key),
+                RowsBinding::Property(_) | RowsBinding::InputProperty(_, _) => continue,
+            };
+            let column = self.column(property, GraphSetColumnType::Stored, key.at)?;
+            let column = match &mut self.grouping {
+                Some(group) => group.hoist_property(&mut self.projection, column, key.at)?,
+                None => column,
+            };
+            mutation_query::push_tail_read(
+                &mut self.projection,
+                &mut self.output,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
+        }
+        Ok((!reads.is_empty()).then(|| BoundaryReads {
+            visible,
+            width: self.output.len(),
+            reads,
+            functions: Vec::new(),
+            grouped: Vec::new(),
+            scoped: Vec::new(),
+        }))
+    }
+
     fn column(
         &mut self,
         binding: RowsBinding<'a>,
@@ -2326,10 +2381,49 @@ impl PreparedGraphVertexMergeRowsText {
                 at: parser.current.at,
             });
             carried.push((name, GraphSetColumnType::Vertex));
+            let requested = parser.write_chain_reads(&carried)?;
+            let boundary = if requested.is_empty() {
+                None
+            } else {
+                // Keep identity-only MERGE chains on the compact row path.
+                // A property-consuming next write instead uses the same
+                // final-state projection owner as an explicit WITH.
+                let mut head = ParsedVertexRowsReturn {
+                    variable,
+                    row: &row,
+                    written: None,
+                    bindings: Vec::new(),
+                    projection: Vec::new(),
+                    grouping: None,
+                    quantifier: GraphSetQuantifier::All,
+                    order: Vec::new(),
+                    offset: ReadPageNumber::Literal(0),
+                    count: None,
+                    at: parser.current.at,
+                    output: carried,
+                };
+                for (input, &(name, kind)) in row[..keep].iter().enumerate() {
+                    let column = head.column(RowsBinding::Input(input), kind, name.at)?;
+                    head.projection.push(ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(column),
+                    });
+                }
+                let column =
+                    head.column(RowsBinding::Vertex, GraphSetColumnType::Vertex, name.at)?;
+                head.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                let boundary = head.hoist_continuation_reads(requested)?;
+                carried = head.output.clone();
+                parsed_return = Some(head);
+                boundary
+            };
             Some(ChainContinuation {
                 at: parser.current.at,
                 row: carried,
-                boundary: None,
+                boundary,
                 parameters: parser.syntax.parameters.clone(),
             })
         } else {
@@ -2353,7 +2447,7 @@ impl PreparedGraphVertexMergeRowsText {
             });
             if parser.is_word("WITH") {
                 // A WITH head: its output row is what the next write reads.
-                let head = parser.vertex_rows_return("WITH", variable, &row, written)?;
+                let mut head = parser.vertex_rows_return("WITH", variable, &row, written)?;
                 if !parser.at_chained_write()? {
                     return Err(error(
                         parser.current.at,
@@ -2363,10 +2457,12 @@ impl PreparedGraphVertexMergeRowsText {
                     )
                     .into());
                 }
+                let requested = parser.write_chain_reads(&head.output)?;
+                let boundary = head.hoist_continuation_reads(requested)?;
                 let continuation = ChainContinuation {
                     at: parser.current.at,
                     row: head.output.clone(),
-                    boundary: None,
+                    boundary,
                     parameters: parser.syntax.parameters.clone(),
                 };
                 parsed_return = Some(head);

@@ -463,7 +463,8 @@ impl PreparedGraphEdgeMergeText {
         let schema = from.row;
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
-        let continuation = Self::chain_continuation(&parser, &schema, keep, &merged, continues)?;
+        let continuation =
+            Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
         let input = BoundSetTextInput {
             selection: None,
             parameters: parser.syntax.parameters.clone(),
@@ -513,7 +514,8 @@ impl PreparedGraphEdgeMergeText {
         parser.chain_write = true;
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
-        let continuation = Self::chain_continuation(&parser, &schema, keep, &merged, continues)?;
+        let continuation =
+            Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
         let read = parser.finish_write_row_prefix(statement, head, stages)?;
         let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
         let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
@@ -525,7 +527,7 @@ impl PreparedGraphEdgeMergeText {
     /// row's first `keep` columns and the relationship, as `WITH *` carries
     /// them.
     fn chain_continuation<'a>(
-        parser: &Parser<'a>,
+        parser: &mut Parser<'a>,
         schema: &[(Name<'a>, GraphSetColumnType)],
         keep: usize,
         merged: &RowMerge<'a>,
@@ -533,6 +535,12 @@ impl PreparedGraphEdgeMergeText {
     ) -> Result<Option<(usize, ChainContinuation<'a>)>, GraphEdgeMergeTextError> {
         if !continues {
             return Ok(None);
+        }
+        // The shared write-tail compiler carries final-state property cells
+        // with their boundary metadata. They remain private input columns of
+        // the following write, just as after CREATE's implicit WITH head.
+        if let Some(continuation) = parser.continuation() {
+            return Ok(Some((keep, continuation)));
         }
         let row = if let Some(head) = &merged.3 {
             head.output.clone()
@@ -623,7 +631,7 @@ impl PreparedGraphEdgeMergeText {
         let headed = !continues && parser.chain_write && parser.is_word("WITH");
         let returning =
             !continues && !headed && returning.unwrap_or_else(|| parser.is_word("RETURN"));
-        let parsed_return = if headed {
+        let mut parsed_return = if headed {
             let head = parser.edge_merge_return(
                 "WITH",
                 parsed.relationship,
@@ -651,6 +659,30 @@ impl PreparedGraphEdgeMergeText {
             None
         };
         let continues = continues || headed;
+        if continues && parsed_return.is_none() {
+            let keep = parser.visible_width(schema);
+            let mut output = schema[..keep].to_vec();
+            let name = parsed.relationship.unwrap_or(Name {
+                text: Parser::anonymous_name(output.len()),
+                at: parser.current.at,
+            });
+            output.push((name, GraphSetColumnType::Edge));
+            // Identity-only continuations retain the compact row path. A
+            // following property read needs the existing final-state query
+            // owner, including its authorization and occurrence accounting.
+            if !parser.write_chain_reads(&output)?.is_empty() {
+                let mut head = ParsedEdgeReturn::identity_head(
+                    parsed.relationship,
+                    schema,
+                    keep,
+                    name,
+                    parser.current.at,
+                )?;
+                head.tail =
+                    Some(parser.edge_merge_tail(&mut head, &mut Vec::new(), output, true)?);
+                parsed_return = Some(head);
+            }
+        }
         if !continues {
             parser.end()?;
         }
@@ -934,6 +966,43 @@ struct ParsedEdgeReturn<'a> {
 }
 
 impl<'a> ParsedEdgeReturn<'a> {
+    /// An implicit WITH * over one MERGE occurrence. Hidden properties are
+    /// added by the same compiler as an explicit WITH head.
+    fn identity_head(
+        relationship: Option<Name<'a>>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+        keep: usize,
+        edge: Name<'a>,
+        at: usize,
+    ) -> Result<Self, GraphPatternTextError> {
+        let mut head = Self {
+            relationship,
+            bindings: Vec::new(),
+            projection: Vec::new(),
+            grouping: None,
+            quantifier: GraphSetQuantifier::All,
+            order: Vec::new(),
+            offset: ReadPageNumber::Literal(0),
+            count: None,
+            at,
+            tail: None,
+            output: Vec::new(),
+        };
+        for (input, &(name, kind)) in row[..keep].iter().enumerate() {
+            let column = head.column(EdgeBinding::Input(input), name, kind)?;
+            head.projection.push(ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            });
+        }
+        let column = head.column(EdgeBinding::Edge, edge, GraphSetColumnType::Edge)?;
+        head.projection.push(ReadProjectionTemplate {
+            name: edge.text.to_owned(),
+            value: ReadValueTemplate::Column(column),
+        });
+        Ok(head)
+    }
+
     fn column(
         &mut self,
         binding: EdgeBinding<'a>,
@@ -1239,7 +1308,7 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
-        if head {
+        if head || keyword == "WITH" && self.chain_write {
             returning.tail =
                 Some(self.edge_merge_tail(&mut returning, columns, items.output, row.is_some())?);
         } else {
@@ -1263,7 +1332,12 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphEdgeMergeTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        for (alias, key) in self.write_tail_reads(&schema)? {
+        let requested = if self.chain_write && self.at_chained_write()? {
+            self.write_chain_reads(&schema)?
+        } else {
+            self.write_tail_reads(&schema)?
+        };
+        for (alias, key) in requested {
             let Some(at) = schema[..visible]
                 .iter()
                 .position(|(name, _)| name.text == alias.text)
@@ -1294,7 +1368,7 @@ impl<'a> Parser<'a> {
                 | EdgeBinding::EndpointProperty { .. }
                 | EdgeBinding::InputProperty { .. } => continue,
             };
-            let column = returning.column(property, key, GraphSetColumnType::Scalar)?;
+            let column = returning.column(property, key, GraphSetColumnType::Stored)?;
             let column = match &mut returning.grouping {
                 Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
                 None => column,

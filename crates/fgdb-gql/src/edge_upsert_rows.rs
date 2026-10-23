@@ -278,9 +278,10 @@ mod tests {
         match (kind, name) {
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
             (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
-            (GraphSymbolKind::Label, "A") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Label, "A" | "Visible") => Some(GraphSymbol::Label(LabelId(1))),
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            (GraphSymbolKind::Property, "secret") => Some(GraphSymbol::Property(PropertyKeyId(3))),
             _ => None,
         }
     }
@@ -464,6 +465,128 @@ mod tests {
             }
             assert!(!program.returns_rows());
         }
+    }
+
+    #[test]
+    fn following_create_reads_final_merge_fields_through_admitted_private_bindings() {
+        let private = bound(
+            "CREATE (a:Visible), (b:Visible) MERGE (a)-[e:R]->(b) \
+             CREATE (c:Visible {p:e.secret})",
+            &GqlParameters::new(),
+        );
+        assert!(!private.returns_rows());
+        let GraphWriteChainStep::EdgeMergeQuery(query) = &private.steps()[1] else {
+            panic!("a future field read needs the MERGE's final-state projection");
+        };
+        assert!(
+            query
+                .bindings()
+                .contains(&crate::GraphEdgeMergeBinding::Property(PropertyKeyId(3),))
+        );
+        assert!(matches!(private.steps()[2], GraphWriteChainStep::Insert(_)));
+
+        let endpoints = bound(
+            "MATCH (a:Visible)-[:R]->(b:Visible) MERGE (a)-[s:S {p:7}]-(b) \
+             CREATE (copy:Visible {p:b.p}) RETURN copy.p AS destination ORDER BY destination",
+            &GqlParameters::new(),
+        );
+        let GraphWriteChainStep::EdgeMergeQuery(query) = &endpoints.steps()[0] else {
+            panic!("the carried endpoint field must be a final-state binding");
+        };
+        assert!(query.bindings().iter().any(|binding| matches!(
+            binding,
+            crate::GraphEdgeMergeBinding::InputProperty { key: P, .. }
+        )));
+        assert_eq!(endpoints.columns(), &["destination"]);
+
+        for head in ["WITH r", "WITH r AS edge"] {
+            let variable = if head.ends_with("edge") { "edge" } else { "r" };
+            let actions = bound(
+                &format!(
+                    "MERGE (a {{p:10}}) MERGE (b {{p:20}}) MERGE (a)-[r:R]->(b) \
+                     ON MATCH SET r.p=r.q,r.q=r.p SET r.p=r.p+10 {head} \
+                     CREATE (c {{p:{variable}.p,q:{variable}.q}}) RETURN c.p,c.q"
+                ),
+                &GqlParameters::new(),
+            );
+            let GraphWriteChainStep::EdgeUpsertQuery { query, .. } = &actions.steps()[2] else {
+                panic!("the ON/SET head must keep its private final-state fields");
+            };
+            assert_eq!(
+                query.column_types(),
+                &[
+                    GraphSetColumnType::Edge,
+                    GraphSetColumnType::Stored,
+                    GraphSetColumnType::Stored,
+                ],
+            );
+            assert!(
+                query
+                    .bindings()
+                    .contains(&crate::GraphEdgeMergeBinding::Property(P))
+            );
+            assert!(
+                query
+                    .bindings()
+                    .contains(&crate::GraphEdgeMergeBinding::Property(Q))
+            );
+            assert_eq!(actions.columns(), &["c.p", "c.q"]);
+        }
+    }
+
+    #[test]
+    fn vertex_with_preimages_are_overlaid_by_the_terminal_set_before_return() {
+        let program = bound(
+            "UNWIND [1,2] AS k MERGE (a {p:k}) ON CREATE SET a.p=k \
+             MERGE (b {p:k+10}) ON CREATE SET b.p=k+10 \
+             WITH a,b SET b.p=b.p+100 RETURN b.p",
+            &GqlParameters::new(),
+        );
+        let GraphWriteChainStep::VertexMergeQuery(head) = &program.steps()[1] else {
+            panic!("WITH must retain the MERGE's final property preimage");
+        };
+        assert!(
+            head.bindings()
+                .contains(&crate::GraphVertexMergeRowsBinding::Property(P))
+        );
+        assert_eq!(
+            head.column_types(),
+            &[
+                GraphSetColumnType::Vertex,
+                GraphSetColumnType::Vertex,
+                GraphSetColumnType::Stored,
+            ],
+        );
+        let GraphWriteChainStep::MutationQuery(tail) = &program.steps()[2] else {
+            panic!("the terminal SET must keep its existing mutation/RETURN owner");
+        };
+        let incoming = vec![
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(11)),
+                scalar(11),
+            ]),
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(12)),
+                scalar(12),
+            ]),
+        ];
+        let proposal = tail
+            .execute_governed_over::<(), ()>(
+                Some(incoming),
+                crate::GraphMutationPolicy::new(
+                    crate::GqlQueryPolicy::new(0, 2, 100_000, 100_000),
+                    2,
+                ),
+                |_, _| panic!("the mutation consumes only its admitted private row"),
+                || Ok(()),
+            )
+            .unwrap();
+        let (_, returning) = proposal.into_parts();
+        assert_eq!(returning.rows.result_rows, 2);
+        assert_eq!(returning.value[0].values(), &[scalar(111)]);
+        assert_eq!(returning.value[1].values(), &[scalar(112)]);
     }
 
     #[test]

@@ -204,6 +204,15 @@ fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract(
         let fixture = Fixture::start(cx, "relationship-action-import", |_| {}).await;
         let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let initial = state(cx, &mut observer).await;
+        assert!(initial.0.rows.is_empty() && initial.1.rows.is_empty());
+        assert_eq!(
+            initial.0.outcome,
+            Outcome::ReadClosed {
+                seq: 0,
+                statements: 1
+            }
+        );
         let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
             MERGE (b:Person {name:row.d}) MERGE (a)-[r:KNOWS]->(b) \
             ON CREATE SET r.age=row.w ON MATCH SET r.age=row.w";
@@ -247,15 +256,24 @@ fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract(
             .execute(cx, ExecuteMode::Write, statement, parameters())
             .await
             .unwrap();
-        assert!(repeated.columns.is_empty() && repeated.rows.is_empty());
+        // Reapplying the weights still executes SET, whose normalized no-op
+        // commits once while preserving all graph identities and properties.
+        committed(repeated, 2, 1);
+        let retried = state(cx, &mut observer).await;
         assert_eq!(
-            repeated.outcome,
-            Outcome::ReadClosed {
-                seq: 1,
-                statements: 1
-            }
+            (
+                retried.0.columns,
+                retried.0.rows,
+                retried.1.columns,
+                retried.1.rows
+            ),
+            (
+                imported.0.columns,
+                imported.0.rows,
+                imported.1.columns,
+                imported.1.rows
+            )
         );
-        assert_eq!(state(cx, &mut observer).await, imported);
 
         committed(
             writer
@@ -269,7 +287,7 @@ fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract(
                 )
                 .await
                 .unwrap(),
-            2,
+            3,
             1,
         );
         let updated = state(cx, &mut observer).await;
@@ -322,7 +340,7 @@ fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract(
         assert_eq!(state(cx, &mut observer).await, updated);
         writer.close(cx).await.unwrap();
         observer.close(cx).await.unwrap();
-        fixture.stop(cx, 2, 3, 3).await;
+        fixture.stop(cx, 3, 3, 3).await;
     });
 }
 

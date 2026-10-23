@@ -1075,6 +1075,24 @@ impl<'a> Parser<'a> {
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
+        self.write_property_reads(outputs, false)
+    }
+
+    /// The next write needs property values used by expressions or RETURN,
+    /// not the old value of a field merely named as a SET target. Avoid
+    /// turning an identity-only continuation into an unnecessary read.
+    pub(super) fn write_chain_reads(
+        &self,
+        outputs: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
+        self.write_property_reads(outputs, true)
+    }
+
+    fn write_property_reads(
+        &self,
+        outputs: &[(Name<'a>, GraphSetColumnType)],
+        skip_set_targets: bool,
+    ) -> Result<Vec<(Name<'a>, Name<'a>)>, GraphPatternTextError> {
         let mut reads: Vec<(Name<'a>, Name<'a>)> = Vec::new();
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
@@ -1082,11 +1100,33 @@ impl<'a> Parser<'a> {
         let mut back: [Option<Token<'a>>; 3] = [None; 3];
         let mut depth = 0_usize;
         let mut unwind = false;
+        let (mut setting, mut target) = (false, false);
         loop {
             let previous = back[2].map(|token| token.kind);
             let after_dot = matches!(previous, Some(TokenKind::Punct(b'.')));
             let after_alias = matches!(previous, Some(TokenKind::Word(word))
                 if word.eq_ignore_ascii_case("AS"));
+            if skip_set_targets && depth == 0 && !after_dot && !after_alias {
+                match token.kind {
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("SET") => {
+                        setting = true;
+                        target = true;
+                    }
+                    TokenKind::Word(word)
+                        if [
+                            "ON", "RETURN", "WITH", "CREATE", "MERGE", "REMOVE", "DELETE", "DETACH",
+                        ]
+                        .iter()
+                        .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                    {
+                        setting = false;
+                        target = false;
+                    }
+                    TokenKind::Punct(b',') if setting => target = true,
+                    TokenKind::Punct(b'=') if setting => target = false,
+                    _ => {}
+                }
+            }
             match token.kind {
                 TokenKind::End => break,
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -1118,7 +1158,7 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
-                TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) if after_dot => {
+                TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) if after_dot && !target => {
                     if let Some(Token {
                         kind: TokenKind::Word(alias),
                         at,
