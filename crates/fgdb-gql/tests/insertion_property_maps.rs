@@ -464,3 +464,33 @@ fn a_create_map_reads_a_sibling_vertex_made_before_it() {
         .is_err()
     );
 }
+
+/// openCypher Graph7 [2], [3]: a created element's `n[key]` subscripts its
+/// property map, so the key may be computed or a parameter, and an absent
+/// key reads NULL.
+#[test]
+fn created_element_subscripts_read_its_property_map() {
+    let batch = create(
+        &prepare(
+            "CREATE (n {p:5})-[r:R {q:6}]->(m) RETURN n['p'] AS p, n['q'] AS absent, \
+             r['' + 'q'] AS weight, m['p'] AS empty",
+            Catalog(Some("p")),
+        ),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(rows(&batch), vec![vec![int(5), null(), int(6), null()]]);
+    let query = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        "CREATE (n {p:5}) RETURN n[$key] AS value",
+        R,
+        &[(
+            "key",
+            fgdb_gql::GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Text),
+        )],
+        Catalog(Some("p")),
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new().with_text("key", "p").unwrap())
+    .unwrap();
+    assert_eq!(rows(&create(&query, policy()).unwrap()), vec![vec![int(5)]]);
+}
