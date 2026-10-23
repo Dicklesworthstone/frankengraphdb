@@ -509,9 +509,8 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
     }
     // Inside a scope that hides the imported columns: refused before any
     // catalog call, as before.
-    for text in [
-        "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q",
-    ] {
+    {
+        let text = "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q";
         let mut calls = 0;
         assert!(
             PreparedGraphSetText::prepare(text, |kind, name| {
