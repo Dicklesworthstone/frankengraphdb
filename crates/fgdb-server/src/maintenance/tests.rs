@@ -9,7 +9,7 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::CancelKind;
 use fgdb_types::{CommitSeq, PurposeContexts, VId};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
 
@@ -54,6 +54,31 @@ where
         panic!("{failure}; crashpack={artifact:?}");
     }
     ((), report)
+}
+
+#[test]
+fn timed_lab_runner_rejects_panicked_tasks_and_zero_elapsed_time() {
+    for panic_root in [false, true] {
+        let reached = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&reached);
+        let refused = std::panic::catch_unwind(move || {
+            run_with_elapsed_time(
+                0x79a0_0022 + u64::from(panic_root),
+                move |root| async move {
+                    if panic_root {
+                        asupersync::time::sleep(root.now(), Duration::from_secs(1)).await;
+                    }
+                    reached.store(true, Ordering::Relaxed);
+                    assert!(!panic_root, "intentional timed lab root failure");
+                },
+            )
+        });
+        assert!(
+            observed.load(Ordering::Relaxed),
+            "the control must reach its intended root outcome"
+        );
+        assert!(refused.is_err(), "the invalid timed run must be refused");
+    }
 }
 
 #[test]
