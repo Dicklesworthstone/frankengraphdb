@@ -229,9 +229,9 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
 }
 
 /// A vertex MERGE selection's identity key: its labels and property
-/// equalities with canonical value encodings (PreparedGraphVertexMerge::
-/// equality_key). Equal keys may match the same vertices; unequal keys of one
-/// template cannot.
+/// equalities with query-equality value encodings (PreparedGraphVertexMerge::
+/// equality_key). Exact Int/Float peers share one key. Equal keys may match the
+/// same vertices; unequal keys of one template cannot.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct MergeEqualityKey {
     pub(crate) labels: Vec<LabelId>,
@@ -312,10 +312,10 @@ impl PreparedGraphVertexMerge {
 
     /// The selection's identity key when it is nothing but one vertex scan
     /// under label and non-null property equalities (fgdb-2l3pt): the sorted
-    /// labels, and each property key with its canonical value encoding,
-    /// sorted. Two bound merges of one template whose keys differ in any value
-    /// match disjoint vertex sets, since a vertex holds one value per property
-    /// and canonical encodings are unique per value of one kind. Any other
+    /// labels, and each property key with its query-equality value encoding,
+    /// sorted. Exact Int/Float peers share an encoding. Two bound merges of one
+    /// template whose keys differ in any value match disjoint vertex sets,
+    /// since a vertex holds one value per property. Any other
     /// operator or predicate (ranges, NULL tests, Boolean selections, edges)
     /// returns None. Definition-only: no source or callback.
     pub(crate) fn equality_key(&self) -> Option<MergeEqualityKey> {
@@ -336,14 +336,20 @@ impl PreparedGraphVertexMerge {
                                 key,
                                 comparison: IntegerComparison::Equal,
                                 value,
-                            } => {
-                                properties.push((*key, CanonicalScalar::Int(*value).encode().ok()?))
-                            }
+                            } => properties.push((
+                                *key,
+                                crate::algebra::equality_value_bytes(&CanonicalScalar::Int(
+                                    *value,
+                                ))?,
+                            )),
                             VertexPredicate::ScalarProperty { key, predicate }
                                 if predicate.comparison() == IntegerComparison::Equal
                                     && !matches!(predicate.value(), CanonicalScalar::Null) =>
                             {
-                                properties.push((*key, predicate.value().encode().ok()?));
+                                properties.push((
+                                    *key,
+                                    crate::algebra::equality_value_bytes(predicate.value())?,
+                                ));
                             }
                             _ => return None,
                         }

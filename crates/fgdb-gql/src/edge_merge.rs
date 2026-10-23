@@ -222,7 +222,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
 }
 
 /// One endpoint's selection: its labels and property equality values
-/// (canonical encodings, kinds included), both sorted.
+/// (query-equality encodings, exact Int/Float peers combined), both sorted.
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct EdgeMergeSlotKey {
     pub(crate) labels: Vec<fgdb_delta_types::LabelId>,
@@ -532,17 +532,22 @@ impl PreparedGraphEdgeMerge {
                                 key: property,
                                 comparison: IntegerComparison::Equal,
                                 value,
-                            } => key
-                                .properties
-                                .push((*property, CanonicalScalar::Int(*value).encode().ok()?)),
+                            } => key.properties.push((
+                                *property,
+                                crate::algebra::equality_value_bytes(&CanonicalScalar::Int(
+                                    *value,
+                                ))?,
+                            )),
                             VertexPredicate::ScalarProperty {
                                 key: property,
                                 predicate,
                             } if predicate.comparison() == IntegerComparison::Equal
                                 && !matches!(predicate.value(), CanonicalScalar::Null) =>
                             {
-                                key.properties
-                                    .push((*property, predicate.value().encode().ok()?));
+                                key.properties.push((
+                                    *property,
+                                    crate::algebra::equality_value_bytes(predicate.value())?,
+                                ));
                             }
                             _ => return None,
                         }

@@ -163,6 +163,22 @@ fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
     }
 }
 
+/// A definition-only key for scalar `=` equivalence, for proofs that two
+/// selections cannot overlap. Storage encodings distinguish Int(1) from
+/// Float(1.0), but both match the same property. Canonicalize an integral Float
+/// only when the shared exact comparator confirms the i64 peer; casts alone
+/// would conflate rounded integers above 2^53, NaN or the saturated i64 bounds.
+/// Decimal cross-kind comparisons remain UNKNOWN and keep their own encoding.
+pub(crate) fn equality_value_bytes(value: &CanonicalScalar) -> Option<Vec<u8>> {
+    if let CanonicalScalar::Float(float) = value {
+        let integer = CanonicalScalar::Int(float.get() as i64);
+        if IntegerComparison::Equal.accepts_scalar_pair(Some(&integer), Some(value)) {
+            return integer.encode().ok();
+        }
+    }
+    value.encode().ok()
+}
+
 impl IntegerComparison {
     /// Two present, non-null values of different domains (fgdb-v6ku6, owner
     /// ruling (a), as openCypher): they are not equal, so `=` is FALSE and

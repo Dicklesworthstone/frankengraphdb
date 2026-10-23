@@ -7,10 +7,11 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphEdgeMergeOutcome, GraphMutationProgramDimension,
     GraphMutationProgramError, GraphSymbol, GraphSymbolKind, GraphWriteProgramError,
     GraphWriteProgramPolicy, GraphWriteScriptBatchError, GraphWriteScriptExecutionError,
-    PreparedGraphWriteScript,
+    PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+    CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -51,6 +52,121 @@ fn script() -> PreparedGraphWriteScript {
         symbols,
     )
     .unwrap()
+}
+
+#[test]
+fn numeric_equal_batch_keys_match_the_live_sequential_vertex_and_edge_oracle() {
+    let ((), report) = run_async_under_lab(0xba7c_0040, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txcx = contexts.txn();
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let values = [
+            CanonicalScalar::Int(1),
+            CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        ];
+        for text in [
+            "MERGE (n {p:$key})",
+            "MERGE (n {p:$key}) SET n.q=$value",
+            "MATCH (a {p:$key}), (b {p:2}) MERGE (a)-[:R]->(b)",
+        ] {
+            let mut arguments = GqlParameters::new();
+            let script = values
+                .iter()
+                .enumerate()
+                .map(|(row, key)| {
+                    let name = format!("key{row}");
+                    arguments = std::mem::take(&mut arguments)
+                        .with_scalar(&name, key.clone())
+                        .unwrap();
+                    if text.contains("$value") {
+                        arguments = std::mem::take(&mut arguments)
+                            .with_int64(format!("value{row}"), row as i64 + 7)
+                            .unwrap();
+                    }
+                    text.replace("$key", &format!("${name}"))
+                        .replace("$value", &format!("$value{row}"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let declarations: Vec<_> = arguments.parameter_types().collect();
+            let batch = PreparedGraphWriteScript::prepare_with_parameter_types(
+                &script,
+                R,
+                &declarations,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameter_sets(std::slice::from_ref(&arguments))
+            .unwrap();
+            // Rebuilding the same bound statements omits physical profiles;
+            // that ordinary executor is the live semantic oracle.
+            let sequential =
+                PreparedGraphWriteProgram::prepare(batch.program().statements().to_vec()).unwrap();
+            let relationship = text.starts_with("MATCH");
+            let mut expected = None;
+            for program in [&sequential, batch.program()] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                if relationship {
+                    let mut seed = WriteBatch::new(R);
+                    for id in 1..=2 {
+                        seed.create_vertex(
+                            VId(id),
+                            vec![],
+                            vec![(P, CanonicalScalar::Int(id as i64))],
+                        );
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                }
+                let mut allocations = 0;
+                let (receipt, completion) = db
+                    .execute_graph_write_program_returning_autocommit_governed(
+                        &txcx,
+                        &query,
+                        &commit,
+                        program,
+                        GraphWriteProgramPolicy::new(query_policy(), 2, 2, 2),
+                        |request| {
+                            allocations += 1;
+                            let id = 100 + request.statement as u128;
+                            Ok::<_, ()>(if relationship {
+                                ElementId::Edge(EId(id))
+                            } else {
+                                ElementId::Vertex(VId(id))
+                            })
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(allocations, 1, "{text}");
+                assert_eq!(receipt.stats().completed_statements, 2);
+                assert_eq!(receipt.stats().created_vertices, u64::from(!relationship));
+                assert_eq!(receipt.stats().created_edges, u64::from(relationship));
+                if text.contains("$value") {
+                    assert!(
+                        db.vertex(VId(100))
+                            .unwrap()
+                            .unwrap()
+                            .props
+                            .contains(&(Q, CanonicalScalar::Int(8).into()))
+                    );
+                }
+                let actual = (
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                    receipt.steps().to_vec(),
+                    completion,
+                );
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected, "{text}");
+                } else {
+                    expected = Some(actual);
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
