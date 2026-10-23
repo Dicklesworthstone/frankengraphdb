@@ -11,13 +11,17 @@ use asupersync::io::AsyncWriteExt as _;
 use asupersync::net::TcpListener;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
-use fgdb_server::{DatabaseConfig, OrderedReadConfig, Server, ServerLimits, Symbols};
+use fgdb_server::{
+    DatabaseConfig, MaintenanceEvent, MaintenanceSchedule, OrderedReadConfig, Server, ServerLimits,
+    Symbols,
+};
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 const HELP: &str = "\
 fgdbd: the FrankenGraphDB server (FGP, HTTPS, and Bolt with optional TLS)
@@ -29,6 +33,7 @@ USAGE:
                   [--policy-epoch <n>] [--write-relation <u32>] [--query-scratch-dir <path>]
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
+                  [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
@@ -64,6 +69,18 @@ own --max-nodes/--max-work/--max-rows caveats still bound each statement too.
 query-private files in an existing directory. The operator chooses this path;
 clients request ReadOrdered or prepared OrderedStream without supplying paths
 or scratch limits. Databases without this option refuse those execution modes.
+
+--compact-interval-seconds and --scrub-interval-seconds opt that database
+into fixed periodic maintenance while fgdbd retains its writer lease. Both
+are disabled by default and require positive whole seconds. The first run
+waits one interval; later runs wait that interval after completion (including
+a failed attempt), without catching up missed ticks. Compaction and scrub
+run sequentially per database through ordinary writer admission; foreground
+writes can wait behind them. This is a fixed operator schedule, not adaptive
+latency pacing. Existing read snapshots and the committed frontier survive
+healthy maintenance. Outcomes, including lost-object counts, go to stderr;
+lost data or ambiguous maintenance publication uses supervised recovery.
+Drain stops new maintenance and waits for an admitted operation to finish.
 
 --tls-cert-file and --tls-key-file must be supplied together. They enable
 TLS 1.3 on EVERY configured listener, with no plaintext fallback. Supply a
@@ -184,6 +201,8 @@ struct DatabaseOptions {
     /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
     /// `--max-scratch-entries`, in [`fgdb_gql::GqlQueryPolicy::new`] order.
     query_limits: [Option<u64>; 4],
+    /// Fixed compaction and scrub delays, in that order; absent disables one.
+    maintenance_intervals: [Option<Duration>; 2],
     symbols: Symbols,
     /// `--bindings-file`: more bindings, merged in before the database opens.
     bindings_file: Option<PathBuf>,
@@ -279,6 +298,7 @@ impl ServeOptions {
                         policy_epoch: 1,
                         write_relation: 1,
                         query_limits: [None; 4],
+                        maintenance_intervals: [None; 2],
                         symbols: Symbols::new(),
                         bindings_file: None,
                     });
@@ -322,6 +342,14 @@ impl ServeOptions {
                             db.query_limits[slot] =
                                 Some(number(value(args, &mut at, flag)?, flag)?);
                         }
+                        "--compact-interval-seconds" | "--scrub-interval-seconds" => {
+                            let slot = usize::from(flag == "--scrub-interval-seconds");
+                            if db.maintenance_intervals[slot].is_some() {
+                                return Err(Failure::usage(format!("duplicate flag {flag}")));
+                            }
+                            let seconds = number(value(args, &mut at, flag)?, flag)?;
+                            db.maintenance_intervals[slot] = Some(Duration::from_secs(seconds));
+                        }
                         "--label" | "--relation" | "--property" => {
                             let kind = match flag {
                                 "--label" => GraphSymbolKind::Label,
@@ -351,6 +379,8 @@ impl ServeOptions {
             return Err(Failure::usage("serve needs at least one --database"));
         }
         for db in &databases {
+            MaintenanceSchedule::new(db.maintenance_intervals[0], db.maintenance_intervals[1])
+                .map_err(Failure::usage)?;
             if db.key_file.is_none() || db.issuer_key_file.is_none() {
                 return Err(Failure::usage(format!(
                     "database {:?} needs --key-file and --issuer-key-file",
@@ -396,6 +426,16 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
     let mut limits = ServerLimits::default();
     if let Some(max) = options.max_connections {
         limits.max_connections = max;
+    }
+    let mut maintenance_jobs = Vec::new();
+    for db in &options.databases {
+        let schedule =
+            MaintenanceSchedule::new(db.maintenance_intervals[0], db.maintenance_intervals[1])
+                .map_err(Failure::usage)?;
+        schedule.validate(cx).map_err(Failure::usage)?;
+        if schedule.is_enabled() {
+            maintenance_jobs.push((db.name.clone(), schedule));
+        }
     }
     let mut server = Server::new(cx, limits).map_err(Failure::usage)?;
     let tls_enabled = options.tls_cert_file.is_some();
@@ -494,52 +534,128 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         stdout.flush().map_err(Failure::io)?;
     }
     let server = Arc::new(server);
-    for watch in [asupersync::signal::sigint, asupersync::signal::sigterm] {
-        let shutdown = server.shutdown();
-        let mut signal = watch().map_err(Failure::io)?;
-        cx.spawn(move |_| async move {
-            if signal.recv().await.is_some() {
-                shutdown.trigger();
-            }
-        })
-        .map_err(|_| Failure::io("cannot install a signal watcher"))?;
-    }
-    let http = match http {
-        None => None,
-        Some((listener, hosts)) => {
+    // Closing this owner also wakes listener/maintenance children if the
+    // serving future is dropped during startup or while awaiting a join.
+    let _drain = DrainOnDrop(server.shutdown());
+    let mut workers: Vec<asupersync::runtime::TaskHandle<Result<(), Failure>>> = Vec::new();
+    let mut result = async {
+        for watch in [asupersync::signal::sigint, asupersync::signal::sigterm] {
+            let shutdown = server.shutdown();
+            let mut signal = watch().map_err(Failure::io)?;
+            cx.spawn(move |_| async move {
+                if signal.recv().await.is_some() {
+                    shutdown.trigger();
+                }
+            })
+            .map_err(|_| Failure::io("cannot install a signal watcher"))?;
+        }
+        if let Some((listener, hosts)) = http {
             let server = Arc::clone(&server);
-            Some(
+            workers.push(
                 cx.spawn(move |child| async move {
-                    let _ = server.serve_http(&child, listener, hosts).await;
+                    server
+                        .serve_http(&child, listener, hosts)
+                        .await
+                        .map_err(Failure::io)
                 })
                 .map_err(|_| Failure::io("cannot start the HTTP listener"))?,
-            )
+            );
         }
-    };
-    let bolt = match bolt {
-        None => None,
-        Some(listener) => {
+        if let Some(listener) = bolt {
             let server = Arc::clone(&server);
-            Some(
+            workers.push(
                 cx.spawn(move |child| async move {
-                    let _ = server.serve_bolt(&child, listener).await;
+                    server
+                        .serve_bolt(&child, listener)
+                        .await
+                        .map_err(Failure::io)
                 })
                 .map_err(|_| Failure::io("cannot start the Bolt listener"))?,
-            )
+            );
         }
-    };
-    Arc::clone(&server)
-        .serve(cx, listener)
-        .await
-        .map_err(Failure::io)?;
-    if let Some(mut http) = http {
-        let _ = http.join(cx).await;
+        for (name, schedule) in maintenance_jobs {
+            let server = Arc::clone(&server);
+            workers.push(
+                cx.spawn(move |child| async move {
+                    let result = server
+                        .run_maintenance(&child, &name, schedule, |event| {
+                            report_maintenance(&name, event);
+                        })
+                        .await
+                        .map_err(Failure::io);
+                    if result.is_err() {
+                        server.shutdown().trigger();
+                    }
+                    result
+                })
+                .map_err(|_| Failure::io("cannot start database maintenance"))?,
+            );
+        }
+        Arc::clone(&server)
+            .serve(cx, listener)
+            .await
+            .map_err(Failure::io)
     }
-    if let Some(mut bolt) = bolt {
-        let _ = bolt.join(cx).await;
+    .await;
+    // Retain the primary error while every already-started child drains.
+    // This also covers a later listener/maintenance spawn failing at startup.
+    server.shutdown().trigger();
+    for mut worker in workers {
+        let outcome = worker
+            .join(cx)
+            .await
+            .map_err(|error| Failure::io(format!("server child failed: {error}")))
+            .and_then(core::convert::identity);
+        if result.is_ok() {
+            result = outcome;
+        }
     }
+    server.finish_shutdown(cx).await;
+    result?;
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, r#"{{"v":1,"event":"stopped"}}"#).map_err(Failure::io)
+}
+
+struct DrainOnDrop(fgdb_server::Shutdown);
+
+impl Drop for DrainOnDrop {
+    fn drop(&mut self) {
+        self.0.trigger();
+    }
+}
+
+fn report_maintenance(name: &str, event: MaintenanceEvent) {
+    match event {
+        MaintenanceEvent::Compaction(Ok(())) => {
+            eprintln!("fgdbd: database {name:?}: compaction completed");
+        }
+        MaintenanceEvent::Compaction(Err(error)) => {
+            eprintln!("fgdbd: database {name:?}: compaction failed: {error}");
+        }
+        MaintenanceEvent::Scrub(Err(error)) => {
+            eprintln!("fgdbd: database {name:?}: scrub failed: {error}");
+        }
+        MaintenanceEvent::Scrub(Ok(summary)) => {
+            eprintln!(
+                "fgdbd: database {name:?}: scrub completed: capsules={}, repaired={}, lost={}, blocks={}, block_lost={}, metadata={}, metadata_lost={}",
+                summary.objects,
+                summary.repaired.len(),
+                summary.lost.len(),
+                summary.block_objects,
+                summary.block_lost.len(),
+                summary.metadata_objects,
+                summary.metadata_lost.len(),
+            );
+            if !summary.lost.is_empty()
+                || !summary.block_lost.is_empty()
+                || !summary.metadata_lost.is_empty()
+            {
+                eprintln!(
+                    "fgdbd: database {name:?}: scrub found lost objects; authoritative recovery requested"
+                );
+            }
+        }
+    }
 }
 
 struct TokenOptions {
@@ -859,6 +975,71 @@ async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_intervals_are_opt_in_and_per_database() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(defaults.databases[0].maintenance_intervals, [None; 2]);
+        let configured = parse(&[
+            "--compact-interval-seconds",
+            "300",
+            "--scrub-interval-seconds",
+            "3600",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+            "--scrub-interval-seconds",
+            "90",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            configured.databases[0].maintenance_intervals,
+            [
+                Some(Duration::from_secs(300)),
+                Some(Duration::from_secs(3600))
+            ]
+        );
+        assert_eq!(
+            configured.databases[1].maintenance_intervals,
+            [None, Some(Duration::from_secs(90))]
+        );
+        for flag in ["--compact-interval-seconds", "--scrub-interval-seconds"] {
+            assert!(parse(&[flag]).is_err());
+            for invalid in [
+                "0",
+                "-1",
+                "1.5",
+                "18446744073709551615",
+                "18446744073709551616",
+            ] {
+                assert!(parse(&[flag, invalid]).is_err(), "{flag}={invalid}");
+            }
+            assert!(parse(&[flag, "1", flag, "2"]).is_err());
+            let misplaced: Vec<String> = [flag, "1"]
+                .iter()
+                .chain(&base)
+                .map(|s| (*s).to_owned())
+                .collect();
+            assert!(ServeOptions::parse(&misplaced).is_err());
+        }
+    }
 
     #[test]
     fn query_scratch_is_an_explicit_per_database_option() {

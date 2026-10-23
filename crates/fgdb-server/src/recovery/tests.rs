@@ -850,3 +850,71 @@ fn stop_releases_published_index_ownership_and_late_writer_cannot_restore_it() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn cancelled_shutdown_waits_for_worker_handoff_and_drains_the_worker() {
+    for expired in [false, true] {
+        let clock = Arc::new(asupersync::time::VirtualClock::new());
+        let timer = asupersync::time::TimerDriverHandle::with_virtual_clock(clock);
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_timer_driver(timer)
+            .build()
+            .unwrap();
+        let budget = if expired {
+            asupersync::Budget::INFINITE.with_deadline(asupersync::types::Time::ZERO)
+        } else {
+            asupersync::Budget::INFINITE
+        };
+        let cleanup = runtime.request_cx_with_budget(budget);
+        if !expired {
+            cleanup.cancel_fast(asupersync::types::CancelKind::User);
+        }
+        assert!(cleanup.checkpoint().is_err());
+        let ((), report) =
+            run_async_under_lab(0x79a0_0013 + u64::from(expired), move |root| async move {
+                let name = if expired {
+                    "expired-shutdown-worker-handoff"
+                } else {
+                    "cancelled-shutdown-worker-handoff"
+                };
+                let (server, _, _) = served(&root, name).await;
+                let db = &server.databases["test"];
+                let weak = Arc::downgrade(&db.db.shared);
+                let admitted = db.db.enter().unwrap();
+                let mut finishing = Box::pin(server.finish_shutdown(&cleanup));
+                {
+                    // The handoff must wait asynchronously even after cancellation.
+                    // Hold no non-Send lock or poll context over the await below.
+                    let held = db.db.worker.try_lock().unwrap();
+                    let wakes = Arc::new(WakeCounter::default());
+                    let waker = std::task::Waker::from(Arc::clone(&wakes));
+                    let mut task = std::task::Context::from_waker(&waker);
+                    assert!(finishing.as_mut().poll(&mut task).is_pending());
+                    assert!(held.as_ref().is_some());
+                    assert!(cleanup.checkpoint().is_err(), "mask restored after Pending");
+                    assert!(matches!(db.db.enter(), Err(Unavailable::Stopping)));
+                    drop(held);
+                    assert!(wakes.0.load(Ordering::Relaxed) > 0);
+                    // Now the handle is owned by the join. Its worker must remain
+                    // alive until the previously admitted operation releases it.
+                    assert!(finishing.as_mut().poll(&mut task).is_pending());
+                    assert!(db.db.worker.try_lock().unwrap().is_none());
+                    assert!(
+                        cleanup.checkpoint().is_err(),
+                        "join does not mask its caller"
+                    );
+                }
+                drop(admitted);
+                finishing.await;
+                assert_eq!(db.db.status(), DatabaseStatus::Stopped);
+                assert!(cleanup.checkpoint().is_err());
+                server.finish_shutdown(&cleanup).await;
+                drop(server);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "shutdown joined the actual recovery child"
+                );
+            });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

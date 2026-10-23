@@ -29,8 +29,9 @@
 //!   writes and connection-scoped reusable read templates via
 //!   `PREPARE`/`PREPARED`, `EXECUTE_PREPARED`, and
 //!   `RELEASE_PREPARED`/`PREPARED_RELEASED`.
-//!   Authorized `CREATE`/`INSERT` chains may carry bindings across `WITH`;
-//!   `MERGE`, `SET`, `REMOVE`, and `DELETE` chain steps are refused explicitly.
+//!   Authorized write chains carry bindings across `WITH`, compose creation
+//!   and relationship `MERGE` steps, and support terminal `SET`, `REMOVE`,
+//!   and `DELETE`. Vertex `MERGE` chain steps are refused explicitly.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
@@ -45,7 +46,9 @@
 //!   [`Server::compact_database`] and [`Server::scrub_database`] while its
 //!   writer lease remains held. Maintenance shares ordinary write admission,
 //!   snapshot publication, and supervised recovery. These host operations are
-//!   not remote endpoints or rights granted by a query capability.
+//!   not remote endpoints or rights granted by a query capability. Operators
+//!   can opt in per database to fixed compaction/scrub intervals in `fgdbd`;
+//!   [`Server::run_maintenance`] drives the same operations under host ownership.
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
@@ -72,6 +75,7 @@ mod convert;
 mod execute;
 mod http;
 mod keys;
+mod maintenance;
 mod ordered;
 mod recovery;
 mod shutdown;
@@ -79,6 +83,7 @@ mod symbols;
 mod tls;
 
 pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
+pub use maintenance::{MaintenanceEvent, MaintenanceSchedule, MaintenanceScheduleError};
 pub use ordered::OrderedReadConfig;
 pub use recovery::DatabaseStatus;
 pub use shutdown::Shutdown;
@@ -580,6 +585,14 @@ impl Server {
         // cancellation: drain/recovery must not retire the worker while a
         // maintenance operation can still publish or fence its handle.
         Ok((database, operation))
+    }
+
+    /// Finish trusted host shutdown after its listener and maintenance tasks
+    /// have been joined. This also retires database workers if startup failed
+    /// before any listener began serving. Repeated calls are harmless.
+    pub async fn finish_shutdown(&self, cx: &Cx) {
+        self.shutdown.trigger();
+        self.join_database_workers(cx).await;
     }
 
     async fn join_database_workers(&self, cx: &Cx) {

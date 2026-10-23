@@ -13,7 +13,7 @@ use crate::commits::CommitSignal;
 use asupersync::Cx;
 use asupersync::runtime::TaskHandle;
 use asupersync::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use core::future::poll_fn;
+use core::future::{Future, poll_fn};
 use core::ops::{Deref, DerefMut};
 use core::task::Poll;
 use fgdb::{Database, DatabaseState, EmbeddedReadView, WeakEmbeddedReadView};
@@ -428,11 +428,20 @@ impl DatabaseSlot {
 
     pub(crate) async fn stop_and_join(&self, cx: &Cx) {
         self.stop();
-        // Take the handle in its own statement: the guard is not Send, so it
-        // must be dropped before the join's await.
-        let handle = match self.worker.lock(cx).await {
-            Ok(mut worker) => worker.take(),
-            Err(_) => None,
+        // Only the ownership handoff is masked. The guard is consumed in
+        // the synchronous poll, before either lock waiting or join yields.
+        // Cancellation must not strand the worker behind a cancelled lock.
+        let handle = {
+            let mut locking = core::pin::pin!(self.worker.lock(cx));
+            poll_fn(|task| {
+                cx.masked(|| {
+                    locking
+                        .as_mut()
+                        .poll(task)
+                        .map(|result| result.ok().and_then(|mut worker| worker.take()))
+                })
+            })
+            .await
         };
         if let Some(mut handle) = handle {
             let _ = handle.join(cx).await;
