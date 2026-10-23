@@ -192,14 +192,22 @@ fn hidden_boundary_column<'a>(
     at: usize,
     column: usize,
 ) -> Result<usize, GraphSetTextError> {
+    hidden_boundary_value(head, at, ReadValueTemplate::Column(column))
+}
+
+/// A hidden output of the boundary under the next free private name.
+fn hidden_boundary_value<'a>(
+    head: &mut GraphProjectionHead<'a>,
+    at: usize,
+    value: ReadValueTemplate,
+) -> Result<usize, GraphSetTextError> {
     let Some(&text) = BOUNDARY_READ_NAMES
         .iter()
         .find(|name| head.outputs.iter().all(|(output, _)| output.text != **name))
     else {
         return Err(expected(at, "at most 16 hidden reads after a WITH"));
     };
-    head.outputs
-        .push((Name { text, at }, ReadValueTemplate::Column(column)));
+    head.outputs.push((Name { text, at }, value));
     Ok(head.outputs.len() - 1)
 }
 
@@ -420,6 +428,9 @@ impl<'a> Parser<'a> {
             pending = Some(later_with_keeps(self.lexer.clone(), &incoming)?);
         }
         let visible = head.outputs.len();
+        // Existence predicates of the WHERE come first among the hidden
+        // columns; the scan below steps over them as ordinary tokens.
+        let existence = self.hoist_existence_reads(head, offset)?;
         let mut reads = Vec::new();
         // A plain WITH's own WHERE and pages (everything before the RETURN)
         // may also read the MATCH bindings it drops, as openCypher allows.
@@ -694,7 +705,178 @@ impl<'a> Parser<'a> {
                 scoped,
             });
         }
+        self.existence_reads = (!existence.is_empty()).then_some((head.outputs.len(), existence));
         Ok(())
+    }
+
+    /// openCypher existence predicates in a WITH's WHERE, `(n)-[:R]->()`,
+    /// `exists((n)-->())` or `EXISTS { ... }`, wherever the WHERE puts them:
+    /// under OR, XOR or NOT, beside any other predicate (TCK Pattern1 [21],
+    /// MatchWhere4 [2], WithWhere4 [2]). A root MATCH's WHERE gets here when
+    /// its graph predicate refused one, at an implicit `WITH *`
+    /// (existence_where_at). Each predicate becomes a Collect scope over the
+    /// head's graph bindings, as a pattern comprehension does, and a hidden
+    /// Boolean column of the head, `size(witnesses) > 0`, which the WHERE
+    /// reads where the predicate stands (existence_read). A DISTINCT head
+    /// does not hoist, and a predicate may read only bindings the head
+    /// carries under their own names, so each column is a function of the
+    /// row it filters. Returns each predicate's (start, end, column).
+    fn hoist_existence_reads(
+        &mut self,
+        head: &mut GraphProjectionHead<'a>,
+        offset: usize,
+    ) -> Result<Vec<(usize, usize, usize)>, GraphSetTextError> {
+        let mut spans = Vec::new();
+        if !self.is_word("WHERE") || self.syntax.distinct {
+            return Ok(spans);
+        }
+        let saved = (self.lexer.clone(), self.current);
+        let hoisted = self.hoist_existence_spans(head, offset, &mut spans);
+        (self.lexer, self.current) = saved;
+        hoisted?;
+        Ok(spans)
+    }
+
+    /// The scan of hoist_existence_reads, from the token after WHERE to the
+    /// WHERE's end. The parser reads each predicate it meets in place, so a
+    /// predicate's own node patterns are never taken for another one.
+    fn hoist_existence_spans(
+        &mut self,
+        head: &mut GraphProjectionHead<'a>,
+        offset: usize,
+        spans: &mut Vec<(usize, usize, usize)>,
+    ) -> Result<(), GraphSetTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut previous = Some(self.current.kind);
+        let mut token = lexer.next()?;
+        let mut depth = 0_usize;
+        loop {
+            let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+            let starts = match token.kind {
+                TokenKind::End => return Ok(()),
+                TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
+                    return Ok(());
+                }
+                TokenKind::Word(word) if !key && word.eq_ignore_ascii_case("EXISTS") => {
+                    exists_introducer_follows(&mut lexer.clone())?
+                }
+                TokenKind::Punct(b'(') => {
+                    pattern_predicate_follows(token.kind, &mut lexer.clone())?
+                }
+                _ => false,
+            };
+            if !starts {
+                match token.kind {
+                    TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                previous = Some(token.kind);
+                token = lexer.next()?;
+                continue;
+            }
+            self.lexer = lexer.clone();
+            self.current = token;
+            let start = token.at;
+            let scope = self.syntax.scopes.len();
+            if self.existence_body().is_err() {
+                // Edge-shaped arithmetic such as `(x) - -1` is no pattern:
+                // the WHERE reads it as written.
+                self.syntax.scopes.truncate(scope);
+                if matches!(token.kind, TokenKind::Punct(b'(')) {
+                    depth += 1;
+                }
+                previous = Some(token.kind);
+                token = lexer.next()?;
+                continue;
+            }
+            let end = self.current.at;
+            self.carried_existence(head, offset, scope, start)?;
+            let input = self.projection_slot(
+                &mut head.inputs,
+                Projection {
+                    variable: Name {
+                        text: "",
+                        at: start,
+                    },
+                    property: None,
+                    path: None,
+                    collect: Some(scope),
+                },
+            )?;
+            let witnesses = ReadValueTemplate::Column(offset + input);
+            let zero =
+                GqlScalarParameter::new(CanonicalScalar::Int(0)).expect("zero is a bounded scalar");
+            let exists = ReadValueTemplate::Ordered {
+                comparison: crate::algebra::IntegerComparison::Greater,
+                left: Box::new(ReadValueTemplate::Size(Box::new(witnesses))),
+                right: Box::new(ReadValueTemplate::Literal(zero)),
+            };
+            let column = hidden_boundary_value(head, start, exists)?;
+            spans.push((start, end, column));
+            lexer = self.lexer.clone();
+            previous = Some(TokenKind::Punct(b')'));
+            token = self.current;
+        }
+    }
+
+    /// One existence predicate at the current token, as a Collect scope:
+    /// `EXISTS { ... }`, `exists(<pattern>)` or a bare pattern predicate.
+    fn existence_body(&mut self) -> Result<(), GraphPatternTextError> {
+        if self.take_word("EXISTS")? {
+            if self.take(b'(')? {
+                self.scope(ScopeKind::Collect, ScopeForm::Pattern)?;
+                return self.punct(b')', ")");
+            }
+            self.punct(b'{', "{")?;
+            return self.scope(ScopeKind::Collect, ScopeForm::Clause);
+        }
+        self.scope(ScopeKind::Collect, ScopeForm::Pattern)
+    }
+
+    /// Refuse a hoisted existence predicate (Collect scope `scope`) that
+    /// reads a MATCH binding its head does not carry under its own name: a
+    /// renamed or dropped binding would correlate the wrong element.
+    fn carried_existence(
+        &self,
+        head: &GraphProjectionHead<'a>,
+        offset: usize,
+        scope: usize,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        let carried = |name: &str| {
+            head.outputs.iter().any(|(output, value)| {
+                output.text == name
+                    && matches!(value, ReadValueTemplate::Column(column)
+                    if column.checked_sub(offset)
+                        .and_then(|input| head.inputs.get(input))
+                        .is_some_and(|input| {
+                            input.variable.text == name
+                                && input.property.is_none()
+                                && input.collect.is_none()
+                        }))
+            })
+        };
+        let body = &self.syntax.scopes[scope].body;
+        let outer = |name: &Name<'a>| {
+            self.syntax
+                .variables
+                .iter()
+                .any(|variable| variable.text == name.text)
+                || self.syntax.visible_edge(name.text).is_some()
+        };
+        let read = (body.variables.iter())
+            .chain(&body.captures)
+            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
+            .filter(|name| outer(name))
+            .find(|name| !carried(name.text));
+        match read {
+            Some(name) => Err(expected(
+                name.at.max(at),
+                "an existence predicate over bindings its WITH carries under their own names",
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Resolve a carried property or native metadata function to its hidden
@@ -841,6 +1023,30 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         for _ in 0..length {
+            self.advance()?;
+        }
+        Ok(Some(column))
+    }
+
+    /// The hidden Boolean column of the existence predicate that starts at
+    /// the current token (hoist_existence_reads) over a row of `width`,
+    /// consuming the predicate. `None` consumes nothing.
+    #[inline(never)]
+    pub(in crate::graph_text) fn existence_read(
+        &mut self,
+        width: usize,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let Some((row, spans)) = self.existence_reads.as_ref() else {
+            return Ok(None);
+        };
+        let at = self.current.at;
+        let Some(&(_, end, column)) = spans
+            .iter()
+            .find(|&&(start, _, _)| *row == width && start == at)
+        else {
+            return Ok(None);
+        };
+        while self.current.at < end && !matches!(self.current.kind, TokenKind::End) {
             self.advance()?;
         }
         Ok(Some(column))

@@ -122,8 +122,11 @@ impl PreparedGraphText {
         // refused, such as a computed graph operand against an imported
         // column (`WITH 0 AS e MATCH (n) WHERE toInteger(n.id) = e`, or the
         // same after a leading UNWIND), means what `MATCH ... WITH * WHERE ...`
-        // means: the same rows, filtered after the join. And a later MATCH
-        // clause that reads a name its child scope cannot see, an earlier
+        // means: the same rows, filtered after the join. So does a required
+        // MATCH's WHERE whose existence predicate the graph predicate cannot
+        // place (`MATCH (n) WHERE (n)-[:A]-() OR (n)-[:B]-()`): the row filter
+        // reads each one from a hidden column (hoist_existence_reads). And a
+        // later MATCH clause that reads a name its child scope cannot see, an earlier
         // clause's relationship (`MATCH (a)-[r]->(b) MATCH (b)-[s]->(c)
         // WHERE r.w < s.w`) or an imported column, means what it means after
         // an explicit `WITH *`: openCypher keeps relationship uniqueness per
@@ -133,6 +136,7 @@ impl PreparedGraphText {
         let mut offset = error.offset;
         loop {
             if let Some(at) = crate::set_text::multipart::continuation_where_at(tokens, offset)
+                .or_else(|| crate::set_text::multipart::existence_where_at(tokens, offset))
                 .filter(|at| !deferred.contains(at))
             {
                 deferred.push(at);

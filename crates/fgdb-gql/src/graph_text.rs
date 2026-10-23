@@ -894,6 +894,10 @@ struct Parser<'a> {
     /// BY is next: a repeat of one item's expression there is that output
     /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
     projected_sources: Option<ProjectedSources>,
+    /// The existence predicates of the WITH WHERE that is next, each a hidden
+    /// Boolean column of its head (hoist_existence_reads): the head's row
+    /// width and each predicate's (source start, source end, column).
+    existence_reads: Option<ExistenceReads>,
     /// The rand() calls read so far: the next call's site (fgdb-13l85).
     random_sites: u32,
     /// An aggregate function's argument is being read. openCypher refuses a
@@ -948,6 +952,10 @@ struct Parser<'a> {
 /// A WITH's row width and its repeatable items as (source start, source
 /// end, output column).
 type ProjectedSources = (usize, Vec<(usize, usize, usize)>);
+
+/// A WITH head's row width and its hoisted existence predicates as (source
+/// start, source end, hidden Boolean column).
+type ExistenceReads = (usize, Vec<(usize, usize, usize)>);
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
 /// binding (`WITH n WHERE n.p = 3 ORDER BY n.q RETURN n.r`). Each is a hidden
@@ -1020,6 +1028,7 @@ impl<'a> Parser<'a> {
             let_base: 0,
             membership_list: false,
             projected_sources: None,
+            existence_reads: None,
             random_sites: 0,
             aggregate_argument: false,
             percentile_leaf: false,

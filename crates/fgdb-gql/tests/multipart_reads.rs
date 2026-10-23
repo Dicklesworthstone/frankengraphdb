@@ -925,3 +925,92 @@ fn a_grouping_head_keeps_its_key_reads_beside_a_property_aggregate() {
         vec![ints(1, 2), ints(2, 2), ints(2, 3)]
     );
 }
+
+/// openCypher existence predicates anywhere in a WHERE, under OR or NOT and
+/// beside any other predicate (TCK Pattern1 [21], MatchWhere4 [2],
+/// WithWhere4 [2]). The graph predicate takes them only as AND conjuncts, so
+/// a refused root MATCH WHERE filters at an implicit `WITH *`, and an
+/// explicit WITH's WHERE reads them the same way: each predicate is a hidden
+/// Boolean column of that boundary over a Collect scope. An existence test
+/// never multiplies rows, whatever its witness count (1 -R-> 2 twice).
+#[test]
+fn existence_predicates_combine_with_any_predicate_in_a_where() {
+    let out = |n: u128| EDGES.iter().any(|&(from, _, _)| from == VId(n));
+    let into = |n: u128| EDGES.iter().any(|&(_, _, to)| to == VId(n));
+    let edge = |a: u128, b: u128| EDGES.iter().any(|&(x, _, y)| (x, y) == (VId(a), VId(b)));
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let ids = |rows: Vec<GraphValueRow>| -> Vec<Vec<u128>> {
+        let mut ids: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|cell| cell.as_vertex().expect("vertex output").0)
+                    .collect()
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let singles = |keep: &dyn Fn(u128) -> bool| -> Vec<Vec<u128>> {
+        (1..=4).filter(|&n| keep(n)).map(|n| vec![n]).collect()
+    };
+    for (text, expected) in [
+        (
+            "MATCH (n) WHERE (n)-[:R]->() OR (n)<-[:R]-() RETURN n",
+            singles(&|n| out(n) || into(n)),
+        ),
+        (
+            "MATCH (n) WHERE n.p = 1 OR NOT (n)-[:R]->() RETURN n",
+            singles(&|n| p(n) == 1 || !out(n)),
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) WHERE m.p = 3 } OR n.p = 2 RETURN n",
+            singles(&|n| (1..=4).any(|m| edge(n, m) && p(m) == 3) || p(n) == 2),
+        ),
+        (
+            "MATCH (n) WHERE NOT (exists((n)<-[:R]-()) OR n.p = 3) RETURN n",
+            singles(&|n| !(into(n) || p(n) == 3)),
+        ),
+    ] {
+        assert_eq!(ids(execute(text)), expected, "{text}");
+    }
+    // Two correlated bindings, at a root MATCH and after a plain WITH.
+    let mut pairs: Vec<Vec<u128>> = Vec::new();
+    for a in 1..=4 {
+        for b in 1..=4 {
+            if (p(a) == 1 && edge(a, b)) || edge(b, a) {
+                pairs.push(vec![a, b]);
+            }
+        }
+    }
+    for text in [
+        "MATCH (a), (b) WHERE a.p = 1 AND (a)-[:R]->(b) OR (b)-[:R]->(a) RETURN a, b",
+        "MATCH (a), (b) WITH a, b WHERE a.p = 1 AND (a)-[:R]->(b) OR (b)-[:R]->(a) \
+         RETURN a, b",
+    ] {
+        assert_eq!(ids(execute(text)), pairs, "{text}");
+    }
+    // Edge-shaped arithmetic stays arithmetic: `(x) - -1` is x + 1.
+    assert_eq!(
+        ids(execute(
+            "MATCH (n) WITH n, n.p AS x WHERE (x) - -1 > 2 OR (n)<-[:R]-() RETURN n"
+        )),
+        singles(&|n| p(n) + 1 > 2 || into(n))
+    );
+    // The hidden columns are never output columns.
+    let star = execute("MATCH (n) WHERE (n)-[:R]->() OR n.p = 3 RETURN *");
+    assert!(star.iter().all(|row| row.len() == 1), "{star:?}");
+    assert_eq!(ids(star), singles(&|n| out(n) || p(n) == 3));
+    // A predicate correlates by name: a binding the WITH renames or drops
+    // would read the wrong element, so it is refused.
+    for text in [
+        "MATCH (a)-[:R]->(b) WITH b AS a WHERE (a)-[:R]->() OR a.p = 1 RETURN a",
+        "MATCH (a)-[:R]->(b) WITH a WHERE (b)-[:R]->() OR a.p = 1 RETURN a",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

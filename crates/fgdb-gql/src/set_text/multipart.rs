@@ -132,6 +132,68 @@ pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> 
     predicate.filter(|&at| at <= offset)
 }
 
+/// The offset of the WHERE keyword of a top-level required MATCH whose
+/// predicate contains byte `offset` and an existence predicate: `EXISTS`
+/// before `{` or `(`, or a node pattern's `)` before an edge introducer.
+/// unresolved_read_input re-reads such a WHERE after an implicit `WITH *`
+/// when the graph predicate refused it (an existence predicate under OR, for
+/// one): the row filter there reads each existence predicate from a hidden
+/// column of that boundary (hoist_existence_reads). Lookahead only.
+pub(crate) fn existence_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
+    ];
+    let mut depth = 0_usize;
+    let mut eligible = false;
+    // The open WHERE's offset, and whether its predicate reads existence.
+    let mut predicate: Option<(usize, bool)> = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some((_, existence)) = predicate.as_mut() {
+            let next = tokens.get(index + 1);
+            let after = tokens.get(index + 2);
+            *existence |= (token.word("EXISTS")
+                && next.is_some_and(|next| next.punct(b'{') || next.punct(b'(')))
+                || (token.punct(b')')
+                    && next.is_some_and(|next| next.punct(b'-'))
+                    && after.is_some_and(|after| {
+                        after.punct(b'[') || after.punct(b'-') || after.punct(b'>')
+                    }))
+                || (token.punct(b')')
+                    && next.is_some_and(|next| next.punct(b'<'))
+                    && after.is_some_and(|after| after.punct(b'-')));
+        }
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    continue;
+                }
+                let operator = token.word("WITH")
+                    && previous
+                        .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"));
+                if !operator && CLAUSES.iter().any(|clause| token.word(clause)) {
+                    if let Some((at, true)) = predicate.take()
+                        && (at..token.at).contains(&offset)
+                    {
+                        return Some(at);
+                    }
+                    eligible = token.word("MATCH")
+                        && !previous.is_some_and(|previous| previous.word("OPTIONAL"));
+                } else if eligible && token.word("WHERE") {
+                    predicate = Some((token.at, false));
+                    eligible = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    predicate
+        .filter(|&(at, existence)| existence && at <= offset)
+        .map(|(at, _)| at)
+}
+
 /// The offset of a top-level MATCH or OPTIONAL MATCH clause that contains
 /// byte `offset` and directly follows another MATCH or OPTIONAL MATCH clause,
 /// if any: the clause unresolved_read_input re-reads after an implicit

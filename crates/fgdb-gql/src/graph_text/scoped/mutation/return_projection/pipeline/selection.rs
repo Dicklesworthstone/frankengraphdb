@@ -191,6 +191,24 @@ impl<'a> Parser<'a> {
         if depth > MAX_FILTER_NESTING {
             return Err(expected(at, "bounded row predicate nesting"));
         }
+        // An existence predicate its head hoisted is that hidden Boolean
+        // column (hoist_existence_reads), never a parenthesized expression.
+        if let Some(column) = self.existence_read(schema.len())? {
+            let test = ReadFilterOp::Compare {
+                left: self.selection_cell(
+                    schema,
+                    selection,
+                    ReadValueTemplate::Column(column),
+                    at,
+                )?,
+                comparison: IntegerComparison::Equal,
+                right: ReadFilterOperand::Literal(
+                    GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                        .expect("canonical true is a bounded scalar"),
+                ),
+            };
+            return emit(&mut selection.code, test, at);
+        }
         let alias = matches!(self.current.kind, TokenKind::Word(word)
             if schema.iter().any(|(name, _)| name.text == word));
         if self.is_word("NOT") && !alias {

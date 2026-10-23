@@ -322,7 +322,9 @@ impl PreparedGraphPipelineAggregateText {
         // RETURN, one at a time, reporting the first error if the statement
         // stays refused:
         // - a required continuation's WHERE the graph predicate refused
-        //   filters after an implicit `WITH *` (fgdb-c6hvm);
+        //   filters after an implicit `WITH *` (fgdb-c6hvm), and so does a
+        //   required MATCH's WHERE with an existence predicate the graph
+        //   predicate cannot place (hoist_existence_reads);
         // - a later MATCH clause that read a name its child scope cannot
         //   see (an earlier relationship or an imported column) starts a
         //   new part at an implicit `WITH *`.
@@ -337,6 +339,9 @@ impl PreparedGraphPipelineAggregateText {
                 loop {
                     if let Some(at) =
                         crate::set_text::multipart::continuation_where_at(&tokens, offset)
+                            .or_else(|| {
+                                crate::set_text::multipart::existence_where_at(&tokens, offset)
+                            })
                             .filter(|at| !deferred.contains(at))
                     {
                         deferred.push(at);
