@@ -945,191 +945,241 @@ impl WriteTxn {
         clauses: [&[fgdb_gql::GraphVertexMergeRowAction]; 2],
         policy: fgdb_gql::GraphVertexMergePolicy,
         used: &mut fgdb_gql::GraphVertexMergeStats,
-        mut held: Option<&mut FrozenCreations>,
+        held: Option<&mut FrozenCreations>,
     ) -> Result<(), TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>> {
-        use crate::gql_exec::source::SourceEvent;
         use fgdb_gql::algebra::GraphValue;
-        use fgdb_gql::{
-            GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
-            GraphIntegerEvaluationError, GraphVertexMergeError, GraphVertexMergeRowAction,
-            GraphVertexMergeRowInput, GraphVertexUpsertAction,
-        };
-        let limits = policy.query.evaluator;
-        let charge = |used: &mut fgdb_gql::GraphVertexMergeStats,
-                      event: GlaExecutionEvent|
-         -> Result<(), TxnGqlError<GraphVertexMergeError<WriteTxnError, A>>> {
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let work = u128::from(used.evaluator.work_units) + 1;
-            let scratch = u128::from(used.evaluator.scratch_entries)
-                + u128::from(event == GlaExecutionEvent::ScratchEntry);
-            for (observed, limit, dimension) in [
-                (work, limits.max_work_units, GlaLimitDimension::WorkUnits),
-                (
-                    scratch,
-                    limits.max_scratch_entries,
-                    GlaLimitDimension::ScratchEntries,
-                ),
-            ] {
-                if observed > u128::from(limit) {
-                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                        dimension,
-                        limit,
-                        observed,
+        use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
+        let source = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
+        let state = std::cell::RefCell::new((self, database, held));
+        vertex_merge_row_actions_controlled(
+            (relation, vertex),
+            (at, row),
+            clauses,
+            policy,
+            used,
+            || cx.checkpoint(),
+            |key, _control| {
+                let state = state.borrow();
+                let stored = match state
+                    .2
+                    .as_deref()
+                    .and_then(|held| held.property(vertex, key))
+                {
+                    Some(stored) => stored,
+                    None => state
+                        .0
+                        .merged_vertex_property(state.1, vertex, key)
+                        .map_err(source)?,
+                };
+                match stored {
+                    None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
+                    Some(value) => GraphValue::from_property_value(&value).ok_or(
+                        GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                            instruction: 0,
+                            kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                        }),
+                    ),
+                }
+            },
+            |batch| {
+                let mut state = state.borrow_mut();
+                let (transaction, database, held) = &mut *state;
+                let staged = if let Some(held) = held.as_deref_mut() {
+                    held.defer(batch);
+                    Ok(())
+                } else if transaction
+                    .staged
+                    .iter()
+                    .all(|staged| staged.relation == relation)
+                {
+                    transaction.write(database, batch)
+                } else {
+                    transaction.write_atomic(database, vec![batch])
+                };
+                staged.map_err(source)
+            },
+        )
+    }
+}
+
+/// One shared ON/SET evaluator for owner and capability-authorized row MERGE.
+/// The host owns property visibility and original-intent staging; expressions,
+/// simultaneous assignments and clause order have no alternate evaluator.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
+    (relation, vertex): (RelationId, VId),
+    (at, row): (usize, &fgdb_gql::algebra::GraphValueRow),
+    clauses: [&[fgdb_gql::GraphVertexMergeRowAction]; 2],
+    policy: fgdb_gql::GraphVertexMergePolicy,
+    used: &mut fgdb_gql::GraphVertexMergeStats,
+    checkpoint: impl FnMut() -> Result<(), C>,
+    mut read: impl FnMut(
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(
+            fgdb_gql::GlaExecutionEvent,
+        ) -> Result<
+            (),
+            fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+        >,
+    ) -> Result<
+        fgdb_gql::algebra::GraphValue,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+    >,
+    mut stage: impl FnMut(
+        WriteBatch,
+    ) -> Result<
+        (),
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+    >,
+) -> Result<(), fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::{
+        GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
+        GraphIntegerEvaluationError, GraphVertexMergeError, GraphVertexMergeRowAction,
+        GraphVertexMergeRowInput, GraphVertexUpsertAction,
+    };
+    let limits = policy.query.evaluator;
+    let checkpoint = std::cell::RefCell::new(checkpoint);
+    let charge = |used: &mut fgdb_gql::GraphVertexMergeStats,
+                  event: GlaExecutionEvent|
+     -> Result<(), GqlQueryError<GraphVertexMergeError<E, A>, C>> {
+        checkpoint.borrow_mut()().map_err(GqlQueryError::Interrupted)?;
+        let work = u128::from(used.evaluator.work_units) + 1;
+        let scratch = u128::from(used.evaluator.scratch_entries)
+            + u128::from(event == GlaExecutionEvent::ScratchEntry);
+        for (observed, limit, dimension) in [
+            (work, limits.max_work_units, GlaLimitDimension::WorkUnits),
+            (
+                scratch,
+                limits.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            if observed > u128::from(limit) {
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
+            }
+        }
+        used.evaluator.work_units = work as u64;
+        used.evaluator.scratch_entries = scratch as u64;
+        Ok(())
+    };
+    let payload = |event: SourceEvent| match event {
+        SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+        _ => GlaExecutionEvent::Work,
+    };
+    for (clause, actions) in clauses.into_iter().enumerate() {
+        if actions.is_empty() {
+            continue;
+        }
+        let mut batch = WriteBatch::new(relation);
+        for (action, definition) in actions.iter().enumerate() {
+            charge(used, GlaExecutionEvent::Work)?;
+            charge(used, GlaExecutionEvent::ScratchEntry)?; // proposal before allocation
+            match definition {
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetProperty {
+                    key,
+                    value,
+                }) => {
+                    point_scalar_payload_admission(value.value(), &mut |event| {
+                        charge(used, payload(event))
+                    })?;
+                    batch.set_vertex_property(vertex, *key, Some(value.value().clone()));
+                }
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetStored {
+                    key,
+                    value,
+                }) => {
+                    point_payload_admission(value, &mut |event| charge(used, payload(event)))?;
+                    batch.set_vertex_property_value(vertex, *key, Some(value.clone()));
+                }
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetLabel {
+                    label,
+                    present,
+                }) => {
+                    batch.set_vertex_label(vertex, *label, *present);
+                }
+                // The step compiler builds every expression as a row
+                // expression; a vertex-only one is the unique MERGE's.
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetExpression {
+                    ..
+                }) => {
+                    return Err(GqlQueryError::Source(GraphVertexMergeError::InputSchema {
+                        row: at,
+                        column: action,
                     }));
                 }
-            }
-            used.evaluator.work_units = work as u64;
-            used.evaluator.scratch_entries = scratch as u64;
-            Ok(())
-        };
-        let source =
-            |error: WriteTxnError| -> TxnGqlError<GraphVertexMergeError<WriteTxnError, A>> {
-                GqlQueryError::Source(GraphVertexMergeError::Source(error))
-            };
-        let payload = |event: SourceEvent| match event {
-            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-            _ => GlaExecutionEvent::Work,
-        };
-        for (clause, actions) in clauses.into_iter().enumerate() {
-            if actions.is_empty() {
-                continue;
-            }
-            let mut batch = WriteBatch::new(relation);
-            for (action, definition) in actions.iter().enumerate() {
-                charge(used, GlaExecutionEvent::Work)?;
-                charge(used, GlaExecutionEvent::ScratchEntry)?; // proposal before allocation
-                match definition {
-                    GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetProperty {
-                        key,
-                        value,
-                    }) => {
-                        point_scalar_payload_admission(value.value(), &mut |event| {
-                            charge(used, payload(event))
-                        })?;
-                        batch.set_vertex_property(vertex, *key, Some(value.value().clone()));
+                GraphVertexMergeRowAction::Expression { key, inputs, value } => {
+                    let mut frame = Vec::with_capacity(inputs.len());
+                    for input in inputs {
+                        charge(used, GlaExecutionEvent::ScratchEntry)?;
+                        frame.push(match *input {
+                            GraphVertexMergeRowInput::Property(key) => {
+                                charge(used, GlaExecutionEvent::Work)?;
+                                read(key, &mut |event| charge(used, event))?
+                            }
+                            GraphVertexMergeRowInput::Column(column) => row
+                                .values()
+                                .get(column)
+                                .cloned()
+                                .ok_or(GqlQueryError::Source(
+                                    GraphVertexMergeError::InputSchema { row: at, column },
+                                ))?,
+                        });
                     }
-                    GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetStored {
-                        key,
-                        value,
-                    }) => {
-                        point_payload_admission(value, &mut |event| charge(used, payload(event)))?;
-                        batch.set_vertex_property_value(vertex, *key, Some(value.clone()));
-                    }
-                    GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetLabel {
-                        label,
-                        present,
-                    }) => {
-                        batch.set_vertex_label(vertex, *label, *present);
-                    }
-                    // The step compiler builds every expression as a row
-                    // expression; a vertex-only one is the unique MERGE's.
-                    GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetExpression {
-                        ..
-                    }) => {
-                        return Err(GqlQueryError::Source(GraphVertexMergeError::InputSchema {
-                            row: at,
-                            column: action,
-                        }));
-                    }
-                    GraphVertexMergeRowAction::Expression { key, inputs, value } => {
-                        let mut frame = Vec::with_capacity(inputs.len());
-                        for input in inputs {
-                            charge(used, GlaExecutionEvent::ScratchEntry)?;
-                            frame.push(match *input {
-                                GraphVertexMergeRowInput::Property(key) => {
-                                    charge(used, GlaExecutionEvent::Work)?;
-                                    // A frozen chain's vertex is held, not staged.
-                                    let stored = match held
-                                        .as_deref()
-                                        .and_then(|held| held.property(vertex, key))
-                                    {
-                                        Some(stored) => stored,
-                                        None => self
-                                            .merged_vertex_property(database, vertex, key)
-                                            .map_err(source)?,
-                                    };
-                                    match stored {
-                                        None => GraphValue::Scalar(CanonicalScalar::Null),
-                                        Some(value) => GraphValue::from_property_value(&value)
-                                            .ok_or(GqlQueryError::Data(
-                                                fgdb_gql::GraphIntegerError {
-                                                    instruction: 0,
-                                                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
-                                                },
-                                            ))?,
-                                    }
-                                }
-                                GraphVertexMergeRowInput::Column(column) => {
-                                    row.values().get(column).cloned().ok_or(
-                                        GqlQueryError::Source(GraphVertexMergeError::InputSchema {
-                                            row: at,
-                                            column,
-                                        }),
-                                    )?
-                                }
-                            });
-                        }
-                        let value = value
-                            .evaluate_scalar_with_control(&frame, &mut |event| charge(used, event))
-                            .map_err(|error| match error {
-                                GraphIntegerEvaluationError::Control(error) => error,
-                                GraphIntegerEvaluationError::Value(source) => {
-                                    GqlQueryError::Source(GraphVertexMergeError::RowAction {
-                                        row: at,
-                                        clause,
-                                        action,
-                                        source,
-                                    })
-                                }
-                            })?;
-                        batch.set_vertex_property(vertex, *key, Some(value));
-                    }
-                    GraphVertexMergeRowAction::Value { key, value } => {
-                        let refusal = |source| {
-                            GqlQueryError::Source(GraphVertexMergeError::RowAction {
-                                row: at,
-                                clause,
-                                action,
-                                source,
-                            })
-                        };
-                        let written = value
-                            .written(row, &mut |event| charge(used, event))
-                            .map_err(|error| match error {
-                                GraphIntegerEvaluationError::Control(error) => error,
-                                GraphIntegerEvaluationError::Value(source) => refusal(source),
-                            })?
-                            .ok_or_else(|| {
-                                refusal(fgdb_gql::GraphIntegerError {
-                                    instruction: 0,
-                                    kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                    let value = value
+                        .evaluate_scalar_with_control(&frame, &mut |event| charge(used, event))
+                        .map_err(|error| match error {
+                            GraphIntegerEvaluationError::Control(error) => error,
+                            GraphIntegerEvaluationError::Value(source) => {
+                                GqlQueryError::Source(GraphVertexMergeError::RowAction {
+                                    row: at,
+                                    clause,
+                                    action,
+                                    source,
                                 })
-                            })?;
-                        point_payload_admission(&written, &mut |event| {
-                            charge(used, payload(event))
+                            }
                         })?;
-                        batch.set_vertex_property_value(vertex, *key, Some(written));
-                    }
+                    batch.set_vertex_property(vertex, *key, Some(value));
+                }
+                GraphVertexMergeRowAction::Value { key, value } => {
+                    let refusal = |source| {
+                        GqlQueryError::Source(GraphVertexMergeError::RowAction {
+                            row: at,
+                            clause,
+                            action,
+                            source,
+                        })
+                    };
+                    let written = value
+                        .written(row, &mut |event| charge(used, event))
+                        .map_err(|error| match error {
+                            GraphIntegerEvaluationError::Control(error) => error,
+                            GraphIntegerEvaluationError::Value(source) => refusal(source),
+                        })?
+                        .ok_or_else(|| {
+                            refusal(fgdb_gql::GraphIntegerError {
+                                instruction: 0,
+                                kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                            })
+                        })?;
+                    point_payload_admission(&written, &mut |event| charge(used, payload(event)))?;
+                    batch.set_vertex_property_value(vertex, *key, Some(written));
                 }
             }
-            // No right-hand side of this clause observes a sibling; the next
-            // clause sees this staging. Preserve the insertion adapter's
-            // composition choice. A frozen chain holds the clause with the
-            // vertex it created.
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let staged = if let Some(held) = held.as_deref_mut() {
-                held.defer(batch);
-                Ok(())
-            } else if self.staged.iter().all(|staged| staged.relation == relation) {
-                self.write(database, batch)
-            } else {
-                self.write_atomic(database, vec![batch])
-            };
-            staged.map_err(source)?;
         }
-        Ok(())
+        // No right-hand side observes a sibling assignment; the next
+        // clause sees the host's completed original-intent staging.
+        checkpoint.borrow_mut()().map_err(GqlQueryError::Interrupted)?;
+        stage(batch)?;
     }
+    Ok(())
+}
 
+impl WriteTxn {
     /// One final-state stored property of a vertex a MERGE step returned,
     /// read through the governed point projection and witnessed, as
     /// relationship MERGE RETURN reads its endpoints. A missing field is NULL.
