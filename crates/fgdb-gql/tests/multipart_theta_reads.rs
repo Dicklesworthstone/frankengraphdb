@@ -412,8 +412,7 @@ fn reserved_property_names_reach_the_catalog_after_theta_syntax_admission() {
         lookups.push((kind, name.to_owned()));
         symbols(kind, name)
     })
-    .err()
-    .expect("the fixture catalog has no property named RETURN");
+    .expect_err("the fixture catalog has no property named RETURN");
     assert_eq!(
         error.kind,
         GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(
