@@ -719,8 +719,10 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(UnresolvedGraphText<'a>, Option<pipeline::RowSchema<'a>>), GraphSetTextError> {
         self.read_row_bindings = schema.iter().map(|(name, _)| *name).collect();
+        let mut deferred = None;
         if implied.is_empty() {
             self.parse_match_prefix()?;
+            deferred = self.deferred_where.take();
         } else {
             // The implied `MATCH (n)` for each read CALL output: exactly
             // the root a written one parses, and nothing else.
@@ -807,8 +809,17 @@ impl<'a> Parser<'a> {
         // for a statement that starts at MATCH: `n.p` there reads a graph
         // property. Later stages see only the projected row.
         let mut tail = None;
-        let (projection, pipeline) = if self.is_word("WITH") {
-            let (outputs, distinct, at) = self.leading_with_head(&schema, width, &mut inputs)?;
+        let (projection, pipeline) = if deferred.is_some() || self.is_word("WITH") {
+            let (outputs, distinct, at) = if let Some((lexer, at_where)) = deferred {
+                // A WHERE the graph predicate refused reads the row after
+                // the implicit `WITH *` (unresolved_read_input).
+                self.lexer = lexer;
+                self.current = at_where;
+                let outputs = self.leading_star_outputs(&schema, width, &mut inputs)?;
+                (outputs, false, at_where.at)
+            } else {
+                self.leading_with_head(&schema, width, &mut inputs)?
+            };
             let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
             types.extend(inputs.iter().map(projection_type));
             let next: pipeline::RowSchema<'a> = outputs
@@ -979,6 +990,51 @@ impl<'a> Parser<'a> {
             )
     }
 
+    /// `WITH *` after `UNWIND ... MATCH`, written or implicit before a
+    /// deferred WHERE: the leading columns, then the same visible graph
+    /// bindings as a MATCH-first `WITH *`; anonymous compiler slots stay
+    /// private. The hidden reads of the scope that follows are hoisted.
+    fn leading_star_outputs(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        width: usize,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<Vec<(Name<'a>, ReadValueTemplate)>, GraphSetTextError> {
+        let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
+        let mut outputs = Vec::new();
+        for (index, name) in leading.iter().enumerate() {
+            // A correlated graph identity retains its source domain even
+            // through WITH *. Other procedure/UNWIND values stay ordinary
+            // row columns and never acquire graph lookup authority.
+            let column = match self
+                .visible_graph_bindings()
+                .find(|binding| binding.text == name.text)
+            {
+                Some(variable) => width + self.mutation_projection(inputs, variable, None)?,
+                None => index,
+            };
+            outputs.push((*name, ReadValueTemplate::Column(column)));
+        }
+        let visible: Vec<_> = self.visible_graph_bindings().collect();
+        for variable in visible {
+            // A vertex reusing a leading name is that leading column.
+            if leading.iter().any(|name| name.text == variable.text) {
+                continue;
+            }
+            let index = self.mutation_projection(inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(width + index)));
+        }
+        let mut head = GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs: core::mem::take(inputs),
+            outputs,
+        };
+        self.hoist_boundary_reads(&mut head, width)?;
+        *inputs = head.inputs;
+        Ok(head.outputs)
+    }
+
     /// The first WITH after `UNWIND ... MATCH`: each item may read a leading
     /// UNWIND column by name, or a MATCH variable or `variable.property`,
     /// which becomes a hidden graph input column (the same
@@ -1008,39 +1064,11 @@ impl<'a> Parser<'a> {
         let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
         if self.take(b'*')? {
-            // Leading columns, then the same visible graph bindings as a
-            // MATCH-first `WITH *`; anonymous compiler slots stay private.
-            for (index, name) in leading.iter().enumerate() {
-                // A correlated graph identity retains its source domain even
-                // through WITH *. Other procedure/UNWIND values stay ordinary
-                // row columns and never acquire graph lookup authority.
-                let column = match self
-                    .visible_graph_bindings()
-                    .find(|binding| binding.text == name.text)
-                {
-                    Some(variable) => width + self.mutation_projection(inputs, variable, None)?,
-                    None => index,
-                };
-                outputs.push((*name, ReadValueTemplate::Column(column)));
-            }
-            let visible: Vec<_> = self.visible_graph_bindings().collect();
-            for variable in visible {
-                // A vertex reusing a leading name is that leading column.
-                if leading.iter().any(|name| name.text == variable.text) {
-                    continue;
-                }
-                let index = self.mutation_projection(inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(width + index)));
-            }
-            let mut head = GraphProjectionHead {
-                with: true,
-                plain: false,
-                inputs: core::mem::take(inputs),
-                outputs,
-            };
-            self.hoist_boundary_reads(&mut head, width)?;
-            *inputs = head.inputs;
-            return Ok((head.outputs, distinct, at));
+            return Ok((
+                self.leading_star_outputs(schema, width, inputs)?,
+                distinct,
+                at,
+            ));
         }
         loop {
             self.capacity(

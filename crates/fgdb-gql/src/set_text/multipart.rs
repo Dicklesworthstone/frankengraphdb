@@ -86,6 +86,52 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
+/// The offset of the WHERE keyword of a required MATCH over imported rows (a
+/// top-level MATCH after a top-level WITH or a leading UNWIND, not OPTIONAL)
+/// whose predicate contains byte `offset`, if any. unresolved_read_input
+/// re-reads such a WHERE after an implicit `WITH *` when the graph predicate
+/// refused it.
+pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
+    ];
+    let mut depth = 0_usize;
+    let mut with = tokens.first().is_some_and(|token| token.word("UNWIND"));
+    let mut eligible = false;
+    let mut predicate: Option<usize> = None;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    continue;
+                }
+                let operator = token.word("WITH")
+                    && previous
+                        .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"));
+                if !operator && CLAUSES.iter().any(|clause| token.word(clause)) {
+                    if let Some(at) = predicate.take()
+                        && (at..token.at).contains(&offset)
+                    {
+                        return Some(at);
+                    }
+                    eligible = with
+                        && token.word("MATCH")
+                        && !previous.is_some_and(|previous| previous.word("OPTIONAL"));
+                    with |= token.word("WITH");
+                } else if eligible && token.word("WHERE") {
+                    predicate = Some(token.at);
+                    eligible = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    predicate.filter(|&at| at <= offset)
+}
+
 /// Whether the statement starts with MATCH and a top-level MATCH or
 /// OPTIONAL MATCH clause follows its first top-level WHERE, before any
 /// RETURN or WITH: the only statements whose root WHERE, deferred to the

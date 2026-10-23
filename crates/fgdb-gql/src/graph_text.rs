@@ -923,6 +923,10 @@ struct Parser<'a> {
     optional_part: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
+    /// Offsets of required continuation WHERE keywords that run as a row
+    /// filter after an implicit `WITH *`, because the graph predicate refused
+    /// them (unresolved_read_input). Every other WHERE parses as before.
+    deferred_wheres: Vec<usize>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
     /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
     write_row_scope: bool,
@@ -1020,6 +1024,7 @@ impl<'a> Parser<'a> {
             defer_where: false,
             optional_part: false,
             deferred_where: None,
+            deferred_wheres: Vec::new(),
             write_row_scope: false,
             write_prefix: false,
             chain_write: false,
