@@ -205,6 +205,251 @@ fn grouped_top_k_refills_after_deletions_and_preserves_independent_parameters() 
 }
 
 #[test]
+fn edge_fields_preserve_parallel_occurrences_directions_and_cascades() {
+    let ((), report) = run_async_under_lab(0x6772_3036, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit) = (c.query(), c.commit());
+        let mut db = seed(&commit).await;
+        let mut extra = WriteBatch::new(RelationId(1));
+        extra.add_edge(
+            EId(u128::MAX),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(4))],
+        );
+        extra.add_edge(
+            EId(0),
+            VId(1),
+            VId(1),
+            vec![(P, CanonicalScalar::Int(3)), (Q, CanonicalScalar::Int(2))],
+        );
+        db.write(&commit, extra).await.unwrap();
+        let args = GqlParameters::new();
+        let statements: Vec<_> = ["(a)-[e:R]->(b)", "(a)<-[e:R]-(b)", "(a)-[e:R]-(b)"]
+            .into_iter().map(|pattern| format!(
+                "MATCH {pattern} WITH e.p AS bucket,SUM(e.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 10"
+            )).collect();
+        let handles: Vec<_> = statements
+            .iter()
+            .map(|text| {
+                db.register_standing_native(&cx, text, &args, symbols, policy())
+                    .unwrap()
+            })
+            .collect();
+        let identity_text = "MATCH (a)-[e:R]->(b) RETURN e AS edge";
+        let identity = db
+            .register_standing_native(&cx, identity_text, &args, symbols, policy())
+            .unwrap();
+        let expected_ids: [&[u128]; 5] = [
+            &[0, 102, 103, 104, 105, 106, u128::MAX],
+            &[0, 102, 103, 104, 105, 106, u128::MAX],
+            // Removing edge102's q field retains its identity and NULL total.
+            &[0, 102, 103, 104, 105, 106, u128::MAX - 1],
+            &[u128::MAX - 1],
+            &[],
+        ];
+        // Independent, hand-enumerated groups of the fixture after each tick.
+        let expected = [
+            vec![
+                (1, Some(8), 2),
+                (2, Some(10), 2),
+                (3, Some(11), 2),
+                (4, None, 1),
+            ],
+            vec![
+                (1, Some(8), 2),
+                (2, Some(7), 1),
+                (3, Some(16), 3),
+                (4, None, 1),
+            ],
+            vec![
+                (1, None, 1),
+                (2, Some(7), 1),
+                (3, Some(16), 3),
+                (4, None, 1),
+                (5, Some(-2), 1),
+            ],
+            vec![(5, Some(-2), 1)],
+            vec![],
+        ];
+        let cell = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        for (tick, groups) in expected.iter().enumerate() {
+            assert_native(&db, &cx, &identity, identity_text, &args);
+            let QueryResult::Rows { columns, rows } = db
+                .standing_native_query(&cx, &identity, delivery())
+                .unwrap()
+                .1
+            else {
+                panic!("edge rows");
+            };
+            assert_eq!(columns, vec![String::from("edge")]);
+            let ids: Vec<_> = rows
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [QueryValue::Value(GraphValue::Edge(eid))] => eid.0,
+                    _ => panic!("edge identity domain"),
+                })
+                .collect();
+            assert_eq!(ids, expected_ids[tick], "identity tick {tick}");
+            db.rebuild_standing_query(&cx, &identity, policy()).unwrap();
+            assert_native(&db, &cx, &identity, identity_text, &args);
+            for (direction, (text, handle)) in statements.iter().zip(&handles).enumerate() {
+                assert_native(&db, &cx, handle, text, &args);
+                let factor = if direction == 2 { 2 } else { 1 };
+                let rows: Vec<_> = groups
+                    .iter()
+                    .map(|&(bucket, total, copies)| {
+                        // Every non-loop has two undirected occurrences; E0 is one.
+                        let loop_correction = if bucket == 3 && tick < 3 {
+                            factor - 1
+                        } else {
+                            0
+                        };
+                        vec![
+                            cell(bucket),
+                            total.map_or(
+                                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                                |total| cell(total * factor - 2 * loop_correction),
+                            ),
+                            cell(copies * factor - loop_correction),
+                        ]
+                    })
+                    .collect();
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, delivery()).unwrap().1,
+                    QueryResult::Rows {
+                        columns: vec!["bucket".into(), "total".into(), "copies".into()],
+                        rows
+                    }
+                );
+                db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                assert_native(&db, &cx, handle, text, &args);
+            }
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.set_edge_property(EId(103), Q, Some(CanonicalScalar::Int(7)));
+                    change.set_edge_property(EId(104), P, Some(CanonicalScalar::Int(3)));
+                    // The edge field must never be read from a vertex's domain.
+                    change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(999)));
+                    change.set_vertex_property(VId(1), Q, Some(CanonicalScalar::Int(999)));
+                }
+                1 => {
+                    change.set_edge_property(EId(102), Q, None);
+                    change.delete_edge(EId(u128::MAX));
+                    change.add_edge(
+                        EId(u128::MAX - 1),
+                        VId(2),
+                        VId(3),
+                        vec![(P, CanonicalScalar::Int(5)), (Q, CanonicalScalar::Int(-2))],
+                    );
+                }
+                2 => {
+                    change.delete_vertex(VId(1));
+                }
+                3 => {
+                    change.delete_vertex(VId(3));
+                }
+                _ => break,
+            }
+            db.write(&commit, change).await.unwrap();
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn edge_field_ticks_are_sparse_and_failed_groups_rebuild_from_committed_values() {
+    let ((), report) = run_async_under_lab(0x6772_3037, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit) = (c.query(), c.commit());
+        let args = GqlParameters::new();
+        let text = "MATCH (a:L)-[e:R]->(b) WHERE a.p=1 WITH e.p AS bucket,SUM(e.q) AS total RETURN bucket,total ORDER BY bucket LIMIT 10";
+        let mut measured = Vec::new();
+        for unrelated in [0, 64] {
+            let mut db = seed(&commit).await;
+            if unrelated != 0 {
+                let mut extra = WriteBatch::new(RelationId(1));
+                for at in 0..unrelated {
+                    let id = 1000 + 2 * at;
+                    for vertex in [id, id + 1] {
+                        extra.create_vertex(
+                            VId(vertex),
+                            vec![LabelId(1)],
+                            vec![(P, CanonicalScalar::Int(99))],
+                        );
+                    }
+                    extra.add_edge(
+                        EId(id),
+                        VId(id),
+                        VId(id + 1),
+                        vec![
+                            (P, CanonicalScalar::Int(99)),
+                            (Q, CanonicalScalar::Int(100)),
+                        ],
+                    );
+                }
+                db.write(&commit, extra).await.unwrap();
+            }
+            let handle = db
+                .register_standing_native(&cx, text, &args, symbols, policy())
+                .unwrap();
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_edge_property(EId(103), Q, Some(CanonicalScalar::Int(7)));
+            db.write(&commit, change).await.unwrap();
+            assert_native(&db, &cx, &handle, text, &args);
+            measured.push(*db.standing_window(&cx, &handle).unwrap().last_maintenance());
+
+            let healthy = db.standing_native_query(&cx, &handle, delivery()).unwrap();
+            assert!(
+                db.rebuild_standing_query(
+                    &cx,
+                    &handle,
+                    GqlQueryPolicy::new(0, 100, 50_000_000, 50_000_000)
+                )
+                .is_err()
+            );
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, delivery()).unwrap(),
+                healthy
+            );
+            let mut bad = WriteBatch::new(RelationId(1));
+            bad.set_edge_property(
+                EId(103),
+                Q,
+                Some(CanonicalScalar::ucs_basic_text("not numeric").unwrap()),
+            );
+            let bad_at = db.write(&commit, bad).await.unwrap();
+            assert_eq!(db.frontier().unwrap(), bad_at);
+            assert!(db.standing_native_query(&cx, &handle, delivery()).is_err());
+            assert!(db.query(&cx, text, &args, symbols, policy()).is_err());
+            let mut repair = WriteBatch::new(RelationId(1));
+            repair.set_edge_property(EId(103), Q, Some(CanonicalScalar::Int(8)));
+            db.write(&commit, repair).await.unwrap();
+            db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+            assert_native(&db, &cx, &handle, text, &args);
+            for unsupported in [
+                "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
+                "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b) RETURN e.p AS p",
+                "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e AS edge",
+            ] {
+                assert!(
+                    matches!(
+                        db.register_standing_native(&cx, unsupported, &args, symbols, policy()),
+                        Err(StandingQueryError::Unsupported)
+                    ),
+                    "{unsupported}"
+                );
+            }
+        }
+        assert_eq!(measured[0], measured[1]);
+        assert_eq!(measured[0].affected_edges, 1);
+        assert!(measured[0].work_units > 0 && measured[0].scratch_entries > 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn intermediate_root_group_rebuild_keeps_row_representation_and_native_cursors() {
     let ((), report) = run_async_under_lab(0x6772_3032, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

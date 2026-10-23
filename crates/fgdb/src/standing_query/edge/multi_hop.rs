@@ -523,7 +523,9 @@ impl Enumeration<'_> {
             Some(scope) => {
                 scope.binding_contribution(self.query, &row, self.sign, counts, output, meter)
             }
-            None => grouped::binding_contributions(self.query, &row, self.sign, output, meter),
+            None => {
+                grouped::binding_contributions(self.query, &row, None, self.sign, output, meter)
+            }
         }
     }
 }

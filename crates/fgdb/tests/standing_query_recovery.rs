@@ -201,6 +201,10 @@ fn failed_rebuild_preserves_healthy_policy_and_corrected_data_can_repair_numeric
             frontier, reason: StandingQueryFailure::NonIntegerAggregate { column: 1 },
         }) if frontier == healthy)
         );
+        assert!(matches!(
+            db.standing_query_node_stats(&cx, &handle),
+            Err(StandingQueryError::Unavailable { .. })
+        ));
         let mut correction = WriteBatch::new(R);
         correction.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(-9)));
         db.write(&commit, correction).await.unwrap();
@@ -234,11 +238,49 @@ fn rebuild_exact_work_and_scratch_limits_succeed_and_one_below_preserves_the_vie
         db.rebuild_standing_query(&cx, &handle, wide()).unwrap();
         let stats = *db.standing_query(&cx, &handle).unwrap().last_maintenance();
         assert!(stats.work_units > 0 && stats.scratch_entries > 0);
+        let nodes: Vec<_> = db
+            .standing_query_node_stats(&cx, &handle)
+            .unwrap()
+            .copied()
+            .collect();
+        assert!(nodes.len() > 1);
+        assert_eq!(nodes.last(), Some(&stats));
+        let (work, scratch) = nodes.iter().fold((0_u64, 0_u64), |(work, scratch), stats| {
+            (
+                work.max(stats.work_units),
+                scratch.max(stats.scratch_entries),
+            )
+        });
+        // A separately registered direct view owns one node and must not
+        // enter this handle's private circuit or its budget measurements.
+        let direct = PreparedGraphAggregate::prepare(
+            definition().input_pattern().clone(),
+            &[],
+            &[GraphAggregate::count_rows("count")],
+            0,
+            None,
+        )
+        .unwrap();
+        let direct = db.register_standing_query(&cx, direct, wide()).unwrap();
+        assert_eq!(
+            db.standing_query_node_stats(&cx, &direct)
+                .unwrap()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![*db.standing_query(&cx, &direct).unwrap().last_maintenance()],
+        );
+        assert_eq!(
+            db.standing_query_node_stats(&cx, &handle)
+                .unwrap()
+                .copied()
+                .collect::<Vec<_>>(),
+            nodes,
+        );
         let before = rows(&db, &cx, &handle);
         for (work, scratch, passes) in [
-            (stats.work_units, stats.scratch_entries, true),
-            (stats.work_units - 1, stats.scratch_entries, false),
-            (stats.work_units, stats.scratch_entries - 1, false),
+            (work, scratch, true),
+            (work - 1, scratch, false),
+            (work, scratch - 1, false),
         ] {
             let result = db.rebuild_standing_query(
                 &cx,
@@ -277,6 +319,10 @@ fn rebuild_never_adopts_foreign_or_reopened_handles() {
             .unwrap();
         let mut foreign = Database::open_memory(&commit, keys()).await.unwrap();
         assert!(matches!(
+            foreign.standing_query_node_stats(&cx, &handle),
+            Err(StandingQueryError::ForeignHandle)
+        ));
+        assert!(matches!(
             foreign.rebuild_standing_query(&cx, &handle, wide()),
             Err(StandingQueryError::ForeignHandle)
         ));
@@ -293,6 +339,10 @@ fn rebuild_never_adopts_foreign_or_reopened_handles() {
         let fresh = reopened
             .register_standing_query(&cx, definition(), wide())
             .unwrap();
+        assert!(matches!(
+            reopened.standing_query_node_stats(&cx, &handle),
+            Err(StandingQueryError::ForeignHandle)
+        ));
         reopened
             .rebuild_standing_query(&cx, &fresh, wide())
             .unwrap();
