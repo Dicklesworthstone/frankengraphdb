@@ -303,7 +303,7 @@ fn execute_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
 /// only those roots by point lookup. Other shapes, and a reader without a
 /// borrowed snapshot, admit as before; their rows are a superset the set
 /// executor's identity join narrows, exactly as for the unseeded leaf.
-fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
+pub(crate) fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
     reader: &R,
     pattern: &PreparedGraphPattern<Row>,
     seeds: Option<&[VId]>,
