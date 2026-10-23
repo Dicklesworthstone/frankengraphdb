@@ -39,6 +39,8 @@ mod connectivity;
 mod core_numbers;
 #[path = "prism_cooperative/dijkstra.rs"]
 mod dijkstra;
+#[path = "prism_cooperative/distance.rs"]
+mod distance;
 #[path = "prism_cooperative/eigenvector.rs"]
 mod eigenvector;
 

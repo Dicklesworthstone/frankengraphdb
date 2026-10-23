@@ -1124,9 +1124,23 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
         writer.write(&commit, second).await.unwrap();
         let current = writer.frontier().unwrap().0.to_string();
         let before = directory_bytes(&fixture.db());
-        for text in [
-            "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance",
-            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        for (text, direction) in [
+            (
+                "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance",
+                "directed",
+            ),
+            (
+                "CALL fnx.weakly_connected_components() YIELD vertex,component",
+                "directed",
+            ),
+            (
+                "CALL fnx.closeness_centrality() YIELD vertex,score",
+                "undirected",
+            ),
+            (
+                "CALL fnx.harmonic_centrality() YIELD vertex,score",
+                "undirected",
+            ),
         ] {
             let mut previous_rows = None;
             for cut in [&historical, &current] {
@@ -1137,6 +1151,8 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
                     "KNOWS",
                     "--parallel-edges",
                     "collapse",
+                    "--direction",
+                    direction,
                     "--as-of",
                     cut.as_str(),
                 ];

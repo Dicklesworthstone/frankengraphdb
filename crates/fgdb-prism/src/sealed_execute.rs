@@ -29,6 +29,8 @@ mod components;
 mod cooperative;
 #[path = "sealed_core.rs"]
 mod core_number;
+#[path = "sealed_distance.rs"]
+mod distance;
 #[path = "sealed_eigenvector.rs"]
 mod eigenvector;
 #[path = "sealed_shortest_path.rs"]
@@ -539,6 +541,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::ClosenessCentrality
+                        | FoundationAlgorithm::HarmonicCentrality
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
                 )
@@ -565,10 +569,12 @@ impl FnxCallSpec {
     }
 
     /// Execute registered ranks, distances, components and local triangles or
-    /// clustering, core numbers and eigenvectors from authenticated compressed rows.
+    /// clustering, centralities and core numbers from authenticated compressed rows.
     /// Degree centrality uses the admitted degree directory without opening
     /// rows; core peeling opens each row once with O(|V|) integer workspace.
     /// Eigenvector iteration keeps two score vectors and canonical reductions.
+    /// Closeness and harmonic centrality reuse one FIFO and distance vector
+    /// for all sources; their retained-history work bound applies to every pass.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -629,6 +635,14 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
         ) {
             return eigenvector::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(
+                FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality
+            )
+        ) {
+            return distance::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
@@ -998,6 +1012,7 @@ fn source_digest() -> Digest {
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
             include_str!("sealed_core.rs"),
+            include_str!("sealed_distance.rs"),
             include_str!("sealed_eigenvector.rs"),
             include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
