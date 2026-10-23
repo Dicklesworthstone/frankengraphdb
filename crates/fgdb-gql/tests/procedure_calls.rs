@@ -729,10 +729,14 @@ fn read_procedure_sources_do_not_enter_write_prefixes_or_owned_write_tails() {
     ] {
         let mut lookups = 0;
         assert!(
-            fgdb_gql::PreparedGraphInsertQueryText::prepare(text, RelationId(1), |kind, name| {
-                lookups += 1;
-                symbols(kind, name)
-            })
+            fgdb_gql::PreparedGraphInsertQueryText::prepare(
+                text,
+                RelationId(1),
+                |kind, name: &str| {
+                    lookups += 1;
+                    symbols(kind, name)
+                },
+            )
             .is_err(),
             "{text}"
         );
