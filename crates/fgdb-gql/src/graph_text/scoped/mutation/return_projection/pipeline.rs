@@ -14,6 +14,102 @@ use crate::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp, GraphSetQ
 const MAX_FILTER_NESTING: usize = 64;
 pub(in crate::graph_text) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
+#[derive(Default)]
+struct ReadLocals<'a> {
+    scopes: Vec<ReadLocal<'a>>,
+}
+
+struct ReadLocal<'a> {
+    depth: usize,
+    bindings: Vec<&'a str>,
+    active: bool,
+    reduce: bool,
+}
+
+impl<'a> ReadLocals<'a> {
+    // Mirror element_scope/list_function_call: inputs use the enclosing scope;
+    // only WHERE and the body see the locals. Report declarations separately
+    // because a binder's spelling is not itself a read of an enclosing value.
+    fn observe(
+        &mut self,
+        token: Token<'a>,
+        previous: Option<TokenKind<'a>>,
+        lexer: &Lexer<'a>,
+        depth: usize,
+    ) -> Result<bool, GraphPatternTextError> {
+        match token.kind {
+            TokenKind::Punct(open @ (b'(' | b'[')) => {
+                let reduce = open == b'('
+                    && matches!(previous, Some(TokenKind::Word(word))
+                        if word.eq_ignore_ascii_case("REDUCE"));
+                let quantifier = open == b'('
+                    && matches!(previous, Some(TokenKind::Word(word))
+                        if ["ANY", "ALL", "NONE", "SINGLE"]
+                            .iter().any(|name| word.eq_ignore_ascii_case(name)));
+                if open == b'[' || reduce || quantifier {
+                    let mut ahead = lexer.clone();
+                    if let TokenKind::Word(name) = ahead.next()?.kind {
+                        let next = ahead.next()?.kind;
+                        if matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
+                            || (reduce && next == TokenKind::Punct(b'='))
+                        {
+                            self.scopes.push(ReadLocal {
+                                depth: depth + 1,
+                                bindings: vec![name],
+                                active: false,
+                                reduce,
+                            });
+                        }
+                    }
+                }
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                if self.scopes.last().is_some_and(|scope| scope.depth == depth) {
+                    self.scopes.pop();
+                }
+            }
+            TokenKind::Punct(b'|') => {
+                if let Some(scope) = self.scopes.last_mut()
+                    && scope.depth == depth
+                {
+                    scope.active = true;
+                }
+            }
+            TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
+                if let Some(scope) = self.scopes.last_mut()
+                    && scope.depth == depth
+                {
+                    if !scope.active
+                        && matches!(previous, Some(TokenKind::Punct(b'[' | b'(')))
+                        && scope.bindings.first() == Some(&word)
+                    {
+                        return Ok(true);
+                    }
+                    if !scope.reduce && word.eq_ignore_ascii_case("WHERE") {
+                        scope.active = true;
+                    } else if scope.reduce
+                        && !scope.active
+                        && matches!(previous, Some(TokenKind::Punct(b',')))
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Word(next)
+                            if next.eq_ignore_ascii_case("IN"))
+                    {
+                        scope.bindings.push(word);
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn shadows(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.active && scope.bindings.contains(&name))
+    }
+}
+
 /// Private output names for hidden boundary reads. A fixed set lets each name
 /// borrow for the statement's lifetime; a user alias that matches one is
 /// skipped, never shadowed.
@@ -421,7 +517,7 @@ impl<'a> Parser<'a> {
         // may also read the MATCH bindings it drops, as openCypher allows.
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
-        let mut binders: Vec<&'a str> = Vec::new();
+        let mut locals = ReadLocals::default();
         let mut before_return = head.plain && !unwind && pending.is_none();
         let mut functions = Vec::new();
         let mut lexer = self.lexer.clone();
@@ -430,6 +526,7 @@ impl<'a> Parser<'a> {
         let mut depth = 0_usize;
         loop {
             let token = lexer.next()?;
+            let declaration = locals.observe(token, window[2], &lexer, depth)?;
             let after_dot = matches!(window[2], Some(TokenKind::Punct(b'.')));
             if let TokenKind::Word(word) = token.kind
                 && depth == 0
@@ -498,19 +595,13 @@ impl<'a> Parser<'a> {
                 {
                     before_return = false;
                 }
-                TokenKind::Word(word) if !after_dot => {
+                TokenKind::Word(word) if !after_dot && !declaration && !locals.shadows(word) => {
                     let next = lexer.clone().next()?.kind;
                     if before_return
                         && !matches!(next, TokenKind::Punct(b'.' | b'(' | b'{' | b':'))
                         && head.outputs.iter().all(|(output, _)| output.text != word)
                     {
-                        // `[x IN list ...]` and quantifiers bind a local that
-                        // shadows any MATCH binding of the same name.
-                        if matches!(window[2], Some(TokenKind::Punct(b'[' | b'(')))
-                            && matches!(next, TokenKind::Word(next) if next.eq_ignore_ascii_case("IN"))
-                        {
-                            binders.push(word);
-                        } else if !scoped
+                        if !scoped
                             .iter()
                             .any(|&(name, key, _)| name == word && key.is_none())
                             && let Some(variable) =
@@ -551,6 +642,7 @@ impl<'a> Parser<'a> {
                         None => metadata_source(word, token.at, &lexer)?,
                     };
                     if let Some((source, function)) = metadata
+                        && !locals.shadows(source.text)
                         && kept(source.text)
                         && let Some(variable) =
                             boundary_metadata_binding(head, offset, source.text, function)
@@ -586,6 +678,7 @@ impl<'a> Parser<'a> {
                         functions.push((source.text, function, head.outputs.len() - 1));
                     }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
+                        && !locals.shadows(source.text)
                         && kept(source.text)
                         && let Some(variable) = boundary_binding(head, offset, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
@@ -625,6 +718,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(property) | TokenKind::DelimitedKeyword(property) if after_dot => {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
+                        && !locals.shadows(alias)
                         && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
                         && let Some(variable) = boundary_binding(head, offset, alias)
                         && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
@@ -656,6 +750,7 @@ impl<'a> Parser<'a> {
                     } else if before_return
                         && !chained
                         && let Some(TokenKind::Word(alias)) = window[1]
+                        && !locals.shadows(alias)
                         && head.outputs.iter().all(|(output, _)| output.text != alias)
                         && !scoped
                             .iter()
@@ -678,7 +773,6 @@ impl<'a> Parser<'a> {
             }
             window = [window[1], window[2], Some(token.kind)];
         }
-        scoped.retain(|&(name, _, _)| !binders.contains(&name));
         if head.outputs.len() != visible {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
@@ -1514,65 +1608,21 @@ impl<'a> Parser<'a> {
             token = lexer.next()?;
         }
         let mut depth = 0_usize;
-        // Like element_scope/list_function_call, bind locals only after their
-        // input expressions. A spelling in a local body is not a CALL-output
-        // demand, while the same spelling in its iterator or initializer is.
-        let mut locals: Vec<(usize, Vec<&str>, bool, bool)> = Vec::new();
+        let mut locals = ReadLocals::default();
         loop {
+            locals.observe(token, previous, &lexer, depth)?;
             match token.kind {
                 TokenKind::End => break,
-                TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => {
-                    depth += 1;
-                    let reduce = matches!(previous, Some(TokenKind::Word(word))
-                        if word.eq_ignore_ascii_case("REDUCE"));
-                    let quantifier = matches!(previous, Some(TokenKind::Word(word))
-                        if ["ANY", "ALL", "NONE", "SINGLE"]
-                            .iter().any(|name| word.eq_ignore_ascii_case(name)));
-                    if open == b'[' || (open == b'(' && (reduce || quantifier)) {
-                        let mut ahead = lexer.clone();
-                        if let TokenKind::Word(name) = ahead.next()?.kind {
-                            let next = ahead.next()?.kind;
-                            if matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
-                                || (open == b'(' && reduce && next == TokenKind::Punct(b'='))
-                            {
-                                locals.push((depth, vec![name], false, open == b'(' && reduce));
-                            }
-                        }
-                    }
-                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => {
-                    if locals.last().is_some_and(|scope| scope.0 == depth) {
-                        locals.pop();
-                    }
                     let Some(outer) = depth.checked_sub(1) else {
                         break;
                     };
                     depth = outer;
                 }
-                TokenKind::Punct(b'|') => {
-                    if let Some(scope) = locals.last_mut()
-                        && scope.0 == depth
-                    {
-                        scope.2 = true;
-                    }
-                }
                 TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
                     if depth == 0 && ends_boundary_scope(word, previous) {
                         break;
-                    }
-                    if let Some(scope) = locals.last_mut()
-                        && scope.0 == depth
-                    {
-                        if !scope.3 && word.eq_ignore_ascii_case("WHERE") {
-                            scope.2 = true;
-                        } else if scope.3
-                            && !scope.2
-                            && matches!(previous, Some(TokenKind::Punct(b',')))
-                            && matches!(lexer.clone().next()?.kind, TokenKind::Word(next)
-                                if next.eq_ignore_ascii_case("IN"))
-                        {
-                            scope.1.push(word);
-                        }
                     }
                     let source = if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
                         Some(Name {
@@ -1585,9 +1635,7 @@ impl<'a> Parser<'a> {
                             .map(|(source, _)| source)
                     };
                     if let Some(source) = source
-                        && !locals
-                            .iter()
-                            .any(|scope| scope.2 && scope.1.contains(&source.text))
+                        && !locals.shadows(source.text)
                         && yielded.iter().any(|(name, _)| name.text == source.text)
                         && !implied.iter().any(|seen| seen.text == source.text)
                     {
