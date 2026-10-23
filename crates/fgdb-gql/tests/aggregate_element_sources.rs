@@ -363,6 +363,7 @@ fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
     for tail in [
         "RETURN SUM(node.value) AS total, [item IN COLLECT(node) | item.value] AS values",
         "RETURN SUM(node.value) AS total, [node IN COLLECT(node) | node.value] AS values",
+        "RETURN SUM(node.value) AS total, [node IN COLLECT(node) | node.missing] AS values",
         "RETURN SUM(node.value) AS total, [node IN COLLECT(node.value) | node] AS values",
         "RETURN [node IN COLLECT(node.value) | node] AS values",
         "RETURN [state IN [reduce(node = {value: SUM(node.value)}, \
@@ -385,7 +386,9 @@ fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
         if values.len() == 2 {
             assert_eq!(values[0].as_integer(), Some(11), "{tail}");
         }
-        let expected = if tail.contains("reduce(") {
+        let expected = if tail.contains(".missing") {
+            scalar_list(&[None, None, None])
+        } else if tail.contains("reduce(") {
             scalar_list(&[Some(22)])
         } else {
             scalar_list(&[Some(2), Some(2), Some(7)])

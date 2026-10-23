@@ -206,6 +206,13 @@ pub(super) fn finish<'a>(
                 .syntax
                 .parameter_offsets
                 .clone_from(&parser.syntax.parameter_offsets);
+            // Terminal arguments and output expressions can register element
+            // keys after the multipart input was captured. Bind their shared
+            // slots through the same catalog as the complete input.
+            first
+                .syntax
+                .element_keys
+                .extend(parser.syntax.element_keys.iter().cloned());
             for (part, _) in &mut continuations {
                 part.syntax.parameters.clone_from(&parser.syntax.parameters);
                 part.syntax
