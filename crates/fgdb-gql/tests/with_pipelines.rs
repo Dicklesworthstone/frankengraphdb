@@ -2241,3 +2241,37 @@ fn ordering_dynamically_typed_values_is_null_across_kinds() {
         some(&[(0, 0), (0, 1), (1, 1), (2, 2), (3, 3), (3, 4), (4, 4)])
     );
 }
+
+/// A DISTINCT WITH's WHERE may repeat one of its items' expressions token
+/// for token (TCK WithWhere1 [2]). The repeat is that item's value on every
+/// row, so the template and rows equal the alias spelling's. A dropped
+/// binding read any other way still refuses. A grouping WITH's WHERE reads
+/// its projected names only
+/// (a_grouping_or_distinct_with_orders_by_a_repeat_of_its_item).
+#[test]
+fn a_distinct_with_where_may_repeat_an_item_expression() {
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run_reading(&prepare(text), &values, wide(), &mut || Ok(()), true)
+            .unwrap()
+            .value
+    };
+    let repeat = "MATCH (n) WITH DISTINCT n.p AS p WHERE n.p > 1 RETURN p ORDER BY p";
+    let alias = "MATCH (n) WITH DISTINCT n.p AS p WHERE p > 1 RETURN p ORDER BY p";
+    assert_eq!(template(repeat), template(alias));
+    assert_eq!(rows(repeat), rows(alias));
+    // p = 3, 1, 2.
+    assert_eq!(ints(&rows(repeat), 0), [Some(2), Some(3)]);
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH DISTINCT n.p AS p WHERE n IS NOT NULL RETURN p",
+            symbols
+        )
+        .is_err()
+    );
+}

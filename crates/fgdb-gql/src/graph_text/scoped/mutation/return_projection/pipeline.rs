@@ -792,8 +792,9 @@ impl<'a> Parser<'a> {
     /// expressions, token for token, at the current token: that item's output
     /// column over a row of `width`, consuming the repeat (openCypher: `WITH
     /// a.name AS name, count(*) AS c ORDER BY a.name`). Within a group the
-    /// repeat and the output are the same value. Its WHERE resolves leaves
-    /// over no row schema, so it never sees these. `None` consumes nothing.
+    /// repeat and the output are the same value. A DISTINCT WITH's WHERE
+    /// reads them too (selection_value); a grouping WITH's does not.
+    /// `None` consumes nothing.
     /// Out of line: the scalar operand reader that calls it repeats once per
     /// nested parenthesis, and these lexers must not widen that frame.
     #[inline(never)]

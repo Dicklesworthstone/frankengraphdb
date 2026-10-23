@@ -440,9 +440,13 @@ impl<'a> Parser<'a> {
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         // The shared resolved-expression entry point stops before comparisons
         // and Boolean connectors. Parentheses and CASE retain their own inner
-        // expressions. This callback resolves ONLY the current WITH aliases.
-        // Hidden boundary reads resolve only as `alias.property`, never by
-        // their private names.
+        // expressions. This callback resolves ONLY the current WITH aliases,
+        // then a DISTINCT WITH's own item expression repeated token for
+        // token (`WITH DISTINCT a.name AS name WHERE a.name = 'B'`, TCK
+        // WithWhere1 [2]), whose value is that item's on every row. A
+        // grouping WITH's WHERE reads its projected names only. Hidden
+        // boundary reads resolve only as `alias.property`, never by their
+        // private names.
         let visible = self.visible_width(schema);
         self.read_resolved_value(
             &mut |parser| {
@@ -456,6 +460,9 @@ impl<'a> Parser<'a> {
                 {
                     parser.advance()?;
                     return Ok(Some(column));
+                }
+                if parser.syntax.distinct {
+                    return parser.projected_source(schema.len());
                 }
                 Ok(None)
             },
