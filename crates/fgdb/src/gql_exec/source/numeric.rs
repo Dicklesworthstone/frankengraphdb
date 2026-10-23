@@ -704,7 +704,7 @@ mod tests {
                             .map(|id| compound_row(id, 1, None, tenant.clone(), key(id)))
                             .collect(),
                     ]);
-                    let mut predicates = vec![equal(KEY, tenant), equal(ID_KEY, key(17))];
+                    let mut predicates = [equal(KEY, tenant), equal(ID_KEY, key(17))];
                     for reverse in [false, true] {
                         if reverse {
                             predicates.reverse();
