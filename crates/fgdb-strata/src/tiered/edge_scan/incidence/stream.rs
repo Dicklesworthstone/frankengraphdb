@@ -103,6 +103,16 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
         cx: &QueryCx,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, EdgePropertyAccess::Read, observe)
+            .await
+    }
+
+    async fn next_candidate_with_access<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        properties: EdgePropertyAccess,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
         };
@@ -122,12 +132,16 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
             if state.is_none() {
                 state = Some(
                     driver
-                        .prepare_incident(cx, request, true, &mut observe)
+                        .prepare_incident(cx, request, true, properties, &mut observe)
                         .await?,
                 );
             }
             let state = state.as_mut().expect("complete incidence heads");
-            let Some(candidate) = driver.root.advance(state, cx, &mut observe).await? else {
+            let Some(candidate) = driver
+                .root
+                .advance(state, cx, properties, &mut observe)
+                .await?
+            else {
                 return Ok(None);
             };
             driver
@@ -165,6 +179,35 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
                     }
                 }
                 Ok(None) => return Ok(None),
+                Err(BufferedScanError::Read(error)) => return Err(error),
+                Err(BufferedScanError::Control(never)) => match never {},
+            }
+        }
+    }
+
+    /// Consume the remaining stream and count visible edge identities without
+    /// loading edge-property sidecars. History merging, same-cut endpoint
+    /// validation, direction matching and self-loop de-duplication are exactly
+    /// the full-record path. Endpoint values still use their ordinary decoder.
+    /// No partial count escapes a source, memory, work or cancellation refusal.
+    /// Initial root admission continues to authenticate every property object.
+    pub async fn count_visible(mut self, cx: &QueryCx) -> Result<u64, BufferedReadError> {
+        let mut count = 0_u64;
+        loop {
+            match self
+                .next_candidate_with_access(cx, EdgePropertyAccess::Skip, &mut |_| {
+                    Ok::<_, core::convert::Infallible>(())
+                })
+                .await
+            {
+                Ok(Some(candidate)) => {
+                    if candidate.row.is_some() {
+                        count = count
+                            .checked_add(1)
+                            .ok_or(BufferedReadError::SizeOverflow)?;
+                    }
+                }
+                Ok(None) => return Ok(count),
                 Err(BufferedScanError::Read(error)) => return Err(error),
                 Err(BufferedScanError::Control(never)) => match never {},
             }

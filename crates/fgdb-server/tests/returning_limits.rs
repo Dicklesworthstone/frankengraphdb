@@ -326,6 +326,34 @@ fn returning_insert_respects_independent_vertex_and_edge_creation_ceilings() {
 }
 
 #[test]
+fn chained_creations_share_host_limits_and_return_the_final_rows() {
+    run(async |cx| {
+        threshold_case(
+            cx,
+            "chain-vertices",
+            policy(100, 1, 0),
+            policy(100, 2, 0),
+            "CREATE (a:Person {name:'NewA'}) WITH a \
+             CREATE (b:Person {name:'NewB'}) RETURN a.name AS first,b.name AS second",
+            4,
+            1,
+        )
+        .await;
+        threshold_case(
+            cx,
+            "chain-edges",
+            policy(100, 2, 0),
+            policy(100, 2, 1),
+            "CREATE (a:Person {name:'NewA'}) WITH a \
+             CREATE (b:Person {name:'NewB'}),(a)-[r:KNOWS]->(b) RETURN b.name AS name",
+            4,
+            2,
+        )
+        .await;
+    });
+}
+
+#[test]
 fn returning_mutation_counts_effects_before_output_pagination() {
     run(async |cx| {
         threshold_case(
@@ -810,5 +838,61 @@ fn relationship_upsert_uses_write_query_limits_and_final_row_admission() {
         assert_eq!(state(cx, &mut writer).await, after);
         writer.close(cx).await.unwrap();
         fixture.finish(cx, &after).await;
+    });
+}
+
+#[test]
+fn mixed_chains_preserve_host_effect_limits_and_rollback_the_creation_prefix() {
+    run(async |cx| {
+        threshold_case(
+            cx,
+            "chain-set-effects",
+            policy(0, 1, 0),
+            policy(1, 1, 0),
+            "CREATE (n:Person {name:'New',age:3}) WITH n \
+             SET n.age=n.age+4 RETURN n.age AS age",
+            3,
+            1,
+        )
+        .await;
+        threshold_case(
+            cx,
+            "chain-remove-effects",
+            policy(0, 1, 0),
+            policy(1, 1, 0),
+            "CREATE (n:Person {name:'New',age:3}) WITH n \
+             REMOVE n.age RETURN n.name AS name",
+            3,
+            1,
+        )
+        .await;
+        threshold_case(
+            cx,
+            "chain-delete-effects",
+            policy(0, 2, 0),
+            policy(1, 2, 0),
+            "CREATE (a:Person {name:'Keep'}),(b:Person {name:'Drop'}) WITH a,b \
+             DELETE b RETURN a.name AS name",
+            3,
+            1,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn relationship_merge_chains_share_the_hosts_creation_allowance() {
+    run(async |cx| {
+        threshold_case(
+            cx,
+            "chain-merge-edge",
+            policy(0, 2, 0),
+            policy(0, 2, 1),
+            "CREATE (a:Person {name:'NewA'}),(b:Person {name:'NewB'}) \
+             MERGE (a)-[r:KNOWS {age:9}]->(b) RETURN r.age AS age",
+            4,
+            2,
+        )
+        .await;
     });
 }

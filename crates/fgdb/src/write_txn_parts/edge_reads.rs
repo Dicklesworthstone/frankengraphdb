@@ -244,12 +244,23 @@ impl WriteTxn {
             relation == merge.relation()
                 && merge.accepts_orientation((source, destination), (src, dst))
         };
+        // Either endpoint's undirected incidences contain every matching
+        // pair. Keep the logical source's gaps above, but avoid rescanning a
+        // hub for every leaf. The hint reads directory metadata, not postings.
+        let index = snapshot.adjacency_index();
+        let probe = if destination != source
+            && index.degree_upper_bound(destination, GlaDirection::Undirected)
+                < index.degree_upper_bound(source, GlaDirection::Undirected)
+        {
+            destination
+        } else {
+            source
+        };
         let mut edges = BTreeMap::new();
-        snapshot
-            .adjacency_index()
+        index
             .visit(
                 &snapshot.blocks,
-                source,
+                probe,
                 GlaDirection::Undirected,
                 self.basis,
                 &mut |_| checkpoint(),
@@ -448,6 +459,169 @@ mod adjacency_overlay_tests {
             DatabaseSecurityNamespaceId([0x92; 32]),
             [0x93; 32],
         )
+    }
+
+    fn pair_merge_definition() -> fgdb_gql::PreparedGraphEdgeMerge {
+        use fgdb_gql::{GqlParameters, PreparedGraphEdgeMerge, PreparedGraphText};
+
+        let selection = PreparedGraphText::prepare("MATCH (a),(b) RETURN ALL a,b", |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        PreparedGraphEdgeMerge::prepare(selection, RelationId(1), 0, 1, vec![]).unwrap()
+    }
+
+    #[test]
+    fn merge_pair_destination_probe_keeps_source_gaps_across_rollback() {
+        let ((), report) = run_async_under_lab(0xa91c_0041, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            for inserted_incoming in [false, true] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(RelationId(1));
+                for vid in 1..=130 {
+                    seed.create_vertex(VId(vid), vec![], vec![]);
+                }
+                // Source 1 has 128 incident edges; destination 2 is isolated.
+                // None is a member of the requested pair.
+                for vid in 3..=130 {
+                    seed.add_edge(EId(vid), VId(1), VId(vid), vec![]);
+                }
+                db.write(&commit, seed).await.unwrap();
+                let merge = pair_merge_definition();
+                let mut txn = db.begin(&txcx).unwrap();
+                let basis = txn.basis();
+                txn.savepoint(&db, "before-probe").unwrap();
+                let mut calls = 0;
+                let rows = txn
+                    .merge_candidate_edges(&db, &merge, VId(1), VId(2), || {
+                        calls += 1;
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                assert!(rows.is_empty());
+                assert!(
+                    calls < 32,
+                    "the isolated destination should avoid 128 source incidences"
+                );
+                assert!(txn.read_set.borrow().is_empty());
+                for incoming in [false, true] {
+                    assert!(txn.point_reads.borrow().contains(
+                        ElementId::Vertex(VId(1)),
+                        PointReadField::Adjacency {
+                            relation: RelationId(1),
+                            incoming,
+                        },
+                    ));
+                }
+                assert_eq!(
+                    txn.point_reads.borrow().0.len(),
+                    1,
+                    "the physical destination must not replace the logical source witness"
+                );
+
+                let mut discarded = WriteBatch::new(RelationId(1));
+                discarded.create_vertex(VId(1000), vec![], vec![]);
+                txn.write(&mut db, discarded).unwrap();
+                let mut winner = WriteBatch::new(RelationId(1));
+                let (src, dst) = if inserted_incoming { (3, 1) } else { (1, 3) };
+                // This touches ONLY the original source, never destination 2.
+                // A gap incorrectly transferred to the cheaper endpoint would
+                // miss it, unlike an inserted edge on the requested pair.
+                winner.add_edge(EId(10_000), VId(src), VId(dst), vec![]);
+                db.write(&commit, winner).await.unwrap();
+                txn.rollback_to_savepoint(&db, "before-probe").unwrap();
+                assert_eq!(txn.basis(), basis);
+                assert!(txn.staged.is_empty());
+                assert!(txn.prepared.is_none());
+                assert!(!txn.scanned_edges.get());
+                assert!(!txn.scanned_vertices.get());
+                assert!(txn.match_expansions.borrow().is_empty());
+                for incoming in [false, true] {
+                    assert!(txn.point_reads.borrow().contains(
+                        ElementId::Vertex(VId(1)),
+                        PointReadField::Adjacency {
+                            relation: RelationId(1),
+                            incoming,
+                        },
+                    ));
+                }
+                assert_eq!(txn.point_reads.borrow().0.len(), 1);
+                for element in [
+                    ElementId::Vertex(VId(1)),
+                    ElementId::Vertex(VId(2)),
+                    ElementId::Vertex(VId(3)),
+                    ElementId::Edge(EId(10_000)),
+                ] {
+                    assert!(
+                        !txn.read_set.borrow().contains(&element),
+                        "only the retained source incidence gap should explain this conflict"
+                    );
+                }
+                assert!(matches!(
+                    txn.finish(&mut db, &commit).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn merge_pair_fanout_visits_leaf_incidence_in_both_orientations() {
+        let ((), report) = run_async_under_lab(0xa91c_0042, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 0..=256 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+                if vid != 0 {
+                    seed.add_edge(EId(vid), VId(0), VId(vid), vec![]);
+                }
+            }
+            db.write(&commit, seed).await.unwrap();
+            for reverse in [false, true] {
+                let merge = if reverse {
+                    pair_merge_definition().with_undirected()
+                } else {
+                    pair_merge_definition()
+                };
+                let txn = db.begin(&txcx).unwrap();
+                let mut calls = 0;
+                for leaf in 1..=256 {
+                    let (source, destination) = if reverse {
+                        (VId(leaf), VId(0))
+                    } else {
+                        (VId(0), VId(leaf))
+                    };
+                    let rows = txn
+                        .merge_candidate_edges(&db, &merge, source, destination, || {
+                            calls += 1;
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                    assert_eq!(rows.len(), 1);
+                    let row = &rows[0];
+                    assert_eq!(row.entry.eid, EId(leaf));
+                    assert_eq!((row.entry.src, row.entry.dst), (VId(0), VId(leaf)));
+                    assert_eq!(row.entry.relation, RelationId(1));
+                    assert!(row.props.is_empty());
+                }
+                // Each pair visits its one-edge leaf. A source-only probe in
+                // the forward case would inspect all 256 hub edges 256 times.
+                assert!(calls <= 256 * 8, "reverse={reverse} calls={calls}");
+                assert!(!txn.scanned_edges.get());
+                assert!(!txn.scanned_vertices.get());
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

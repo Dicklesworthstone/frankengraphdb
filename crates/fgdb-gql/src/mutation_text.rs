@@ -132,6 +132,18 @@ impl core::fmt::Debug for PreparedGraphMutationText {
     }
 }
 
+/// A chain step's SET, REMOVE or DELETE over the previous write's rows
+/// (fgdb-cpny9): `CREATE (n:P) SET n.name = $name RETURN n.name`. Its input
+/// is one owned leaf of those rows, and every action addresses that row.
+#[derive(Clone)]
+pub(crate) struct PreparedGraphMutationRowsText {
+    pub(crate) relation: RelationId,
+    pub(crate) actions: Vec<MutationActionTemplate>,
+    pub(crate) input: crate::set_text::BoundSetTextInput,
+    /// The write's own clause, where its binding errors point.
+    pub(crate) at: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphMutationTextError {
     pub offset: usize,

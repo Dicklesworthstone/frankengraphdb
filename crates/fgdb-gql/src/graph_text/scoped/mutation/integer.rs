@@ -4,6 +4,7 @@
 
 mod conditional;
 
+use super::return_projection::Route;
 use super::*;
 use crate::set_text::ReadValueTemplate;
 use crate::{
@@ -169,6 +170,31 @@ fn list_members(
         members: list.values().len(),
     });
     Ok(())
+}
+
+/// Whether the list literal `lexer` is just past the `[` of has an element
+/// that is itself a list or map literal, at its own level. Only lexical
+/// lookahead: nothing is read.
+fn literal_has_composite_element(lexer: &Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    let mut depth = 1_usize;
+    let mut element_start = true;
+    loop {
+        let token = lexer.next()?;
+        match token.kind {
+            TokenKind::Punct(b'[' | b'{') if depth == 1 && element_start => return Ok(true),
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(false);
+                }
+            }
+            TokenKind::End => return Ok(false),
+            _ => {}
+        }
+        element_start = depth == 1 && matches!(token.kind, TokenKind::Punct(b','));
+    }
 }
 
 pub(in crate::graph_text) fn bind_integer(
@@ -383,6 +409,49 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
+    /// The typed row that routes a list operand, list CASE or element CASE
+    /// result to the value language: a row scope's schema, or the WITH row a
+    /// write's resolver addresses (resolved_row), so `DETACH DELETE CASE WHEN
+    /// c THEN a ELSE b END` after WITH reads its vertex results as values.
+    fn routing_row<'s>(
+        &'s self,
+        columns: &'s ExpressionColumns<'_, 'a>,
+    ) -> Option<&'s [(Name<'a>, crate::GraphSetColumnType)]> {
+        match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            ExpressionColumns::Resolved(_) => self.resolved_row.as_deref(),
+            ExpressionColumns::Graph(_) => None,
+        }
+    }
+
+    /// The routing lookahead's names here (Route): the typed row, and in a
+    /// graph scope the MATCH elements, so `RETURN CASE WHEN c THEN a ELSE b
+    /// END` without WITH reads its vertex results as values too.
+    fn route<'s>(&'s self, columns: &'s ExpressionColumns<'_, 'a>) -> Route<'s, 'a> {
+        Route {
+            row: self.routing_row(columns),
+            graph: matches!(columns, ExpressionColumns::Graph(_)).then_some(self),
+        }
+    }
+
+    /// A bare row column read whole (row_list_column, row_element_column):
+    /// by its position in a row scope, and through a write's own resolver,
+    /// which names the same column the scalar compiler would read.
+    fn bare_column_value(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        column: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        if let ExpressionColumns::Resolved(resolve) = columns {
+            let at = self.current.at;
+            let resolved = resolve(self)?
+                .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownVariable))?;
+            return Ok(ReadValueTemplate::Column(resolved));
+        }
+        self.advance()?;
+        Ok(ReadValueTemplate::Column(column))
+    }
+
     /// A searched CASE with a list result (list_case_follows), read in the
     /// value language as one let slot: `CASE WHEN c THEN reverse(l) ELSE l
     /// END` (fgdb-13l85). False, with nothing consumed, for any other CASE,
@@ -396,11 +465,7 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
         at: usize,
     ) -> Result<bool, GraphMutationTextError> {
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        if !self.list_case_follows(row)? {
+        if !self.list_case_follows(self.route(columns))? {
             return Ok(false);
         }
         let nesting = self.let_base + depth + 1;
@@ -459,20 +524,15 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        if let Some(column) = self.row_list_column(row)? {
-            self.advance()?;
-            return Ok(ReadValueTemplate::Column(column));
-        }
+        let row = self.routing_row(columns);
         // A vertex, edge or path column is a whole CASE result too.
-        if let Some(column) = self.row_element_column(row)? {
-            self.advance()?;
-            return Ok(ReadValueTemplate::Column(column));
+        if let Some(column) = match self.row_list_column(row)? {
+            None => self.row_element_column(row)?,
+            list => list,
+        } {
+            return self.bare_column_value(columns, column);
         }
-        if self.list_case_follows(row)? {
+        if self.list_case_follows(self.route(columns))? {
             return self.list_case_value(columns, nesting, at);
         }
         // A list- or map-typed parameter is that argument's value. Read it
@@ -504,15 +564,11 @@ impl<'a> Parser<'a> {
         if self.sum_has_list(columns)? {
             return self.list_sum_value(columns, nesting, at);
         }
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
+        let row = self.routing_row(columns);
         if let Some(column) = self.row_list_column(row)? {
-            self.advance()?;
-            return Ok(ReadValueTemplate::Column(column));
+            return self.bare_column_value(columns, column);
         }
-        if self.list_case_follows(row)? {
+        if self.list_case_follows(self.route(columns))? {
             return self.list_case_value(columns, nesting, at);
         }
         // Only the value read that starts here is bounded: it takes the flag
@@ -531,11 +587,7 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        if self.lone_case_result(row)? {
+        if self.lone_case_result(self.route(columns))? {
             return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);
@@ -556,11 +608,7 @@ impl<'a> Parser<'a> {
         if self.starts_composite_comparison()? {
             return Ok(true);
         }
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        Ok(self.list_column_compared(row)?)
+        Ok(self.list_column_compared(self.routing_row(columns))?)
     }
 
     /// Whether the `+`/`-` chain here has a list operand, which the value
@@ -569,11 +617,7 @@ impl<'a> Parser<'a> {
         &self,
         columns: &ExpressionColumns<'_, 'a>,
     ) -> Result<bool, GraphMutationTextError> {
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        Ok(self.list_chain_follows(row)?)
+        Ok(self.list_chain_follows(self.route(columns))?)
     }
 
     /// openCypher list concatenation: a `+`/`-` chain with a list operand
@@ -627,11 +671,7 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        let row = match columns {
-            ExpressionColumns::Row(schema) => Some(*schema),
-            _ => None,
-        };
-        if self.list_operand_here(row)? {
+        if self.list_operand_here(self.route(columns))? {
             return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);
@@ -677,9 +717,14 @@ impl<'a> Parser<'a> {
         if !matches!(lexer.next()?.kind, TokenKind::Punct(b'[')) {
             return Ok(true);
         }
-        // A list literal keeps the scalar IN, unless a slice, subscript or
-        // additive list concatenation reads it (`3 IN [1, 2, 3][0..1]`,
-        // `2 IN [1] + 2`): then the list is a value.
+        // A list literal keeps the scalar IN, unless an element is a list or
+        // map literal (`false IN [[3, 4], false]`, TCK Precedence3 [6]), which
+        // the scalar members cannot hold, or a slice, subscript or additive
+        // list concatenation reads it (`3 IN [1, 2, 3][0..1]`, `2 IN [1] +
+        // 2`): then the list is a value.
+        if literal_has_composite_element(&lexer)? {
+            return Ok(true);
+        }
         super::return_projection::skip_group(&mut lexer)?;
         Ok(matches!(
             lexer.next()?.kind,
@@ -2267,9 +2312,13 @@ impl<'a> Parser<'a> {
         }
         if let TokenKind::Word(word) = self.current.kind {
             let visible = self.visible_width(schema);
-            if let Some(column) = schema[..visible]
-                .iter()
-                .position(|(name, _)| name.text == word)
+            // A name before `(` is a call, never a column: `sum(a.num)` after
+            // `... AS sum` repeats the item (TCK WithOrderBy4 [11]).
+            let call = matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+            if !call
+                && let Some(column) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == word)
             {
                 self.advance()?;
                 return Ok(Operand::Column(column));

@@ -35,6 +35,29 @@ pub struct BufferedEdgeCandidate<Row = BufferedValue<BufferedEdge>> {
     pub row: Option<Row>,
 }
 
+/// An authenticated visible edge without property materialization. Its source
+/// reservation stays owned by this value; no empty property row is presented
+/// as a complete stored record. This does not prove endpoint visibility.
+pub struct BufferedEdgeTopology(BufferedValue<BufferedEdge>);
+
+impl BufferedEdgeTopology {
+    pub fn entry(&self) -> &AdjacencyEntry {
+        &self.0.entry
+    }
+}
+
+impl core::fmt::Debug for BufferedEdgeTopology {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BufferedEdgeTopology([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgePropertyAccess {
+    Read,
+    Skip,
+}
+
 /// One complete edge and its visible endpoints, all resolved at the cursor's
 /// cut. A self-loop retains one endpoint allocation, not two copies. This is
 /// an owner-level storage record, not a Warden authorization grant.
@@ -102,6 +125,7 @@ type Key = (EId, CommitSeq, usize);
 struct ActiveBlock {
     block: usize,
     image: BufferedValue<(Vec<AdjacencyEntry>, Option<BlockProps>)>,
+    properties: EdgePropertyAccess,
     order: Vec<Key>,
     _order_charge: MemoryCharge,
 }
@@ -203,20 +227,21 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         state: &mut State,
         cx: &QueryCx,
         block: usize,
+        properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
-        if state
-            .active
-            .as_ref()
-            .is_some_and(|active| active.block == block)
-        {
+        if state.active.as_ref().is_some_and(|active| {
+            active.block == block
+                && (properties == EdgePropertyAccess::Skip
+                    || active.properties == EdgePropertyAccess::Read)
+        }) {
             return Ok(());
         }
         // Drop old decoded storage before faulting another block.
         state.active = None;
         let image = self
             .partition
-            .edge_scan_block(cx, block, &mut self.work, observe)
+            .edge_scan_block(cx, block, properties, &mut self.work, observe)
             .await?;
         let bytes = image
             .0
@@ -248,6 +273,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         state.active = Some(ActiveBlock {
             block,
             image,
+            properties,
             order,
             _order_charge: charge,
         });
@@ -258,6 +284,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         &mut self,
         state: &mut State,
         cx: &QueryCx,
+        properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
         if !state.initialized {
@@ -337,7 +364,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 break;
             }
             self.work.step(cx, observe)?;
-            self.load(state, cx, head.block, observe).await?;
+            self.load(state, cx, head.block, properties, observe)
+                .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let &(eid, created, original) =
                 active.order.get(head.ordinal).ok_or_else(invalid_load)?;
@@ -361,11 +389,15 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 self.work.step(cx, observe)?;
                 let value = &mut winner.as_mut().expect("reserved winner").0;
                 value.entry = *entry;
-                value.props = active
-                    .image
-                    .1
-                    .as_ref()
-                    .map_or_else(Vec::new, |props| props.props_of(original));
+                value.props = if properties == EdgePropertyAccess::Read {
+                    active
+                        .image
+                        .1
+                        .as_ref()
+                        .map_or_else(Vec::new, |props| props.props_of(original))
+                } else {
+                    Vec::new()
+                };
             }
             let next = active
                 .order
@@ -402,10 +434,45 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         cx: &QueryCx,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, EdgePropertyAccess::Read, observe)
+            .await
+    }
+
+    /// Resolve the same complete EId history without faulting edge-property
+    /// sidecars. Initial root admission already proved the topology/sidecar
+    /// binding; every selected topology fault still verifies its immutable
+    /// extent, descriptor summary and positional locators. An invisible winner
+    /// remains a candidate with no row, not EOF. Endpoint visibility and any
+    /// authorization projection remain the caller's responsibility.
+    ///
+    /// Topology and complete-record pulls may be interleaved. A later complete
+    /// pull upgrades an active topology-only block before observing properties.
+    /// Both paths share history ordering, work admission and terminal cleanup.
+    pub async fn next_topology_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeTopology>>, BufferedScanError<C>> {
+        self.next_candidate_with_access(cx, EdgePropertyAccess::Skip, observe)
+            .await
+            .map(|candidate| {
+                candidate.map(|candidate| BufferedEdgeCandidate {
+                    eid: candidate.eid,
+                    row: candidate.row.map(BufferedEdgeTopology),
+                })
+            })
+    }
+
+    async fn next_candidate_with_access<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        properties: EdgePropertyAccess,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
         let Some(mut state) = self.state.take() else {
             return Ok(None);
         };
-        let result = self.advance(&mut state, cx, observe).await;
+        let result = self.advance(&mut state, cx, properties, observe).await;
         if matches!(result, Ok(Some(_))) && !state.heads.is_empty() {
             self.state = Some(state);
         }
@@ -425,7 +492,10 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         let Some(mut state) = self.state.take() else {
             return Ok(None);
         };
-        let Some(candidate) = self.advance(&mut state, cx, observe).await? else {
+        let Some(candidate) = self
+            .advance(&mut state, cx, EdgePropertyAccess::Read, observe)
+            .await?
+        else {
             return Ok(None);
         };
         let candidate = self

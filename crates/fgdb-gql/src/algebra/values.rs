@@ -599,7 +599,9 @@ impl GraphValue {
     /// scalar payload quantum as work and scratch, all before the copy is
     /// built, as a scalar operand is admitted before it is cloned. A value
     /// beyond the query bounds raises `StoredValueBounds`; it is never NULL.
-    pub(crate) fn admit_property_value<E: From<crate::GraphIntegerError>>(
+    /// Hosts must authorize the field before calling this conversion and supply
+    /// their existing evaluator and signed-work control; this grants no authority.
+    pub fn admit_property_value<E: From<crate::GraphIntegerError>>(
         value: &CanonicalPropertyValue,
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {

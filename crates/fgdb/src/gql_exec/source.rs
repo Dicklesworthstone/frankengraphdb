@@ -915,6 +915,30 @@ impl AdjacencyIndex {
         }
     }
 
+    /// Cheap historical incidence upper bound for choosing a traversal side.
+    /// Read only endpoint-directory lengths: base/overlay overlap and a self
+    /// loop's two faces may be counted twice. Unlike `degree`, this does not
+    /// walk overlay postings to deduplicate them or inspect edge payloads.
+    pub(crate) fn degree_upper_bound(
+        &self,
+        endpoint: VId,
+        direction: fgdb_gql::algebra::GlaDirection,
+    ) -> usize {
+        use fgdb_gql::algebra::GlaDirection;
+        let count = |base: &FlatFace, overlay: &IndexMap<VId, Incidence>| {
+            base.members(endpoint)
+                .0
+                .len()
+                .saturating_add(overlay.get(&endpoint).map_or(0, IndexMap::len))
+        };
+        match direction {
+            GlaDirection::Forward => count(&self.base.outgoing, &self.outgoing),
+            GlaDirection::Reverse => count(&self.base.incoming, &self.incoming),
+            GlaDirection::Undirected => count(&self.base.outgoing, &self.outgoing)
+                .saturating_add(count(&self.base.incoming, &self.incoming)),
+        }
+    }
+
     /// `eid`'s current history, if this generation indexed it.
     fn history(&self, eid: EId) -> Option<HistoryRef<'_>> {
         if let Some(history) = self.histories.get(&eid) {
@@ -2517,7 +2541,7 @@ mod indexed_tests {
                 })
                 .collect()
         }
-        let (mut visits, mut changed_endpoints) = (0, 0);
+        let (mut visits, mut changed_endpoints, mut loose_hints) = (0, 0, 0);
         for seed in [3_u64, 11, 47, 101, 977] {
             let mut state = seed;
             let mut next = |bound: u64| {
@@ -2570,6 +2594,11 @@ mod indexed_tests {
                     ] {
                         for as_of in 0..=11 {
                             let (endpoint, as_of) = (VId(vid), CommitSeq(as_of));
+                            let degree = index.degree(endpoint, direction);
+                            let upper = index.degree_upper_bound(endpoint, direction);
+                            assert!(upper >= degree);
+                            assert!(upper <= degree.saturating_mul(2));
+                            loose_hints += usize::from(upper > degree);
                             let mut seen = Vec::new();
                             let mut control = |_| Ok::<(), ()>(());
                             index
@@ -2597,8 +2626,8 @@ mod indexed_tests {
             }
         }
         assert!(
-            visits > 2_000 && changed_endpoints > 20,
-            "{visits} {changed_endpoints}"
+            visits > 2_000 && changed_endpoints > 20 && loose_hints > 0,
+            "{visits} {changed_endpoints} {loose_hints}"
         );
     }
 

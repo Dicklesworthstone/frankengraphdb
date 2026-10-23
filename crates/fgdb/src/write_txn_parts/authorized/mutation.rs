@@ -427,7 +427,7 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
 // Both mutation surfaces authorize the same original intents. The projected
 // RETURN path charges its final rows instead of internal target identities.
 #[allow(clippy::too_many_arguments)]
-fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
     query_cx: &QueryCx,

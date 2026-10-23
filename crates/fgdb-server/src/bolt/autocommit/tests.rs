@@ -150,6 +150,54 @@ fn pending_writes_are_consumed_once_and_committed_rows_survive_real_recovery() {
 }
 
 #[test]
+fn creation_chains_are_deferred_and_consumed_once_without_return_rows() {
+    let ((), report) = run_async_under_lab(0xb017_0011, |root| async move {
+        let (server, token, _) = served(&root, "bolt-creation-chain").await;
+        let db = &server.databases["test"];
+        let mut client = connection(&server, token);
+        let mut wire = io();
+        for (discard, before) in [(false, 0), (true, 1)] {
+            let fields = client
+                .run(&root, "CREATE (a) WITH a CREATE (b)", &vec![], &extra())
+                .await
+                .unwrap();
+            assert_eq!(get(&fields, "fields"), Some(&Value::List(vec![])));
+            assert!(client.pending.as_ref().unwrap().write.is_some());
+            assert_eq!(frontier(&root, db).await, CommitSeq(before));
+            let done = client.pull(&root, &mut wire, -1, discard).await.unwrap();
+            assert_eq!(get(&done, "type").and_then(Value::as_str), Some("w"));
+            assert_eq!(
+                get(&done, "bookmark").and_then(Value::as_str),
+                Some(format!("fgdb:test:{}", before + 1).as_str()),
+            );
+            assert_eq!(frontier(&root, db).await, CommitSeq(before + 1));
+            assert!(client.pending.is_none());
+            assert!(client.pull(&root, &mut wire, -1, false).await.is_err());
+            assert_eq!(
+                db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+                ((before + 1) * 2) as usize,
+            );
+        }
+        // The Bolt profile still excludes write RETURN. Recognizing a chain
+        // must not silently discard an explicitly requested public result.
+        assert!(
+            client
+                .run(
+                    &root,
+                    "CREATE (a) WITH a CREATE (b) RETURN 1 AS value",
+                    &vec![],
+                    &extra(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(frontier(&root, db).await, CommitSeq(2));
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn pending_write_is_not_replayed_after_database_reopen() {
     let ((), report) = run_async_under_lab(0xb017_0002, |root| async move {
         let (server, token, _) = served(&root, "bolt-write-stale-queue").await;

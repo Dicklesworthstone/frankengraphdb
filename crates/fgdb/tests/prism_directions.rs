@@ -976,3 +976,102 @@ fn sealed_degree_empty_singleton_and_retained_loops_match_the_catalog_contract()
         );
     });
 }
+
+#[test]
+fn retained_endpoint_directory_matches_tight_workspace_fallback_in_every_direction() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = fixture();
+        let extra: Vec<_> = (1..=513u128).map(|id| VId((id << 118) | id)).collect();
+        for &vertex in &extra {
+            batch.create_vertex(vertex, vec![LabelId(1)], vec![]);
+        }
+        for (index, (source, target)) in [
+            (VId(1), extra[0]),
+            (extra[0], extra[256]),
+            (extra[256], extra[512]),
+            (extra[512], VId(u128::MAX)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            batch.add_edge(
+                EId(2000 + index as u128),
+                source,
+                target,
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let mut opt = options(direction);
+            opt.projection_limits.max_vertices = 1024;
+            opt.execution_limits.max_result_rows = 1024;
+            let cached = project(&db, &query, opt).await;
+            assert_eq!(cached.node_count(), 518);
+            // The fixture's excluded endpoints have invalid Bool weights.
+            // Successful construction must exclude them before weight binding.
+            assert_eq!(cached.input_edge_count(), 22);
+            let mandatory_bytes = cached.node_count() * (size_of::<VId>() + size_of::<usize>())
+                + cached
+                    .incoming_index_stats()
+                    .map_or(0, |stats| stats.charged_workspace_bytes);
+            assert!(cached.charged_workspace_bytes() > mandatory_bytes);
+            opt.projection_limits.max_workspace_bytes = mandatory_bytes;
+            let fallback = project(&db, &query, opt).await;
+            assert_eq!(fallback.charged_workspace_bytes(), mandatory_bytes);
+            assert_eq!(cached.binding(), fallback.binding());
+            assert_eq!(cached.digest(), fallback.digest());
+            assert_eq!(cached.vertex_ids(), fallback.vertex_ids());
+            assert_eq!(cached.edge_count(), fallback.edge_count());
+            assert_eq!(cached.input_edge_count(), fallback.input_edge_count());
+            assert_eq!(
+                cached.adjacency_entry_count(),
+                fallback.adjacency_entry_count()
+            );
+            assert_eq!(
+                cached.scan_incidence_bound(),
+                fallback.scan_incidence_bound()
+            );
+            for (ordinal, &vertex) in cached.vertex_ids().iter().enumerate() {
+                assert_eq!(cached.vertex_ordinal(vertex), Some(ordinal));
+                assert_eq!(fallback.vertex_ordinal(vertex), Some(ordinal));
+                assert_eq!(cached.degree(ordinal), fallback.degree(ordinal));
+                for lower in [None, Some(extra[256])] {
+                    assert_eq!(
+                        row(&cached, &query, ordinal, lower),
+                        row(&fallback, &query, ordinal, lower),
+                        "{direction:?} source={ordinal} lower={lower:?}"
+                    );
+                }
+            }
+            for absent in [VId(0), VId(99), VId(extra[256].0 ^ (1u128 << 127))] {
+                assert_eq!(cached.vertex_ordinal(absent), None);
+                assert_eq!(fallback.vertex_ordinal(absent), None);
+            }
+            // Exercise source lookup and repeated compressed passes, including
+            // all isolates, with identical rows and complete certificates.
+            for text in [BFS, RANK] {
+                let call = call(text);
+                assert_eq!(
+                    call.execute_sealed(&query, &cached, opt.execution_limits, memory())
+                        .unwrap(),
+                    call.execute_sealed(&query, &fallback, opt.execution_limits, memory())
+                        .unwrap(),
+                    "{direction:?} {text}"
+                );
+            }
+        }
+    });
+}

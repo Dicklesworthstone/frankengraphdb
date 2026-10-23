@@ -466,6 +466,342 @@ fn p_rows() -> QueryResult {
     native_rows(&["p"], vec![vec![value(10)], vec![value(30)]])
 }
 
+/// The physically filtered twin omits hidden labels, fields, relations and
+/// transit vertices. Both contain 512 unrelated visible vertices, so a tiny
+/// source allowance distinguishes identity admission from a corpus scan.
+async fn identity_seed_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x72; 32], NS, [0x73; 32]))
+        .await
+        .unwrap();
+    let mut batch = WriteBatch::new(RelationId(1));
+    for id in [1, 3, 4].into_iter().chain(1000..1512) {
+        let labels = if hidden && id == 1 {
+            vec![LabelId(1), LabelId(99)]
+        } else {
+            vec![LabelId(1)]
+        };
+        let mut properties = vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64 * 10))];
+        if hidden {
+            properties.push((PropertyKeyId(2), CanonicalScalar::Int(999)));
+        }
+        batch.create_vertex(VId(id), labels, properties);
+    }
+    if hidden {
+        batch.create_vertex(
+            VId(2),
+            vec![LabelId(99)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(20))],
+        );
+    }
+    // Parallel edges and a cycle must retain the original bag and path laws.
+    for (eid, from, to) in [(12, 1, 3), (13, 1, 3), (14, 3, 1)] {
+        batch.add_edge(EId(eid), VId(from), VId(to), vec![]);
+    }
+    if hidden {
+        for (eid, from, to) in [(10, 1, 2), (11, 2, 3), (15, 2, 4)] {
+            batch.add_edge(EId(eid), VId(from), VId(to), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden {
+        let mut denied_relation = WriteBatch::new(RelationId(2));
+        denied_relation.add_edge(EId(20), VId(1), VId(1000), vec![]);
+        db.write(cx, denied_relation).await.unwrap();
+    }
+    db
+}
+
+fn identity_seed_arguments() -> GqlParameters {
+    use fgdb_gql::algebra::GraphValue;
+    GqlParameters::new()
+        .with_list(
+            "nodes",
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(999)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap()
+}
+
+#[test]
+fn authorized_identity_seeds_are_reauthorized_and_admit_only_their_visible_roots() {
+    let ((), report) = run_async_under_lab(0x5ec0_4021, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let full = identity_seed_database(&c.commit(), true).await;
+        let filtered = identity_seed_database(&c.commit(), false).await;
+        let issuer = authority(421);
+        let mut allowed = grant();
+        allowed.limits.max_nodes = 1;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let args = identity_seed_arguments();
+        let text = "UNWIND $nodes AS n MATCH (n) RETURN n.p AS p, n.hidden AS hidden";
+        let null = QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null));
+        let expected = native_rows(
+            &["p", "hidden"],
+            vec![vec![value(10), null.clone()], vec![value(10), null]],
+        );
+        let small = GqlQueryPolicy::new(1, 1000, 1_000_000, 1_000_000);
+        assert_eq!(
+            filtered.query(&cx, text, &args, symbols, policy()).unwrap(),
+            expected
+        );
+        for db in [&full, &filtered] {
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100
+                )
+                .unwrap(),
+                expected,
+            );
+        }
+        // The record allowance remains live; an ordinary unbound leaf still
+        // refuses after the first record rather than silently widening it.
+        assert!(
+            full.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                "MATCH (n) RETURN n.p AS p",
+                &GqlParameters::new(),
+                symbols,
+                small,
+                || 100,
+            )
+            .is_err()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_identity_seeded_closures_preserve_directions_bags_and_aggregates() {
+    let ((), report) = run_async_under_lab(0x5ec0_4022, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let full = identity_seed_database(&c.commit(), true).await;
+        let filtered = identity_seed_database(&c.commit(), false).await;
+        let issuer = authority(422);
+        let mut allowed = grant();
+        allowed.limits.max_nodes = 2;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let args = identity_seed_arguments();
+        // Two visible vertices and at most their three original edges. Hidden
+        // seed 2, its bridge to visible 4, and denied S->1000 cost no records.
+        let small = GqlQueryPolicy::new(5, 1000, 1_000_000, 1_000_000);
+        for (path, values) in [
+            ("(n)-[:R]->(m)", vec![30; 4]),
+            ("(n)-[]->(m)", vec![30; 4]),
+            ("(n)<-[:R]-(m)", vec![30; 2]),
+            ("(n)-[:R]-(m)", vec![30; 6]),
+            ("(n)-[:R]->(x)-[:R]->(m)", vec![10; 4]),
+            (
+                "(n)-[:R]->{0,2}(m)",
+                vec![10, 10, 10, 10, 10, 10, 30, 30, 30, 30],
+            ),
+        ] {
+            let text = format!("UNWIND $nodes AS n MATCH {path} RETURN m.p AS p ORDER BY p");
+            let expected =
+                native_rows(&["p"], values.into_iter().map(|n| vec![value(n)]).collect());
+            assert_eq!(
+                filtered
+                    .query(&cx, &text, &args, symbols, policy())
+                    .unwrap(),
+                expected,
+                "{text}"
+            );
+            for db in [&full, &filtered] {
+                assert_eq!(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &text,
+                        &args,
+                        symbols,
+                        small,
+                        || 100
+                    )
+                    .unwrap(),
+                    expected,
+                    "{text}",
+                );
+            }
+        }
+        let text = "UNWIND $nodes AS n MATCH (n)-[:R]->(m) RETURN COUNT(*) AS n, COUNT(m.hidden) AS hidden";
+        let expected = native_rows(
+            &["n", "hidden"],
+            vec![vec![QueryValue::Count(4), QueryValue::Count(0)]],
+        );
+        assert_eq!(
+            filtered.query(&cx, text, &args, symbols, policy()).unwrap(),
+            expected
+        );
+        for db in [&full, &filtered] {
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100
+                )
+                .unwrap(),
+                expected,
+            );
+        }
+        allowed.limits.max_nodes = 1;
+        let too_few_nodes = issuer.issue_at(&allowed, 100).unwrap();
+        for tail in ["RETURN m.p AS p", "RETURN m.p AS p LIMIT 0"] {
+            let text = format!("UNWIND $nodes AS n MATCH (n)-[:R]->(m) {tail}");
+            assert!(matches!(
+                full.query_authorized(
+                    &cx,
+                    &issuer,
+                    &too_few_nodes,
+                    BRANCH,
+                    &text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(
+                    LimitDimension::Nodes
+                )))
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hidden_seeded_transit_does_not_change_the_signed_work_refusal_boundary() {
+    let ((), report) = run_async_under_lab(0x5ec0_4023, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut full = identity_seed_database(&c.commit(), true).await;
+        let filtered = identity_seed_database(&c.commit(), false).await;
+        // More versions of a visible vertex's hidden field and of a wholly
+        // hidden vertex leave the visible graph unchanged. Winner seeks and
+        // source accounting must not expose that extra history through work.
+        for version in 0..8 {
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_property(
+                VId(1),
+                PropertyKeyId(2),
+                Some(CanonicalScalar::Int(version)),
+            );
+            change.set_vertex_property(
+                VId(2),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(version)),
+            );
+            full.write(&c.commit(), change).await.unwrap();
+        }
+        let issuer = authority(423);
+        let args = identity_seed_arguments();
+        let text = "UNWIND $nodes AS n MATCH (n)-[]->{0,2}(m) RETURN m.p AS p ORDER BY p";
+        let small = GqlQueryPolicy::new(5, 1000, 1_000_000, 1_000_000);
+        let least_work = |db: &Database<MemVfs>| {
+            let (mut low, mut high) = (1, 1_000_000);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let mut allowed = grant();
+                allowed.limits.max_nodes = 2;
+                allowed.limits.max_work = middle;
+                let token = issuer.issue_at(&allowed, 100).unwrap();
+                match db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100,
+                ) {
+                    Ok(_) => high = middle,
+                    Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Work))) => {
+                        low = middle + 1
+                    }
+                    other => panic!("unexpected work-threshold result: {other:?}"),
+                }
+            }
+            low
+        };
+        let full_work = least_work(&full);
+        assert!(full_work > 1 && full_work < 1_000_000);
+        assert_eq!(full_work, least_work(&filtered));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn seeded_reads_choose_the_historical_winner_before_masking() {
+    let ((), report) = run_async_under_lab(0x5ec0_4024, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = identity_seed_database(&commit, true).await;
+        let issuer = authority(424);
+        let mut allowed = grant();
+        allowed.limits.max_nodes = 1;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let basis = db.frontier().unwrap();
+        let old = identity_seed_arguments()
+            .with_uint64("at", basis.0)
+            .unwrap();
+        let text = "UNWIND $nodes AS n MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p";
+        let prepared = PreparedNativeRead::prepare(text, &old, symbols).unwrap();
+        let mut hide = WriteBatch::new(RelationId(1));
+        hide.set_vertex_label(VId(1), LabelId(1), false);
+        let after = db.write(&commit, hide).await.unwrap();
+        let current = identity_seed_arguments()
+            .with_uint64("at", after.0)
+            .unwrap();
+        let small = GqlQueryPolicy::new(1, 1000, 1_000_000, 1_000_000);
+        for compact in [false, true] {
+            if compact {
+                db.compact(&commit).await.unwrap();
+            }
+            assert_eq!(
+                prepared
+                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &old, small, || 100)
+                    .unwrap(),
+                native_rows(&["p"], vec![vec![value(10)], vec![value(10)]]),
+            );
+            assert_eq!(
+                prepared
+                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &current, small, || 100)
+                    .unwrap(),
+                native_rows(&["p"], vec![]),
+                "a hidden successor cannot revive the previously visible root",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn all_seven_native_facades_use_scoped_data_and_lossless_output_slots() {
     let ((), report) = run_async_under_lab(0x5ec0_4001, |root| async move {

@@ -585,10 +585,14 @@ impl<'a> Parser<'a> {
         if let Some(path) = self.syntax.path {
             self.syntax.filters.push(Filter::PathCapture(path));
         }
-        if self.defer_where && self.is_word("WHERE") && self.where_needs_values()? {
+        if self.is_word("WHERE")
+            && ((self.defer_where && self.where_needs_values()?)
+                || self.deferred_wheres.contains(&self.current.at))
+        {
             // A predicate over list or path values runs as a row filter after
-            // the match, at an implicit `WITH *` (fgdb-1c29d). The composition
-            // entry re-reads it from here.
+            // the match, at an implicit `WITH *` (fgdb-1c29d). So does a
+            // required continuation's WHERE the graph predicate refused. The
+            // composition entry re-reads it from here.
             self.deferred_where = Some((self.lexer.clone(), self.current));
             self.skip_where()?;
         } else if self.take_word("WHERE")? {

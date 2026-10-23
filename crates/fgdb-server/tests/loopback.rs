@@ -976,6 +976,55 @@ fn http_map_parameters_bind_nested_bulk_input_and_return_typed_maps() {
 }
 
 #[test]
+fn http_creation_chain_binds_parameters_and_publishes_one_atomic_result() {
+    run(async |cx| {
+        let server = Arc::new(served(cx, "creation-chain-http").await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let mut task = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let rw = token(&grant(Rights::ReadWrite));
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/write",
+            "127.0.0.1",
+            Some(&rw),
+            r#"{"statement":"CREATE (a:Person {name:$first}) WITH a CREATE (b:Person {name:$second}) RETURN a.name AS first,b.name AS second","parameters":{"first":"Ada","second":"Bob"}}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["first","second"],"rows":[[{"type":"text","value":"Ada"},{"type":"text","value":"Bob"}]],"seq":1,"statements":1,"committed":true}"#,
+        );
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            "127.0.0.1",
+            Some(&rw),
+            r#"{"statement":"MATCH (n:Person) RETURN n.name AS name ORDER BY name"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name"],"rows":[[{"type":"text","value":"Ada"}],[{"type":"text","value":"Bob"}]],"seq":1}"#,
+        );
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn fgp_map_fields_select_and_update_through_native_scalar_expressions() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "map-field-expressions").await;

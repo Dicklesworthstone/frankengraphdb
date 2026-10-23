@@ -85,9 +85,9 @@ fn retained_vertices_include_unused_label_capacity() {
         };
         let expected = size_of::<VertexRow>()
             + row.labels.capacity() * size_of::<LabelId>()
-            + properties(&row.props, &mut okay).unwrap().unwrap();
+            + properties(&row.props, &mut okay).unwrap();
         let value = BufferedValue::from_reserved(row, pool.reserve(&cx, WORKSPACE).unwrap());
-        let value = vertex(value, &mut okay).unwrap();
+        let value = value.retain_scan_vertex(&mut okay).unwrap();
         assert_eq!(value.charged_bytes(), expected);
         assert_eq!(pool.used(), expected);
         assert_eq!(value.vid, VId(u128::MAX));
@@ -112,7 +112,7 @@ fn retained_blocks_include_all_nested_vectors_without_changing_locators() {
             + entries.capacity() * size_of::<AdjacencyEntry>()
             + locators.capacity()
             + rows.capacity() * size_of::<EdgePropertyRow>()
-            + properties(&rows[0], &mut okay).unwrap().unwrap();
+            + properties(&rows[0], &mut okay).unwrap();
         let image = (entries, Some(BlockProps { locators, rows }));
         let value = BufferedValue::from_reserved(image, pool.reserve(&cx, WORKSPACE).unwrap());
         let value = block(value, &mut okay).unwrap();
@@ -127,15 +127,18 @@ fn retained_blocks_include_all_nested_vectors_without_changing_locators() {
 }
 
 #[test]
-fn collection_images_keep_full_admission_instead_of_guessing_capacities() {
+fn collection_images_retain_their_actual_capacity_instead_of_decoder_workspaces() {
     let ((), report) = run_async_under_lab(0x7c604, |root| async move {
         let cx = PurposeContexts::narrow_runtime_root(&root).query();
         let pool = MemoryPool::new(WORKSPACE, 0).unwrap();
         let mut children = Vec::with_capacity(128);
         children.push(CanonicalScalar::Int(7).into());
+        let child_bytes = children.capacity() * size_of::<CanonicalPropertyValue>();
         let list = CanonicalPropertyValue::List(CanonicalList::try_new(children).unwrap());
         let props = vec![(PropertyKeyId(1), list)];
-        assert_eq!(properties(&props, &mut okay).unwrap(), None);
+        let prop_bytes =
+            props.capacity() * size_of::<(PropertyKeyId, CanonicalPropertyValue)>() + child_bytes;
+        assert_eq!(properties(&props, &mut okay).unwrap(), prop_bytes);
         let image = (
             vec![edge(Vec::new()).entry],
             Some(BlockProps {
@@ -143,14 +146,31 @@ fn collection_images_keep_full_admission_instead_of_guessing_capacities() {
                 rows: vec![props],
             }),
         );
+        let expected = size_of::<BufferedBlockImage>()
+            + image.0.capacity() * size_of::<AdjacencyEntry>()
+            + image.1.as_ref().unwrap().locators.capacity()
+            + image.1.as_ref().unwrap().rows.capacity() * size_of::<EdgePropertyRow>()
+            + prop_bytes;
         let image = BufferedValue::from_reserved(image, pool.reserve(&cx, WORKSPACE).unwrap());
         let image = block(image, &mut okay).unwrap();
-        assert_eq!(image.charged_bytes(), WORKSPACE);
-        let row = edge(image.1.as_ref().unwrap().props_of(0));
+        assert_eq!(image.charged_bytes(), expected);
+        assert_eq!(pool.used(), expected);
         drop(image);
+        let mut children = Vec::with_capacity(256);
+        children.push(CanonicalScalar::Int(8).into());
+        let child_bytes = children.capacity() * size_of::<CanonicalPropertyValue>();
+        let props = vec![(
+            PropertyKeyId(1),
+            CanonicalPropertyValue::List(CanonicalList::try_new(children).unwrap()),
+        )];
+        let expected = size_of::<BufferedEdge>()
+            + props.capacity() * size_of::<(PropertyKeyId, CanonicalPropertyValue)>()
+            + child_bytes;
+        let row = edge(props);
         let row = BufferedValue::from_reserved(row, pool.reserve(&cx, WORKSPACE).unwrap());
         let row = row.retain_scan_edge(&mut okay).unwrap();
-        assert_eq!(row.charged_bytes(), WORKSPACE);
+        assert_eq!(row.charged_bytes(), expected);
+        assert_eq!(pool.used(), expected);
         drop(row);
         assert_eq!(pool.used(), 0);
     });
@@ -205,7 +225,7 @@ fn undersized_prepaid_reservation_refuses_without_an_unaccounted_owner() {
         // Inline test payload: no unadmitted heap allocation is introduced.
         let value = BufferedValue::from_reserved([0_u8; 128], pool.reserve(&cx, 64).unwrap());
         assert!(matches!(
-            retain(value, Some(128)),
+            retain(value, 128),
             Err(BufferedReadError::SizeOverflow)
         ));
         assert_eq!(pool.used(), 0);

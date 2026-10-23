@@ -362,7 +362,11 @@ fn joined_write_scripts_and_parameter_batches_share_the_same_selection_compiler(
     else {
         panic!("wrong joined write dispatch")
     };
-    let ops = update.selection().plan().operators();
+    let ops = update
+        .selection()
+        .expect("a MATCH mutation reads a graph selection")
+        .plan()
+        .operators();
     let boundary = ops
         .iter()
         .position(|op| matches!(op, GlaOperator::OptionalEnd { .. }))

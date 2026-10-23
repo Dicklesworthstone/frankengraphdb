@@ -6,7 +6,7 @@
 //! A lost terminal response is not evidence of rollback and is not replayed.
 
 use super::*;
-use fgdb_gql::{BoundNativeGraphWrite, GraphSymbol};
+use fgdb_gql::{BoundNativeGraphWrite, GraphSymbol, PreparedGraphWriteChainText};
 use fgdb_protocol::body::{Body, Execute, ExecuteMode, Outcome};
 use fgdb_warden::{PlannerPredicates, Rights};
 
@@ -62,7 +62,7 @@ fn is_native_write(
     if is_native_read(db, text, parameters) {
         return false;
     }
-    BoundNativeGraphWrite::probe_definition(text, parameters, db.write_relation, |kind, name| {
+    let resolve = |kind, name: &str| {
         db.symbols
             .resolve(kind, name)
             .filter(|symbol| match symbol {
@@ -70,8 +70,21 @@ fn is_native_write(
                 GraphSymbol::Relation(relation) => scope.allows_relation(*relation),
                 GraphSymbol::Property(property) => scope.allows_property(*property),
             })
-    })
-    .is_ok()
+    };
+    if PreparedGraphWriteChainText::is_chain(text).unwrap_or(false) {
+        // Preparing the definition does not expand parameter rows or allocate
+        // identities. PULL/DISCARD later binds the retained definition.
+        // Execution uses one signed permit and the queued generation fence.
+        let declarations: Vec<_> = parameters.parameter_types().collect();
+        return PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text,
+            db.write_relation,
+            &declarations,
+            resolve,
+        )
+        .is_ok_and(|chain| !chain.returns_rows());
+    }
+    BoundNativeGraphWrite::probe_definition(text, parameters, db.write_relation, resolve).is_ok()
 }
 
 impl<'s> Connection<'s> {

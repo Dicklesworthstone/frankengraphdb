@@ -16,7 +16,7 @@
 //! environment and debug assertions cannot recover every compiler option.
 //!
 //! Build GAPBS from https://github.com/sbeamer/gapbs, or pass a clean source
-//! checkout: this example compiles the actual upstream BFS/CC implementations
+//! checkout: this example compiles the actual upstream BFS/CC/TC implementations
 //! with a small output adapter. A C++11/OpenMP compiler (`CXX`, default `c++`)
 //! plus Git and `rustc` must be available. The checkout's revision, compiler, input blob,
 //! arguments, full results, verification transcripts and samples are retained
@@ -30,6 +30,13 @@
 //! loop lets GAPBS's endpoint-based loader retain trailing isolates as well.
 //! BFS compares every reachable distance and every unreachable vertex; WCC
 //! compares all labels after canonicalizing to each component's minimum ID.
+//! Triangle counting symmetrizes that same input and compares the exact total
+//! from all database per-vertex counts with GAPBS's native scalar result and
+//! TCVerifier. Database vertex counts are fully consumed and retained; GAPBS
+//! does not return per-vertex counts, so TC makes no per-vertex parity or
+//! identical-output-cost claim. The database's independent fnx/brute-force
+//! triangle tests cover each vertex. Duplicate/reciprocal edges collapse and
+//! self-loops are dropped before either triangle kernel.
 //! PageRank is intentionally absent: GAPBS's sink and float32 semantics differ
 //! from the registered normalized float64 procedure.
 //!
@@ -71,6 +78,7 @@ use fgdb_prism::{
     ParallelEdgePolicy, SelfLoopPolicy, SnapshotGraphView,
 };
 use fgdb_types::{CommitCx, EId, PurposeContexts, QueryCx, VId};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -355,7 +363,11 @@ fn run_oracle(
     if output_path.exists() {
         return Err("refusing to overwrite oracle output".into());
     }
-    let mut command = Command::new(config.output.join("gapbs-adapter"));
+    let mut command = Command::new(config.output.join(if algorithm == "tc" {
+        "gapbs-tc-adapter"
+    } else {
+        "gapbs-adapter"
+    }));
     command
         .arg(algorithm)
         .arg(config.output.join("graph.el"))
@@ -383,6 +395,7 @@ fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Resul
     let expected_columns = match algorithm {
         "bfs" => ["vertex", "distance"],
         "wcc" => ["vertex", "component"],
+        "tc" => ["vertex", "triangles"],
         _ => return Err("unknown result algorithm".into()),
     };
     if result
@@ -405,17 +418,45 @@ fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Resul
         }
         previous = Some(vertex);
         values[vertex] = match (algorithm, value) {
-            ("bfs", FnxValue::Integer(distance)) => i64::try_from(*distance)?,
+            ("bfs" | "tc", FnxValue::Integer(value)) => i64::try_from(*value)?,
             ("wcc", FnxValue::Vertex(component)) if component.0 < vertices as u128 => {
                 i64::try_from(component.0)?
             }
             _ => return Err("production result has the wrong value type".into()),
         };
     }
-    if algorithm == "wcc" && result.rows.len() != vertices {
-        return Err("component result omitted vertices".into());
+    if algorithm != "bfs" && result.rows.len() != vertices {
+        return Err("analytics result omitted vertices".into());
     }
     Ok(values)
+}
+
+/// GAPBS TC returns one exact graph total; the database returns one count per
+/// vertex. Each triangle contributes to exactly three database rows. Preserve
+/// and encode those complete rows before reducing only the comparison copy.
+fn oracle_rows<'a>(values: &'a [i64], algorithm: &str) -> Result<Cow<'a, [i64]>> {
+    if algorithm != "tc" {
+        return Ok(Cow::Borrowed(values));
+    }
+    let incidences = values
+        .iter()
+        .try_fold(0u128, |sum, &value| -> Result<u128> {
+            let value = u128::try_from(value)?;
+            sum.checked_add(value)
+                .ok_or("triangle count overflow".into())
+        })?;
+    if !incidences.is_multiple_of(3) {
+        return Err("per-vertex triangle counts do not sum to three times a total".into());
+    }
+    Ok(Cow::Owned(vec![i64::try_from(incidences / 3)?]))
+}
+
+fn comparison_scope(algorithm: &str) -> &'static str {
+    if algorithm == "tc" {
+        "exact triangle total matches; all database vertex counts consumed; upstream TCVerifier PASS"
+    } else {
+        "all vertices match; upstream verifier PASS"
+    }
 }
 
 fn write_rows(path: &Path, values: &[i64]) -> Result<()> {
@@ -448,10 +489,13 @@ fn compare_rows(expected: &[i64], reader: impl BufRead) -> Result<()> {
 }
 
 fn statement(algorithm: &str, source: usize) -> String {
-    if algorithm == "bfs" {
-        format!("CALL fnx.single_source_shortest_path_length({source}) YIELD vertex,distance")
-    } else {
-        "CALL fnx.weakly_connected_components() YIELD vertex,component".to_owned()
+    match algorithm {
+        "bfs" => {
+            format!("CALL fnx.single_source_shortest_path_length({source}) YIELD vertex,distance")
+        }
+        "wcc" => "CALL fnx.weakly_connected_components() YIELD vertex,component".to_owned(),
+        "tc" => "CALL fnx.triangles() YIELD vertex,triangles".to_owned(),
+        _ => unreachable!("the runner's algorithm set is closed"),
     }
 }
 
@@ -525,7 +569,10 @@ fn database_sample(
                 "warm_public_call_and_consume_ns",
                 public_call_ns.to_string(),
             ),
-            ("projected_arcs", certificate.edges.to_string()),
+            (
+                "projected_arcs",
+                projection.incoming_face().1.len().to_string(),
+            ),
             ("result_rows", result.rows.len().to_string()),
             ("kernel", certificate.execution_kernel.to_owned()),
             (
@@ -629,8 +676,9 @@ fn database_sample(
             )?;
         }
     }
+    let arcs = projection.incoming_face().1.len();
     *previous = Some(projection);
-    Ok((values, query_ns, certificate.edges))
+    Ok((values, query_ns, arcs))
 }
 
 struct SealedSample {
@@ -710,7 +758,7 @@ async fn sealed_sample(
     let values = canonical_rows(&result, algorithm, config.vertices)?;
     write_rows(&config.output.join(format!("{prefix}.rows")), &values)?;
     let encoding_ns = started.elapsed().as_nanos();
-    let arcs = result.certificate.edges;
+    let arcs = graph.adjacency_entry_count();
     let projection_digest = format!("{:?}", result.certificate.projection_digest);
     let result_digest = format!("{:?}", result.certificate.result_digest);
     let kernel = result.certificate.execution_kernel;
@@ -787,7 +835,7 @@ async fn sealed_trials(
         [2, 0, 1],
         [2, 1, 0],
     ];
-    for algorithm in ["bfs", "wcc"] {
+    for algorithm in ["bfs", "wcc", "tc"] {
         let mut read_only_times = Vec::new();
         let mut writable_times = Vec::new();
         let mut gapbs_times = Vec::new();
@@ -843,7 +891,10 @@ async fn sealed_trials(
             {
                 return Err("live GAPBS and sealed populations differ".into());
             }
-            compare_rows(&read_only.values, BufReader::new(File::open(rows)?))?;
+            compare_rows(
+                &oracle_rows(&read_only.values, algorithm)?,
+                BufReader::new(File::open(rows)?),
+            )?;
             let gapbs_ns = metrics["input_ns"]
                 + metrics["csr_ns"]
                 + metrics["kernel_ns"]
@@ -855,7 +906,7 @@ async fn sealed_trials(
                     ("algorithm", algorithm.to_owned()),
                     ("trial", trial.to_string()),
                     ("order", order.map(|actor| ["readonly", "writable", "gapbs"][actor]).join(",")),
-                    ("correctness", "all rows and populations match; sealed identities match; live GAPBS verifier PASS".to_owned()),
+                    ("correctness", format!("sealed rows, populations and identities match; {}", comparison_scope(algorithm))),
                     ("read_only_open_through_release_ns", read_only.total_ns.to_string()),
                     ("writable_open_through_release_ns", writable.total_ns.to_string()),
                     ("gapbs_input_through_result_ns", gapbs_ns.to_string()),
@@ -992,14 +1043,24 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         &config.output.join("gapbs-adapter.cc"),
         GAPBS_ADAPTER.as_bytes(),
     )?;
-    command_output(
-        Command::new(&compiler)
-            .args(["-std=c++11", "-O3", "-Wall", "-fopenmp", "-I"])
-            .arg(config.gapbs.join("src"))
-            .arg(config.output.join("gapbs-adapter.cc"))
-            .arg("-o")
-            .arg(config.output.join("gapbs-adapter")),
-    )?;
+    for (binary, triangle) in [("gapbs-adapter", false), ("gapbs-tc-adapter", true)] {
+        let mut build = Command::new(&compiler);
+        build.args(["-std=c++11", "-O3", "-Wall", "-fopenmp"]);
+        if triangle {
+            // tc.cc opts into libstdc++ parallel algorithms before including
+            // headers. Keep it in its own translation unit so those macros
+            // cannot change the existing BFS/WCC comparator builds.
+            build.arg("-DFGDB_TC_ORACLE");
+        }
+        command_output(
+            build
+                .arg("-I")
+                .arg(config.gapbs.join("src"))
+                .arg(config.output.join("gapbs-adapter.cc"))
+                .arg("-o")
+                .arg(config.output.join(binary)),
+        )?;
+    }
     let started = Instant::now();
     let mut edges = if let Some(path) = &config.graph {
         input(BufReader::new(File::open(path)?), config.vertices)?
@@ -1033,7 +1094,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ),
             (
                 "gapbs_build_flags",
-                "-std=c++11 -O3 -Wall -fopenmp".to_owned(),
+                "-std=c++11 -O3 -Wall -fopenmp; separate TC adapter adds -DFGDB_TC_ORACLE".to_owned(),
             ),
             ("rust_debug_assertions", cfg!(debug_assertions).to_string()),
             ("rustc_verbose_version", rustc_version),
@@ -1083,7 +1144,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             ),
             (
                 "graph_policy",
-                "directed; unit weights; collapse parallel; drop self-loops".to_owned(),
+                "BFS/WCC directed; TC undirected; unit weights; collapse parallel; drop self-loops".to_owned(),
             ),
             (
                 "durability",
@@ -1093,22 +1154,34 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         ],
     )?;
     // This is a real negative control against the upstream verifier, not a
-    // fabricated passing log: corrupt the computed source parent and require
+    // fabricated passing log: corrupt the source parent or triangle total and require
     // both the nonzero exit and the explicit FAIL, with no result published.
-    let (control, rows) = run_oracle(&config, "bfs", "negative-control", true)?;
-    let control_log = String::from_utf8(control.stdout)?;
-    if control.status.success()
-        || verification_tokens(&control_log) != ["FAIL"]
-        || rows.exists()
-        || oracle_metrics(&control_log, control.status.success()).is_ok()
-    {
-        return Err("GAPBS failed the corrupted-result rejection control".into());
+    for algorithm in ["bfs", "tc"] {
+        let (control, rows) = run_oracle(
+            &config,
+            algorithm,
+            &format!("{algorithm}-negative-control"),
+            true,
+        )?;
+        let control_log = String::from_utf8(control.stdout)?;
+        if control.status.success()
+            || verification_tokens(&control_log) != ["FAIL"]
+            || rows.exists()
+            || oracle_metrics(&control_log, control.status.success()).is_ok()
+        {
+            return Err(
+                format!("GAPBS failed the {algorithm} corrupted-result rejection control").into(),
+            );
+        }
+        emit(
+            &mut log,
+            "negative_control",
+            &[
+                ("algorithm", algorithm.to_owned()),
+                ("outcome", "corrupted result rejected".to_owned()),
+            ],
+        )?;
     }
-    emit(
-        &mut log,
-        "negative_control",
-        &[("outcome", "corrupted BFS rejected".to_owned())],
-    )?;
 
     let started = Instant::now();
     let database_path = config.output.join("database");
@@ -1152,7 +1225,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
         ],
     )?;
     let mut previous = None;
-    for algorithm in ["bfs", "wcc"] {
+    for algorithm in ["bfs", "wcc", "tc"] {
         let mut database_samples = Vec::new();
         let mut gapbs_samples = Vec::new();
         for trial in 0..config.trials {
@@ -1184,7 +1257,10 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
             if metrics["arcs"] != projected_arcs as u128 {
                 return Err("GAPBS projected arc count differs from database".into());
             }
-            compare_rows(&values, BufReader::new(File::open(path)?))?;
+            compare_rows(
+                &oracle_rows(&values, algorithm)?,
+                BufReader::new(File::open(path)?),
+            )?;
             let gapbs_ns = metrics["input_ns"]
                 + metrics["csr_ns"]
                 + metrics["kernel_ns"]
@@ -1201,10 +1277,7 @@ async fn run(config: Config, commit: CommitCx, query: QueryCx) -> Result<()> {
                     }
                     .to_owned(),
                 ),
-                (
-                    "correctness",
-                    "all vertices match; upstream verifier PASS".to_owned(),
-                ),
+                ("correctness", comparison_scope(algorithm).to_owned()),
                 ("input_through_result_ns", gapbs_ns.to_string()),
             ];
             fields.extend(
@@ -1268,14 +1341,21 @@ fn main() {
 // builds do not need a C++ compiler or an installed GAPBS checkout. The driver
 // compiles this adapter before any measurement, retaining the exact source.
 const GAPBS_ADAPTER: &str = r#"
+#ifdef FGDB_TC_ORACLE
+#define main upstream_tc_main
+#include "tc.cc"
+#undef main
+#else
 #define main upstream_bfs_main
 #include "bfs.cc"
 #undef main
 #define main upstream_cc_main
 #include "cc.cc"
 #undef main
+#endif
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 using Clock = std::chrono::steady_clock;
@@ -1290,13 +1370,17 @@ int main(int argc, char** argv) {
   try {
     if (argc != 6 && argc != 7) throw std::runtime_error("invalid adapter arguments");
     const std::string algorithm(argv[1]);
+#ifdef FGDB_TC_ORACLE
+    if (algorithm != "tc") throw std::runtime_error("invalid TC algorithm");
+#else
     if (algorithm != "bfs" && algorithm != "wcc") throw std::runtime_error("invalid algorithm");
+#endif
     const NodeID population = std::stoi(argv[3]);
     const NodeID source = std::stoi(argv[4]);
     if (population <= 0 || source < 0 || source >= population) throw std::runtime_error("invalid source/population");
     if (std::ifstream(argv[5]).good()) throw std::runtime_error("output already exists");
-    char program[] = "gapbs-adapter", file_flag[] = "-f";
-    char* builder_args[] = {program, file_flag, argv[2], nullptr};
+    char program[] = "gapbs-adapter", file_flag[] = "-f", symmetric_file_flag[] = "-sf";
+    char* builder_args[] = {program, algorithm == "tc" ? symmetric_file_flag : file_flag, argv[2], nullptr};
     CLApp cli(3, builder_args, "live GAPBS comparison");
     if (!cli.ParseArgs()) throw std::runtime_error("builder arguments failed");
     Builder builder(cli);
@@ -1315,11 +1399,20 @@ int main(int argc, char** argv) {
     const uint64_t csr_ns = ns(start);
     if (graph.num_nodes() != population) throw std::runtime_error("population mismatch");
     start = Clock::now();
-    pvector<NodeID> result = algorithm == "bfs" ? DOBFS(graph, source) : Afforest(graph);
+    pvector<NodeID> result;
+    size_t triangles = 0;
+#ifdef FGDB_TC_ORACLE
+    if (graph.directed()) throw std::runtime_error("TC requires an undirected graph");
+    triangles = Hybrid(graph);
+#else
+    result = algorithm == "bfs" ? DOBFS(graph, source) : Afforest(graph);
+#endif
     const uint64_t kernel_ns = ns(start);
     if (argc == 7) {
       if (std::string(argv[6]) != "corrupt") throw std::runtime_error("invalid negative control");
-      if (algorithm == "bfs") {
+      if (algorithm == "tc") {
+        ++triangles;
+      } else if (algorithm == "bfs") {
         result[source] = -1;
       } else {
         bool corrupted = false;
@@ -1339,13 +1432,21 @@ int main(int argc, char** argv) {
       }
     }
     start = Clock::now();
+#ifdef FGDB_TC_ORACLE
+    bool verified = TCVerifier(graph, triangles);
+#else
     bool verified = algorithm == "bfs" ? BFSVerifier(graph, source, result) : CCVerifier(graph, result);
+#endif
     const uint64_t verification_ns = ns(start);
     PrintLabel("Verification", verified ? "PASS" : "FAIL");
     if (!verified) return 3;
     start = Clock::now();
-    std::vector<int64_t> values(population, -1);
-    if (algorithm == "bfs") {
+    std::vector<int64_t> values(algorithm == "tc" ? 1 : population, -1);
+    if (algorithm == "tc") {
+      if (triangles > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+        throw std::runtime_error("TC total exceeds signed comparison range");
+      values[0] = triangles;
+    } else if (algorithm == "bfs") {
       values[source] = 0;
       std::vector<NodeID> path;
       for (NodeID vertex = 0; vertex < population; ++vertex) {
@@ -1371,7 +1472,7 @@ int main(int argc, char** argv) {
     }
     std::ofstream output(argv[5]);
     if (!output) throw std::runtime_error("cannot create result file");
-    for (NodeID vertex = 0; vertex < population; ++vertex) output << vertex << " " << values[vertex] << '\n';
+    for (size_t vertex = 0; vertex < values.size(); ++vertex) output << vertex << " " << values[vertex] << '\n';
     output.close();
     if (!output) throw std::runtime_error("result write failed");
     const uint64_t encoding_ns = ns(start);
@@ -1400,9 +1501,9 @@ mod tests {
     use fgdb_types::{CommitSeq, ids::ObjectId};
     use std::convert::Infallible;
 
-    fn smoke_projection() -> SnapshotGraphView {
+    fn fixture_projection(name: &str, direction: Directedness) -> SnapshotGraphView {
         let vertices: Vec<_> = (0..8).map(VId).collect();
-        let edges: Vec<_> = fixture("smoke", 8)
+        let edges: Vec<_> = fixture(name, 8)
             .unwrap()
             .into_iter()
             .enumerate()
@@ -1421,7 +1522,7 @@ mod tests {
             &vertices,
             &edges,
             ProjectionSpec {
-                directedness: Directedness::Directed,
+                directedness: direction,
                 parallel_edges: ParallelEdgePolicy::CollapseUnit,
                 self_loops: SelfLoopPolicy::Drop,
             },
@@ -1437,7 +1538,7 @@ mod tests {
 
     #[test]
     fn complete_smoke_results_preserve_diamonds_duplicates_loops_and_isolates() {
-        let graph = smoke_projection();
+        let graph = fixture_projection("smoke", Directedness::Directed);
         for (algorithm, expected) in [
             ("bfs", vec![0, 1, 1, 2, -1, -1, -1, -1]),
             ("wcc", vec![0, 0, 0, 0, 4, 4, 6, 7]),
@@ -1459,8 +1560,29 @@ mod tests {
     }
 
     #[test]
+    fn triangle_total_consumes_all_vertex_counts_and_rejects_incomplete_results() {
+        let graph = fixture_projection("hub", Directedness::Undirected);
+        let call = FnxCallSpec::bind(&statement("tc", 0), &FnxParameters::new()).unwrap();
+        let mut result = call
+            .execute(&graph, FnxReadOptions::DEFAULT_EXECUTION_LIMITS, || {
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+        let values = canonical_rows(&result, "tc", 8).unwrap();
+        assert_eq!(values, [5, 1, 2, 2, 2, 2, 1, 0]);
+        assert_eq!(&*oracle_rows(&values, "tc").unwrap(), &[5]);
+        assert_eq!(graph.edge_count(), 11);
+        assert_eq!(graph.incoming_face().1.len(), 22);
+        assert!(oracle_rows(&[1, 0, 0], "tc").is_err());
+        assert!(oracle_rows(&[-1, 1, 0], "tc").is_err());
+        assert!(oracle_rows(&[i64::MAX; 6], "tc").is_err());
+        result.rows.pop();
+        assert!(canonical_rows(&result, "tc", 8).is_err());
+    }
+
+    #[test]
     fn result_normalization_rejects_wrong_missing_reordered_and_extra_columns() {
-        let graph = smoke_projection();
+        let graph = fixture_projection("smoke", Directedness::Directed);
         let call = FnxCallSpec::bind(&statement("bfs", 0), &FnxParameters::new()).unwrap();
         let mut result = call
             .execute(&graph, FnxReadOptions::DEFAULT_EXECUTION_LIMITS, || {

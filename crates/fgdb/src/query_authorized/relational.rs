@@ -7,6 +7,8 @@
 mod graph;
 #[path = "relational/native.rs"]
 mod native;
+#[path = "relational/seeded.rs"]
+mod seeded;
 pub use native::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
@@ -176,11 +178,15 @@ fn set_execution_in_runs<Clock: FnMut() -> u64>(
     GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
 > {
     let element_failure = RefCell::new(None);
-    let result = query.execute_governed_with_elements(
+    let result = query.execute_governed_with_seeded_elements(
         policy,
         |pattern, remaining| {
             pattern_at(snapshot, at, pattern, scope, execution, remaining)
                 .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |pattern, seeds, remaining| {
+            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
         },
         |call, arguments, remaining| {
             procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
@@ -292,11 +298,15 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
     GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 > {
     let element_failure = RefCell::new(None);
-    let result = query.execute_governed_with_elements(
+    let result = query.execute_governed_with_seeded_elements(
         policy,
         |pattern, remaining| {
             pattern_at(snapshot, at, pattern, scope, execution, remaining)
                 .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |pattern, seeds, remaining| {
+            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
         },
         |call, arguments, remaining| {
             procedure_at(snapshot, at, call, arguments, scope, execution, remaining)

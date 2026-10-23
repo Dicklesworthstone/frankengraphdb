@@ -4,11 +4,11 @@
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
 };
-use crate::write_txn::authorized::{edge_merge, stage};
+use crate::write_txn::authorized::{edge_merge, selection, stage};
 use crate::write_txn::{
-    WriteTxn, edge_upsert_actions, edge_upsert_property, edge_upsert_query_selection_policy,
-    edge_upsert_returning,
+    WriteTxn, edge_upsert_actions, edge_upsert_query_selection_policy, edge_upsert_returning,
 };
+use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
     GqlQueryError, GqlQueryExecution, GraphEdgeMergeOutcome, GraphEdgeUpsertError,
@@ -89,7 +89,29 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     return Ok(fgdb_types::CanonicalScalar::Null);
                 }
                 let state = state.borrow();
-                edge_upsert_property(state.0, state.1, edge, key, control)
+                // The singular host uses the same admitted-field accounting
+                // as occurrence-preserving programs. Physical history and
+                // hidden-key comparisons poll cancellation without changing
+                // either the native or signed work refusal threshold.
+                selection::property(
+                    state.0,
+                    state.1,
+                    ElementId::Edge(edge),
+                    key,
+                    scope,
+                    || {
+                        cx.checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(GqlQueryError::Interrupted)?;
+                        controls
+                            .borrow_mut()
+                            .poll()
+                            .map_err(GqlQueryError::Interrupted)
+                    },
+                    control,
+                    source,
+                )
+                .and_then(selection::scalar)
             },
             |batch| {
                 let mut state = state.borrow_mut();
@@ -250,7 +272,26 @@ impl<V: Vfs + Clone> Database<V> {
                                 control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
                                 return Ok(fgdb_types::CanonicalScalar::Null);
                             }
-                            edge_upsert_property(workspace.transaction(), self, edge, key, control)
+                            selection::property(
+                                workspace.transaction(),
+                                self,
+                                ElementId::Edge(edge),
+                                key,
+                                verified.predicates(),
+                                || {
+                                    query_cx
+                                        .checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
+                                control,
+                                source,
+                            )
+                            .and_then(selection::scalar)
                         },
                     )
                 })?;

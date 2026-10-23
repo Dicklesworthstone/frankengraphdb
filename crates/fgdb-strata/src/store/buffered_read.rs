@@ -733,12 +733,20 @@ impl<V: Vfs> BufferedPartition<V> {
             }
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        Ok(result
+        result
             .filter(|(row, _)| row.visible_at(as_of))
-            .map(|(value, _)| BufferedValue {
-                value,
-                _charge: result_charge,
-            }))
+            .map(|(value, _)| {
+                BufferedValue::from_reserved(value, result_charge).retain_scan_vertex(&mut || {
+                    cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, self.limits.max_work)?;
+                    Ok::<(), BufferedScanError<core::convert::Infallible>>(())
+                })
+            })
+            .transpose()
+            .map_err(|error| match error {
+                BufferedScanError::Read(error) => error,
+                BufferedScanError::Control(never) => match never {},
+            })
     }
 
     /// Seek admitted EId intervals across all possibly matching histories, then
@@ -796,10 +804,17 @@ impl<V: Vfs> BufferedPartition<V> {
                 .await?
         };
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        Ok(Some(BufferedValue {
-            value: BufferedEdge { entry, props },
-            _charge: result_charge,
-        }))
+        BufferedValue::from_reserved(BufferedEdge { entry, props }, result_charge)
+            .retain_scan_edge(&mut || {
+                cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, self.limits.max_work)?;
+                Ok::<(), BufferedScanError<core::convert::Infallible>>(())
+            })
+            .map(Some)
+            .map_err(|error| match error {
+                BufferedScanError::Read(error) => error,
+                BufferedScanError::Control(never) => match never {},
+            })
     }
 
     /// Bounded winning adjacency, in the canonical (src, relation, dst, eid)
@@ -1046,7 +1061,10 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             }
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        let row = winning_row.filter(|row| row.visible_at(self.as_of));
+        let row = winning_row
+            .filter(|row| row.visible_at(self.as_of))
+            .map(|row| row.retain_scan_vertex(&mut || self.observe(cx, observe)))
+            .transpose()?;
         Ok(Some(BufferedVertexCandidate {
             vid: first.vid,
             row,

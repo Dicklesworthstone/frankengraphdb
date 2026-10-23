@@ -425,3 +425,281 @@ fn stats_only_dispatch_keeps_the_hosts_cumulative_creation_ceiling() {
         fixture.stop(cx, 1, 1, 0).await;
     });
 }
+
+#[test]
+fn authorized_creation_chain_keeps_private_rows_and_commits_once() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "creation-chain", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::Write, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada',age:1}) WITH a \
+                     CREATE (b:Person {name:'Bob',age:2}),(a)-[:KNOWS]->(b)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after = state(cx, &mut observer).await;
+        assert_eq!((after.0.rows.len(), after.1.rows.len()), (2, 1));
+        assert_eq!(after.1.rows[0][0], WireValue::Text("Ada".into()));
+        assert_eq!(after.1.rows[0][1], WireValue::Text("Bob".into()));
+        // Private WITH input needs no delivered-row allowance, but RETURN
+        // still requires read authority even when its final limit is zero.
+        refuse_without_rows(
+            cx,
+            &mut writer,
+            "CREATE (a:Person) WITH a CREATE (b:Person) RETURN 1 AS value LIMIT 0",
+            ErrorCode::PermissionDenied,
+        )
+        .await;
+        assert_eq!(state(cx, &mut observer).await, after);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 2, 1).await;
+    });
+}
+
+#[test]
+fn authorized_creation_chain_refusal_rolls_back_every_step() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "chain-late-refusal", |config| {
+            config.write_policy.max_created_vertices = 1;
+        })
+        .await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 100)).await;
+        let before = state(cx, &mut writer).await;
+        let failure = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {name:'First'}) WITH a \
+                 CREATE (b:Person {name:'Second'}) RETURN b.name AS name",
+                vec![],
+            )
+            .await;
+        let Err(ClientError::Server { message, .. }) = failure else {
+            panic!("the shared creation allowance must refuse: {failure:?}");
+        };
+        assert!(
+            message.contains("limit") || message.contains("budget"),
+            "{message}"
+        );
+        assert_eq!(state(cx, &mut writer).await, before);
+        writer.close(cx).await.unwrap();
+        fixture.stop(cx, 0, 0, 0).await;
+    });
+}
+
+#[test]
+fn zero_row_mixed_chains_update_remove_and_delete_with_one_completion_each() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "mixed-chain-zero-rows", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada',age:1}) WITH a SET a.age=a.age+10",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after_set = state(cx, &mut observer).await;
+        assert_eq!(after_set.0.rows.len(), 1);
+        assert_eq!(after_set.0.rows[0][2], WireValue::Int(11));
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Ada'}) CREATE (b:Person {name:'Bob',age:2}) \
+                     WITH a,b REMOVE a.age",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
+        let after_remove = state(cx, &mut observer).await;
+        assert_eq!(after_remove.0.rows.len(), 2);
+        assert_eq!(after_remove.0.rows[0][1], WireValue::Text("Ada".into()));
+        assert_eq!(after_remove.0.rows[0][2], WireValue::Null);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Bob'}) CREATE (b:Person {name:'Survivor'}) \
+                     WITH a,b DELETE a",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            3,
+            1,
+        );
+        let after_delete = state(cx, &mut observer).await;
+        assert_eq!(
+            after_delete
+                .0
+                .rows
+                .iter()
+                .map(|row| row[1].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                WireValue::Text("Ada".into()),
+                WireValue::Text("Survivor".into())
+            ]
+        );
+        assert!(after_delete.1.rows.is_empty());
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 3, 2, 0).await;
+    });
+}
+
+#[test]
+fn relationship_merge_chain_continues_after_created_and_existing_matches() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "merge-chain-continuation", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                     MERGE (a)-[r:KNOWS]->(b) CREATE (b)-[:KNOWS]->(a)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after_create = state(cx, &mut observer).await;
+        assert_eq!(
+            (after_create.0.rows.len(), after_create.1.rows.len()),
+            (2, 2)
+        );
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                     MERGE (a)-[r:KNOWS]->(b) \
+                     CREATE (c:Person {name:'Followup'}),(c)-[:KNOWS]->(b)",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
+        let after_match = state(cx, &mut observer).await;
+        assert_eq!((after_match.0.rows.len(), after_match.1.rows.len()), (3, 3));
+        assert_eq!(
+            after_match
+                .1
+                .rows
+                .iter()
+                .filter(|row| {
+                    row[0] == WireValue::Text("Ada".into())
+                        && row[1] == WireValue::Text("Bob".into())
+                })
+                .count(),
+            1,
+            "a matched MERGE created a duplicate relationship"
+        );
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 2, 3, 3).await;
+    });
+}
+
+#[test]
+fn parameter_endpoint_merge_chain_imports_with_zero_rows_and_reuses_the_graph() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "vertex-merge-chain-import", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+            MERGE (b:Person {name:row.d}) MERGE (a)-[:KNOWS]->(b)";
+        let parameters = || {
+            vec![(
+                "rows".into(),
+                WireValue::List(
+                    [("Ada", "Bob"), ("Bob", "Cy"), ("Ada", "Bob"), ("Cy", "Cy")]
+                        .into_iter()
+                        .map(|(source, target)| {
+                            WireValue::Map(vec![
+                                ("d".into(), WireValue::Text(target.into())),
+                                ("s".into(), WireValue::Text(source.into())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )]
+        };
+        committed(
+            writer
+                .execute(cx, ExecuteMode::Write, statement, parameters())
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let first = state(cx, &mut observer).await;
+        assert_eq!((first.0.rows.len(), first.1.rows.len()), (3, 3));
+        assert_eq!(
+            first
+                .1
+                .rows
+                .iter()
+                .map(|row| (&row[0], &row[1]))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    &WireValue::Text("Ada".into()),
+                    &WireValue::Text("Bob".into())
+                ),
+                (
+                    &WireValue::Text("Bob".into()),
+                    &WireValue::Text("Cy".into())
+                ),
+                (&WireValue::Text("Cy".into()), &WireValue::Text("Cy".into())),
+            ],
+        );
+        let repeated = writer
+            .execute(cx, ExecuteMode::Write, statement, parameters())
+            .await
+            .unwrap();
+        assert!(repeated.columns.is_empty() && repeated.rows.is_empty());
+        assert_eq!(
+            repeated.outcome,
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1
+            }
+        );
+        assert_eq!(state(cx, &mut observer).await, first);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 3, 3).await;
+    });
+}

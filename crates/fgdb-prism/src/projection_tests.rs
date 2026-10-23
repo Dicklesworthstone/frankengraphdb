@@ -162,6 +162,76 @@ fn sorted_vertex_lookup_accepts_duplicates_and_rejects_absent_full_width_ids() {
     }
 }
 
+#[test]
+fn retained_directory_is_optional_and_charged_at_capacity() {
+    let bytes = size_of::<OrdinalPrefix>();
+    for n in [0, 1, 511, 512, 513, 4096] {
+        let vertices: Vec<_> = (0..n).map(|index| VId(index as u128)).collect();
+        for budget in [0, bytes - 1, bytes, bytes * 2, usize::MAX] {
+            let retained = OrdinalPrefix::reserve_retained(&vertices, budget);
+            assert_eq!(
+                retained.len(),
+                usize::from(n >= INDEXED_DIRECTORY_MIN && budget >= bytes),
+                "n={n} budget={budget}"
+            );
+            assert!(retained.capacity() <= budget / bytes);
+            if retained.is_empty() {
+                assert_eq!(retained.capacity(), 0);
+            }
+        }
+        with_incumbent_directory(true, || {
+            let retained = OrdinalPrefix::reserve_retained(&vertices, usize::MAX);
+            assert!(retained.is_empty());
+            assert_eq!(retained.capacity(), 0);
+        });
+    }
+}
+
+#[test]
+fn retained_directory_reuses_full_width_bounds_after_population_moves() {
+    for n in [512, 513, 4096] {
+        for shape in 0..5 {
+            let mut vertices = directory_vertices(n, shape);
+            vertices.sort_unstable();
+            let mut retained =
+                OrdinalPrefix::reserve_retained(&vertices, size_of::<OrdinalPrefix>());
+            // The metadata retains no borrowed slice. Owned projections may
+            // move their population and share this single directory with rows.
+            let owned = vertices.clone();
+            drop(vertices);
+            let prefix = retained.first_mut().unwrap();
+            for (index, &vertex) in owned.iter().enumerate() {
+                prefix.include(vertex, index);
+            }
+            prefix.finish();
+            let public_lookup = SortedVertexLookup::from_sorted(&owned);
+            let mut queries = vec![VId(0), VId(u128::MAX)];
+            for &vertex in &owned {
+                queries.extend([
+                    vertex,
+                    VId(vertex.0.wrapping_sub(1)),
+                    VId(vertex.0.wrapping_add(1)),
+                ]);
+            }
+            queries.extend((0..128).map(|bit| VId(owned[0].0 ^ (1u128 << bit))));
+            // Repeated row-sized scans borrow the completed bounds; absent
+            // endpoints and different shared high prefixes must still fail.
+            for row in queries.chunks(31) {
+                let prefix = retained.first().unwrap();
+                for &query in row {
+                    let expected = owned.binary_search(&query).ok();
+                    assert_eq!(
+                        prefix.ordinal(&owned, query),
+                        expected,
+                        "n={n} shape={shape} query={query:?}"
+                    );
+                    assert_eq!(public_lookup.ordinal(query), expected);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ProjectionContents {
     binding: SnapshotBinding,

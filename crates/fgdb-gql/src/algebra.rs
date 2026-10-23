@@ -26,8 +26,8 @@ pub use pattern::{
     MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError,
     PatternLimitDimension, PreparedGraphPattern, PreparedGraphPatternFactors,
 };
-pub(crate) use predicate::numeric_domain;
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
+pub(crate) use predicate::{equality_value_bytes, numeric_domain};
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue,
     GraphValueDecodeError, GraphValueRow, ValueProjection,

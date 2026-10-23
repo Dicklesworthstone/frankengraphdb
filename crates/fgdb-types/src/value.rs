@@ -712,6 +712,63 @@ impl CanonicalPropertyValue {
         !matches!(self, Self::Scalar(_))
     }
 
+    /// Owned heap storage at every depth, including unused vector capacity,
+    /// map keys, text comparison keys and scalar payloads, without allocating.
+    /// The inline value and allocator bookkeeping are excluded. Returns
+    /// `None` on size overflow and visits each value through `control` before
+    /// inspecting it. Recursion is bounded by the admitted nesting depth.
+    ///
+    /// This measures a completed immutable owner; it is not admission for
+    /// decoding or cloning a replacement, which must be reserved separately.
+    pub fn owned_heap_bytes_controlled<E>(
+        &self,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        control()?;
+        match self {
+            Self::Scalar(scalar) => Ok(scalar.owned_heap_bytes()),
+            Self::List(list) => {
+                let Some(mut bytes) = list.values.capacity().checked_mul(size_of::<Self>()) else {
+                    return Ok(None);
+                };
+                for value in &list.values {
+                    let Some(child) = value.owned_heap_bytes_controlled(control)? else {
+                        return Ok(None);
+                    };
+                    let Some(total) = bytes.checked_add(child) else {
+                        return Ok(None);
+                    };
+                    bytes = total;
+                }
+                Ok(Some(bytes))
+            }
+            Self::Map(map) => {
+                let Some(mut bytes) = map
+                    .entries
+                    .capacity()
+                    .checked_mul(size_of::<CanonicalMapEntry>())
+                else {
+                    return Ok(None);
+                };
+                for entry in &map.entries {
+                    let Some(child) = entry.value.owned_heap_bytes_controlled(control)? else {
+                        return Ok(None);
+                    };
+                    let Some(total) = entry
+                        .key
+                        .owned_heap_bytes()
+                        .and_then(|key| bytes.checked_add(key))
+                        .and_then(|bytes| bytes.checked_add(child))
+                    else {
+                        return Ok(None);
+                    };
+                    bytes = total;
+                }
+                Ok(Some(bytes))
+            }
+        }
+    }
+
     /// Whether `bytes` begin with the List or Map tag. A durable reader
     /// decodes such bytes with [`Self::decode`] and every other value with
     /// [`CanonicalScalar::decode`], so scalar bytes keep exactly their scalar

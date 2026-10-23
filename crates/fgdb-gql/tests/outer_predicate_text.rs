@@ -349,7 +349,14 @@ fn aggregate_input_and_write_script_batches_reuse_the_same_outer_binding_path() 
     else {
         panic!("wrong shared write dispatch")
     };
-    assert_eq!(captures(update.selection()), 1);
+    assert_eq!(
+        captures(
+            update
+                .selection()
+                .expect("a MATCH mutation reads a graph selection")
+        ),
+        1
+    );
     assert_eq!(captures(delete.selection()), 1);
     let batch = script.bind_parameter_sets(&[args.clone(), args]).unwrap();
     assert_eq!(batch.program().statements().len(), 4);

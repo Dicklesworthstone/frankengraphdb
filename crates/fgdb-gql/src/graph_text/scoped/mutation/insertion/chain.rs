@@ -85,6 +85,15 @@ impl PreparedGraphWriteChainText {
                         }
                     } else if clause && written && word.eq_ignore_ascii_case("WITH") {
                         headed = true;
+                    } else if clause
+                        && written
+                        && ["SET", "REMOVE", "DELETE", "DETACH"]
+                            .iter()
+                            .any(|kind| word.eq_ignore_ascii_case(kind))
+                    {
+                        // A SET, REMOVE or DELETE after a CREATE writes its
+                        // rows (`CREATE (n) SET n.p = 1`, fgdb-cpny9).
+                        return Ok(true);
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
                         parameter_unwound = matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
@@ -308,6 +317,23 @@ impl PreparedGraphWriteChainText {
                 at: from.at,
                 tokens: 0,
             };
+            // A SET, REMOVE or DELETE is the last write: a RETURN or the end
+            // of the statement follows it.
+            if matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
+                if ["SET", "REMOVE", "DELETE", "DETACH"]
+                    .iter()
+                    .any(|kind| word.eq_ignore_ascii_case(kind)))
+            {
+                let step = crate::mutation_text::PreparedGraphMutationRowsText::prepare_chained(
+                    body,
+                    relation,
+                    declarations,
+                    &mut resolve,
+                    from,
+                )?;
+                steps.push(ChainTextStep::Mutation(Box::new(step)));
+                break;
+            }
             let merge = matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
             // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
             let relationship = merge
@@ -404,6 +430,7 @@ impl PreparedGraphWriteChainText {
                 ChainTextStep::EdgeMerge(step) => step.0.parameter_schema(),
                 ChainTextStep::EdgeMergeRows(step) => step.0.parameter_schema(),
                 ChainTextStep::VertexMerge(merge) => merge.parameter_schema(),
+                ChainTextStep::Mutation(step) => step.0.parameter_schema(),
             };
             for spec in specs {
                 if !schema.iter().any(|known| known.name == spec.name) {
@@ -550,6 +577,24 @@ impl PreparedGraphWriteChainText {
                         keep: *keep,
                     });
                 }
+                ChainTextStep::Mutation(step) => {
+                    let (mutation, returning) = &**step;
+                    let own = own(mutation.parameter_schema())?;
+                    if mutation.owned_column_types() != previous.as_deref() {
+                        return Err(expected(mutation.at, "the previous write's WITH row").into());
+                    }
+                    steps.push(match returning {
+                        Some(returning) => {
+                            let query = mutation.bind_query(returning, &own)?;
+                            previous = Some(query.column_types().to_vec());
+                            GraphWriteChainStep::MutationQuery(Box::new(query))
+                        }
+                        None => {
+                            previous = None;
+                            GraphWriteChainStep::Mutation(Box::new(mutation.bind_parameters(&own)?))
+                        }
+                    });
+                }
             }
         }
         if arguments
@@ -633,6 +678,15 @@ mod tests {
              MERGE (e:Event {id: event.id}) MERGE (y)<-[:IN]-(e) RETURN e.id AS x ORDER BY x",
             "UNWIND $events AS event MATCH (y:Year {year: event.year}) MERGE (e:Event {id: event.id})",
             "UNWIND [1, 2] AS v MATCH (y:Year {year: v}) MERGE (e:Event {id: v})",
+            // A SET, REMOVE or DELETE after a CREATE writes its rows.
+            "CREATE (n) SET n.p = 1",
+            "CREATE (n:P {p: 1}) SET n.p = n.p + 1 RETURN n.p",
+            "UNWIND [1, 2] AS i CREATE (n) SET n.i = i",
+            "MATCH (a) CREATE (b) SET b.k = a.k RETURN b.k",
+            "CREATE (n) WITH n SET n.p = 1 RETURN n",
+            "CREATE (n {p: 1}) REMOVE n.p",
+            "MATCH () CREATE (n) DELETE n",
+            "CREATE (n) DETACH DELETE n",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -670,6 +724,10 @@ mod tests {
             "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
             "MERGE (n:L) SET n.p = 1",
             "MERGE (n:L) RETURN n",
+            // A SET without a CREATE before it is the mutation's own.
+            "MATCH (n) SET n.p = 1",
+            "MATCH (n) WITH n SET n.p = 1 RETURN n",
+            "MATCH (n {p: 'CREATE (x)'}) DELETE n",
         ] {
             assert!(
                 !PreparedGraphWriteChainText::is_chain(text).unwrap(),

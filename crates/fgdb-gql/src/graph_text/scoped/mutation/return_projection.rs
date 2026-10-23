@@ -187,6 +187,23 @@ fn skip_factor<'t>(
     after_postfix(lexer)
 }
 
+/// What a routing lookahead types a bare name against: the typed row of a
+/// row scope or of a write's WITH row, and in a graph scope the parser whose
+/// MATCH elements a bare name reads whole (Parser::graph_element).
+#[derive(Clone, Copy)]
+pub(super) struct Route<'s, 'a> {
+    pub(super) row: Option<&'s [(Name<'a>, GraphSetColumnType)]>,
+    pub(super) graph: Option<&'s Parser<'a>>,
+}
+
+impl Route<'_, '_> {
+    /// No typed names: only literals and calls route.
+    pub(super) const NONE: Self = Self {
+        row: None,
+        graph: None,
+    };
+}
+
 /// Whether `token` (with `lexer` just past it) starts a list operand of a
 /// `+` chain (fgdb-c4i0d): a list literal or comprehension, a call of a
 /// list-valued function (reverse, split, tail, range, keys), or a
@@ -194,17 +211,17 @@ fn skip_factor<'t>(
 fn list_operand_at(
     token: Token<'_>,
     lexer: &Lexer<'_>,
-    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+    route: Route<'_, '_>,
 ) -> Result<bool, GraphPatternTextError> {
     match token.kind {
         TokenKind::Punct(b'[') => Ok(true),
-        TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => case_has_list(lexer, row),
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => case_has_list(lexer, route),
         TokenKind::Word(word) => Ok(match lexer.clone().next()?.kind {
             TokenKind::Punct(b'(') => ["REVERSE", "SPLIT", "TAIL", "RANGE", "KEYS"]
                 .iter()
                 .any(|name| word.eq_ignore_ascii_case(name)),
             TokenKind::Punct(b'.' | b'[') => false,
-            _ => row.is_some_and(|schema| {
+            _ => route.row.is_some_and(|schema| {
                 schema
                     .iter()
                     .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::List)
@@ -217,10 +234,7 @@ fn list_operand_at(
 /// Whether the CASE that `lexer` is just past the `CASE` of has a THEN or
 /// ELSE result that starts with a list operand (list_operand_at), at its own
 /// level: such a CASE is read as a value-language Case (fgdb-13l85).
-fn case_has_list(
-    lexer: &Lexer<'_>,
-    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
-) -> Result<bool, GraphPatternTextError> {
+fn case_has_list(lexer: &Lexer<'_>, route: Route<'_, '_>) -> Result<bool, GraphPatternTextError> {
     let mut lexer = lexer.clone();
     let mut groups = 0_usize;
     let mut cases = 1_usize;
@@ -243,9 +257,9 @@ fn case_has_list(
             {
                 let mut ahead = lexer.clone();
                 let result = ahead.next()?;
-                if list_operand_at(result, &ahead, row)?
-                    || dynamic_column_at(result, &ahead, row)?
-                    || element_column_at(result, &ahead, row)?
+                if list_operand_at(result, &ahead, route)?
+                    || dynamic_column_at(result, &ahead, route.row)?
+                    || element_column_at(result, &ahead, route)?
                     || composite_result_at(result, &ahead)?
                 {
                     return Ok(true);
@@ -293,14 +307,15 @@ fn dynamic_column_at(
 }
 
 /// Whether `token` (with `lexer` just past it) is a bare row column holding a
-/// graph element: a vertex, edge or path, or a list of vertices or edges. The
-/// scalar program cannot carry one, so a CASE that returns it (`CASE WHEN c
-/// THEN a ELSE b END`) is read in the value language. A property read or a
-/// call on the name stays with the scalar program.
+/// graph element: a vertex, edge or path, or a list of vertices or edges, or
+/// in a graph scope a bare MATCH element. The scalar program cannot carry
+/// one, so a CASE that returns it (`CASE WHEN c THEN a ELSE b END`) is read
+/// in the value language. A property read or a call on the name stays with
+/// the scalar program.
 fn element_column_at(
     token: Token<'_>,
     lexer: &Lexer<'_>,
-    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+    route: Route<'_, '_>,
 ) -> Result<bool, GraphPatternTextError> {
     let TokenKind::Word(word) = token.kind else {
         return Ok(false);
@@ -311,11 +326,11 @@ fn element_column_at(
     ) {
         return Ok(false);
     }
-    Ok(row.is_some_and(|schema| {
+    Ok(route.row.is_some_and(|schema| {
         schema
             .iter()
             .any(|(name, kind)| name.text == word && is_element_column(*kind))
-    }))
+    }) || route.graph.is_some_and(|parser| parser.graph_element(word)))
 }
 
 fn is_element_column(kind: GraphSetColumnType) -> bool {
@@ -704,8 +719,10 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(UnresolvedGraphText<'a>, Option<pipeline::RowSchema<'a>>), GraphSetTextError> {
         self.read_row_bindings = schema.iter().map(|(name, _)| *name).collect();
+        let mut deferred = None;
         if implied.is_empty() {
             self.parse_match_prefix()?;
+            deferred = self.deferred_where.take();
         } else {
             // The implied `MATCH (n)` for each read CALL output: exactly
             // the root a written one parses, and nothing else.
@@ -792,8 +809,17 @@ impl<'a> Parser<'a> {
         // for a statement that starts at MATCH: `n.p` there reads a graph
         // property. Later stages see only the projected row.
         let mut tail = None;
-        let (projection, pipeline) = if self.is_word("WITH") {
-            let (outputs, distinct, at) = self.leading_with_head(&schema, width, &mut inputs)?;
+        let (projection, pipeline) = if deferred.is_some() || self.is_word("WITH") {
+            let (outputs, distinct, at) = if let Some((lexer, at_where)) = deferred {
+                // A WHERE the graph predicate refused reads the row after
+                // the implicit `WITH *` (unresolved_read_input).
+                self.lexer = lexer;
+                self.current = at_where;
+                let outputs = self.leading_star_outputs(&schema, width, &mut inputs)?;
+                (outputs, false, at_where.at)
+            } else {
+                self.leading_with_head(&schema, width, &mut inputs)?
+            };
             let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
             types.extend(inputs.iter().map(projection_type));
             let next: pipeline::RowSchema<'a> = outputs
@@ -964,6 +990,51 @@ impl<'a> Parser<'a> {
             )
     }
 
+    /// `WITH *` after `UNWIND ... MATCH`, written or implicit before a
+    /// deferred WHERE: the leading columns, then the same visible graph
+    /// bindings as a MATCH-first `WITH *`; anonymous compiler slots stay
+    /// private. The hidden reads of the scope that follows are hoisted.
+    fn leading_star_outputs(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        width: usize,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<Vec<(Name<'a>, ReadValueTemplate)>, GraphSetTextError> {
+        let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
+        let mut outputs = Vec::new();
+        for (index, name) in leading.iter().enumerate() {
+            // A correlated graph identity retains its source domain even
+            // through WITH *. Other procedure/UNWIND values stay ordinary
+            // row columns and never acquire graph lookup authority.
+            let column = match self
+                .visible_graph_bindings()
+                .find(|binding| binding.text == name.text)
+            {
+                Some(variable) => width + self.mutation_projection(inputs, variable, None)?,
+                None => index,
+            };
+            outputs.push((*name, ReadValueTemplate::Column(column)));
+        }
+        let visible: Vec<_> = self.visible_graph_bindings().collect();
+        for variable in visible {
+            // A vertex reusing a leading name is that leading column.
+            if leading.iter().any(|name| name.text == variable.text) {
+                continue;
+            }
+            let index = self.mutation_projection(inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(width + index)));
+        }
+        let mut head = GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs: core::mem::take(inputs),
+            outputs,
+        };
+        self.hoist_boundary_reads(&mut head, width)?;
+        *inputs = head.inputs;
+        Ok(head.outputs)
+    }
+
     /// The first WITH after `UNWIND ... MATCH`: each item may read a leading
     /// UNWIND column by name, or a MATCH variable or `variable.property`,
     /// which becomes a hidden graph input column (the same
@@ -993,39 +1064,11 @@ impl<'a> Parser<'a> {
         let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
         if self.take(b'*')? {
-            // Leading columns, then the same visible graph bindings as a
-            // MATCH-first `WITH *`; anonymous compiler slots stay private.
-            for (index, name) in leading.iter().enumerate() {
-                // A correlated graph identity retains its source domain even
-                // through WITH *. Other procedure/UNWIND values stay ordinary
-                // row columns and never acquire graph lookup authority.
-                let column = match self
-                    .visible_graph_bindings()
-                    .find(|binding| binding.text == name.text)
-                {
-                    Some(variable) => width + self.mutation_projection(inputs, variable, None)?,
-                    None => index,
-                };
-                outputs.push((*name, ReadValueTemplate::Column(column)));
-            }
-            let visible: Vec<_> = self.visible_graph_bindings().collect();
-            for variable in visible {
-                // A vertex reusing a leading name is that leading column.
-                if leading.iter().any(|name| name.text == variable.text) {
-                    continue;
-                }
-                let index = self.mutation_projection(inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(width + index)));
-            }
-            let mut head = GraphProjectionHead {
-                with: true,
-                plain: false,
-                inputs: core::mem::take(inputs),
-                outputs,
-            };
-            self.hoist_boundary_reads(&mut head, width)?;
-            *inputs = head.inputs;
-            return Ok((head.outputs, distinct, at));
+            return Ok((
+                self.leading_star_outputs(schema, width, inputs)?,
+                distinct,
+                at,
+            ));
         }
         loop {
             self.capacity(
@@ -1909,7 +1952,7 @@ impl<'a> Parser<'a> {
     /// (fgdb-c4i0d). A lone list operand keeps its own reading.
     pub(super) fn list_chain_follows(
         &self,
-        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
@@ -1919,7 +1962,7 @@ impl<'a> Parser<'a> {
             while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
                 token = lexer.next()?;
             }
-            list |= list_operand_at(token, &lexer, row)?;
+            list |= list_operand_at(token, &lexer, route)?;
             loop {
                 token = skip_factor(token, &mut lexer)?;
                 if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
@@ -1955,6 +1998,16 @@ impl<'a> Parser<'a> {
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
         self.row_bare_column(row, is_element_column)
+    }
+
+    /// Whether `word` names a MATCH vertex, relationship or path that no
+    /// local shadows: a graph scope's value reader reads it bare as the
+    /// element itself.
+    fn graph_element(&self, word: &str) -> bool {
+        !self.elements.contains(&word)
+            && (self.syntax.variables.iter().any(|name| name.text == word)
+                || self.syntax.names_path(word)
+                || self.syntax.visible_edge(word).is_some())
     }
 
     /// The visible row column named by the current word when no property
@@ -2048,30 +2101,30 @@ impl<'a> Parser<'a> {
     /// Whether a list operand of a `+` chain starts here (list_operand_at).
     pub(super) fn list_operand_here(
         &self,
-        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        list_operand_at(self.current, &self.lexer, row)
+        list_operand_at(self.current, &self.lexer, route)
     }
 
     /// Whether a CASE with a list result starts here (case_has_list).
     pub(super) fn list_case_follows(
         &self,
-        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("CASE") && case_has_list(&self.lexer, row)?)
+        Ok(self.is_word("CASE") && case_has_list(&self.lexer, route)?)
     }
 
     /// Whether a list operand here is a whole CASE result: WHEN, THEN, ELSE
     /// or END follows it.
     pub(super) fn lone_case_result(
         &self,
-        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
         // A map literal or a name's subscript or slice is a whole result too
         // (case_has_list routes its CASE here): the value reader reads it.
-        if !list_operand_at(self.current, &self.lexer, row)?
+        if !list_operand_at(self.current, &self.lexer, route)?
             && !composite_result_at(self.current, &self.lexer)?
-            && !element_column_at(self.current, &self.lexer, row)?
+            && !element_column_at(self.current, &self.lexer, route)?
         {
             return Ok(false);
         }
@@ -2340,7 +2393,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             self.punct(b'(', "(")?;
             self.value_function_call(function, inputs.as_deref_mut(), schema, resolve, depth)?
-        } else if self.composite_coalesce(schema)? {
+        } else if self.composite_coalesce(schema, inputs.is_some())? {
             // coalesce over a list, map or element: a value function.
             self.advance()?;
             self.punct(b'(', "(")?;
@@ -2565,8 +2618,8 @@ impl<'a> Parser<'a> {
                             } else {
                                 // A resolver over a known row (a write's
                                 // WITH row) states its column types.
-                                (self.resolved_column_types.as_ref())
-                                    .and_then(|types| types.get(at).copied())
+                                (self.resolved_row.as_ref())
+                                    .and_then(|row| row.get(at).map(|(_, kind)| *kind))
                             }
                         },
                         &self.syntax.parameters,
@@ -2678,12 +2731,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `coalesce(` with a composite argument: a list or map literal, a call
-    /// that makes a list, or a row column that is not a scalar. That call is
-    /// the value function; the scalar COALESCE keeps every all-scalar call.
-    /// Only lexical lookahead: nothing is read or registered.
+    /// that makes a list, a row column that is not a scalar, or in a `graph`
+    /// scope a bare MATCH element (`coalesce(b, a)` over an OPTIONAL MATCH).
+    /// That call is the value function; the scalar COALESCE keeps every
+    /// all-scalar call. Only lexical lookahead: nothing is read or registered.
     fn composite_coalesce(
         &self,
         schema: &[(Name<'a>, GraphSetColumnType)],
+        graph: bool,
     ) -> Result<bool, GraphPatternTextError> {
         if !self.is_word("COALESCE") {
             return Ok(false);
@@ -2704,9 +2759,9 @@ impl<'a> Parser<'a> {
                         let next = lexer.clone().next()?.kind;
                         let bare = matches!(next, TokenKind::Punct(b',' | b')'));
                         if bare
-                            && schema.iter().any(|(name, kind)| {
+                            && (schema.iter().any(|(name, kind)| {
                                 name.text == word && *kind != GraphSetColumnType::Scalar
-                            })
+                            }) || (graph && self.graph_element(word)))
                         {
                             return Ok(true);
                         }

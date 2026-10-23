@@ -75,14 +75,17 @@ impl PreparedGraphText {
     /// Parse once and retain native syntax until ALL compound operands and
     /// their shared parameter/output contracts have passed. Computed RETURN
     /// reuses the same scalar parser as SET, but produces only a read relation.
+    /// `deferred` lists the WHERE offsets read after an implicit `WITH *`.
     pub(crate) fn unresolved_for_composition<'a>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
         zones: Option<&crate::GqlTimeZones>,
+        deferred: &[usize],
     ) -> Result<UnresolvedGraphText<'a>, crate::GraphSetTextError> {
-        Parser::new_with_parameter_types(statement, declarations)?
-            .with_zones(zones.cloned())
-            .parse_return_for_composition(statement)
+        let mut parser =
+            Parser::new_with_parameter_types(statement, declarations)?.with_zones(zones.cloned());
+        parser.deferred_wheres = deferred.to_vec();
+        parser.parse_return_for_composition(statement)
     }
 }
 

@@ -244,7 +244,7 @@ fn any_scripts_and_parameter_batches_lower_all_write_selections_without_reparsin
         };
         for selection in [
             insert.selection().unwrap(),
-            update.selection(),
+            update.selection().unwrap(),
             delete.selection(),
         ] {
             assert_eq!(modes(selection), vec![GraphWalkSearch::AnyShortest]);

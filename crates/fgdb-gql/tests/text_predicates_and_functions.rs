@@ -1371,6 +1371,13 @@ fn list_literals_order_element_by_element_three_valued() {
         ("[1, 2] < [3, 4] IN [[3, 4], false]", null.clone()),
         ("[1, 2] >= ([3, 4] IN [[3, 4], false])", null.clone()),
         ("([1, 2] > [3, 4]) IN [true, false]", truth(true)),
+        // A lone operand IN a literal with a list member reads the list as
+        // a value: members of another value domain are unequal, not refused.
+        ("([1, 2] = [3, 4]) IN [[3, 4], false]", truth(true)),
+        ("false IN [[3, 4], false]", truth(true)),
+        ("2 IN [[1], 2]", truth(true)),
+        ("1 IN [[1], {a: 1}]", truth(false)),
+        ("null IN [[1]]", null.clone()),
         // One operand of the Boolean operators around it.
         ("[1] < [2] AND [3] > [2]", truth(true)),
         ("NOT [1] < [2]", truth(false)),

@@ -127,6 +127,7 @@ impl GraphWriteProgramPolicy {
             self.max_created_vertices,
             self.max_created_edges,
         )
+        .with_mutation_limit(self.mutations.max_effects)
     }
     #[must_use]
     pub const fn vertex_merge_policy(self) -> GraphVertexMergePolicy {
@@ -498,7 +499,8 @@ impl PreparedGraphWriteProgram {
                         !names.contains(written)
                             || key.properties.iter().any(|(name, bytes)| {
                                 name == written
-                                    && value.value().encode().ok().as_deref()
+                                    && crate::algebra::equality_value_bytes(value.value())
+                                        .as_deref()
                                         == Some(bytes.as_slice())
                             })
                     }

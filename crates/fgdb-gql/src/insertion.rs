@@ -262,6 +262,10 @@ pub struct GraphInsertPolicy {
     pub query: GqlQueryPolicy,
     pub max_vertices: u64,
     pub max_edges: u64,
+    /// The effects a chain's SET, REMOVE or DELETE step may propose
+    /// (fgdb-cpny9). An insertion proposes none; [`Self::new`] leaves it
+    /// unbounded, so only the query allowance bounds such a step.
+    pub max_mutation_effects: u64,
 }
 impl GraphInsertPolicy {
     #[must_use]
@@ -270,7 +274,13 @@ impl GraphInsertPolicy {
             query,
             max_vertices,
             max_edges,
+            max_mutation_effects: u64::MAX,
         }
+    }
+    #[must_use]
+    pub const fn with_mutation_limit(mut self, max_mutation_effects: u64) -> Self {
+        self.max_mutation_effects = max_mutation_effects;
+        self
     }
 }
 

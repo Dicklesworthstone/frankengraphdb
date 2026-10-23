@@ -608,6 +608,201 @@ fn selected_relation_analytics_skip_unrelated_payloads_under_a_tighter_source_bu
 }
 
 #[test]
+fn unit_and_collapsed_projections_skip_sidecars_and_match_the_full_property_oracle() {
+    let ((), report) = run_async_under_lab(0x6270_7204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut writer =
+            Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        let input = [
+            (EId(0), 1, 2),
+            (HIGH_EDGE, 1, 2),
+            (EId(2), 2, 3),
+            (EId(3), 3, 1),
+            (EId(u128::MAX), 2, 2),
+        ];
+        let payload_key = PropertyKeyId(10);
+        let mut first = WriteBatch::new(R);
+        for vid in [1, 2, 3, u128::MAX] {
+            first.create_vertex(VId(vid), vec![L], vec![]);
+        }
+        for (eid, source, target) in input {
+            first.add_edge(
+                eid,
+                VId(source),
+                VId(target),
+                vec![
+                    (P, CanonicalScalar::Int(1)),
+                    (
+                        payload_key,
+                        CanonicalScalar::bytes(vec![0xa7; 1024]).unwrap(),
+                    ),
+                ],
+            );
+        }
+        assert_eq!(writer.write(&commit, first).await.unwrap(), CommitSeq(1));
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(2));
+        change.set_edge_property(
+            EId(0),
+            payload_key,
+            Some(CanonicalScalar::bytes(vec![0xb8; 1024]).unwrap()),
+        );
+        assert_eq!(writer.write(&commit, change).await.unwrap(), CommitSeq(2));
+        let source_pool = pool();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        let call = FnxCallSpec::bind(RANK, &FnxParameters::new()).unwrap();
+        for cut in 0..=2 {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let mut opt = options();
+                opt.projection.directedness = direction;
+                let before = view.buffer_stats().misses;
+                let complete = view
+                    .prism_projection_at(
+                        &cx,
+                        CommitSeq(cut),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits,
+                    )
+                    .await
+                    .unwrap();
+                let complete_faults = view.buffer_stats().misses - before;
+
+                let vertices = if cut == 0 {
+                    vec![]
+                } else {
+                    vec![VId(1), VId(2), VId(3), VId(u128::MAX)]
+                };
+                let edges: Vec<_> = input
+                    .into_iter()
+                    .filter(|(eid, source, target)| {
+                        cut > 0 && (cut < 2 || *eid != EId(2)) && source != target
+                    })
+                    .map(|(eid, source, target)| ProjectionEdge {
+                        eid,
+                        source: VId(source),
+                        target: VId(target),
+                        weight: 1.0,
+                    })
+                    .collect();
+                let expected = SnapshotGraphView::build(
+                    complete.binding(),
+                    &vertices,
+                    &edges,
+                    opt.projection,
+                    opt.projection_limits,
+                )
+                .unwrap();
+                assert_eq!(complete.digest(), expected.digest());
+
+                opt.selection.weight = FnxWeightSpec::Unit;
+                let before = view.buffer_stats().misses;
+                let topology = view
+                    .prism_projection_at(
+                        &cx,
+                        CommitSeq(cut),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits,
+                    )
+                    .await
+                    .unwrap();
+                let topology_faults = view.buffer_stats().misses - before;
+                assert_eq!(
+                    topology.digest(),
+                    complete.digest(),
+                    "cut {cut}, {direction:?}"
+                );
+                assert_eq!(topology.vertex_ids(), complete.vertex_ids());
+                for ordinal in 0..topology.vertex_ids().len() {
+                    assert_eq!(
+                        topology.projected_row(ordinal),
+                        complete.projected_row(ordinal)
+                    );
+                }
+                assert_eq!(
+                    call.execute(&topology, opt.execution_limits, || cx.checkpoint())
+                        .unwrap(),
+                    call.execute(&complete, opt.execution_limits, || cx.checkpoint())
+                        .unwrap()
+                );
+                if cut > 0 {
+                    assert!(
+                        topology_faults < complete_faults,
+                        "unit projection skips sidecars against the live complete source: cut {cut}, {direction:?}, topology {topology_faults}, complete {complete_faults}"
+                    );
+                }
+
+                // CollapseUnit deliberately ignores even a missing required
+                // weight. The independent input keeps parallel EIds; the
+                // source selection already excludes the dropped self-loop.
+                opt.selection.weight = FnxWeightSpec::Property {
+                    key: PropertyKeyId(999),
+                    missing: MissingWeightPolicy::Reject,
+                };
+                opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+                let before = view.buffer_stats().misses;
+                let collapsed = view
+                    .prism_projection_at(
+                        &cx,
+                        CommitSeq(cut),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits,
+                    )
+                    .await
+                    .unwrap();
+                let collapsed_faults = view.buffer_stats().misses - before;
+                let expected = SnapshotGraphView::build(
+                    collapsed.binding(),
+                    &vertices,
+                    &edges,
+                    opt.projection,
+                    opt.projection_limits,
+                )
+                .unwrap();
+                assert_eq!(collapsed.digest(), expected.digest());
+                if cut > 0 {
+                    assert!(collapsed_faults < complete_faults);
+                    opt.projection.parallel_edges = ParallelEdgePolicy::Sum;
+                    assert!(matches!(
+                        view.prism_projection_at(
+                            &cx,
+                            CommitSeq(cut),
+                            opt.selection,
+                            opt.projection,
+                            opt.projection_limits,
+                            opt.source_limits,
+                        )
+                        .await,
+                        Err(FnxReadError::Weight {
+                            reason: FnxWeightError::Missing,
+                            ..
+                        })
+                    ));
+                }
+            }
+        }
+        drop(view);
+        drop(writer);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn every_buffered_analytics_checkpoint_cancels_without_publishing_a_partial_projection() {
     let ((), report) = run_async_under_lab(0x6270_7203, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -625,45 +820,39 @@ fn every_buffered_analytics_checkpoint_cancels_without_publishing_a_partial_proj
         batch.add_edge(EId(0), VId(1), VId(2), vec![(P, CanonicalScalar::Int(2))]);
         writer.write(&commit, batch).await.unwrap();
         let call = FnxCallSpec::bind(DIJKSTRA, &FnxParameters::new()).unwrap();
-        let observe = Arc::new(SimulationCheckpointProbe::new(None));
-        let mut view = cold(&contexts, &vfs, pool()).await;
-        let complete = view
-            .execute_fnx(
-                &cx.with_checkpoint_probe(Arc::clone(&observe)),
-                &call,
-                options(),
-            )
-            .await
-            .unwrap();
-        let total = observe.calls();
-        assert!(total > 20);
-        drop(view);
-        for stop in 1..=total {
-            let source_pool = pool();
-            // Start with the same empty extent cache on every cut. A warm
-            // cache has a different legal physical checkpoint transcript.
-            let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
-            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-            let failure = view
-                .execute_fnx(&controlled, &call, options())
+        for weight in [options().selection.weight, FnxWeightSpec::Unit] {
+            let mut opt = options();
+            opt.selection.weight = weight;
+            let observe = Arc::new(SimulationCheckpointProbe::new(None));
+            let mut view = cold(&contexts, &vfs, pool()).await;
+            let complete = view
+                .execute_fnx(&cx.with_checkpoint_probe(Arc::clone(&observe)), &call, opt)
                 .await
-                .unwrap_err();
-            assert!(
-                failure.split_cancel::<core::convert::Infallible>().is_err(),
-                "cut {stop}"
-            );
-            assert_eq!(
-                probe.calls(),
-                stop,
-                "no source/kernel work after cancellation"
-            );
-            assert_eq!(
-                view.execute_fnx(&cx, &call, options()).await.unwrap(),
-                complete
-            );
+                .unwrap();
+            let total = observe.calls();
+            assert!(total > 20);
             drop(view);
-            assert_eq!(source_pool.used(), 0, "cut {stop}");
+            for stop in 1..=total {
+                let source_pool = pool();
+                // Start with the same empty extent cache on every cut. A warm
+                // cache has a different legal physical checkpoint transcript.
+                let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let failure = view.execute_fnx(&controlled, &call, opt).await.unwrap_err();
+                assert!(
+                    failure.split_cancel::<core::convert::Infallible>().is_err(),
+                    "cut {stop}, {weight:?}"
+                );
+                assert_eq!(
+                    probe.calls(),
+                    stop,
+                    "no source/kernel work after cancellation"
+                );
+                assert_eq!(view.execute_fnx(&cx, &call, opt).await.unwrap(), complete);
+                drop(view);
+                assert_eq!(source_pool.used(), 0, "cut {stop}, {weight:?}");
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

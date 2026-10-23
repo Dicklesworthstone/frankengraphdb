@@ -1114,7 +1114,10 @@ fn duplicate_match_occurrences_collapse_and_distinct_vertices_keep_complete_rece
             unreachable!()
         };
         let merge = PreparedGraphVertexMerge::prepare(
-            selection.selection().clone(),
+            selection
+                .selection()
+                .expect("a MATCH mutation reads a graph selection")
+                .clone(),
             R,
             0,
             base.creation().clone(),

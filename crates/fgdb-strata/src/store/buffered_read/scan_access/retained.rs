@@ -1,4 +1,4 @@
-//! Separate completed scalar-record ownership from format-wide decode scratch.
+//! Separate completed record ownership from format-wide decode scratch.
 //! All decoders and replacement clones still acquire their original workspace
 //! BEFORE allocation. Only completed, immutable images reach this module.
 
@@ -16,29 +16,24 @@ fn vector_bytes<T>(values: &Vec<T>) -> Result<usize, BufferedReadError> {
         .ok_or(BufferedReadError::SizeOverflow)
 }
 
-// Scalar owners expose actual heap capacities, including text sort keys and
-// spare byte capacity. Collection owners do not expose their Vec capacities.
-// Never substitute length or encoded length for those unknown allocations:
-// retain the preexisting full workspace for any image containing a collection.
+// Value owners measure actual capacities at every depth, including collection
+// vectors, map keys, text sort keys and spare byte capacity. Encoded length and
+// collection length are not bounds on their retained heap allocations.
 fn properties<C>(
     values: &EdgePropertyRow,
     control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
-) -> Result<Option<usize>, BufferedScanError<C>> {
+) -> Result<usize, BufferedScanError<C>> {
     control()?;
     let mut bytes = vector_bytes(values)?;
     for (_, value) in values {
-        control()?;
-        let Some(scalar) = value.as_scalar() else {
-            return Ok(None);
-        };
         bytes = add(
             bytes,
-            scalar
-                .owned_heap_bytes()
+            value
+                .owned_heap_bytes_controlled(control)?
                 .ok_or(BufferedReadError::SizeOverflow)?,
         )?;
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 // The affine split transfers admission without allocating or reacquiring it.
@@ -48,15 +43,13 @@ fn properties<C>(
 // it never silently publishes an under-accounted allocation.
 fn retain<T>(
     mut value: BufferedValue<T>,
-    bytes: Option<usize>,
+    bytes: usize,
 ) -> Result<BufferedValue<T>, BufferedReadError> {
-    if let Some(bytes) = bytes {
-        let retained = value
-            ._charge
-            .split_off(bytes)
-            .ok_or(BufferedReadError::SizeOverflow)?;
-        value._charge = retained;
-    }
+    let retained = value
+        ._charge
+        .split_off(bytes)
+        .ok_or(BufferedReadError::SizeOverflow)?;
+    value._charge = retained;
     Ok(value)
 }
 
@@ -70,31 +63,28 @@ pub(super) fn block<C>(
         bytes = add(bytes, vector_bytes(&props.locators)?)?;
         bytes = add(bytes, vector_bytes(&props.rows)?)?;
         for row in &props.rows {
-            let Some(row_bytes) = properties(row, control)? else {
-                return Ok(image);
-            };
-            bytes = add(bytes, row_bytes)?;
+            bytes = add(bytes, properties(row, control)?)?;
         }
     }
     control()?;
-    Ok(retain(image, Some(bytes))?)
+    Ok(retain(image, bytes)?)
 }
 
-pub(super) fn vertex<C>(
-    row: BufferedValue<VertexRow>,
-    control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
-) -> Result<BufferedValue<VertexRow>, BufferedScanError<C>> {
-    control()?;
-    let bytes = properties(&row.props, control)?
-        .map(|props| {
-            add(
-                add(size_of::<VertexRow>(), vector_bytes(&row.labels)?)?,
-                props,
-            )
-        })
-        .transpose()?;
-    control()?;
-    Ok(retain(row, bytes)?)
+impl BufferedValue<VertexRow> {
+    /// Keep only the completed vertex's owned capacity after all historical
+    /// replacements and decoder temporaries have finished.
+    pub(crate) fn retain_scan_vertex<C>(
+        self,
+        control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+    ) -> Result<Self, BufferedScanError<C>> {
+        control()?;
+        let bytes = add(
+            add(size_of::<VertexRow>(), vector_bytes(&self.labels)?)?,
+            properties(&self.props, control)?,
+        )?;
+        control()?;
+        Ok(retain(self, bytes)?)
+    }
 }
 
 impl BufferedValue<BufferedEdge> {
@@ -106,9 +96,7 @@ impl BufferedValue<BufferedEdge> {
         control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
     ) -> Result<Self, BufferedScanError<C>> {
         control()?;
-        let bytes = properties(&self.props, control)?
-            .map(|props| add(size_of::<BufferedEdge>(), props))
-            .transpose()?;
+        let bytes = add(size_of::<BufferedEdge>(), properties(&self.props, control)?)?;
         control()?;
         Ok(retain(self, bytes)?)
     }

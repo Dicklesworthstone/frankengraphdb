@@ -711,6 +711,47 @@ fn case_returns_the_vertex_a_with_row_carries() {
     }
 }
 
+/// Without WITH, a CASE or coalesce over a bare MATCH vertex reads it as a
+/// value too: the graph scope routes an element result as the row scope does.
+#[test]
+fn graph_scope_case_and_coalesce_return_the_matched_vertex() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1, 2, 3].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    let plain = rows("MATCH (n) RETURN n.p AS x, n ORDER BY x");
+    assert_eq!(ints(&plain, 0), [1, 2, 3].map(Some));
+    let vertex = |text: &str, row: &GraphValueRow, expected: &GraphValueRow| {
+        let value = row.get(1).unwrap();
+        assert!(matches!(value, GraphValue::Vertex(_)), "{text}: {value:?}");
+        assert_eq!(value, expected.get(1).unwrap(), "{text}");
+    };
+    for text in [
+        "MATCH (n) RETURN n.p AS x, CASE WHEN n.p > 1 THEN n END AS chosen ORDER BY x",
+        "MATCH (n) RETURN n.p AS x, CASE n.p WHEN 1 THEN null ELSE n END AS chosen ORDER BY x",
+    ] {
+        let chosen = rows(text);
+        assert_eq!(ints(&chosen, 0), [1, 2, 3].map(Some), "{text}");
+        assert!(chosen[0].get(1).unwrap().is_null(), "{text}");
+        for (row, expected) in chosen.iter().zip(&plain).skip(1) {
+            vertex(text, row, expected);
+        }
+    }
+    for text in [
+        "MATCH (n) RETURN n.p AS x, coalesce(n) AS chosen ORDER BY x",
+        "MATCH (n) RETURN n.p AS x, coalesce(null, n) AS chosen ORDER BY x",
+    ] {
+        let chosen = rows(text);
+        assert_eq!(chosen.len(), plain.len(), "{text}");
+        for (row, expected) in chosen.iter().zip(&plain) {
+            vertex(text, row, expected);
+        }
+    }
+}
+
 /// openCypher rand() (fgdb-13l85): a float in [0, 1), drawn as a pure
 /// function of its call site, the row's ordinal in its projection stage and
 /// the comprehension elements in force. Rows, sites and elements draw
@@ -844,6 +885,13 @@ fn a_grouping_or_distinct_with_orders_by_a_repeat_of_its_item() {
         (
             "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY count(*) DESC, p LIMIT 1 \
              RETURN p, c",
+            vec![(Some(2), Some(2))],
+        ),
+        // An alias spelled like the call it names is no column before `(`:
+        // the call repeats the item (TCK WithOrderBy4 [11]).
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS count ORDER BY count(*) DESC, p LIMIT 1 \
+             RETURN p, count",
             vec![(Some(2), Some(2))],
         ),
         // RETURN without ORDER BY gives canonical order, so a WITH's ORDER BY
@@ -2003,4 +2051,32 @@ fn an_aggregating_with_combines_aggregate_results_like_a_second_stage() {
         )
         .is_err()
     );
+}
+
+/// openCypher: an ORDER BY right after a plain WITH's items may name a
+/// binding that WITH drops (TCK WithOrderBy4 [8]). It ranks the rows, then it
+/// is gone; under DISTINCT only the projected names rank.
+#[test]
+fn a_with_order_by_may_rank_by_a_binding_it_drops() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    // score is -p, so its two lowest keep p = 3 and p = 2.
+    let kept = rows(
+        "MATCH (n) WITH n, 0 - n.p AS score WITH n, n.p AS p ORDER BY score LIMIT 2 \
+         RETURN p ORDER BY p",
+    );
+    assert_eq!(ints(&kept, 0), [Some(2), Some(3)]);
+    for text in [
+        "MATCH (n) WITH n, n.p AS score WITH n, n.p AS p ORDER BY score RETURN score",
+        "MATCH (n) WITH n, n.p AS score WITH DISTINCT n, n.p AS p ORDER BY score RETURN p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
 }

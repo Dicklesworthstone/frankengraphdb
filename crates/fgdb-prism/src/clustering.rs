@@ -226,6 +226,24 @@ pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<TriangleStatistics, FnxExecutionError<C>> {
+    let (triangles, mut witness) = counts(graph, checkpoint)?;
+    let clustering = coefficients(graph, &triangles, &mut witness, checkpoint)?;
+    Ok(TriangleStatistics {
+        triangles,
+        clustering,
+        witness,
+    })
+}
+
+/// Exact count-only kernel. A triangle CALL does not request local clustering,
+/// so it must not allocate the coefficient vector or search each row again to
+/// remove self-loops from its denominator. Shared admission remains a
+/// conservative bound for both outputs; the witness and meter record only
+/// the work that this selected kernel actually performs.
+pub(crate) fn counts<C>(
+    graph: &SnapshotGraphView,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(Vec<u64>, ComplexityWitness), FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
         algorithm: "triangles_degree_oriented_forward_csr".to_owned(),
@@ -298,6 +316,16 @@ pub(crate) fn run<C>(
     }
     drop(forward);
     drop(marked);
+    Ok((triangles, witness))
+}
+
+fn coefficients<C>(
+    graph: &SnapshotGraphView,
+    triangles: &[u64],
+    witness: &mut ComplexityWitness,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<Vec<f64>, FnxExecutionError<C>> {
+    let n = graph.node_count();
     let mut clustering = reserve(n)?;
     for node in 0..n {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
@@ -341,11 +369,7 @@ pub(crate) fn run<C>(
         };
         clustering.push(coefficient);
     }
-    Ok(TriangleStatistics {
-        triangles,
-        clustering,
-        witness,
-    })
+    Ok(clustering)
 }
 
 /// Exact pre-forward-CSR kernel, retained only for paired measurement and
@@ -530,6 +554,120 @@ mod tests {
             }
             self.counts.units += count;
             Ok(())
+        }
+    }
+
+    #[test]
+    fn triangle_call_omits_coefficients_and_preserves_every_remaining_refusal_prefix() {
+        use crate::{FnxCallSpec, FnxValue};
+
+        for view in [
+            graph(0, &[]),
+            graph(6, &[]),
+            graph(6, &[(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]),
+            graph(6, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 3)]),
+        ] {
+            let mut full_units = 0;
+            let full = run(&view, &mut || {
+                full_units += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
+            let mut count_units = 0;
+            let (triangles, witness) = counts(&view, &mut || {
+                count_units += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
+            assert_eq!(triangles, full.triangles);
+            assert_eq!(witness.nodes_touched, full.witness.nodes_touched);
+            // Only the coefficient pass is gone: one row visit per vertex
+            // and exactly the self-loop probes included in the old witness.
+            assert_eq!(
+                full_units - count_units,
+                view.node_count() + full.witness.edges_scanned - witness.edges_scanned
+            );
+
+            let call = FnxCallSpec::triangles();
+            let mut total = 0;
+            let expected = call
+                .execute(&view, limits(), || {
+                    total += 1;
+                    Ok::<(), usize>(())
+                })
+                .unwrap();
+            let rows: Vec<_> = view
+                .vertex_ids()
+                .iter()
+                .zip(&full.triangles)
+                .map(|(&vertex, &count)| vec![FnxValue::Vertex(vertex), FnxValue::Integer(count)])
+                .collect();
+            assert_eq!(expected.rows, rows);
+            assert_eq!(expected.certificate.witness, witness);
+            assert!(count_units <= expected.certificate.estimated_work);
+
+            // Hash the independent full-statistics output under this exact
+            // call, proving the externally visible result binding is unchanged.
+            let mut hash = fgdb_crypto::Hasher::new();
+            hash.update(b"fgdb:prism:result-rows:v3");
+            hash.update(&(rows.len() as u128).to_le_bytes());
+            hash.update(&call.digest().0);
+            for row in &rows {
+                for &value in row {
+                    crate::execute::hash_result_value(&mut hash, value);
+                }
+            }
+            assert_eq!(expected.certificate.result_digest, hash.finalize());
+
+            for allowance in 0..=total {
+                let mut observed = MeterCounts::default();
+                let actual = call.execute(
+                    &view,
+                    limits(),
+                    BulkMeter {
+                        counts: &mut observed,
+                        allowance,
+                    },
+                );
+                if allowance == total {
+                    assert_eq!(actual.unwrap(), expected);
+                    assert_eq!(observed.units, total);
+                } else {
+                    assert!(matches!(
+                        actual,
+                        Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1
+                    ));
+                    assert_eq!(observed.units, allowance + 1);
+                }
+            }
+
+            for cap in [
+                FnxExecutionLimits {
+                    max_result_rows: 0,
+                    ..limits()
+                },
+                FnxExecutionLimits {
+                    max_estimated_work: 0,
+                    ..limits()
+                },
+            ] {
+                let mut scalar_units = 0;
+                let scalar = call.execute(&view, cap, || {
+                    scalar_units += 1;
+                    Ok::<(), usize>(())
+                });
+                let mut observed = MeterCounts::default();
+                let bulk = call.execute(
+                    &view,
+                    cap,
+                    BulkMeter {
+                        counts: &mut observed,
+                        allowance: usize::MAX,
+                    },
+                );
+                assert_eq!(format!("{bulk:?}"), format!("{scalar:?}"));
+                assert_eq!(observed.units, scalar_units);
+            }
         }
     }
 
@@ -720,6 +858,8 @@ mod tests {
                 .collect();
             let view = graph(4, &edges);
             let actual = triangle_statistics(&view, limits(), || Ok::<(), Infallible>(())).unwrap();
+            let (counts, _) = counts(&view, &mut || Ok::<(), Infallible>(())).unwrap();
+            assert_eq!(counts, actual.triangles, "count-only mask={mask}");
             let prior = incumbent(&view, &mut || Ok::<(), Infallible>(())).unwrap();
             assert_eq!(actual.triangles, prior.triangles, "incumbent mask={mask}");
             assert_eq!(

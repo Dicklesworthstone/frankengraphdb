@@ -492,11 +492,24 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
         execute("MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p < m RETURN q ORDER BY q"),
         [1, 2, 3].map(|id| vertices(&[id])).to_vec()
     );
-    // Not a top-level AND conjunct, or inside a scope that hides the
-    // imported columns: refused before any catalog call, as before.
+    // Not a top-level AND conjunct: no join key, but the row filter after
+    // the join that `WITH * WHERE` spells. m = 3, held only by vertex 4.
+    for (text, ids) in [
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m OR q.p = 1 RETURN q ORDER BY q",
+            &[1, 4][..],
+        ),
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE NOT q.p = m RETURN q ORDER BY q",
+            &[1, 2, 3][..],
+        ),
+    ] {
+        let expected: Vec<_> = ids.iter().map(|&id| vertices(&[id])).collect();
+        assert_eq!(execute(text), expected, "{text}");
+    }
+    // Inside a scope that hides the imported columns: refused before any
+    // catalog call, as before.
     for text in [
-        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p = m OR q.p = 1 RETURN q",
-        "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE NOT q.p = m RETURN q",
         "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q",
     ] {
         let mut calls = 0;
@@ -510,6 +523,58 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
         );
         assert_eq!(calls, 0, "{text}");
     }
+}
+
+/// A required continuation's WHERE that is no graph predicate, such as a
+/// computed graph operand against an imported column (TCK Comparison1
+/// [1]-[3]: `WITH ... AS expected MATCH (n) WHERE toInteger(n.id) =
+/// expected`), is that part's `WITH * WHERE`: the same template, so the same
+/// rows. An OPTIONAL continuation's WHERE belongs to its left join, and a
+/// computed operand there still refuses before any catalog call.
+#[test]
+fn a_continuation_where_over_a_computed_graph_operand_filters_after_the_join() {
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    for (implicit, explicit) in [
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE q.p + 0 = m RETURN q",
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WITH * WHERE q.p + 0 = m RETURN q",
+        ),
+        (
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WHERE toInteger(q.p) = m RETURN q",
+            "MATCH (n) WITH max(n.p) AS m MATCH (q) WITH * WHERE toInteger(q.p) = m RETURN q",
+        ),
+    ] {
+        assert_eq!(template(implicit), template(explicit), "{implicit}");
+        // m = 3, held only by vertex 4.
+        assert_eq!(execute(implicit), vec![vertices(&[4])], "{implicit}");
+    }
+    // The same after a leading UNWIND, the import idiom's shape (`UNWIND
+    // $rows AS row MATCH (n) WHERE toLower(n.name) = row.name`).
+    assert_eq!(
+        template("UNWIND [3, 1] AS m MATCH (q) WHERE q.p + 0 = m RETURN m, q"),
+        template("UNWIND [3, 1] AS m MATCH (q) WITH * WHERE q.p + 0 = m RETURN m, q")
+    );
+    assert_eq!(
+        execute("UNWIND [3, 1] AS m MATCH (q) WHERE q.p + 0 = m RETURN m, q ORDER BY m, q"),
+        [(1, 1), (3, 4)]
+            .map(|(value, vid)| scalar_vertex(value, vid))
+            .to_vec()
+    );
+    let text = "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) \
+                WHERE q.p + 0 = m RETURN a, q";
+    let mut calls = 0;
+    assert!(
+        PreparedGraphSetText::prepare(text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(calls, 0);
 }
 
 /// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the carried

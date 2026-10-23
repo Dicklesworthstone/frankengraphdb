@@ -162,7 +162,8 @@ impl WriteTxn {
         use fgdb_gql::{
             GlaExecutionEvent, GlaExecutionStats, GqlExecutionStats, GqlQueryError,
             GqlQueryExecution, GqlQueryPolicy, GraphEdgeMergePolicy, GraphEdgeMergeQueryError,
-            GraphEdgeMergeStats, GraphInsertQueryError, GraphVertexMergePolicy,
+            GraphEdgeMergeStats, GraphInsertQueryError, GraphMutationPolicy,
+            GraphMutationQueryError, GraphMutationStats, GraphVertexMergePolicy,
             GraphVertexMergeRowsQueryError, GraphWriteChainError, GraphWriteChainStep,
             GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
         };
@@ -181,6 +182,14 @@ impl WriteTxn {
             created_vertices: 0,
             created_edges: stats.created_edges,
         };
+        // A SET, REMOVE or DELETE step's counters, likewise; it creates nothing.
+        let mutated = |stats: &GraphMutationStats| GraphInsertStats {
+            selection: stats.selection,
+            evaluator: stats.evaluator,
+            created_vertices: 0,
+            created_edges: 0,
+        };
+        let mutation = |error| GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error));
         self.ensure_database(database).map_err(source)?;
         let live = database
             .frontier()
@@ -224,6 +233,9 @@ impl WriteTxn {
                 policy.max_vertices.saturating_sub(used.created_vertices),
                 policy.max_edges.saturating_sub(used.created_edges),
             )
+            // A SET, REMOVE or DELETE is the chain's last step: no earlier
+            // step spends this allowance.
+            .with_mutation_limit(policy.max_mutation_effects)
         };
         let add = |used: &mut GraphInsertStats, step: &GraphInsertStats| {
             used.selection.snapshot_records = used
@@ -258,6 +270,7 @@ impl WriteTxn {
             };
             let mut rows = None;
             let mut result = None;
+            let mut mutation_effects = 0;
             let mut receipts = Vec::with_capacity(chain.steps().len());
             let last = chain.steps().len().saturating_sub(1);
             // A chain of creating MERGEs (see frozen_chain) holds its effects
@@ -273,6 +286,7 @@ impl WriteTxn {
                         GraphWriteChainStep::Query(_)
                             | GraphWriteChainStep::EdgeMergeQuery(_)
                             | GraphWriteChainStep::VertexMergeQuery(_)
+                            | GraphWriteChainStep::MutationQuery(_)
                     );
                 let allowance = remaining(&used, delivers);
                 // A step without RETURN rows: its own counters, no rows.
@@ -619,6 +633,67 @@ impl WriteTxn {
                             .map_err(|error| error.map_source(GraphWriteChainError::EdgeMerge))?;
                         (merged(&stats), returning)
                     }
+                    // A SET, REMOVE or DELETE over the previous write's rows
+                    // (fgdb-cpny9): its proposal is complete before anything
+                    // is staged, as for `MATCH ... WITH ... SET`.
+                    GraphWriteChainStep::Mutation(step) => {
+                        let policy =
+                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let proposal = step
+                            .execute_governed_over(
+                                rows.take(),
+                                policy,
+                                |pattern, budget| {
+                                    workspace.txn.execute_graph_pattern_governed(
+                                        database, cx, pattern, budget,
+                                    )
+                                },
+                                || cx.checkpoint(),
+                            )
+                            .map_err(|error| error.map_source(mutation))?;
+                        let (targets, edges) = mutation_targets(&proposal);
+                        let stats = workspace.txn.stage_mutation_intents(
+                            database,
+                            cx,
+                            step.relation(),
+                            proposal,
+                            policy,
+                            mutation,
+                        )?;
+                        receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
+                        mutation_effects = stats.effects;
+                        let stats = mutated(&stats);
+                        (stats, unreturned(&stats))
+                    }
+                    GraphWriteChainStep::MutationQuery(query) => {
+                        let policy =
+                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let proposal = query
+                            .execute_governed_over(
+                                rows.take(),
+                                policy,
+                                |pattern, budget| {
+                                    workspace.txn.execute_graph_pattern_governed(
+                                        database, cx, pattern, budget,
+                                    )
+                                },
+                                || cx.checkpoint(),
+                            )
+                            .map_err(|error| error.map_source(GraphWriteChainError::Mutation))?;
+                        let (batch, returning) = proposal.into_parts();
+                        let (targets, edges) = mutation_targets(&batch);
+                        let stats = workspace.txn.stage_mutation_intents(
+                            database,
+                            cx,
+                            query.mutation().relation(),
+                            batch,
+                            policy,
+                            mutation,
+                        )?;
+                        receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
+                        mutation_effects = stats.effects;
+                        (mutated(&stats), returning)
+                    }
                 };
                 // A query step's execution includes its write prefix PLUS
                 // projection, grouping, ordering and WITH-tail evaluation.
@@ -672,7 +747,7 @@ impl WriteTxn {
                     evaluator: used.evaluator,
                     target_vertex_visits: 0,
                     target_edge_visits: 0,
-                    mutation_effects: 0,
+                    mutation_effects,
                     created_vertices: used.created_vertices,
                     created_edges: used.created_edges,
                 },

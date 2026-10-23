@@ -744,6 +744,44 @@ fn read_procedure_sources_do_not_enter_write_prefixes_or_owned_write_tails() {
 }
 
 #[test]
+fn with_ordering_ends_before_a_call_reuses_a_dropped_column_name() {
+    for order in ["a", "b"] {
+        let query = prepare(
+            &format!(
+                "UNWIND [2,1,2] AS b WITH b AS a ORDER BY {order} LIMIT 2 \
+                 CALL t.echo(9) YIELD b RETURN a, b"
+            ),
+            &GqlParameters::new(),
+        );
+        assert_eq!(
+            call(&query)
+                .unwrap()
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            vec![vec![int(1), int(9)], vec![int(2), int(9)]],
+            "ORDER BY {order}"
+        );
+    }
+    let mut lookups = 0;
+    assert!(
+        PreparedGraphSetText::prepare(
+            "UNWIND [2,1] AS b WITH b AS a ORDER BY b LIMIT 1 \
+             CALL t.echo(b) YIELD c RETURN c",
+            |kind, name| {
+                lookups += 1;
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(
+        lookups, 0,
+        "the completed WITH's dropped b is not a CALL argument"
+    );
+}
+
+#[test]
 fn procedure_columns_correlate_with_a_later_match() {
     // Graph: VId(i) has p = values[i]. The procedure yields ids to look up.
     let values = [10, 20, 30].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));

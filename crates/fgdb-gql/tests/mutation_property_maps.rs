@@ -271,6 +271,7 @@ fn nullable_maps_skip_override_evaluation_and_selective_maps_need_no_catalog() {
         !selective
             .mutation()
             .selection()
+            .expect("a MATCH mutation reads a graph selection")
             .plan()
             .projects_property_maps()
     );

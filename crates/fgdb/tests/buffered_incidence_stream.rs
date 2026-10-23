@@ -199,6 +199,7 @@ async fn check_cuts(view: &mut BufferedReadView<MemVfs>, contexts: &PurposeConte
                         .into_iter()
                         .filter(|row| matches(endpoint, relation, direction, row))
                         .collect();
+                    let before = view.buffer_stats().misses;
                     let mut scan = view
                         .stream_adjacency_at(
                             &cx,
@@ -217,6 +218,8 @@ async fn check_cuts(view: &mut BufferedReadView<MemVfs>, contexts: &PurposeConte
                     assert!(scan.is_finished());
                     assert_eq!(actual, wanted);
                     drop(scan);
+                    let full_faults = view.buffer_stats().misses - before;
+                    let before = view.buffer_stats().misses;
                     assert_eq!(
                         view.incident_edge_count_at(
                             &cx,
@@ -229,6 +232,13 @@ async fn check_cuts(view: &mut BufferedReadView<MemVfs>, contexts: &PurposeConte
                         .unwrap(),
                         wanted.len() as u64
                     );
+                    if !wanted.is_empty() {
+                        let count_faults = view.buffer_stats().misses - before;
+                        assert!(
+                            count_faults < full_faults,
+                            "count skips edge sidecars against the live full-record incumbent: cut {cut}, endpoint {endpoint:?}, relation {relation:?}, direction {direction:?}, count {count_faults}, full {full_faults}"
+                        );
+                    }
                 }
             }
         }

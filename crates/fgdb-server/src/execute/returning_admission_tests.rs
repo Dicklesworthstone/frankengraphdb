@@ -66,6 +66,36 @@ fn representation_refusal_rolls_back_the_complete_native_write() {
 }
 
 #[test]
+fn chain_representation_refusal_rolls_back_all_prior_creations() {
+    let ((), report) = run_async_under_lab(0xb017_1011, |root| async move {
+        let (server, token, _) = served(&root, "chain-representation-refusal").await;
+        let db = &server.databases["test"];
+        let before = state(&root, db).await;
+        let mut calls = 0;
+        let result = write_returning_checked(
+            &root,
+            db,
+            &token,
+            prepare(db, "CREATE (a) WITH a CREATE (b) RETURN 7 AS value"),
+            None,
+            |columns, rows, _| {
+                calls += 1;
+                assert_eq!(columns, &[String::from("value")]);
+                assert_eq!(rows, [vec![WireValue::Int(7)]]);
+                Err::<(), _>(Refusal::new(ErrorCode::Execution, "chain output rejected"))
+            },
+        )
+        .await;
+        let error = result.err().expect("output admission must abort the chain");
+        assert_eq!(error.message, "chain output rejected");
+        assert_eq!(calls, 1);
+        assert_eq!(state(&root, db).await, before);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn converted_output_and_empty_output_both_precede_one_completion() {
     let ((), report) = run_async_under_lab(0xb017_1002, |root| async move {
         let (server, token, _) = served(&root, "returning-owned-representation").await;

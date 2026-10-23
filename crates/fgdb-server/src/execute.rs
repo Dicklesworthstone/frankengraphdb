@@ -17,7 +17,8 @@ use fgdb_gql::{
     GqlQueryError, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
     PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery,
     PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
-    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText,
+    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
 };
 use fgdb_protocol::body::{ErrorCode, Execute, ExecuteBatch, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
@@ -397,10 +398,22 @@ async fn write_inner(
     );
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    if deferred.is_none()
-        && let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)?
-    {
-        return write_returning(cx, db, token, returning).await;
+    if let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)? {
+        if deferred.is_none() {
+            return write_returning(cx, db, token, returning).await;
+        }
+        // Bolt retains a no-RETURN definition at RUN and executes it only at
+        // PULL/DISCARD. Chains use the same checked owner as projected writes,
+        // even when their only rows are private WITH input. Keep the original
+        // recovery generation/bookmark fence and refuse actual RETURN here.
+        if !matches!(&returning, Returning::Chain(chain) if !chain.returns_rows()) {
+            return Err(Refusal::new(
+                ErrorCode::Statement,
+                "a deferred write cannot return rows",
+            ));
+        }
+        return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _| Ok(rows))
+            .await;
     }
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     if let Some((generation, minimum_seq)) = deferred {
@@ -545,6 +558,7 @@ async fn write_batch_inner(
 /// Prepared write projections share the same capability and native completion
 /// boundary as their effects. Their collectors own RETURN semantics.
 pub(crate) enum Returning {
+    Chain(Box<PreparedGraphWriteChain>),
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
     Merge(Box<PreparedGraphVertexUpsertQuery>),
@@ -565,12 +579,21 @@ impl Returning {
         let refusal = |error: &dyn core::fmt::Display| {
             Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
         };
-        // A chained write (fgdb-cpny9) has no authorized executor yet: refuse
-        // it whole rather than let a classifier claim a prefix of it.
-        if fgdb_gql::PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
-            return Err(refusal(
-                &"a chained write (CREATE ... WITH ... CREATE) is not served under a capability",
-            ));
+        // Classify the whole chain before any single-write parser can claim
+        // its prefix. Both private WITH rows and public RETURN rows belong to
+        // the same authorized workspace and sole completion boundary.
+        if PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
+            let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map_err(|e| refusal(&e))?;
+            return template
+                .bind_parameters(parameters)
+                .map(|chain| Some(Self::Chain(Box::new(chain))))
+                .map_err(|e| refusal(&e));
         }
         if PreparedGraphInsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
             let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
@@ -644,6 +667,7 @@ impl Returning {
 
     pub(crate) fn columns(&self) -> &[String] {
         match self {
+            Self::Chain(chain) => chain.columns(),
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
             Self::Merge(query) => query.columns(),
@@ -728,6 +752,31 @@ pub(crate) async fn write_returning_checked<R: Send>(
             collect(&columns, rows, work)
         };
     let result = match &prepared {
+        Returning::Chain(prepared) => guard
+            .execute_graph_write_chain_authorized_checked(
+                &txn,
+                &query,
+                &commit,
+                &db.authority,
+                token,
+                TRUNK,
+                prepared,
+                policy.insertion_policy(),
+                unix_millis,
+                |rows, work| match output(rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
+            )
+            .await
+            .map(|(_, rows, completion)| (rows, completion))
+            .map_err(returning_refusal),
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized_checked(
                 &txn,
@@ -1004,6 +1053,10 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
             match txn {
                 fgdb::WriteTxnError::Authorization(warden) => {
                     code = warden_code(*warden);
+                    break;
+                }
+                fgdb::WriteTxnError::AuthorizedChainStepUnsupported { .. } => {
+                    code = ErrorCode::Statement;
                     break;
                 }
                 fgdb::WriteTxnError::AuthorizedMutationRefused

@@ -61,10 +61,20 @@ mod set_aggregate_queries {
                 })?;
             // A CALL input runs in Prism at this same sequence.
             cx.with_restriction(|| {
-                query.execute_governed_with_elements(
+                query.execute_governed_with_seeded_elements(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    |pattern, seeds, remaining| {
+                        Some(crate::gql_exec::execute_seeded_pattern_at(
+                            self,
+                            pattern,
+                            Some(seeds),
+                            as_of,
+                            remaining,
+                            || cx.checkpoint(),
+                        ))
                     },
                     |call, arguments, remaining| {
                         if crate::query::is_hybrid(call) {
@@ -120,10 +130,20 @@ mod set_aggregate_queries {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
             cx.with_restriction(|| {
-                query.execute_governed_with_elements(
+                query.execute_governed_with_seeded_elements(
                     policy,
                     |pattern, remaining| {
                         self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+                    },
+                    |pattern, seeds, remaining| {
+                        Some(crate::gql_exec::execute_seeded_pattern_at(
+                            self,
+                            pattern,
+                            Some(seeds),
+                            as_of,
+                            remaining,
+                            || cx.checkpoint(),
+                        ))
                     },
                     |call, arguments, remaining| {
                         if crate::query::is_hybrid(call) {

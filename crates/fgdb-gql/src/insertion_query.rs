@@ -328,6 +328,14 @@ impl PreparedGraphInsertQuery {
     pub const fn insertion(&self) -> &PreparedGraphInsert {
         &self.insertion
     }
+    /// The frozen occurrence bindings, including private continuation columns.
+    /// Authorized hosts use these before execution to admit property reads on
+    /// created elements; a hidden WITH column is subject to the same scope as
+    /// a delivered RETURN column.
+    #[must_use]
+    pub fn bindings(&self) -> &[GraphInsertBinding] {
+        &self.bindings
+    }
     #[must_use]
     pub fn columns(&self) -> &[String] {
         &self.columns

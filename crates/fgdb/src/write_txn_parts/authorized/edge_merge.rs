@@ -374,6 +374,36 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
         execution,
         returning,
         None,
+        None,
+    )
+}
+
+/// Resolve a complete, already-masked chain input through the ordinary native
+/// pair reducer. The caller owns selection and its cumulative counters; this
+/// seam issues no permit, charges no public rows and never completes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    selected: GqlQueryExecution<GraphValueRow>,
+    frozen: Option<&mut crate::write_txn::FrozenCreations>,
+) -> Result<(GraphEdgeMergeStats, EdgeMergeRows, Vec<GraphValueRow>), Fault> {
+    apply_with_input(
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        false,
+        Some((selected, None)),
+        frozen,
     )
 }
 
@@ -402,7 +432,8 @@ pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
         scope,
         execution,
         false,
-        Some((selected, occurrence)),
+        Some((selected, Some(occurrence))),
+        None,
     )
     .map(|(stats, outcomes, _)| (stats, outcomes))
 }
@@ -417,7 +448,8 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
-    selected: Option<(GqlQueryExecution<GraphValueRow>, usize)>,
+    selected: Option<(GqlQueryExecution<GraphValueRow>, Option<usize>)>,
+    mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -432,7 +464,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
-    let original_row = selected.as_ref().map(|(_, row)| *row);
+    let original_row = selected.as_ref().and_then(|(_, row)| *row);
     let proposal: super::super::EdgeMergeProposal<Output> = cx.with_restriction(|| {
         let database = RefCell::new(&mut *database);
         let controls = RefCell::new(&mut *execution);
@@ -470,12 +502,27 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                     cx.checkpoint()
                         .map_err(WriteTxnError::Interrupted)
                         .map_err(GqlQueryError::Interrupted)?;
-                    if controls
-                        .borrow_mut()
-                        .vertex(transaction, &database.borrow(), vertex)
-                        .map_err(GqlQueryError::Source)?
-                        .is_none()
+                    let visible = match frozen
+                        .as_deref()
+                        .and_then(|held| held.index.get(&vertex).map(|at| &held.vertices[*at]))
                     {
+                        Some((_, labels, _)) => {
+                            // This is the same logical endpoint lookup as
+                            // Execution::vertex. The held image has already
+                            // passed ordinary native before/after admission.
+                            controls
+                                .borrow_mut()
+                                .checkpoint()
+                                .map_err(GqlQueryError::Source)?;
+                            scope.allows_vertex(labels)
+                        }
+                        None => controls
+                            .borrow_mut()
+                            .vertex(transaction, &database.borrow(), vertex)
+                            .map_err(GqlQueryError::Source)?
+                            .is_some(),
+                    };
+                    if !visible {
                         return Err(GqlQueryError::Source(WriteTxnError::Authorization(
                             Error::ScopeDenied,
                         )));
@@ -522,12 +569,17 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
         )
     })?;
     if let Some(batch) = proposal.creation {
-        for row in batch.rows {
-            cx.checkpoint()
-                .map_err(WriteTxnError::Interrupted)
+        if let Some(held) = frozen.as_deref_mut() {
+            super::chain::stage_batch(transaction, database, cx, batch, Some(held), execution)
                 .map_err(source)?;
-            execution.checkpoint().map_err(source)?;
-            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+        } else {
+            for row in batch.rows {
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(source)?;
+                execution.checkpoint().map_err(source)?;
+                stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+            }
         }
     }
     let result_rows = proposal.outcome.result_rows();

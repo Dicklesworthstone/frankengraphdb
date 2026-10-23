@@ -2,7 +2,7 @@
 //! A surviving unsynced marker models surviving bytes, not a power-loss VFS.
 
 use super::*;
-use crate::{DatabaseConfig, Served, Server, ServerLimits};
+use crate::{DatabaseConfig, MaintenanceError, Served, Server, ServerLimits};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{CrashPoint, DatabaseKeys, DerivedPublicationStage, WriteBatch, WriteError};
@@ -206,6 +206,192 @@ pub(crate) async fn settled(db: &Served) -> DatabaseStatus {
         }
     })
     .await
+}
+
+#[test]
+fn host_maintenance_preserves_pinned_readers_and_the_committed_frontier() {
+    let ((), report) = run_async_under_lab(0x79a0_0010, |root| async move {
+        let (server, token, path) = served(&root, "host-maintenance-pins").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(1))
+            .await
+            .unwrap();
+        let (mut pinned, at) = crate::execute::read_session(&root, db, &token)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(at, CommitSeq(1));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(2))
+            .await
+            .unwrap();
+
+        let before = std::fs::read(path.join("manifest.root")).unwrap();
+        server.compact_database(&root, "test").await.unwrap();
+        assert_ne!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+        let summary = server.scrub_database(&root, "test").await.unwrap();
+        assert_eq!(summary.objects, 2);
+        assert_eq!(summary.clean.len() + summary.repaired.len(), 2);
+        assert!(summary.metadata_objects >= 2);
+        assert!(summary.lost.is_empty());
+        assert!(summary.block_lost.is_empty());
+        assert!(summary.metadata_lost.is_empty());
+        assert_eq!(
+            server.database_status(&root, "test"),
+            Some(DatabaseStatus::Ready { generation: 1 })
+        );
+        let (answer, pinned_at) = pinned
+            .query_with_snapshot(
+                &contexts.query(),
+                "MATCH (n) RETURN n",
+                &fgdb_gql::GqlParameters::new(),
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(pinned_at, CommitSeq(1));
+        assert!(matches!(answer, fgdb::QueryResult::Rows { rows, .. } if rows.len() == 1));
+        let (fresh, generation) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(fresh.frontier(), CommitSeq(2));
+        assert!(fresh.vertex(VId(1)).unwrap().is_some());
+        assert!(fresh.vertex(VId(2)).unwrap().is_some());
+        generation.check().unwrap();
+        assert_eq!(
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(3))
+                .await
+                .unwrap(),
+            CommitSeq(3)
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn host_maintenance_admission_tracks_waiters_cancellation_and_drain() {
+    let ((), report) = run_async_under_lab(0x79a0_0011, |root| async move {
+        let (server, _, _) = served(&root, "host-maintenance-admission").await;
+        assert!(matches!(
+            server.compact_database(&root, "unknown").await,
+            Err(MaintenanceError::UnknownDatabase(name)) if name == "unknown"
+        ));
+        assert!(matches!(
+            server.scrub_database(&root, "unknown").await,
+            Err(MaintenanceError::UnknownDatabase(name)) if name == "unknown"
+        ));
+        let db = &server.databases["test"];
+        let held = db.db.write(&root).await.unwrap();
+        let mut maintenance = Box::pin(server.compact_database(&root, "test"));
+        assert!(
+            maintenance
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(db.db.shared.gate.state.read().unwrap().active, 1);
+        db.db.stop();
+        drop(maintenance);
+        assert_eq!(db.db.shared.gate.state.read().unwrap().active, 0);
+        drop(held);
+        server.join_database_workers(&root).await;
+        assert!(matches!(
+            server.compact_database(&root, "test").await,
+            Err(MaintenanceError::DatabaseUnavailable(
+                DatabaseStatus::Stopped
+            ))
+        ));
+        assert!(matches!(
+            server.scrub_database(&root, "test").await,
+            Err(MaintenanceError::DatabaseUnavailable(
+                DatabaseStatus::Stopped
+            ))
+        ));
+        let (draining, _, _) = served(&root, "host-maintenance-draining").await;
+        draining.shutdown().trigger();
+        assert!(matches!(
+            draining.compact_database(&root, "test").await,
+            Err(MaintenanceError::Draining)
+        ));
+        assert!(matches!(
+            draining.scrub_database(&root, "test").await,
+            Err(MaintenanceError::Draining)
+        ));
+        draining.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn host_scrub_loss_fences_pinned_readers_and_uses_authoritative_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_0012, |root| async move {
+        let (server, token, path) = served(&root, "host-scrub-loss").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(1))
+            .await
+            .unwrap();
+        let (mut pinned, _) = crate::execute::read_session(&root, db, &token)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let admitted = db.db.enter().unwrap();
+        // Damage only this test's newly created committed capsule. The scrub
+        // must not keep serving the retained graph merely because it is warm.
+        let capsules = std::fs::read_dir(path.join("capsules"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(capsules.len(), 1);
+        let capsule = &capsules[0];
+        let intact = std::fs::read(capsule).unwrap();
+        std::fs::write(capsule, b"damaged capsule for host scrub law").unwrap();
+        let summary = server.scrub_database(&root, "test").await.unwrap();
+        assert_eq!(summary.lost.len(), 1);
+        assert_eq!(db.db.status(), DatabaseStatus::Recovering { generation: 2 });
+        assert!(matches!(
+            pinned.query(
+                &contexts.query(),
+                "MATCH (n) RETURN n",
+                &fgdb_gql::GqlParameters::new(),
+            ),
+            Err(crate::execute::SessionError::Unavailable(
+                Unavailable::Recovering
+            ))
+        ));
+        assert!(matches!(
+            server.compact_database(&root, "test").await,
+            Err(MaintenanceError::DatabaseUnavailable(
+                DatabaseStatus::Recovering { generation: 2 }
+            ))
+        ));
+        drop(admitted);
+        assert!(matches!(
+            settled(db).await,
+            DatabaseStatus::Fenced { generation: 2, .. }
+        ));
+        std::fs::write(capsule, intact).unwrap();
+        assert!(matches!(
+            server.scrub_database(&root, "test").await,
+            Err(MaintenanceError::DatabaseUnavailable(
+                DatabaseStatus::Fenced { generation: 2, .. }
+            ))
+        ));
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -663,4 +849,72 @@ fn stop_releases_published_index_ownership_and_late_writer_cannot_restore_it() {
         assert!(generation.gate.state.read().unwrap().published.is_none());
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cancelled_shutdown_waits_for_worker_handoff_and_drains_the_worker() {
+    for expired in [false, true] {
+        let clock = Arc::new(asupersync::time::VirtualClock::new());
+        let timer = asupersync::time::TimerDriverHandle::with_virtual_clock(clock);
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_timer_driver(timer)
+            .build()
+            .unwrap();
+        let budget = if expired {
+            asupersync::Budget::INFINITE.with_deadline(asupersync::types::Time::ZERO)
+        } else {
+            asupersync::Budget::INFINITE
+        };
+        let cleanup = runtime.request_cx_with_budget(budget);
+        if !expired {
+            cleanup.cancel_fast(asupersync::types::CancelKind::User);
+        }
+        assert!(cleanup.checkpoint().is_err());
+        let ((), report) =
+            run_async_under_lab(0x79a0_0013 + u64::from(expired), move |root| async move {
+                let name = if expired {
+                    "expired-shutdown-worker-handoff"
+                } else {
+                    "cancelled-shutdown-worker-handoff"
+                };
+                let (server, _, _) = served(&root, name).await;
+                let db = &server.databases["test"];
+                let weak = Arc::downgrade(&db.db.shared);
+                let admitted = db.db.enter().unwrap();
+                let mut finishing = Box::pin(server.finish_shutdown(&cleanup));
+                {
+                    // The handoff must wait asynchronously even after cancellation.
+                    // Hold no non-Send lock or poll context over the await below.
+                    let held = db.db.worker.try_lock().unwrap();
+                    let wakes = Arc::new(WakeCounter::default());
+                    let waker = std::task::Waker::from(Arc::clone(&wakes));
+                    let mut task = std::task::Context::from_waker(&waker);
+                    assert!(finishing.as_mut().poll(&mut task).is_pending());
+                    assert!(held.as_ref().is_some());
+                    assert!(cleanup.checkpoint().is_err(), "mask restored after Pending");
+                    assert!(matches!(db.db.enter(), Err(Unavailable::Stopping)));
+                    drop(held);
+                    assert!(wakes.0.load(Ordering::Relaxed) > 0);
+                    // Now the handle is owned by the join. Its worker must remain
+                    // alive until the previously admitted operation releases it.
+                    assert!(finishing.as_mut().poll(&mut task).is_pending());
+                    assert!(db.db.worker.try_lock().unwrap().is_none());
+                    assert!(
+                        cleanup.checkpoint().is_err(),
+                        "join does not mask its caller"
+                    );
+                }
+                drop(admitted);
+                finishing.await;
+                assert_eq!(db.db.status(), DatabaseStatus::Stopped);
+                assert!(cleanup.checkpoint().is_err());
+                server.finish_shutdown(&cleanup).await;
+                drop(server);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "shutdown joined the actual recovery child"
+                );
+            });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }

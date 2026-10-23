@@ -862,10 +862,12 @@ struct Parser<'a> {
     /// Enabled only while a multipart graph part can lower its WHERE to ON.
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
-    /// The types of the leading columns a column resolver addresses, while
-    /// one runs over a known row (a write's WITH row), so a map column's
-    /// `m.key` reads its entry. `None` keeps resolved columns untyped.
-    resolved_column_types: Option<Vec<crate::GraphSetColumnType>>,
+    /// The leading columns a column resolver addresses, named and typed,
+    /// while one runs over a known row (a write's WITH row): a map column's
+    /// `m.key` reads its entry, and a CASE or list operand over a column is
+    /// routed by its type as in a row scope. `None` keeps resolved columns
+    /// untyped.
+    resolved_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -921,6 +923,10 @@ struct Parser<'a> {
     optional_part: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
+    /// Offsets of required continuation WHERE keywords that run as a row
+    /// filter after an implicit `WITH *`, because the graph predicate refused
+    /// them (unresolved_read_input). Every other WHERE parses as before.
+    deferred_wheres: Vec<usize>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
     /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
     write_row_scope: bool,
@@ -1001,7 +1007,7 @@ impl<'a> Parser<'a> {
             read_correlations: Vec::new(),
             read_row_fields: Vec::new(),
             read_comparisons: None,
-            resolved_column_types: None,
+            resolved_row: None,
             boundary_reads: None,
             resolved_entries: false,
             elements: Vec::new(),
@@ -1018,6 +1024,7 @@ impl<'a> Parser<'a> {
             defer_where: false,
             optional_part: false,
             deferred_where: None,
+            deferred_wheres: Vec::new(),
             write_row_scope: false,
             write_prefix: false,
             chain_write: false,

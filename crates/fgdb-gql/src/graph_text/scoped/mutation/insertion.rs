@@ -248,11 +248,9 @@ impl<'a> Parser<'a> {
         // The imported row's columns keep their types, so a map column's
         // `m.key` reads its entry (`WITH {key: n} AS m DELETE m.key`, TCK
         // Delete5); MATCH projections after them stay untyped.
-        let previous = self
-            .resolved_column_types
-            .replace(imports.iter().map(|(_, kind)| *kind).collect());
+        let previous = self.resolved_row.replace(imports.to_vec());
         let value = self.insertion_resolved_value(inputs, imports);
-        self.resolved_column_types = previous;
+        self.resolved_row = previous;
         value
     }
 
@@ -389,11 +387,51 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
+    /// A vertex this CREATE made earlier in its pattern list, read whole as
+    /// `a.key` (`CREATE (a {id: 0}), ({num: a.id})`): that vertex's own value
+    /// for the key, which the same input row computes, or NULL when its map
+    /// does not set it. Nothing is consumed for any other value.
+    fn sibling_property(
+        &mut self,
+        siblings: &[NewVertex<'a>],
+    ) -> Result<Option<ReadValueTemplate>, GraphInsertTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let Some(sibling) = siblings
+            .iter()
+            .find(|vertex| vertex.name.is_some_and(|name| name.text == word))
+        else {
+            return Ok(None);
+        };
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.')) {
+            return Ok(None);
+        }
+        let (TokenKind::Word(key) | TokenKind::DelimitedKeyword(key)) = lexer.next()?.kind else {
+            return Ok(None);
+        };
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b',' | b'}')) {
+            return Ok(None);
+        }
+        let value = match sibling.properties.iter().find(|(name, _)| name.text == key) {
+            Some((_, value)) => value.clone(),
+            None => ReadValueTemplate::Literal(
+                GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
+            ),
+        };
+        for _ in 0..3 {
+            self.advance()?;
+        }
+        Ok(Some(value))
+    }
+
     fn insertion_properties(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         fields: &mut usize,
         row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        siblings: &[NewVertex<'a>],
     ) -> Result<ParsedFields<'a>, GraphInsertTextError> {
         let mut properties: ParsedFields<'a> = Vec::new();
         if !self.take(b'{')? {
@@ -415,14 +453,16 @@ impl<'a> Parser<'a> {
             }
             self.punct(b':', ":")?;
             let at = self.current.at;
-            let value = if let Some(schema) = row_schema {
+            let value = if let Some(value) = self.sibling_property(siblings)? {
+                value
+            } else if let Some(schema) = row_schema {
                 let value = if self.syntax.variables.is_empty() {
                     self.read_row_value(schema, 0)?
                 } else {
                     self.insertion_source_value(inputs, schema)?
                 };
                 self.scalar_property_value(value, at, schema, inputs)?
-            } else if self.list_chain_follows(None)? {
+            } else if self.list_chain_follows(super::return_projection::Route::NONE)? {
                 // A `+` chain with a list operand (`[1] + [2]`, `n.p + [3]`)
                 // reads whole through the list sum over the MATCH columns,
                 // as a SET list value does (fgdb-k3nub).
@@ -568,7 +608,12 @@ impl<'a> Parser<'a> {
             }
             labels.push(label);
         }
-        let properties = self.insertion_properties(&mut parsed.projections, fields, row_schema)?;
+        let properties = self.insertion_properties(
+            &mut parsed.projections,
+            fields,
+            row_schema,
+            &parsed.vertices,
+        )?;
         self.punct(b')', ")")?;
         let vertex = parsed.vertices.len();
         parsed.vertices.push(NewVertex {
@@ -625,8 +670,12 @@ impl<'a> Parser<'a> {
                 };
                 self.punct(b':', ":")?;
                 let relation = self.schema_name()?;
-                let properties =
-                    self.insertion_properties(&mut parsed.projections, &mut fields, row_schema)?;
+                let properties = self.insertion_properties(
+                    &mut parsed.projections,
+                    &mut fields,
+                    row_schema,
+                    &parsed.vertices,
+                )?;
                 self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
                 let outgoing = self.take(b'>')?;

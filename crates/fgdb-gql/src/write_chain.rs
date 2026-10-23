@@ -17,12 +17,16 @@ mod read;
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
-use crate::mutation_text::{EdgeMergeReturnTemplate, PreparedGraphVertexMergeRowsText};
+use crate::mutation_text::{
+    EdgeMergeReturnTemplate, MutationReturnTemplate, PreparedGraphMutationRowsText,
+    PreparedGraphVertexMergeRowsText,
+};
 use crate::{
     GraphEdgeMergeQueryError, GraphEdgeMergeTextError, GraphInsertQueryError, GraphInsertTextError,
-    GraphVertexMergeTextError, PreparedGraphEdgeMerge, PreparedGraphEdgeMergeQuery,
-    PreparedGraphEdgeMergeText, PreparedGraphInsertQuery, PreparedGraphInsertText,
-    PreparedGraphVertexMergeRows,
+    GraphMutationQueryError, GraphMutationTextError, GraphVertexMergeTextError,
+    PreparedGraphEdgeMerge, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeText,
+    PreparedGraphInsertQuery, PreparedGraphInsertText, PreparedGraphMutation,
+    PreparedGraphMutationQuery, PreparedGraphVertexMergeRows,
 };
 
 /// One parsed write of a chain.
@@ -38,6 +42,14 @@ pub(crate) enum ChainTextStep {
     /// A vertex MERGE over the previous write's rows, or over one empty row
     /// as the first write; any step but one with RETURN.
     VertexMerge(Box<PreparedGraphVertexMergeRowsText>),
+    /// A SET, REMOVE or DELETE over the previous write's rows, with its
+    /// RETURN if it has one (the last step).
+    Mutation(
+        Box<(
+            PreparedGraphMutationRowsText,
+            Option<MutationReturnTemplate>,
+        )>,
+    ),
 }
 
 /// A parsed chain: two or more writes, each but the last with a (written or
@@ -47,6 +59,21 @@ pub(crate) enum ChainTextStep {
 pub struct PreparedGraphWriteChainText {
     pub(crate) statement: String,
     pub(crate) steps: Vec<ChainTextStep>,
+}
+
+impl PreparedGraphWriteChainText {
+    /// Definition-only result classification. This performs no parameter
+    /// binding, source expansion, identity allocation or graph observation.
+    #[must_use]
+    pub fn returns_rows(&self) -> bool {
+        match self.steps.last() {
+            Some(ChainTextStep::Insert(step)) => step.1.is_some(),
+            Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
+            Some(ChainTextStep::Mutation(step)) => step.1.is_some(),
+            Some(ChainTextStep::VertexMerge(step)) => step.returning.is_some(),
+            Some(ChainTextStep::EdgeMergeRows(_)) | None => false,
+        }
+    }
 }
 
 impl core::fmt::Debug for PreparedGraphWriteChainText {
@@ -64,6 +91,12 @@ pub enum GraphWriteChainTextError {
     Insert(GraphInsertTextError),
     EdgeMerge(GraphEdgeMergeTextError),
     VertexMerge(GraphVertexMergeTextError),
+    Mutation(GraphMutationTextError),
+}
+impl From<GraphMutationTextError> for GraphWriteChainTextError {
+    fn from(error: GraphMutationTextError) -> Self {
+        Self::Mutation(error)
+    }
 }
 impl From<GraphInsertTextError> for GraphWriteChainTextError {
     fn from(error: GraphInsertTextError) -> Self {
@@ -91,6 +124,7 @@ impl core::fmt::Display for GraphWriteChainTextError {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
+            Self::Mutation(error) => error.fmt(f),
         }
     }
 }
@@ -100,6 +134,7 @@ impl core::error::Error for GraphWriteChainTextError {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
+            Self::Mutation(error) => Some(error),
         }
     }
 }
@@ -111,6 +146,8 @@ pub enum GraphWriteChainError<E, A> {
     Insert(GraphInsertQueryError<E, A>),
     EdgeMerge(GraphEdgeMergeQueryError<E, A>),
     VertexMerge(crate::GraphVertexMergeRowsQueryError<E, A>),
+    /// A SET, REMOVE or DELETE step, or its RETURN.
+    Mutation(GraphMutationQueryError<E>),
     /// A correlated read after the complete write prefix. The host keeps the
     /// same statement rollback guard until this continuation succeeds.
     Read(crate::GraphSetExecutionError<E>),
@@ -123,6 +160,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
+            Self::Mutation(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
         }
     }
@@ -135,6 +173,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
+            Self::Mutation(error) => Some(error),
             Self::Read(error) => Some(error),
         }
     }
@@ -165,6 +204,11 @@ pub enum GraphWriteChainStep {
     VertexMerge(Box<PreparedGraphVertexMergeRows>),
     /// The last write, a vertex MERGE with RETURN.
     VertexMergeQuery(Box<crate::PreparedGraphVertexMergeRowsQuery>),
+    /// The last write, a SET, REMOVE or DELETE over the previous write's
+    /// rows (fgdb-cpny9), without RETURN.
+    Mutation(Box<PreparedGraphMutation>),
+    /// The last write, a SET, REMOVE or DELETE with RETURN.
+    MutationQuery(Box<PreparedGraphMutationQuery>),
 }
 
 impl core::fmt::Debug for GraphWriteChainStep {
@@ -177,6 +221,8 @@ impl core::fmt::Debug for GraphWriteChainStep {
             Self::EdgeMergeRows { .. } => "EdgeMergeRows([REDACTED])",
             Self::VertexMerge(_) => "VertexMerge([REDACTED])",
             Self::VertexMergeQuery(_) => "VertexMergeQuery([REDACTED])",
+            Self::Mutation(_) => "Mutation([REDACTED])",
+            Self::MutationQuery(_) => "MutationQuery([REDACTED])",
         })
     }
 }
@@ -320,6 +366,7 @@ impl PreparedGraphWriteChain {
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
             Some(GraphWriteChainStep::VertexMergeQuery(query)) => query.columns(),
+            Some(GraphWriteChainStep::MutationQuery(query)) => query.columns(),
             _ => &[],
         }
     }
@@ -333,6 +380,7 @@ impl PreparedGraphWriteChain {
                 GraphWriteChainStep::Query(_)
                     | GraphWriteChainStep::EdgeMergeQuery(_)
                     | GraphWriteChainStep::VertexMergeQuery(_)
+                    | GraphWriteChainStep::MutationQuery(_)
             )
         )
     }

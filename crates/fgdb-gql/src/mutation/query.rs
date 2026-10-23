@@ -166,7 +166,7 @@ impl PreparedGraphMutationQuery {
         {
             // The frozen list holds names; resolving them back needs both
             // the catalog and one name per label identity.
-            let Some(catalog) = &mutation.selection.plan().reverse_catalog else {
+            let Some(catalog) = mutation.reverse_catalog() else {
                 return Err(GraphMutationQueryBuildError::LabelCatalog);
             };
             let mut names = std::collections::BTreeSet::new();
@@ -177,7 +177,7 @@ impl PreparedGraphMutationQuery {
         if bindings
             .iter()
             .any(|binding| matches!(binding, GraphMutationBinding::Properties { .. }))
-            && let Some(catalog) = &mutation.selection.plan().reverse_catalog
+            && let Some(catalog) = mutation.reverse_catalog()
         {
             let mut names = std::collections::BTreeSet::new();
             if !catalog.properties.values().all(|name| names.insert(name)) {
@@ -276,6 +276,22 @@ impl PreparedGraphMutationQuery {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_governed_over(None, policy, source, checkpoint)
+    }
+
+    /// The last write of a chain with RETURN (fgdb-cpny9): `owned` are the
+    /// rows the previous write returned, read by the mutation's one owned
+    /// leaf. `None` is [`Self::execute_governed`].
+    pub fn execute_governed_over<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
         // Every engine below (selection, aggregate, ordering, tail) sees one
@@ -292,6 +308,7 @@ impl PreparedGraphMutationQuery {
             &self.mutation,
             selection,
             Some(&self.bindings),
+            owned,
             source,
             &mut checkpoint,
         )
@@ -401,7 +418,7 @@ impl PreparedGraphMutationQuery {
             .any(|binding| matches!(binding, GraphMutationBinding::Properties { .. }))
         {
             crate::algebra::append_property_catalog_transcript(
-                self.mutation.selection.plan().reverse_catalog.as_deref(),
+                self.mutation.reverse_catalog(),
                 &mut bytes,
             );
         }
@@ -411,7 +428,7 @@ impl PreparedGraphMutationQuery {
             .any(|binding| matches!(binding, GraphMutationBinding::Labels { .. }))
         {
             crate::algebra::append_label_catalog_transcript(
-                self.mutation.selection.plan().reverse_catalog.as_deref(),
+                self.mutation.reverse_catalog(),
                 &mut bytes,
             );
         }

@@ -582,10 +582,13 @@ type ErasedSource<'a, E, C> = Box<
         + 'a,
 >;
 
+/// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every
+/// other statement.
 pub(super) fn execute<'a, E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
     bindings: Option<&[GraphMutationBinding]>,
+    owned: Option<Vec<GraphValueRow>>,
     source: impl FnOnce(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
@@ -600,6 +603,7 @@ pub(super) fn execute<'a, E, C>(
         mutation,
         policy,
         bindings,
+        owned,
         Box::new(source),
         &mut checkpoint,
     )
@@ -609,11 +613,12 @@ fn execute_erased<E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
     bindings: Option<&[GraphMutationBinding]>,
+    owned: Option<Vec<GraphValueRow>>,
     source: ErasedSource<'_, E, C>,
     mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let selected = mutation.select_governed(policy.query, source, &mut checkpoint)?;
+    let selected = mutation.select_governed(policy.query, owned, source, &mut checkpoint)?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphMutationError::InvalidSourceStatistics,
@@ -735,7 +740,7 @@ fn execute_erased<E, C>(
                 GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(
                     &row.values()[*current],
                     keep,
-                    mutation.selection.plan().reverse_catalog.as_deref(),
+                    mutation.reverse_catalog(),
                     row_at,
                     action_at,
                     &mut meter,
@@ -847,7 +852,7 @@ fn execute_erased<E, C>(
                 row,
                 row_at,
                 &proposals,
-                mutation.selection.plan().reverse_catalog.as_deref(),
+                mutation.reverse_catalog(),
                 &mut meter,
             )?);
         }

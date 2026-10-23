@@ -274,7 +274,7 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::GraphMutationStats>,
         TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
-        use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationIntent};
+        use fgdb_gql::{GqlQueryError, GraphMutationError};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));
         self.admit_mutation(database, mutation.relation())
             .map_err(source)?;
@@ -287,31 +287,7 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let (targets, edges) = if retain_targets {
-                let mut targets = std::collections::BTreeSet::new();
-                let mut edges = std::collections::BTreeSet::new();
-                for intent in proposal.intents() {
-                    match intent {
-                        GraphMutationIntent::Property { vertex, .. }
-                        | GraphMutationIntent::StoredProperty {
-                            target: ElementId::Vertex(vertex),
-                            ..
-                        }
-                        | GraphMutationIntent::Label { vertex, .. }
-                        | GraphMutationIntent::DetachDelete { vertex }
-                        | GraphMutationIntent::Delete { vertex } => {
-                            targets.insert(*vertex);
-                        }
-                        GraphMutationIntent::EdgeProperty { edge, .. }
-                        | GraphMutationIntent::StoredProperty {
-                            target: ElementId::Edge(edge),
-                            ..
-                        }
-                        | GraphMutationIntent::DeleteEdge { edge } => {
-                            edges.insert(*edge);
-                        }
-                    }
-                }
-                (targets.into_iter().collect(), edges.into_iter().collect())
+                mutation_targets(&proposal)
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -326,4 +302,37 @@ impl WriteTxn {
             Ok((stats, targets, edges))
         })
     }
+}
+
+/// The distinct vertices and edges a proposal has at least one intent for,
+/// each domain sorted.
+fn mutation_targets(
+    proposal: &fgdb_gql::GraphMutationBatch,
+) -> (Vec<fgdb_types::VId>, Vec<fgdb_types::EId>) {
+    use fgdb_gql::GraphMutationIntent;
+    let mut targets = std::collections::BTreeSet::new();
+    let mut edges = std::collections::BTreeSet::new();
+    for intent in proposal.intents() {
+        match intent {
+            GraphMutationIntent::Property { vertex, .. }
+            | GraphMutationIntent::StoredProperty {
+                target: ElementId::Vertex(vertex),
+                ..
+            }
+            | GraphMutationIntent::Label { vertex, .. }
+            | GraphMutationIntent::DetachDelete { vertex }
+            | GraphMutationIntent::Delete { vertex } => {
+                targets.insert(*vertex);
+            }
+            GraphMutationIntent::EdgeProperty { edge, .. }
+            | GraphMutationIntent::StoredProperty {
+                target: ElementId::Edge(edge),
+                ..
+            }
+            | GraphMutationIntent::DeleteEdge { edge } => {
+                edges.insert(*edge);
+            }
+        }
+    }
+    (targets.into_iter().collect(), edges.into_iter().collect())
 }

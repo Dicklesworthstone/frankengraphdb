@@ -92,17 +92,49 @@ impl PreparedGraphText {
         tokens: &[TextToken<'_>],
         zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
-        if !has_continuation(tokens)
-            && !Parser::deferred_where_continues(statement, declarations, tokens, zones)
-        {
-            return Ok(UnresolvedReadInput {
-                first: Self::unresolved_for_composition(statement, declarations, zones)?,
-                continuations: Vec::new(),
-            });
+        let multipart = has_continuation(tokens)
+            || Parser::deferred_where_continues(statement, declarations, tokens, zones);
+        let read = |deferred: &[usize]| -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            if !multipart {
+                return Ok(UnresolvedReadInput {
+                    first: Self::unresolved_for_composition(
+                        statement,
+                        declarations,
+                        zones,
+                        deferred,
+                    )?,
+                    continuations: Vec::new(),
+                });
+            }
+            let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+                .with_zones(zones.cloned());
+            parser.deferred_wheres = deferred.to_vec();
+            parser.multipart_read(statement)
+        };
+        let error = match read(&[]) {
+            Err(error) => error,
+            read => return read,
+        };
+        // A required MATCH's WHERE over imported rows that the graph predicate
+        // refused, such as a computed graph operand against an imported
+        // column (`WITH 0 AS e MATCH (n) WHERE toInteger(n.id) = e`, or the
+        // same after a leading UNWIND), means what `MATCH ... WITH * WHERE ...`
+        // means: the same rows, filtered after the join. Re-read it that way,
+        // one refused WHERE at a time. A WHERE that parses keeps its join
+        // keys; a still-refused statement reports its first error.
+        let mut deferred = Vec::new();
+        let mut offset = error.offset;
+        while let Some(at) = crate::set_text::multipart::continuation_where_at(tokens, offset) {
+            if deferred.contains(&at) {
+                break;
+            }
+            deferred.push(at);
+            match read(&deferred) {
+                Ok(read) => return Ok(read),
+                Err(next) => offset = next.offset,
+            }
         }
-        Parser::new_with_parameter_types(statement, declarations)?
-            .with_zones(zones.cloned())
-            .multipart_read(statement)
+        Err(error)
     }
 }
 
@@ -623,7 +655,11 @@ impl<'a> Parser<'a> {
         // it passes through the `WITH *` boundary openCypher gives it: the
         // incoming columns plus this MATCH's bindings, nothing invented. The
         // first part still needs its explicit boundary before the next MATCH.
-        let implicit_star = aggregate && kind.is_some() && self.is_word("RETURN");
+        // An UNWIND directly after a continuation reads that same row (TCK
+        // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
+        let implicit_star = kind.is_some()
+            && deferred.is_none()
+            && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND"));
         if aggregate
             && !implicit_star
             && deferred.is_none()
@@ -638,7 +674,18 @@ impl<'a> Parser<'a> {
         let mut head = if let Some((lexer, at_where)) = deferred {
             // The row pipeline reads the WHERE after the implicit `WITH *`,
             // then this part ends at the next MATCH, as after an explicit one.
-            let head = self.implicit_with_head()?;
+            // A continuation's `WITH *` also keeps its incoming columns.
+            let head = if kind.is_none() {
+                self.implicit_with_head()?
+            } else {
+                let outputs = self.star_outputs(incoming, &mut inputs)?;
+                GraphProjectionHead {
+                    with: true,
+                    plain: false,
+                    inputs,
+                    outputs,
+                }
+            };
             self.lexer = lexer;
             self.current = at_where;
             head
