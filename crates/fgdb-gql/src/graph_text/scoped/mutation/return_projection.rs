@@ -1992,6 +1992,14 @@ impl<'a> Parser<'a> {
         self.row_bare_column(row, |kind| kind == GraphSetColumnType::List)
     }
 
+    /// A bare dynamically typed (Any) row column.
+    pub(super) fn row_any_column(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        self.row_bare_column(row, |kind| kind == GraphSetColumnType::Any)
+    }
+
     /// A bare row column holding a graph element (element_column_at).
     pub(super) fn row_element_column(
         &self,
@@ -2051,6 +2059,27 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(b'<' | b'>') => true,
             TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
             TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
+            _ => false,
+        })
+    }
+
+    /// Whether a bare dynamically typed (Any) row column is ordered here,
+    /// `<`, `<=`, `>` or `>=`. Its value may be a list, a map or a graph
+    /// element, which openCypher orders against its own kind only and
+    /// otherwise compares as NULL (membership::order), so the comparison
+    /// reads both values whole (TCK Comparison2 [3]). Scalars compare as the
+    /// scalar program compares them (evaluate_scalar_pair).
+    pub(super) fn any_column_ordered(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if self.row_any_column(row)?.is_none() {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(match lexer.next()?.kind {
+            TokenKind::Punct(b'<') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'>') => true,
             _ => false,
         })
     }

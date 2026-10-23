@@ -598,8 +598,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a list or map literal (starts_composite_comparison) or a
-    /// list-typed row column (list_column_compared) is compared here. Out of
-    /// line: integer_unary repeats once per nested parenthesis.
+    /// list-typed row column (list_column_compared) is compared here, or a
+    /// dynamically typed one is ordered (any_column_ordered). Out of line:
+    /// integer_unary repeats once per nested parenthesis.
     #[inline(never)]
     fn composite_comparison_follows(
         &self,
@@ -608,7 +609,8 @@ impl<'a> Parser<'a> {
         if self.starts_composite_comparison()? {
             return Ok(true);
         }
-        Ok(self.list_column_compared(self.routing_row(columns))?)
+        let row = self.routing_row(columns);
+        Ok(self.list_column_compared(row)? || self.any_column_ordered(row)?)
     }
 
     /// Whether the `+`/`-` chain here has a list operand, which the value
@@ -773,6 +775,28 @@ impl<'a> Parser<'a> {
     /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
     /// equality. `operand IN value` with a non-literal list takes the same
     /// path (starts_operand_membership).
+    /// One side of a composite comparison. A dynamically typed bare column
+    /// that no arithmetic follows is read whole (any_column_ordered routed
+    /// its ordering here): the composite reader would hand it back to the
+    /// scalar compiler, which would see the same comparison again. Everything
+    /// else, a sum such as `y + [3]` included, is list_operand_value.
+    fn comparison_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        if let Some(column) = self.row_any_column(self.routing_row(columns))?
+            && !matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
+            )
+        {
+            return self.bare_column_value(columns, column);
+        }
+        self.list_operand_value(columns, nesting, at)
+    }
+
     #[inline(never)]
     fn composite_comparison(
         &mut self,
@@ -789,7 +813,7 @@ impl<'a> Parser<'a> {
             self.membership_operand(columns, nesting, at)?
         } else {
             // A literal, or a list-typed row column read as its value.
-            self.list_operand_value(columns, nesting, at)?
+            self.comparison_operand(columns, nesting, at)?
         };
         let (value, negate) = if self.take_word("IN")? {
             let list = self.membership_list(columns, nesting, at)?;
@@ -800,7 +824,7 @@ impl<'a> Parser<'a> {
             (value, false)
         } else {
             let comparison = self.comparison()?;
-            let mut right = self.list_operand_value(columns, nesting, at)?;
+            let mut right = self.comparison_operand(columns, nesting, at)?;
             // IN binds tighter than a comparison, as in the scalar grammar:
             // `[1, 2] = [3, 4] IN l` compares with the membership
             // (openCypher Precedence3 [6]).

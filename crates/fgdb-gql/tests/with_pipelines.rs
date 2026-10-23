@@ -2205,3 +2205,39 @@ fn a_with_where_reads_a_binding_the_with_drops() {
     );
     assert_eq!(ints(&found, 0), [Some(2), Some(3)]);
 }
+
+/// Ordering dynamically typed values (TCK Comparison2 [3]): a list, map or
+/// graph element orders against its own kind only, so any other pairing is
+/// NULL rather than a runtime refusal. Lists compare element by element,
+/// maps never order, and scalars compare as the scalar program does
+/// (numbers across int and float).
+#[test]
+fn ordering_dynamically_typed_values_is_null_across_kinds() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let pairs = |operator: &str| {
+        let text = format!(
+            "WITH [1, 2.5, 'a', [1], [2], {{k: 1}}] AS types \
+             UNWIND range(0, 5) AS i UNWIND range(0, 5) AS j \
+             WITH i, j, types[i] AS lhs, types[j] AS rhs \
+             WITH i, j, lhs {operator} rhs AS result WHERE result RETURN i, j ORDER BY i, j"
+        );
+        let rows = run(&prepare(&text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value;
+        ints(&rows, 0)
+            .into_iter()
+            .zip(ints(&rows, 1))
+            .collect::<Vec<_>>()
+    };
+    let some = |list: &[(i64, i64)]| {
+        list.iter()
+            .map(|&(i, j)| (Some(i), Some(j)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pairs("<"), some(&[(0, 1), (3, 4)]));
+    assert_eq!(pairs(">"), some(&[(1, 0), (4, 3)]));
+    assert_eq!(
+        pairs("<="),
+        some(&[(0, 0), (0, 1), (1, 1), (2, 2), (3, 3), (3, 4), (4, 4)])
+    );
+}
