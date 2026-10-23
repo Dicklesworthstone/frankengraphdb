@@ -23,6 +23,7 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const ID: PropertyKeyId = PropertyKeyId(2);
 const L: LabelId = LabelId(1);
+const K: LabelId = LabelId(2);
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x41; 32],
@@ -33,6 +34,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(L)),
+        (GraphSymbolKind::Label, "K") => Some(GraphSymbol::Label(K)),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
@@ -192,6 +194,120 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
                 .iter()
                 .all(|row| row.retired_at.is_some())
         );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A SET or REMOVE after WITH may target a dynamically typed column, the
+/// element of an UNWIND over collected elements (`WITH collect(n) AS ns
+/// UNWIND ns AS m SET m.p = ...`, the shape of TCK List12 [1], [2]). Each
+/// row writes the vertex or relationship it holds and a NULL element writes
+/// nothing. Any other value, or a relationship as a label target, refuses
+/// the whole statement typed: no effect is published.
+#[test]
+fn writes_after_with_target_an_unwound_element() {
+    let ((), report) = run_async_under_lab(0xa071_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.add_edge(fgdb_types::EId(10), VId(1), VId(2), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let id = |db: &Database<_>, vid: VId| {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            vertex
+                .props
+                .iter()
+                .find(|(key, _)| *key == ID)
+                .map(|(_, value)| value.clone())
+        };
+        // Every collected vertex is written, with a value the row carries.
+        let counted = write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns, count(n) AS c \
+             UNWIND ns AS m SET m.id = c * 10 RETURN count(*) AS rows",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(counted, &["rows"]), vec![vec![int(2)]]);
+        for vid in [VId(1), VId(2)] {
+            assert_eq!(id(&db, vid), Some(CanonicalScalar::Int(20).into()));
+        }
+        // A NULL element writes nothing; the vertex beside it still is.
+        write(
+            &mut db,
+            "MATCH (n:L) WITH [n, null] AS ns UNWIND ns AS m SET m.id = 3",
+        )
+        .await
+        .unwrap();
+        for vid in [VId(1), VId(2)] {
+            assert_eq!(id(&db, vid), Some(CanonicalScalar::Int(3).into()));
+        }
+        // REMOVE and a label take the same targets.
+        write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m REMOVE m.id SET m:K",
+        )
+        .await
+        .unwrap();
+        for vid in [VId(1), VId(2)] {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            assert_eq!(id(&db, vid), None);
+            assert!(vertex.labels.contains(&K), "{vertex:?}");
+        }
+        // A collected relationship is a property target too.
+        write(
+            &mut db,
+            "MATCH ()-[r:R]->() WITH collect(r) AS rs UNWIND rs AS e SET e.p = 9",
+        )
+        .await
+        .unwrap();
+        let edge = db.edge(fgdb_types::EId(10)).unwrap().unwrap();
+        assert!(
+            edge.props.contains(&(P, CanonicalScalar::Int(9).into())),
+            "{edge:?}"
+        );
+        // A value that is no element, or a relationship labeled, refuses the
+        // statement when it runs, after the vertex rows beside it.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (n:L) WITH [n, 1] AS ns UNWIND ns AS m SET m.id = 5",
+            "MATCH (n:L) WITH [n, {id: 1}] AS ns UNWIND ns AS m REMOVE m.id",
+            "MATCH ()-[r:R]->() WITH collect(r) AS rs UNWIND rs AS e SET e:K",
+        ] {
+            let error = write(&mut db, refused).await.unwrap_err();
+            let mut chain = error.to_string();
+            let mut cause = error.source();
+            while let Some(inner) = cause {
+                chain = format!("{chain}: {inner}");
+                cause = inner.source();
+            }
+            assert!(
+                chain.contains("not a node or relationship"),
+                "{refused}: {chain}"
+            );
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        for vid in [VId(1), VId(2)] {
+            assert_eq!(id(&db, vid), None);
+        }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

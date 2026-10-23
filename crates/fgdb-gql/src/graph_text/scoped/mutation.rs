@@ -192,19 +192,24 @@ fn property_key<'a>(
 }
 
 /// A write target after WITH (fgdb-sl4ym): a vertex the WITH row carries,
-/// or for every action but DETACH DELETE a vertex or relationship.
+/// or for every action but DETACH DELETE a vertex or relationship. SET and
+/// REMOVE also take a dynamically typed column, such as the element of an
+/// UNWIND over collected vertices (`WITH collect(a) AS ns UNWIND ns AS n SET
+/// n.p = 1`): the collector writes the element it holds, skips NULL, and
+/// refuses any other value (NonElementTarget). A DELETE of such a column is
+/// a computed delete instead (row_element_target).
 fn row_write_target<'a>(
     row: &[(Name<'a>, crate::GraphSetColumnType)],
     name: Name<'a>,
     detach: bool,
 ) -> Result<(usize, crate::GraphSetColumnType), GraphPatternTextError> {
-    use crate::GraphSetColumnType::{Edge, Vertex};
+    use crate::GraphSetColumnType::{Any, Edge, Vertex};
     let target = row
         .iter()
         .position(|(alias, _)| alias.text == name.text)
         .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownVariable))?;
     let kind = row[target].1;
-    if kind != Vertex && (detach || kind != Edge) {
+    if kind != Vertex && (detach || (kind != Edge && kind != Any)) {
         return Err(error(
             name.at,
             GraphPatternTextErrorKind::Expected(if detach {
@@ -519,7 +524,9 @@ impl<'a> Parser<'a> {
                     Some(row) => {
                         let variable = self.name()?;
                         let (target, kind) = row_write_target(row, variable, detach)?;
-                        (variable, target, kind == crate::GraphSetColumnType::Vertex)
+                        // A dynamically typed target may hold a vertex: its
+                        // label actions refuse a relationship when they run.
+                        (variable, target, kind != crate::GraphSetColumnType::Edge)
                     }
                     None => {
                         // DELETE p and DETACH DELETE p name a matched path:

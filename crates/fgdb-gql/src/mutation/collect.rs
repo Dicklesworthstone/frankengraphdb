@@ -731,10 +731,32 @@ fn execute_erased<E, C>(
                 }
                 continue;
             }
-            // Only canonical null can remain after the schema check. An
-            // absent OPTIONAL target does not execute an assignment RHS.
-            let Some(target) = element(target_value) else {
-                continue;
+            // A typed target column holds its element or canonical null (the
+            // schema check above); a dynamically typed one, any value. NULL
+            // changes nothing: an absent OPTIONAL target does not execute an
+            // assignment RHS. Anything else that is not an element, or a
+            // relationship as a label target, is a typed error.
+            let target = match element(target_value) {
+                Some(ElementId::Edge(_))
+                    if matches!(action, GraphMutationAction::SetLabel { .. }) =>
+                {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::NonElementTarget {
+                            row: row_at,
+                            action: action_at,
+                        },
+                    ));
+                }
+                Some(target) => target,
+                None if target_value.is_null() => continue,
+                None => {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::NonElementTarget {
+                            row: row_at,
+                            action: action_at,
+                        },
+                    ));
+                }
             };
             let proposed = match action {
                 GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(

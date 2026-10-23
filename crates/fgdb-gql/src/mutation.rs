@@ -270,6 +270,13 @@ pub enum GraphMutationError<E> {
         row: usize,
         action: usize,
     },
+    /// A SET or REMOVE target read from a dynamically typed column holds a
+    /// value that is not a node or relationship, or a label target holds a
+    /// relationship. NULL is never one: it changes nothing.
+    NonElementTarget {
+        row: usize,
+        action: usize,
+    },
     ConflictingAssignment {
         first_row: usize,
         first_action: usize,
@@ -328,6 +335,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::NonElementDelete { row, action } => write!(
                 f,
                 "mutation row {row} action {action}: DELETE of a value that is not a node, relationship or path"
+            ),
+            Self::NonElementTarget { row, action } => write!(
+                f,
+                "mutation row {row} action {action}: SET or REMOVE of a value that is not a node or relationship, or a label of a relationship"
             ),
             Self::ConflictingAssignment {
                 first_row,
@@ -609,15 +620,25 @@ impl PreparedGraphMutation {
                     return Err(refused(None));
                 }
             }
-            // A path is a delete target: its elements (TCK Delete3).
+            // A path is a delete target: its elements (TCK Delete3). SET and
+            // REMOVE of a property or label also take a dynamically typed
+            // column (an UNWIND element); the collector checks each value it
+            // holds when it runs (NonElementTarget).
             let valid_target = match (action, action.target().map(|target| columns.get(target))) {
                 (GraphMutationAction::DeleteValue { .. }, _) => true,
                 (
                     GraphMutationAction::SetProperty { .. }
-                    | GraphMutationAction::RemoveProperty { .. }
-                    | GraphMutationAction::ClearProperties { .. },
+                    | GraphMutationAction::RemoveProperty { .. },
                     Some(kind),
                 ) => matches!(
+                    kind,
+                    Some(
+                        GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::Any
+                    )
+                ),
+                (GraphMutationAction::ClearProperties { .. }, Some(kind)) => matches!(
                     kind,
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
@@ -633,9 +654,10 @@ impl PreparedGraphMutation {
                     kind,
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Path)
                 ),
-                (GraphMutationAction::SetLabel { .. }, Some(kind)) => {
-                    kind == Some(&GraphSetColumnType::Vertex)
-                }
+                (GraphMutationAction::SetLabel { .. }, Some(kind)) => matches!(
+                    kind,
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                ),
                 (_, None) => false,
             };
             if !valid_target {
