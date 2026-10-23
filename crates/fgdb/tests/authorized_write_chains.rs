@@ -400,7 +400,7 @@ fn source_free_with_computation_spends_the_same_signed_work_permit() {
 }
 
 #[test]
-fn unsupported_chain_steps_and_write_only_public_reads_fail_before_publication() {
+fn write_only_merges_mutations_and_public_reads_fail_before_publication() {
     lab(0xc4a1_2006, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
         let issuer = authority();
@@ -428,15 +428,11 @@ fn unsupported_chain_steps_and_write_only_public_reads_fail_before_publication()
                 )
                 .await
                 .unwrap_err();
-            if !text.contains(" MERGE ") {
-                assert_eq!(
-                    authorization(&error),
-                    Some(Error::PermissionDenied),
-                    "{error:?}"
-                );
-            } else {
-                assert!(error.to_string().contains("not a supported creation step"));
-            }
+            assert_eq!(
+                authorization(&error),
+                Some(Error::PermissionDenied),
+                "{error:?}"
+            );
             assert_eq!(db.frontier().unwrap(), frontier);
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(txn.outstanding_obligations(), 0);

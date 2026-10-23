@@ -29,9 +29,10 @@
 //!   writes and connection-scoped reusable read templates via
 //!   `PREPARE`/`PREPARED`, `EXECUTE_PREPARED`, and
 //!   `RELEASE_PREPARED`/`PREPARED_RELEASED`.
-//!   Authorized write chains carry bindings across `WITH`, compose creation
-//!   and relationship `MERGE` steps, and support terminal `SET`, `REMOVE`,
-//!   and `DELETE`. Vertex `MERGE` chain steps are refused explicitly.
+//!   Authorized write chains carry bindings across `WITH`, compose creation,
+//!   vertex and relationship `MERGE` steps, and support `ON CREATE`/`ON MATCH`
+//!   actions plus terminal `SET`, `REMOVE`, and `DELETE`. Creating MERGE
+//!   chains hold admitted effects for one ordered preparation and commit.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.

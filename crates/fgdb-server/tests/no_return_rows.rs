@@ -631,3 +631,75 @@ fn relationship_merge_chain_continues_after_created_and_existing_matches() {
         fixture.stop(cx, 2, 3, 3).await;
     });
 }
+
+#[test]
+fn parameter_endpoint_merge_chain_imports_with_zero_rows_and_reuses_the_graph() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "vertex-merge-chain-import", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
+            MERGE (b:Person {name:row.d}) MERGE (a)-[:KNOWS]->(b)";
+        let parameters = || {
+            vec![(
+                "rows".into(),
+                WireValue::List(
+                    [("Ada", "Bob"), ("Bob", "Cy"), ("Ada", "Bob"), ("Cy", "Cy")]
+                        .into_iter()
+                        .map(|(source, target)| {
+                            WireValue::Map(vec![
+                                ("d".into(), WireValue::Text(target.into())),
+                                ("s".into(), WireValue::Text(source.into())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )]
+        };
+        committed(
+            writer
+                .execute(cx, ExecuteMode::Write, statement, parameters())
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let first = state(cx, &mut observer).await;
+        assert_eq!((first.0.rows.len(), first.1.rows.len()), (3, 3));
+        assert_eq!(
+            first
+                .1
+                .rows
+                .iter()
+                .map(|row| (&row[0], &row[1]))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    &WireValue::Text("Ada".into()),
+                    &WireValue::Text("Bob".into())
+                ),
+                (
+                    &WireValue::Text("Bob".into()),
+                    &WireValue::Text("Cy".into())
+                ),
+                (&WireValue::Text("Cy".into()), &WireValue::Text("Cy".into())),
+            ],
+        );
+        let repeated = writer
+            .execute(cx, ExecuteMode::Write, statement, parameters())
+            .await
+            .unwrap();
+        assert!(repeated.columns.is_empty() && repeated.rows.is_empty());
+        assert_eq!(
+            repeated.outcome,
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1
+            }
+        );
+        assert_eq!(state(cx, &mut observer).await, first);
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 1, 3, 3).await;
+    });
+}

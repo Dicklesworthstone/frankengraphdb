@@ -1121,13 +1121,14 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                                 charge(used, GlaExecutionEvent::Work)?;
                                 read(key, &mut |event| charge(used, event))?
                             }
-                            GraphVertexMergeRowInput::Column(column) => row
-                                .values()
-                                .get(column)
-                                .cloned()
-                                .ok_or(GqlQueryError::Source(
-                                    GraphVertexMergeError::InputSchema { row: at, column },
-                                ))?,
+                            GraphVertexMergeRowInput::Column(column) => {
+                                row.values()
+                                    .get(column)
+                                    .ok_or(GqlQueryError::Source(
+                                        GraphVertexMergeError::InputSchema { row: at, column },
+                                    ))?
+                                    .copy_with_control(&mut |event| charge(used, event))?
+                            }
                         });
                     }
                     let value = value

@@ -39,8 +39,8 @@ fn definition(step: &GraphWriteChainStep) -> Option<&PreparedGraphEdgeMerge> {
 }
 
 /// Called during whole-chain admission, before the workspace or any identity.
-/// A false result leaves the step to another owner; vertex MERGE remains
-/// unsupported. All relationship MERGEs require ReadWrite, including NoInput.
+/// A false result leaves the step to another owner. All relationship MERGEs
+/// require ReadWrite, including NoInput.
 pub(super) fn preflight(
     step: &GraphWriteChainStep,
     scope: &PlannerPredicates,
@@ -246,10 +246,9 @@ fn returning_row<V: Vfs + Clone, Clock: FnMut() -> u64>(
 /// reducer's canonical order and parallel matches. The chain owns rollback,
 /// final signed-row admission, authorization digest and the sole completion.
 ///
-/// Native frozen_chain requires at least one vertex MERGE. Those variants
-/// remain rejected by whole-chain preflight, so no chain admitted here can
-/// require FrozenCreations. Do not extend vertex support by bypassing that
-/// profile's entry-overlay and held-creation semantics.
+/// The native creation-only profile also supplies held endpoint vertices.
+/// Existence reads keep the chain-entry overlay and original incidence gaps;
+/// every new relationship is authorized before joining the held effects.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
@@ -260,6 +259,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     owned: Option<Vec<GraphValueRow>>,
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
+    frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphInsertStats, GqlQueryExecution<GraphValueRow>), Fault> {
     if !preflight(step, scope)? {
         return Err(invalid());
@@ -309,6 +309,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
             scope,
             execution,
             selected,
+            frozen,
         )
         .map_err(|error| {
             error.map_source(|error| {

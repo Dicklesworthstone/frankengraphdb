@@ -323,6 +323,7 @@ impl<V: Vfs + Clone> Database<V> {
                     creation,
                     &mut execution,
                     false,
+                    None,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
                 query_cx
@@ -458,6 +459,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         proposal,
         execution,
         returning,
+        None,
     )
 }
 
@@ -472,6 +474,7 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     proposal: GraphInsertBatch,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
+    mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphInsertStats, Vec<VId>, Vec<EId>), Fault> {
     let stats = proposal.stats();
     let mut vertices = Vec::new();
@@ -518,9 +521,15 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 batch
             }
         };
-        for row in batch.rows {
-            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
-        }
+        super::chain::stage_batch(
+            transaction,
+            database,
+            query_cx,
+            batch,
+            frozen.as_deref_mut(),
+            execution,
+        )
+        .map_err(source)?;
     }
     Ok((stats, vertices, edges))
 }

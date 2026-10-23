@@ -374,6 +374,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
         execution,
         returning,
         None,
+        None,
     )
 }
 
@@ -390,6 +391,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     selected: GqlQueryExecution<GraphValueRow>,
+    frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphEdgeMergeStats, EdgeMergeRows, Vec<GraphValueRow>), Fault> {
     apply_with_input(
         transaction,
@@ -401,6 +403,7 @@ pub(super) fn apply_selected<V: Vfs + Clone, Clock: FnMut() -> u64>(
         execution,
         false,
         Some((selected, None)),
+        frozen,
     )
 }
 
@@ -430,6 +433,7 @@ pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
         execution,
         false,
         Some((selected, Some(occurrence))),
+        None,
     )
     .map(|(stats, outcomes, _)| (stats, outcomes))
 }
@@ -445,6 +449,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
     selected: Option<(GqlQueryExecution<GraphValueRow>, Option<usize>)>,
+    mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
@@ -497,12 +502,27 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                     cx.checkpoint()
                         .map_err(WriteTxnError::Interrupted)
                         .map_err(GqlQueryError::Interrupted)?;
-                    if controls
-                        .borrow_mut()
-                        .vertex(transaction, &database.borrow(), vertex)
-                        .map_err(GqlQueryError::Source)?
-                        .is_none()
+                    let visible = match frozen
+                        .as_deref()
+                        .and_then(|held| held.index.get(&vertex).map(|at| &held.vertices[*at]))
                     {
+                        Some((_, labels, _)) => {
+                            // This is the same logical endpoint lookup as
+                            // Execution::vertex. The held image has already
+                            // passed ordinary native before/after admission.
+                            controls
+                                .borrow_mut()
+                                .checkpoint()
+                                .map_err(GqlQueryError::Source)?;
+                            scope.allows_vertex(labels)
+                        }
+                        None => controls
+                            .borrow_mut()
+                            .vertex(transaction, &database.borrow(), vertex)
+                            .map_err(GqlQueryError::Source)?
+                            .is_some(),
+                    };
+                    if !visible {
                         return Err(GqlQueryError::Source(WriteTxnError::Authorization(
                             Error::ScopeDenied,
                         )));
@@ -549,12 +569,17 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
         )
     })?;
     if let Some(batch) = proposal.creation {
-        for row in batch.rows {
-            cx.checkpoint()
-                .map_err(WriteTxnError::Interrupted)
+        if let Some(held) = frozen.as_deref_mut() {
+            super::chain::stage_batch(transaction, database, cx, batch, Some(held), execution)
                 .map_err(source)?;
-            execution.checkpoint().map_err(source)?;
-            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+        } else {
+            for row in batch.rows {
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(source)?;
+                execution.checkpoint().map_err(source)?;
+                stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+            }
         }
     }
     let result_rows = proposal.outcome.result_rows();
