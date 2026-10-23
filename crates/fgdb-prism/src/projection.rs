@@ -463,12 +463,85 @@ pub struct SortedVertexLookup<'a> {
     prefix: Option<OrdinalPrefix>,
 }
 
-struct OrdinalPrefix {
+/// Prefix bounds detached from their immutable sorted population. The caller
+/// must include every ordinal, finish the bounds, and retain exactly those
+/// vertex values alongside this metadata before looking anything up.
+#[derive(Debug)]
+pub(crate) struct OrdinalPrefix {
     boundaries: [usize; 257],
     shift: u32,
 }
 
 const INDEXED_DIRECTORY_MIN: usize = 512;
+
+impl OrdinalPrefix {
+    fn new(vertices: &[VId]) -> Option<Self> {
+        #[cfg(test)]
+        if tests::incumbent_directory() {
+            return None;
+        }
+        (vertices.len() >= INDEXED_DIRECTORY_MIN).then(|| {
+            // Ignore only the prefix shared by EVERY sorted identity. This
+            // also distributes normal permuted 63-bit engine identities,
+            // whose most significant 65 bits are all zero.
+            let differing = vertices[0].0 ^ vertices[vertices.len() - 1].0;
+            Self {
+                boundaries: [0; 257],
+                shift: (128 - differing.leading_zeros()).saturating_sub(8),
+            }
+        })
+    }
+
+    /// Reserve zero or one unfinished directory within the remaining allowance.
+    /// This optional accelerator must not make an otherwise admissible graph
+    /// fail: small populations, tight quotas and allocation failures all retain
+    /// the ordinary binary-search path. Charge the returned buffer's capacity.
+    pub(crate) fn reserve_retained(vertices: &[VId], max_bytes: usize) -> Vec<Self> {
+        let mut retained = Vec::new();
+        if max_bytes < size_of::<Self>() {
+            return retained;
+        }
+        let Some(prefix) = Self::new(vertices) else {
+            return retained;
+        };
+        if retained.try_reserve_exact(1).is_err() {
+            return retained;
+        }
+        if retained.capacity() > max_bytes / size_of::<Self>() {
+            return Vec::new();
+        }
+        retained.push(prefix);
+        retained
+    }
+
+    /// Above `shift + 8` every member has the same prefix, so buckets are
+    /// monotone. The last member establishes its bucket's exclusive upper bound.
+    pub(crate) fn include(&mut self, vertex: VId, index: usize) {
+        let bucket = ((vertex.0 >> self.shift) & 255) as usize;
+        self.boundaries[bucket + 1] = index + 1;
+    }
+
+    /// Fill empty buckets in at most 257 scalar steps, independent of n/m.
+    pub(crate) fn finish(&mut self) {
+        let mut end = 0;
+        for next in &mut self.boundaries {
+            end = end.max(*next);
+            *next = end;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ordinal(&self, vertices: &[VId], vertex: VId) -> Option<usize> {
+        let bucket = ((vertex.0 >> self.shift) & 255) as usize;
+        let first = self.boundaries[bucket];
+        // A missing ID may differ in the supposedly shared high prefix.
+        // Full-width comparisons within the bucket still reject it exactly.
+        vertices[first..self.boundaries[bucket + 1]]
+            .binary_search(&vertex)
+            .ok()
+            .map(|index| first + index)
+    }
+}
 
 impl<'a> SortedVertexLookup<'a> {
     /// Borrow identities sorted in ascending `VId` order, as required by
@@ -496,17 +569,10 @@ impl<'a> SortedVertexLookup<'a> {
     /// Return an ordinal of this identity in the borrowed sorted slice.
     #[inline]
     pub fn ordinal(&self, vertex: VId) -> Option<usize> {
-        let Some(prefix) = &self.prefix else {
-            return self.vertices.binary_search(&vertex).ok();
-        };
-        let bucket = ((vertex.0 >> prefix.shift) & 255) as usize;
-        let first = prefix.boundaries[bucket];
-        // A missing ID may differ in the supposedly shared high prefix.
-        // Full-width comparisons within the bucket still reject it exactly.
-        self.vertices[first..prefix.boundaries[bucket + 1]]
-            .binary_search(&vertex)
-            .ok()
-            .map(|index| first + index)
+        match &self.prefix {
+            Some(prefix) => prefix.ordinal(self.vertices, vertex),
+            None => self.vertices.binary_search(&vertex).ok(),
+        }
     }
 
     /// Test membership in the borrowed sorted slice.
@@ -516,23 +582,7 @@ impl<'a> SortedVertexLookup<'a> {
     }
 
     fn new(vertices: &'a [VId]) -> Self {
-        #[cfg(test)]
-        if tests::incumbent_directory() {
-            return Self {
-                vertices,
-                prefix: None,
-            };
-        }
-        let prefix = (vertices.len() >= INDEXED_DIRECTORY_MIN).then(|| {
-            // Ignore only the prefix shared by EVERY sorted identity. This
-            // also distributes normal permuted 63-bit engine identities,
-            // whose most significant 65 bits are all zero.
-            let differing = vertices[0].0 ^ vertices[vertices.len() - 1].0;
-            OrdinalPrefix {
-                boundaries: [0; 257],
-                shift: (128 - differing.leading_zeros()).saturating_sub(8),
-            }
-        });
+        let prefix = OrdinalPrefix::new(vertices);
         let mut result = Self { vertices, prefix };
         if result.prefix.is_some() {
             result.include(0);
@@ -540,25 +590,17 @@ impl<'a> SortedVertexLookup<'a> {
         result
     }
 
-    /// Called alongside the existing duplicate-identity validation. Above
-    /// `shift + 8` every member has the same prefix, so buckets are monotone.
-    /// The last member of each bucket establishes its exclusive upper bound.
+    /// Called alongside the existing duplicate-identity validation.
     fn include(&mut self, index: usize) {
         if let Some(prefix) = &mut self.prefix {
-            let bucket = ((self.vertices[index].0 >> prefix.shift) & 255) as usize;
-            prefix.boundaries[bucket + 1] = index + 1;
+            prefix.include(self.vertices[index], index);
         }
     }
 
-    /// Fill empty buckets in at most 257 scalar steps, independent of n/m.
     /// This bounded stack scratch adds no allocation or per-edge callback.
     fn finish(&mut self) {
         if let Some(prefix) = &mut self.prefix {
-            let mut end = 0;
-            for next in &mut prefix.boundaries {
-                end = end.max(*next);
-                *next = end;
-            }
+            prefix.finish();
         }
     }
 
