@@ -62,7 +62,7 @@ pub(super) fn contributions(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
-    binding_contributions(query, &[(vid, state)], sign, output, meter)
+    binding_contributions(query, &[(vid, state)], None, sign, output, meter)
 }
 
 /// Project one admitted binding through the same predicate and aggregate
@@ -71,6 +71,7 @@ pub(super) fn contributions(
 pub(super) fn binding_contributions(
     query: &PreparedGraphAggregate,
     binding: &[(VId, &VertexState)],
+    edge: Option<EdgeBinding<'_>>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
@@ -87,6 +88,7 @@ pub(super) fn binding_contributions(
                 .map(Some)
                 .ok_or(StandingQueryFailure::InvalidDelta)
         },
+        edge,
         sign,
         output,
         meter,
@@ -188,6 +190,7 @@ pub(super) fn keeps(
 fn projected_value<'a>(
     column: ValueProjection,
     binding: &mut impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
+    edge: Option<EdgeBinding<'_>>,
     meter: &mut Meter<'_>,
 ) -> Result<GraphValue, StandingQueryFailure> {
     match column {
@@ -213,6 +216,28 @@ fn projected_value<'a>(
             // A stored List or Map projects as the value it is (fgdb-k3nub).
             GraphValue::from_property_value(value).ok_or(StandingQueryFailure::InvalidDelta)
         }
+        ValueProjection::EdgeProperty { key, .. } => {
+            // Shape admission proved every capture is the same single edge.
+            // Missing fields are NULL; an absent edge binding is not NULL.
+            let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
+            let Some(value) = edge.props.and_then(|props| props.get(&key)) else {
+                meter.units(
+                    ZSetEvent::ScratchEntry,
+                    scalar_units(&CanonicalScalar::Null),
+                )?;
+                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+            };
+            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
+            GraphValue::from_property_value(value).ok_or(StandingQueryFailure::InvalidDelta)
+        }
+        ValueProjection::Path {
+            function: GraphPathFunction::Edge,
+            ..
+        } => {
+            let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            Ok(GraphValue::Edge(edge.id))
+        }
         _ => Err(StandingQueryFailure::InvalidDelta),
     }
 }
@@ -222,12 +247,13 @@ fn projected_value<'a>(
 pub(super) fn project_contributions<'a>(
     query: &PreparedGraphAggregate,
     mut binding: impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
+    edge: Option<EdgeBinding<'_>>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
     if query.input_projection().is_some() {
-        return computed::contributions(query, binding, sign, output, meter);
+        return computed::contributions(query, binding, edge, sign, output, meter);
     }
     meter.charge(ZSetEvent::ScratchEntry)?;
     let mut key = Vec::new();
@@ -236,6 +262,7 @@ pub(super) fn project_contributions<'a>(
         key.push(projected_value(
             query.input_pattern().value_columns()[column],
             &mut binding,
+            edge,
             meter,
         )?);
     }
@@ -255,7 +282,7 @@ pub(super) fn project_contributions<'a>(
                 (support::primary(&key, index), None),
                 ZWeight::from_i128(sign),
             ));
-            let value = projected_value(column, &mut binding, meter)?;
+            let value = projected_value(column, &mut binding, edge, meter)?;
             if !value.is_null() {
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 let value = Arc::new(value);
@@ -280,6 +307,27 @@ pub(super) fn project_contributions<'a>(
                     // A stored List or Map is not an integer (fgdb-k3nub).
                     _ => return Err(StandingQueryFailure::NonIntegerSum),
                 }
+            }
+            Some(ValueProjection::EdgeProperty { key, .. }) => {
+                match edge
+                    .ok_or(StandingQueryFailure::InvalidDelta)?
+                    .props
+                    .and_then(|props| props.get(&key))
+                {
+                    None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+                    Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
+                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => {
+                        Some(i128::from(*value))
+                    }
+                    _ => return Err(StandingQueryFailure::NonIntegerSum),
+                }
+            }
+            Some(ValueProjection::Path {
+                function: GraphPathFunction::Edge,
+                ..
+            }) if aggregate.function() == GraphAggregateFunction::Count => {
+                edge.ok_or(StandingQueryFailure::InvalidDelta)?;
+                Some(0)
             }
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };

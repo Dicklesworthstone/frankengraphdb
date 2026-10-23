@@ -219,6 +219,7 @@ impl Shape {
                     .map(Some)
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
+            None,
             sign,
             output,
             meter,
@@ -294,6 +295,7 @@ impl Shape {
                 slot if self.mode == Mode::Optional && slot < self.width => Ok(None),
                 _ => Err(StandingQueryFailure::InvalidDelta),
             },
+            None,
             sign,
             output,
             meter,

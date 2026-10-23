@@ -5,14 +5,21 @@
 //! a time; its caller retains and retracts the resulting aggregate contribution.
 
 use super::*;
+use crate::algebra::GraphPathFunction;
 use crate::{GraphSetColumnType, GraphSetValue};
 use core::convert::Infallible;
 
 impl PreparedGraphAggregate {
     fn incremental_source_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
         match self.input.value_columns().get(column)? {
-            ValueProjection::Property { .. } => Some(GraphSetColumnType::Scalar),
+            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => {
+                Some(GraphSetColumnType::Scalar)
+            }
             ValueProjection::Vertex { .. } => Some(GraphSetColumnType::Vertex),
+            ValueProjection::Path {
+                function: GraphPathFunction::Edge,
+                ..
+            } => Some(GraphSetColumnType::Edge),
             _ => None,
         }
     }
@@ -25,7 +32,7 @@ impl PreparedGraphAggregate {
     /// graph leaf. This is group-schema admission, not admission of the input
     /// operators. Completed relations preserve every native value domain,
     /// including the dynamic Any domain produced by UNWIND and list indexing.
-    /// This does not widen the scalar/vertex graph-binding adapter below.
+    /// The graph-binding adapter admits scalar, vertex and single-edge cells.
     #[must_use]
     pub fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
         if let Some(relation) = &self.relational_input {
@@ -42,6 +49,7 @@ impl PreparedGraphAggregate {
             GraphSetValue::TypedNull(kind) => Some(*kind),
             GraphSetValue::Value(GraphValue::Scalar(_)) => Some(GraphSetColumnType::Scalar),
             GraphSetValue::Value(GraphValue::Vertex(_)) => Some(GraphSetColumnType::Vertex),
+            GraphSetValue::Value(GraphValue::Edge(_)) => Some(GraphSetColumnType::Edge),
             _ => None,
         }
     }
@@ -106,6 +114,9 @@ impl PreparedGraphAggregate {
                 Some(GraphSetColumnType::Scalar) => matches!(value, GraphValue::Scalar(_)),
                 Some(GraphSetColumnType::Vertex) => {
                     matches!(value, GraphValue::Vertex(_)) || value.is_null()
+                }
+                Some(GraphSetColumnType::Edge) => {
+                    matches!(value, GraphValue::Edge(_)) || value.is_null()
                 }
                 _ => false,
             };

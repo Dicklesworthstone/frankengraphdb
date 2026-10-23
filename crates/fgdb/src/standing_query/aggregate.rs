@@ -18,9 +18,9 @@ use fgdb_delta_types::zset::aggregate::IncrementalAggregate;
 use fgdb_delta_types::{
     DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet, ZSetEvent,
 };
-use fgdb_gql::algebra::{GlaOperator, ValueProjection, VertexPredicate};
+use fgdb_gql::algebra::{GlaOperator, GraphPathFunction, ValueProjection, VertexPredicate};
 use fgdb_gql::{GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate};
-use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -30,6 +30,14 @@ use std::sync::Arc;
 struct VertexState {
     labels: BTreeSet<LabelId>,
     props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
+}
+
+type EdgeProperties = BTreeMap<PropertyKeyId, CanonicalPropertyValue>;
+
+#[derive(Clone, Copy)]
+struct EdgeBinding<'a> {
+    id: EId,
+    props: Option<&'a EdgeProperties>,
 }
 
 pub(crate) struct StandingQuery {
@@ -189,10 +197,30 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::SelectBoolean { expression }
                 if expression.supports_vertex_bindings(width as usize) => {}
+            GlaOperator::CapturePath {
+                start, segments, ..
+            } if width == 2
+                && start.ordinal() == 0
+                && segments.len() == 1
+                && segments[0].ordinal() == 1 => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
-                if columns.iter().any(|column| !matches!(column,
-                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() < width)) { return false; }
+                if columns.iter().any(|column| match column {
+                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } => {
+                        slot.ordinal() >= width
+                    }
+                    ValueProjection::EdgeProperty { capture, .. }
+                    | ValueProjection::Path {
+                        capture,
+                        function: GraphPathFunction::Edge,
+                    } if width == 2 => !operators[..position].iter().any(|operator| {
+                        matches!(operator, GlaOperator::CapturePath { capture: bound, .. }
+                                if bound == capture)
+                    }),
+                    _ => true,
+                }) {
+                    return false;
+                }
             }
             GlaOperator::OrderByValues
             | GlaOperator::Limit {
@@ -228,6 +256,11 @@ fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
                 .any(|(_, actual)| actual == key),
             _ => false,
         })
+}
+fn needs_edge_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
+    query.input_pattern().value_columns().iter().any(|column| {
+        matches!(column, ValueProjection::EdgeProperty { key: actual, .. } if *actual == key)
+    })
 }
 fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
     query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))
@@ -636,6 +669,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .seed(
                             &query.definition,
                             &row.entry,
+                            &row.props,
                             &query.vertices,
                             &mut updates,
                             &mut meter,

@@ -805,6 +805,50 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(query)
     }
 
+    /// Borrow the latest maintenance statistics of every node owned by this
+    /// handle, in dependency order with the result owner last. A direct view
+    /// has one node; a native circuit includes its private sources and stages.
+    /// Separately registered dependencies keep their own handles and policies.
+    ///
+    /// Work and scratch limits apply independently to each node. Their maxima
+    /// give the observed per-node requirements of this maintenance operation;
+    /// result-owner statistics alone cannot establish a whole-circuit bound.
+    /// Snapshot/result quotas and future ticks require their own admission.
+    /// Owner, database health, cancellation and freshness checks precede access.
+    pub fn standing_query_node_stats<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<impl DoubleEndedIterator<Item = &'a StandingQueryStats>, StandingQueryError> {
+        self.admitted_standing_query(cx, handle)?;
+        let first = match handle.native.as_deref() {
+            Some(
+                native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. },
+            ) => *first,
+            _ => handle.index,
+        };
+        let nodes = self
+            .standing_queries
+            .get(first..=handle.index)
+            .ok_or(StandingQueryError::UnknownHandle)?;
+        for node in nodes {
+            cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+            let (_, frontier, failure) = node.status();
+            if let Some(reason) = failure {
+                return Err(StandingQueryError::Unavailable { frontier, reason });
+            }
+            if frontier != self.snapshot.frontier || node.maintained().is_none() {
+                return Err(StandingQueryError::Unavailable {
+                    frontier,
+                    reason: StandingQueryFailure::InvalidDelta,
+                });
+            }
+        }
+        Ok(nodes
+            .iter()
+            .filter_map(|node| node.maintained().map(|(_, stats)| stats)))
+    }
+
     /// Read a native aggregate result. Its bag and optional ordered page share
     /// one publication frontier. A reachability handle refuses rather than
     /// masquerading as aggregate cells or panicking on the wrong row kind.
