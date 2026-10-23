@@ -351,13 +351,17 @@ fn local_predicates_quantifiers_and_reduce_keep_the_call_element_reader() {
             Some(&GraphValue::Scalar(CanonicalScalar::Bool(true)))
         );
     }
-    assert_eq!(values[5].as_integer(), Some(11));
+    assert_eq!(
+        values[5].as_value(),
+        Some(&GraphValue::Scalar(CanonicalScalar::Int(11)))
+    );
     assert_eq!(values[6], scalar_list(&[Some(11)]));
 }
 
 #[test]
 fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
     for tail in [
+        "RETURN SUM(node.value) AS total, [item IN COLLECT(node) | item.value] AS values",
         "RETURN SUM(node.value) AS total, [node IN COLLECT(node) | node.value] AS values",
         "RETURN SUM(node.value) AS total, [node IN COLLECT(node.value) | node] AS values",
         "RETURN [node IN COLLECT(node.value) | node] AS values",
@@ -374,7 +378,7 @@ fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
                 || Ok(()),
             )
         };
-        let actual = execute(6).unwrap();
+        let actual = execute(6).unwrap_or_else(|error| panic!("{tail}: {error:?}"));
         assert_eq!(actual.rows.snapshot_records, 6, "{tail}");
         assert_eq!(actual.rows.result_rows, 1, "{tail}");
         let values = actual.value[0].values();
@@ -391,6 +395,42 @@ fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
             if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
                 && error.observed == error.limit + 1));
     }
+}
+
+#[test]
+fn nested_shadowing_ends_before_a_following_outer_graph_demand() {
+    let nested =
+        prepare_output("RETURN [node IN COLLECT(node) | [node IN [node] | node.value]] AS values");
+    let actual = run(&nested, policy()).unwrap();
+    assert_eq!(actual.rows.snapshot_records, 3);
+    assert_eq!(actual.rows.result_rows, 1);
+    assert_eq!(
+        actual.value[0].values()[0].as_value(),
+        Some(&GraphValue::List(
+            [2, 2, 7]
+                .map(|n| GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(n))].into()))
+                .into()
+        ))
+    );
+    let following = prepare_output(
+        "RETURN [node IN COLLECT(node) | node.value] AS values, SUM(node.value) AS total",
+    );
+    let actual = following
+        .execute_governed_with_elements(
+            GqlQueryPolicy::new(6, 1, 1_000_000, 100_000),
+            graph_source,
+            procedure,
+            property,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(actual.rows.snapshot_records, 6);
+    assert_eq!(actual.rows.result_rows, 1);
+    assert_eq!(
+        actual.value[0].values()[0],
+        scalar_list(&[Some(2), Some(2), Some(7)])
+    );
+    assert_eq!(actual.value[0].values()[1].as_integer(), Some(11));
 }
 
 #[test]
