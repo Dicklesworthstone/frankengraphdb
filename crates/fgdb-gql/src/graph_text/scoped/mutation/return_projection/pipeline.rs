@@ -600,18 +600,15 @@ impl<'a> Parser<'a> {
                     if before_return
                         && !matches!(next, TokenKind::Punct(b'.' | b'(' | b'{' | b':'))
                         && head.outputs.iter().all(|(output, _)| output.text != word)
-                    {
-                        if !scoped
+                        && !scoped
                             .iter()
                             .any(|&(name, key, _)| name == word && key.is_none())
-                            && let Some(variable) =
-                                self.visible_graph_bindings().find(|name| name.text == word)
-                        {
-                            let input =
-                                self.mutation_projection(&mut head.inputs, variable, None)?;
-                            let column = hidden_boundary_column(head, token.at, offset + input)?;
-                            scoped.push((word, None, column));
-                        }
+                        && let Some(variable) =
+                            self.visible_graph_bindings().find(|name| name.text == word)
+                    {
+                        let input = self.mutation_projection(&mut head.inputs, variable, None)?;
+                        let column = hidden_boundary_column(head, token.at, offset + input)?;
+                        scoped.push((word, None, column));
                     }
                     let kept =
                         |alias: &str| carried.as_ref().is_none_or(|kept| kept.contains(&alias));

@@ -5,8 +5,9 @@
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
-    GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
+    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphPatternTextErrorKind,
+    GraphSetExecutionError, GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
+    PreparedGraphSetText,
 };
 use fgdb_types::{CanonicalScalar, VId};
 use std::cell::RefCell;
@@ -394,15 +395,53 @@ fn required_boolean_identity_predicates_preserve_complete_theta_bags() {
 
 #[test]
 fn computed_required_theta_predicates_compare_complete_joined_rows() {
-    assert!(
-        execute("MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m").is_empty()
-    );
+    assert!(execute("MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m").is_empty());
     // Original t is always positive, so the predicate is false for all16
     // pairs. Making just n1's t negative admits each of the four m rows.
     assert_eq!(
         execute("MATCH (n) WITH n.p - 2 AS t MATCH (m) WHERE m.p > t + m.p RETURN m"),
         (1..=4).map(|m| vertices(&[m])).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn reserved_property_names_reach_the_catalog_after_theta_syntax_admission() {
+    let text = "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m";
+    let mut lookups = Vec::new();
+    let error = PreparedGraphSetText::prepare(text, |kind, name| {
+        lookups.push((kind, name.to_owned()));
+        symbols(kind, name)
+    })
+    .err()
+    .expect("the fixture catalog has no property named RETURN");
+    assert_eq!(
+        error.kind,
+        GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(
+            GraphSymbolKind::Property
+        ))
+    );
+    assert_eq!(error.offset, text.find("RETURN >").unwrap());
+    assert!(lookups.contains(&(GraphSymbolKind::Property, "RETURN".to_owned())));
+    for (text, expected) in [
+        (text, Vec::<GraphValueRow>::new()),
+        (
+            "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN IS NULL AND m.p > t RETURN m",
+            [2, 3, 4, 4, 4].map(|m| vertices(&[m])).into(),
+        ),
+    ] {
+        let query = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            if kind == GraphSymbolKind::Property && name == "RETURN" {
+                // This known property is absent from every fixture vertex.
+                Some(GraphSymbol::Property(PropertyKeyId(2)))
+            } else {
+                symbols(kind, name)
+            }
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    }
 }
 
 #[test]
@@ -424,7 +463,7 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
         "MATCH (n) WITH n.p AS kept MATCH (m) WHERE m.p > t + m.p RETURN m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
-        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
+        "MATCH (n) WITH n.p AS kept MATCH (m) WHERE m.RETURN > t RETURN m",
     ] {
         let mut calls = 0;
         let result = PreparedGraphSetText::prepare(text, |kind, name| {
