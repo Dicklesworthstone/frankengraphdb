@@ -2275,3 +2275,30 @@ fn a_distinct_with_where_may_repeat_an_item_expression() {
         .is_err()
     );
 }
+
+/// Ordering a dynamically typed column keeps openCypher precedence: a null
+/// predicate binds tighter than the comparison, so `a < b IS NULL` is
+/// `a < (b IS NULL)` (TCK Precedence1 [23]), not `(a < b) IS NULL`. The
+/// composite ordering takes a right operand only where the comparison ends.
+#[test]
+fn ordering_a_dynamically_typed_column_keeps_null_predicate_precedence() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    for comparison in ["<", "<=", ">", ">="] {
+        for predicate in ["IS NULL", "IS NOT NULL"] {
+            let text = format!(
+                "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b \
+                 WITH collect((a {comparison} b {predicate}) = (a {comparison} (b {predicate}))) AS eq, \
+                 collect((a {comparison} b {predicate}) <> ((a {comparison} b) {predicate})) AS neq \
+                 RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"
+            );
+            let rows = run(&prepare(&text), &values, wide(), &mut || Ok(()))
+                .unwrap()
+                .value;
+            assert_eq!(
+                rows[0].get(0).unwrap().as_scalar(),
+                Some(&CanonicalScalar::Bool(true)),
+                "{text}"
+            );
+        }
+    }
+}

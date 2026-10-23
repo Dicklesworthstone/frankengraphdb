@@ -122,6 +122,23 @@ pub(super) fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextEr
     }
 }
 
+/// Whether the next token starts an operator that binds tighter than a
+/// comparison: arithmetic, a null predicate (`IS`), IN, a string predicate
+/// or `=~`. `a < b IS NOT NULL` is `a < (b IS NOT NULL)` (TCK Precedence1
+/// [23]), so `b` is then not the comparison's whole right operand.
+pub(super) fn tighter_than_comparison(
+    lexer: &mut Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    Ok(match lexer.next()?.kind {
+        TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^') => true,
+        TokenKind::Punct(b'=') => matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+        TokenKind::Word(word) => ["IS", "IN", "STARTS", "ENDS", "CONTAINS"]
+            .iter()
+            .any(|operator| word.eq_ignore_ascii_case(operator)),
+        _ => false,
+    })
+}
+
 /// The first token after a value's postfix reads (`[...]` subscripts and
 /// `.key` entries), with `lexer` just past the value itself.
 fn after_postfix<'t>(lexer: &mut Lexer<'t>) -> Result<Token<'t>, GraphPatternTextError> {
@@ -2077,11 +2094,32 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
-        Ok(match lexer.next()?.kind {
-            TokenKind::Punct(b'<') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
-            TokenKind::Punct(b'>') => true,
-            _ => false,
-        })
+        let first = lexer.next()?.kind;
+        if !matches!(first, TokenKind::Punct(b'<' | b'>')) {
+            return Ok(false);
+        }
+        let mut right = lexer.next()?;
+        match right.kind {
+            // `<>` is not an ordering.
+            TokenKind::Punct(b'>') if matches!(first, TokenKind::Punct(b'<')) => return Ok(false),
+            TokenKind::Punct(b'=') => right = lexer.next()?,
+            _ => {}
+        }
+        // The right operand must end where the comparison does: a bare name,
+        // or a list literal, that no tighter operator follows. Anything else
+        // keeps the scalar program and its precedence
+        // (tighter_than_comparison).
+        match right.kind {
+            TokenKind::Word(_) => {
+                let mut after = lexer.clone();
+                if matches!(after.next()?.kind, TokenKind::Punct(b'.' | b'(' | b'[')) {
+                    return Ok(false);
+                }
+            }
+            TokenKind::Punct(b'[') => skip_group(&mut lexer)?,
+            _ => return Ok(false),
+        }
+        Ok(!tighter_than_comparison(&mut lexer)?)
     }
 
     /// starts_let_operand, or a list literal read through a subscript or

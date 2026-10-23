@@ -771,15 +771,12 @@ impl<'a> Parser<'a> {
         Ok(self.scalar_let_value(operand, slots, at)?)
     }
 
-    /// `[..] = rhs`, `{..} <> rhs` or `[..] IN list`, read whole in the
-    /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
-    /// equality. `operand IN value` with a non-literal list takes the same
-    /// path (starts_operand_membership).
     /// One side of a composite comparison. A dynamically typed bare column
-    /// that no arithmetic follows is read whole (any_column_ordered routed
-    /// its ordering here): the composite reader would hand it back to the
-    /// scalar compiler, which would see the same comparison again. Everything
-    /// else, a sum such as `y + [3]` included, is list_operand_value.
+    /// that no tighter operator follows is read whole (any_column_ordered
+    /// routed its ordering here): the composite reader would hand it back to
+    /// the scalar compiler, which would see the same comparison again.
+    /// Everything else is list_operand_value: a sum such as `y + [3]`, or
+    /// `b IS NOT NULL`, which binds tighter than the comparison.
     fn comparison_operand(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
@@ -787,16 +784,17 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
         if let Some(column) = self.row_any_column(self.routing_row(columns))?
-            && !matches!(
-                self.lexer.clone().next()?.kind,
-                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
-            )
+            && !super::return_projection::tighter_than_comparison(&mut self.lexer.clone())?
         {
             return self.bare_column_value(columns, column);
         }
         self.list_operand_value(columns, nesting, at)
     }
 
+    /// `[..] = rhs`, `{..} <> rhs` or `[..] IN list`, read whole in the
+    /// value language as one let slot (fgdb-9cawv); `<>` is NOT of the
+    /// equality. `operand IN value` with a non-literal list takes the same
+    /// path (starts_operand_membership).
     #[inline(never)]
     fn composite_comparison(
         &mut self,
