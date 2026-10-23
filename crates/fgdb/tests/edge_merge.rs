@@ -348,24 +348,35 @@ fn indexed_pair_probe_preserves_parallel_properties_orientation_and_staged_rollb
         let mut seed = WriteBatch::new(R);
         for id in 1..=600_u128 {
             seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
-            if id > 1 {
-                seed.add_edge(EId(id), VId(id - 1), VId(id), weight(7));
+        }
+        for id in 1..=600_u128 {
+            if id != 100 && id != 102 {
+                seed.add_edge(EId(id), VId(100), VId(id), weight(7));
             }
         }
         seed.add_edge(EId(1000), VId(100), VId(102), weight(7));
         seed.add_edge(EId(1001), VId(100), VId(102), weight(3));
         seed.add_edge(EId(1002), VId(100), VId(100), weight(7));
+        seed.add_edge(EId(1003), VId(102), VId(100), weight(3));
         db.write(&commit, seed).await.unwrap();
+        // The endpoint hint includes retained identities and base/overlay
+        // duplicates. They must not change the winning visible property image.
+        let mut history = WriteBatch::new(R);
+        history.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(11)));
+        history.delete_edge(EId(200));
+        db.write(&commit, history).await.unwrap();
+        let mut restore = WriteBatch::new(R);
+        restore.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(7)));
+        db.write(&commit, restore).await.unwrap();
 
-        // Even with complete vertex admission this leaves room for only the
-        // pair's two records, not the other 600 relationships. Independent
-        // indexed-root admission can further reduce the vertex side.
-        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(602, 10, 5_000_000, 5_000_000));
+        // Even with complete vertex admission there is room for only the
+        // pair's three records, not the hub's unrelated relationships.
+        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(603, 10, 5_000_000, 5_000_000));
         let mut txn = db.begin(&txcx).unwrap();
         txn.savepoint(&db, "before-pair-edits").unwrap();
-        for merge in [
-            definition(100, Some(102)),
-            definition(102, Some(100)).with_undirected(),
+        for (merge, candidates) in [
+            (definition(100, Some(102)), 2),
+            (definition(102, Some(100)).with_undirected(), 3),
         ] {
             let (stats, outcome) = txn
                 .execute_graph_edge_merge_governed(
@@ -378,7 +389,7 @@ fn indexed_pair_probe_preserves_parallel_properties_orientation_and_staged_rollb
                     },
                 )
                 .unwrap();
-            assert_eq!(stats.overlay_edges, 2);
+            assert_eq!(stats.overlay_edges, candidates);
             assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1000)));
         }
         let (stats, outcome) = txn
