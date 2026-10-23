@@ -282,7 +282,7 @@ impl<V: Vfs> BufferedPartition<V> {
         // Shrinking earlier would under-admit a later, larger replacement.
         result
             .filter(|row| row.visible_at(as_of))
-            .map(|row| retained::vertex(row, &mut || work.step(cx, observe)))
+            .map(|row| row.retain_scan_vertex(&mut || work.step(cx, observe)))
             .transpose()
     }
 }

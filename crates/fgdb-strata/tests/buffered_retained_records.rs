@@ -15,8 +15,9 @@ use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_strata::vertex::{VertexRow, encode_patch};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion, encode_block_with_properties};
 use fgdb_types::{
-    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
-    GraphId, PurposeContexts, VId,
+    BranchId, CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
+    CanonicalScalar, CanonicalText, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId,
+    PurposeContexts, VId,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -62,6 +63,18 @@ fn text(value: &str) -> CanonicalPropertyValue {
     CanonicalScalar::ucs_basic_text(value).unwrap().into()
 }
 
+fn collection(value: &str) -> CanonicalPropertyValue {
+    CanonicalPropertyValue::Map(
+        CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+            CanonicalText::new_ucs_basic("items").unwrap(),
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![text(value), CanonicalScalar::Null.into()]).unwrap(),
+            ),
+        )])
+        .unwrap(),
+    )
+}
+
 fn edge(eid: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         eid: EId(eid),
@@ -73,18 +86,27 @@ fn edge(eid: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     }
 }
 
-fn vertex(id: u128, created: u64, retired: Option<u64>, value: &str) -> VertexRow {
+fn vertex(
+    id: u128,
+    created: u64,
+    retired: Option<u64>,
+    value: CanonicalPropertyValue,
+) -> VertexRow {
     VertexRow {
         vid: VId(id),
         birth_ordinal: id as u64,
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
         labels: vec![LabelId(9)],
-        props: vec![(P, text(value))],
+        props: vec![(P, value)],
     }
 }
 
-async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, PartitionRootVersion) {
+async fn fixture(
+    contexts: &PurposeContexts,
+    path: &Path,
+    value: fn(&str) -> CanonicalPropertyValue,
+) -> (BlockStore, PartitionRootVersion) {
     let cx = contexts.commit();
     let store = BlockStore::open(
         &cx,
@@ -110,9 +132,9 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
                 vec![(
                     P,
                     if entry.created_at == CommitSeq(2) {
-                        text(&"replacement-edge".repeat(32))
+                        value(&"replacement-edge".repeat(32))
                     } else {
-                        text("original-edge")
+                        value("original-edge")
                     },
                 )]
             })
@@ -135,10 +157,13 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
     }
     let mut patches = Vec::new();
     for rows in [
-        vec![vertex(1, 1, None, "source"), vertex(2, 1, None, "target")],
         vec![
-            vertex(1, 1, Some(2), "source"),
-            vertex(1, 2, None, &"replacement-source".repeat(48)),
+            vertex(1, 1, None, value("source")),
+            vertex(2, 1, None, value("target")),
+        ],
+        vec![
+            vertex(1, 1, Some(2), value("source")),
+            vertex(1, 2, None, value(&"replacement-source".repeat(48))),
         ],
     ] {
         let patch = store
@@ -181,9 +206,82 @@ fn source_value(cut: u64) -> CanonicalPropertyValue {
 }
 
 #[test]
+fn retained_point_reads_release_decoder_workspaces_and_preserve_both_cuts() {
+    run(|contexts, path| async move {
+        let (store, root) = fixture(&contexts, &path, text).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(MEMORY, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for cut in [1, 2] {
+            for id in 1..=PARALLEL {
+                let vertex = view
+                    .vertex_at(&cx, VId(1), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(vertex.props, vec![(P, source_value(cut))]);
+                vertices.push(vertex);
+                let edge = view
+                    .edge_at(&cx, EId(id), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected = if cut == 2 && id == 1 {
+                    text(&"replacement-edge".repeat(32))
+                } else {
+                    text("original-edge")
+                };
+                assert_eq!(edge.props, vec![(P, expected)]);
+                edges.push(edge);
+                assert!(
+                    pool.used() < baseline + 256 * 1024,
+                    "completed point reads retain values, not decoder workspaces: {} bytes",
+                    pool.used() - baseline,
+                );
+            }
+        }
+        assert!(
+            view.vertex_at(&cx, VId(99), CommitSeq(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            view.edge_at(&cx, EId(99), CommitSeq(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(view);
+        drop(store);
+        let retained = vertices
+            .iter()
+            .map(|row| row.charged_bytes())
+            .sum::<usize>()
+            + edges.iter().map(|row| row.charged_bytes()).sum::<usize>();
+        assert_eq!(pool.used(), retained);
+        assert!(retained > 0 && retained < 128 * 1024);
+        assert_eq!(vertices[0].props, vec![(P, source_value(1))]);
+        assert_eq!(
+            vertices[PARALLEL as usize].props,
+            vec![(P, source_value(2))]
+        );
+        drop(vertices);
+        drop(edges);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn retained_parallel_edges_and_endpoints_fit_without_charging_decoder_space_per_row() {
     run(|contexts, path| async move {
-        let (store, root) = fixture(&contexts, &path).await;
+        let (store, root) = fixture(&contexts, &path, text).await;
         let cx = contexts.query();
         let pool = MemoryPool::new(MEMORY, 0).unwrap();
         let mut view = store
@@ -246,7 +344,7 @@ fn retained_parallel_edges_and_endpoints_fit_without_charging_decoder_space_per_
 #[test]
 fn incidence_restarts_keep_retained_history_and_late_refusals_fuse() {
     run(|contexts, path| async move {
-        let (store, root) = fixture(&contexts, &path).await;
+        let (store, root) = fixture(&contexts, &path, text).await;
         let cx = contexts.query();
         let pool = MemoryPool::new(MEMORY, 0).unwrap();
         let mut view = store
@@ -318,6 +416,91 @@ fn incidence_restarts_keep_retained_history_and_late_refusals_fuse() {
             assert_eq!(row.source_vertex().props, vec![(P, source_value(2))]);
         }
         drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn retained_collection_records_fit_across_point_reads_and_nested_traversals() {
+    run(|contexts, path| async move {
+        let (store, root) = fixture(&contexts, &path, collection).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(MEMORY, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let mut vertices = Vec::new();
+        let mut points = Vec::new();
+        let mut traversals = Vec::new();
+        for cut in [1, 2] {
+            let source = if cut == 1 {
+                "source".to_owned()
+            } else {
+                "replacement-source".repeat(48)
+            };
+            for id in 1..=PARALLEL {
+                let vertex = view
+                    .vertex_at(&cx, VId(1), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(vertex.props, vec![(P, collection(&source))]);
+                vertices.push(vertex);
+                points.push(
+                    view.edge_at(&cx, EId(id), CommitSeq(cut))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_join_scan();
+            while let Some(candidate) = scan
+                .next_with_endpoints(&cx, Some(R), &mut |_| Ok::<_, ()>(()))
+                .await
+                .unwrap()
+            {
+                let row = candidate.row.unwrap();
+                let edge = if cut == 2 && candidate.eid == EId(1) {
+                    "replacement-edge".repeat(32)
+                } else {
+                    "original-edge".to_owned()
+                };
+                assert_eq!(row.edge().props, vec![(P, collection(&edge))]);
+                assert_eq!(row.source_vertex().props, vec![(P, collection(&source))]);
+                traversals.push(row);
+                // Retain one independent successor beside each root, so the
+                // live pool contains both merge images and all prior outputs.
+                let nested = scan
+                    .next_incident_retained_with_endpoints(
+                        &cx,
+                        VId(1),
+                        Some(R),
+                        BufferedEdgeDirection::Outgoing,
+                        None,
+                        &mut |_| Ok::<_, ()>(()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(nested.eid, EId(1));
+                traversals.push(nested.row.unwrap());
+                assert!(pool.used() < baseline + 512 * 1024);
+            }
+        }
+        assert_eq!(traversals.len(), 4 * (PARALLEL as usize + 1));
+        drop(view);
+        drop(store);
+        assert!(pool.used() > 0 && pool.used() < 512 * 1024);
+        assert_eq!(vertices[0].props, vec![(P, collection("source"))]);
+        assert_eq!(points[0].props, vec![(P, collection("original-edge"))]);
+        drop(vertices);
+        drop(points);
+        drop(traversals);
         assert_eq!(pool.used(), 0);
     });
 }

@@ -1868,3 +1868,63 @@ fn profile_free_property_bytes_keep_scalar_bytes_and_round_trip_collections() {
         Err(CanonicalPropertyValueError::EmptyEncoding)
     );
 }
+
+#[test]
+fn property_heap_bytes_count_nested_spare_capacity_and_map_keys() {
+    let mut payload = Vec::with_capacity(8192);
+    payload.extend_from_slice(b"payload");
+    let payload_bytes = payload.capacity();
+    let mut children = Vec::with_capacity(64);
+    children.push(scalar_value(CanonicalScalar::bytes(payload).unwrap()));
+    children.push(scalar_value(CanonicalScalar::Int(42)));
+    let children_bytes = children.capacity() * size_of::<CanonicalPropertyValue>();
+    let list = CanonicalPropertyValue::List(CanonicalList::try_new(children).unwrap());
+    let mut entries = Vec::with_capacity(32);
+    entries.push(CanonicalMapEntry::new(ucs("nested"), list));
+    entries.push(CanonicalMapEntry::new(
+        ucs("inline"),
+        scalar_value(CanonicalScalar::Null),
+    ));
+    let entries_bytes = entries.capacity() * size_of::<CanonicalMapEntry>();
+    let map = CanonicalPropertyValue::Map(CanonicalMap::try_new(entries).unwrap());
+    let encoded_before = map.encode().unwrap();
+    let expected = payload_bytes + children_bytes + entries_bytes + "nestedinline".len();
+    let mut visits = 0;
+    assert_eq!(
+        map.owned_heap_bytes_controlled(&mut || {
+            visits += 1;
+            Ok::<_, usize>(())
+        }),
+        Ok(Some(expected))
+    );
+    assert_eq!(visits, 5); // map, null, list, bytes, integer
+    for stop in 1..=visits {
+        let mut at = 0;
+        assert_eq!(
+            map.owned_heap_bytes_controlled(&mut || {
+                at += 1;
+                if at == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(stop)
+        );
+        assert_eq!(at, stop);
+        assert_eq!(map.encode().unwrap(), encoded_before);
+    }
+    assert_eq!(map.encode().unwrap(), encoded_before);
+
+    // Empty collections still own their spare backing storage.
+    let values = Vec::with_capacity(16);
+    let expected = values.capacity() * size_of::<CanonicalPropertyValue>();
+    let empty = CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap());
+    assert_eq!(
+        empty.owned_heap_bytes_controlled(&mut || Ok::<_, ()>(())),
+        Ok(Some(expected))
+    );
+    let entries = Vec::with_capacity(16);
+    let expected = entries.capacity() * size_of::<CanonicalMapEntry>();
+    let empty = CanonicalPropertyValue::Map(CanonicalMap::try_new(entries).unwrap());
+    assert_eq!(
+        empty.owned_heap_bytes_controlled(&mut || Ok::<_, ()>(())),
+        Ok(Some(expected))
+    );
+}
