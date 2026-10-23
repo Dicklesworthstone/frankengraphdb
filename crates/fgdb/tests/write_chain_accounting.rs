@@ -275,3 +275,201 @@ fn exact_complete_budgets_pass_and_one_below_restores_the_staged_prefix() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn merge_actions_count_repeated_rows_parallel_targets_and_selected_branches() {
+    let ((), report) = run_async_under_lab(0xc4a1_1003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let chain = prepare(
+            "UNWIND [1,1] AS k MERGE (a {p:k}) \
+             ON CREATE SET a.p=99 ON MATCH SET a.p=1 \
+             MERGE (b {p:2}) ON CREATE SET b.p=2",
+        );
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1, 2] {
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(1))]);
+        }
+        database.write(&contexts.commit(), seed).await.unwrap();
+        let basis = database.frontier().unwrap();
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut database, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let next = AtomicU64::new(1_000);
+        let error = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(0, HIGH, HIGH).with_mutation_limit(4),
+                |request| allocate(&next, request),
+            )
+            .expect_err("four matched actions leave no allowance for the next creation's SET");
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::EffectLimit {
+                        limit: 0,
+                        observed: 1
+                    }
+                )
+            ))
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(database.frontier().unwrap(), basis);
+        assert_eq!(transaction.vertices(&database).unwrap().len(), 3);
+        let (stats, result, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(0, HIGH, HIGH).with_mutation_limit(5),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(receipt.stats().mutation_effects, 5);
+        assert_eq!(stats.created_vertices, 1);
+        assert!(result.value.is_empty());
+        assert_eq!(result.rows.result_rows, 0);
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(database.vertices().unwrap().len(), 4);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_actions_share_the_terminal_mutation_allowance_and_receipt() {
+    let ((), report) = run_async_under_lab(0xc4a1_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let chain = prepare(
+            "UNWIND [1,2] AS k MERGE (a {p:k}) ON CREATE SET a.p=k \
+             MERGE (b {p:k+10}) ON CREATE SET b.p=k+10 \
+             WITH a,b SET b.p=b.p+100 RETURN b.p",
+        );
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let basis = database.frontier().unwrap();
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let next = AtomicU64::new(1_000);
+        let error = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(2, HIGH, HIGH).with_mutation_limit(5),
+                |request| allocate(&next, request),
+            )
+            .expect_err("the terminal SET must not reset earlier MERGE action costs");
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::EffectLimit {
+                        limit: 1,
+                        observed: 2
+                    }
+                )
+            ))
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(database.frontier().unwrap(), basis);
+        assert!(transaction.vertices(&database).unwrap().is_empty());
+        let (stats, result, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(2, HIGH, HIGH).with_mutation_limit(6),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(receipt.stats().mutation_effects, 6);
+        assert_eq!(stats.created_vertices, 4);
+        assert_eq!(result.value.len(), 2);
+        assert_eq!(
+            result.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(111))]
+        );
+        assert_eq!(
+            result.value[1].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(112))]
+        );
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_effect_refusal_precedes_rhs_evaluation_and_empty_input_costs_nothing() {
+    let ((), report) = run_async_under_lab(0xc4a1_1005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let next = AtomicU64::new(1_000);
+        let failing = prepare(
+            "UNWIND [1] AS k MERGE (a {p:k}) ON CREATE SET a.p=10/(k-1) \
+             MERGE (b {p:2})",
+        );
+        let error = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &failing,
+                policy(0, HIGH, HIGH).with_mutation_limit(0),
+                |request| allocate(&next, request),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::EffectLimit {
+                        limit: 0,
+                        observed: 1
+                    }
+                )
+            ))
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        let empty = prepare(
+            "UNWIND [] AS k MERGE (a {p:k}) ON CREATE SET a.p=99 \
+             MERGE (b {p:2}) ON CREATE SET b.p=2",
+        );
+        let (stats, result, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &empty,
+                policy(0, HIGH, HIGH).with_mutation_limit(0),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(receipt.stats().mutation_effects, 0);
+        assert_eq!(stats.created_vertices, 0);
+        assert!(result.value.is_empty());
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        transaction.abort();
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

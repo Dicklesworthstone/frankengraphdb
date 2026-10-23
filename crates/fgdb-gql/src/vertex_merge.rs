@@ -131,6 +131,12 @@ pub enum GraphVertexMergeError<E, A> {
     },
     Creation(GraphInsertError<E, A>),
     AccountingOverflow,
+    /// Selected ON/SET assignments exceed the enclosing chain's remaining
+    /// mutation allowance. Every target and repeated input occurrence counts.
+    EffectLimit {
+        limit: u64,
+        observed: u128,
+    },
     /// A MERGE over input rows read NULL or a non-scalar from its row for a
     /// property value (openCypher refuses a null MERGE property).
     RowValue {
@@ -185,6 +191,9 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::Creation(error) => write!(f, "MERGE creation: {error}"),
             Self::AccountingOverflow => {
                 f.write_str("MERGE cumulative resource accounting overflow")
+            }
+            Self::EffectLimit { limit, observed } => {
+                write!(f, "MERGE actions have {observed} effects; limit {limit}")
             }
             Self::RowValue { row, column } => write!(
                 f,

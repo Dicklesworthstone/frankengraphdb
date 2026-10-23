@@ -189,7 +189,16 @@ impl WriteTxn {
             created_vertices: 0,
             created_edges: 0,
         };
-        let mutation = |error| GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error));
+        let mutation =
+            |error| GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error));
+        let vertex_merge = |error| match error {
+            fgdb_gql::GraphVertexMergeError::EffectLimit { limit, observed } => {
+                mutation(fgdb_gql::GraphMutationError::EffectLimit { limit, observed })
+            }
+            error => {
+                GraphWriteChainError::VertexMerge(GraphVertexMergeRowsQueryError::Merge(error))
+            }
+        };
         self.ensure_database(database).map_err(source)?;
         let live = database
             .frontier()
@@ -202,7 +211,7 @@ impl WriteTxn {
             }));
         }
         // What the statement has left after the steps so far.
-        let remaining = |used: &GraphInsertStats, delivers: bool| {
+        let remaining = |used: &GraphInsertStats, effects: u64, delivers: bool| {
             let records = policy
                 .query
                 .rows
@@ -233,9 +242,9 @@ impl WriteTxn {
                 policy.max_vertices.saturating_sub(used.created_vertices),
                 policy.max_edges.saturating_sub(used.created_edges),
             )
-            // A SET, REMOVE or DELETE is the chain's last step: no earlier
-            // step spends this allowance.
-            .with_mutation_limit(policy.max_mutation_effects)
+            // ON/SET actions on earlier MERGEs spend the same allowance as
+            // a later MERGE or the terminal SET, REMOVE or DELETE.
+            .with_mutation_limit(policy.max_mutation_effects.saturating_sub(effects))
         };
         let add = |used: &mut GraphInsertStats, step: &GraphInsertStats| {
             used.selection.snapshot_records = used
@@ -288,7 +297,8 @@ impl WriteTxn {
                             | GraphWriteChainStep::VertexMergeQuery(_)
                             | GraphWriteChainStep::MutationQuery(_)
                     );
-                let allowance = remaining(&used, delivers);
+                let allowance = remaining(&used, mutation_effects, delivers);
+                let mut effects = 0;
                 // A step without RETURN rows: its own counters, no rows.
                 let unreturned = |stats: &GraphInsertStats| GqlQueryExecution {
                     value: Vec::new(),
@@ -411,17 +421,13 @@ impl WriteTxn {
                                 merge,
                                 GraphVertexMergePolicy::new(allowance.query)
                                     .with_creation_limit(allowance.max_vertices),
+                                allowance.max_mutation_effects,
+                                &mut effects,
                                 rows.take(),
                                 frozen.as_mut(),
                                 &mut allocate,
                             )
-                            .map_err(|error| {
-                                error.map_source(|error| {
-                                    GraphWriteChainError::VertexMerge(
-                                        GraphVertexMergeRowsQueryError::Merge(error),
-                                    )
-                                })
-                            })?;
+                            .map_err(|error| error.map_source(&vertex_merge))?;
                         receipts.push(receipt);
                         // Multiplicity can repeat a large carried value for
                         // every matching vertex. Admit each complete copy
@@ -553,17 +559,13 @@ impl WriteTxn {
                                 merge,
                                 GraphVertexMergePolicy::new(allowance.query)
                                     .with_creation_limit(allowance.max_vertices),
+                                allowance.max_mutation_effects,
+                                &mut effects,
                                 rows.take(),
                                 None,
                                 &mut allocate,
                             )
-                            .map_err(|error| {
-                                error.map_source(|error| {
-                                    GraphWriteChainError::VertexMerge(
-                                        GraphVertexMergeRowsQueryError::Merge(error),
-                                    )
-                                })
-                            })?;
+                            .map_err(|error| error.map_source(&vertex_merge))?;
                         receipts.push(receipt);
                         // RETURN's input: each bound column of each pair,
                         // properties read after the statement: the merged
@@ -637,8 +639,10 @@ impl WriteTxn {
                     // (fgdb-cpny9): its proposal is complete before anything
                     // is staged, as for `MATCH ... WITH ... SET`.
                     GraphWriteChainStep::Mutation(step) => {
-                        let policy =
-                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let policy = GraphMutationPolicy::new(
+                            allowance.query,
+                            allowance.max_mutation_effects,
+                        );
                         let proposal = step
                             .execute_governed_over(
                                 rows.take(),
@@ -661,13 +665,15 @@ impl WriteTxn {
                             mutation,
                         )?;
                         receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
-                        mutation_effects = stats.effects;
+                        effects = stats.effects;
                         let stats = mutated(&stats);
                         (stats, unreturned(&stats))
                     }
                     GraphWriteChainStep::MutationQuery(query) => {
-                        let policy =
-                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let policy = GraphMutationPolicy::new(
+                            allowance.query,
+                            allowance.max_mutation_effects,
+                        );
                         let proposal = query
                             .execute_governed_over(
                                 rows.take(),
@@ -691,10 +697,12 @@ impl WriteTxn {
                             mutation,
                         )?;
                         receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
-                        mutation_effects = stats.effects;
+                        effects = stats.effects;
                         (mutated(&stats), returning)
                     }
                 };
+                // Each step admitted against the unspent effect allowance.
+                mutation_effects += effects;
                 // A query step's execution includes its write prefix PLUS
                 // projection, grouping, ordering and WITH-tail evaluation.
                 // The write stats alone stop before that work. Carry the
@@ -1234,6 +1242,8 @@ mod chain_materialization_tests {
                         cx,
                         merge,
                         GraphVertexMergePolicy::new(policy(HIGH, HIGH).query),
+                        u64::MAX,
+                        &mut 0,
                         None,
                         None,
                         |_| -> Result<ElementId, ()> { panic!("all targets exist") },
@@ -1438,6 +1448,8 @@ mod chain_materialization_tests {
                             &cx,
                             query.merge(),
                             GraphVertexMergePolicy::new(policy(HIGH, HIGH).query),
+                            u64::MAX,
+                            &mut 0,
                             None,
                             None,
                             |_| -> Result<ElementId, ()> { panic!("all targets exist") },

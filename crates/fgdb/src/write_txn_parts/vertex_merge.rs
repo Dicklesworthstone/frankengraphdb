@@ -649,6 +649,8 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         merge: &fgdb_gql::PreparedGraphVertexMergeRows,
         policy: fgdb_gql::GraphVertexMergePolicy,
+        max_effects: u64,
+        effects: &mut u64,
         owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
         mut frozen: Option<&mut FrozenCreations>,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
@@ -902,6 +904,23 @@ impl WriteTxn {
                     } else {
                         &actions.on_match
                     };
+                    // Price the branch that actually ran for every selected
+                    // target, including repeated/no-op assignments. Admit the
+                    // whole occurrence before evaluating any of its actions.
+                    let observed = (selected.len() as u128)
+                        .checked_add(actions.after.len() as u128)
+                        .and_then(|count| count.checked_mul(resolved[&tuple].len() as u128))
+                        .and_then(|count| u128::from(*effects).checked_add(count))
+                        .ok_or(GqlQueryError::Source(
+                            GraphVertexMergeError::AccountingOverflow,
+                        ))?;
+                    if observed > u128::from(max_effects) {
+                        return Err(GqlQueryError::Source(GraphVertexMergeError::EffectLimit {
+                            limit: max_effects,
+                            observed,
+                        }));
+                    }
+                    *effects = observed as u64;
                     for vertex in &resolved[&tuple] {
                         self.vertex_merge_row_actions::<V, A>(
                             database,
