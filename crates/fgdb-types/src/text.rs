@@ -255,11 +255,18 @@ impl CanonicalText {
         self.sort_key.as_deref()
     }
 
-    /// Owned text and comparison-key storage, including unused capacity.
+    /// Owned text, boxed binding and comparison-key storage, including unused
+    /// string and vector capacity. Inline fields and allocator overhead are
+    /// excluded.
     pub(crate) fn owned_heap_bytes(&self) -> Option<usize> {
+        let binding_bytes = match &self.binding {
+            TextBinding::UcsBasic => 0,
+            TextBinding::NonBinary(binding) => std::mem::size_of_val(binding.as_ref()),
+        };
         self.text
             .capacity()
-            .checked_add(self.sort_key.as_ref().map_or(0, Vec::capacity))
+            .checked_add(binding_bytes)
+            .and_then(|bytes| bytes.checked_add(self.sort_key.as_ref().map_or(0, Vec::capacity)))
     }
 
     /// Bytes defining collation equivalence under this value's pinned
@@ -863,12 +870,13 @@ mod tests {
     }
 
     #[test]
-    fn owned_heap_bytes_counts_both_non_binary_allocations() {
+    fn owned_heap_bytes_counts_all_non_binary_allocations() {
         let mut text = String::with_capacity(64);
         text.push_str("abc");
         let mut key = Vec::with_capacity(128);
         key.extend_from_slice(&[u8::MAX - b'c', u8::MAX - b'b', u8::MAX - b'a']);
-        let expected = text.capacity() + key.capacity();
+        let expected =
+            text.capacity() + key.capacity() + std::mem::size_of::<NonBinaryTextBinding>();
         assert!(expected > text.len() + key.len());
         let value = CanonicalText::from_ordered_scalar_parts(
             text,
@@ -882,6 +890,42 @@ mod tests {
             crate::CanonicalScalar::Text(value).owned_heap_bytes(),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn property_heap_bytes_count_boxed_bindings_in_nested_map_keys_and_values() {
+        use crate::{
+            CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue, CanonicalScalar,
+        };
+
+        let key = non_binary("nested-key", &TestResolver::available());
+        let value = non_binary("nested-value", &TestResolver::available());
+        // Count the owned allocations independently of the helper under test.
+        // The boxes remain separately owned even when their bindings match.
+        let text_bytes = key.text.capacity()
+            + key.sort_key.as_ref().unwrap().capacity()
+            + value.text.capacity()
+            + value.sort_key.as_ref().unwrap().capacity()
+            + 2 * std::mem::size_of::<NonBinaryTextBinding>();
+        let mut children = Vec::with_capacity(16);
+        children.push(CanonicalScalar::Text(value).into());
+        let children_bytes = children.capacity() * std::mem::size_of::<CanonicalPropertyValue>();
+        let list = CanonicalPropertyValue::List(CanonicalList::try_new(children).unwrap());
+        let mut entries = Vec::with_capacity(8);
+        entries.push(CanonicalMapEntry::new(key, list));
+        let entries_bytes = entries.capacity() * std::mem::size_of::<CanonicalMapEntry>();
+        let map = CanonicalPropertyValue::Map(CanonicalMap::try_new(entries).unwrap());
+        let before = map.encode().unwrap();
+        let mut visits = 0;
+        assert_eq!(
+            map.owned_heap_bytes_controlled(&mut || {
+                visits += 1;
+                Ok::<_, ()>(())
+            }),
+            Ok(Some(text_bytes + children_bytes + entries_bytes))
+        );
+        assert_eq!(visits, 3); // map, list, text value
+        assert_eq!(map.encode().unwrap(), before);
     }
 
     #[test]

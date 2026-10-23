@@ -390,15 +390,18 @@ impl CanonicalScalar {
 
     /// Bytes of owned heap storage retained by this scalar, without allocating.
     ///
-    /// Text counts both its `String` capacity and its optional sort-key capacity;
-    /// bytes count their `Vec` capacity, including unused space. A timestamp's
-    /// boxed zone identifier counts its exact byte length. Inline scalar data
-    /// and allocator bookkeeping are excluded. Returns `None` on size overflow.
+    /// Text counts its `String` capacity, boxed binding and optional sort-key
+    /// capacity; bytes count their `Vec` capacity, including unused space. A
+    /// timestamp counts both the boxed zone metadata and its separately boxed
+    /// identifier. Inline scalar data and allocator bookkeeping are excluded.
+    /// Returns `None` on size overflow.
     pub fn owned_heap_bytes(&self) -> Option<usize> {
         match self {
             Self::Text(value) => value.owned_heap_bytes(),
             Self::Bytes(value) => Some(value.owned_heap_bytes()),
-            Self::Timestamp(value) => Some(value.zone().map_or(0, |zone| zone.identifier().len())),
+            Self::Timestamp(value) => value.zone().map_or(Some(0), |zone| {
+                std::mem::size_of_val(zone).checked_add(zone.identifier().len())
+            }),
             Self::Null
             | Self::Bool(_)
             | Self::Int(_)
@@ -1701,7 +1704,10 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(scalar.owned_heap_bytes(), Some("America/New_York".len()));
+        assert_eq!(
+            scalar.owned_heap_bytes(),
+            Some(std::mem::size_of::<crate::temporal::TimestampZone>() + "America/New_York".len())
+        );
     }
 
     #[test]
