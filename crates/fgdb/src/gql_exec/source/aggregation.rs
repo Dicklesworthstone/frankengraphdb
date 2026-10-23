@@ -201,6 +201,9 @@ fn count_input<E>(
     let mut matching = 0;
     match source {
         GraphCountSource::Vertices => {
+            // The ordinary unbound vertex source probes index eligibility
+            // before scanning. Preserve that first refusal boundary too.
+            control(super::SourceEvent::Work)?;
             super::visit_vertices(&snapshot.patches, as_of, control, |_, control| {
                 control(super::SourceEvent::SnapshotRecord)?;
                 control(super::SourceEvent::ScratchEntry)?;

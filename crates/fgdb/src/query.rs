@@ -1104,7 +1104,6 @@ mod write_return_tests {
             for text in [
                 "CREATE (n:Copy) RETURN n; CREATE (m)",
                 "CREATE (n:Copy); CREATE (m) RETURN m",
-                "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
             ] {
                 let calls = AtomicI32::new(0);
                 let result = db
@@ -1130,6 +1129,76 @@ mod write_return_tests {
                     "refusal precedes catalog calls: {text}"
                 );
                 assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+            // CREATE/SET is now an owned write chain, not refused syntax.
+            // Keep that exact former case as real execution and a one-below
+            // creation limit, with independent state and no partial commit.
+            for (populated, vertex_limit) in [(false, 2), (true, 1), (true, 2)] {
+                let mut chain_db = Database::open_memory(&commit, keys()).await.unwrap();
+                if populated {
+                    let mut seed = WriteBatch::new(R);
+                    for id in [1, 2] {
+                        seed.create_vertex(VId(id), vec![], vec![]);
+                    }
+                    chain_db.write(&commit, seed).await.unwrap();
+                }
+                let chain_before = (
+                    chain_db.frontier().unwrap(),
+                    chain_db.vertices().unwrap(),
+                    chain_db.edges().unwrap(),
+                );
+                let allocations = AtomicU64::new(0);
+                let result = chain_db
+                    .query_write(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
+                        &GqlParameters::new(),
+                        symbols,
+                        R,
+                        policy(if populated { 16 } else { 2 }, vertex_limit, 0),
+                        |request| {
+                            allocations.fetch_add(1, Ordering::Relaxed);
+                            allocate(request)
+                        },
+                    )
+                    .await;
+                if populated && vertex_limit == 1 {
+                    assert!(matches!(result, Err(QueryWriteError::Chain(_))));
+                    assert!(allocations.load(Ordering::Relaxed) <= 1);
+                    assert_eq!(
+                        (
+                            chain_db.frontier().unwrap(),
+                            chain_db.vertices().unwrap(),
+                            chain_db.edges().unwrap()
+                        ),
+                        chain_before
+                    );
+                } else if populated {
+                    assert_eq!(
+                        rows(result.unwrap(), &["copy"]),
+                        vec![
+                            vec![GraphValue::Vertex(VId(100))],
+                            vec![GraphValue::Vertex(VId(110))]
+                        ]
+                    );
+                    assert_eq!(allocations.load(Ordering::Relaxed), 2);
+                    assert_eq!(chain_db.frontier().unwrap().0, chain_before.0.0 + 1);
+                    assert_eq!(chain_db.vertices().unwrap().len(), 4);
+                    for id in [100, 110] {
+                        assert_eq!(
+                            chain_db.vertex(VId(id)).unwrap().unwrap().props,
+                            vec![(P, CanonicalScalar::Int(1).into())]
+                        );
+                    }
+                } else {
+                    assert!(rows(result.unwrap(), &["copy"]).is_empty());
+                    assert_eq!(allocations.load(Ordering::Relaxed), 0);
+                    assert_eq!(chain_db.frontier().unwrap(), chain_before.0);
+                    assert!(chain_db.vertices().unwrap().is_empty());
+                }
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
             let result = db

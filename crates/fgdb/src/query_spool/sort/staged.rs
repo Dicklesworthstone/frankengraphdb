@@ -561,7 +561,7 @@ where
         drop(bytes);
         let retained = codec::row_memory(&row, work)?;
         codec::retain_reservation(&mut charge, retained, work.cx)?;
-        let cursor = stage
+        let cursor = match stage
             .start_with_async_elements(
                 row,
                 row_index,
@@ -581,10 +581,20 @@ where
                 },
             )
             .await
-            .map_err(|error| match error {
-                SpillSetRowError::Control(error) => error,
-                SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
-            })?;
+        {
+            Ok(cursor) => cursor,
+            Err(SpillSetRowError::Control(error)) => return Err(error),
+            Err(SpillSetRowError::Native(error)) => {
+                // A completed native evaluation failed, not a scratch I/O.
+                // Seal and discard its private prefix before returning the
+                // error; abandoning this writer would fence a reusable file.
+                drop(charge);
+                drop(reader);
+                work.charge(1)?;
+                writer.finish(work.cx).await?;
+                return Err(NativeSpoolError::SetExecution(error));
+            }
+        };
         // Evaluation has finished, so its temporary workspace can be released.
         // Preserve the initial cursor footprint through the entire expansion:
         // it covers the original iterator allocation AND payloads moved into
@@ -601,21 +611,26 @@ where
             // original input/list reservation remains live. Native work and
             // scratch-entry accounting nevertheless continue cumulatively.
             let mut charge = pool.reserve(work.cx, 0).map_err(SpillError::Memory)?;
-            let next = state
-                .0
-                .next_with_control(&mut |event| {
-                    control(event)?;
-                    native_event(work.cx, policy, evaluator, event)?;
-                    if event == GlaExecutionEvent::ScratchEntry {
-                        let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-                        charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
-                    }
-                    Ok(())
-                })
-                .map_err(|error| match error {
-                    SpillSetRowError::Control(error) => error,
-                    SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
-                })?;
+            let next = match state.0.next_with_control(&mut |event| {
+                control(event)?;
+                native_event(work.cx, policy, evaluator, event)?;
+                if event == GlaExecutionEvent::ScratchEntry {
+                    let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+                    charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
+                }
+                Ok(())
+            }) {
+                Ok(next) => next,
+                Err(SpillSetRowError::Control(error)) => return Err(error),
+                Err(SpillSetRowError::Native(error)) => {
+                    drop(state.1);
+                    drop(charge);
+                    drop(reader);
+                    work.charge(1)?;
+                    writer.finish(work.cx).await?;
+                    return Err(NativeSpoolError::SetExecution(error));
+                }
+            };
             let Some((row, remaining)) = next else {
                 break;
             };

@@ -143,6 +143,76 @@ fn folded_and_collection_inputs_read_elements_and_preserve_exact_occurrences() {
 }
 
 #[test]
+fn yielded_vertex_property_aggregates_use_the_correlated_graph_source() {
+    let vertices = [VId(1), VId(9), HIGH];
+    let properties = [2, 99, 7].map(|n| CanonicalPropertyValue::from(CanonicalScalar::Int(n)));
+    for (tail, expected) in [
+        (
+            "RETURN COUNT(node.value) AS n, SUM(node.value) AS total, COLLECT(node.value) AS values",
+            vec![2, 2, 7],
+        ),
+        (
+            "UNWIND [1,1] AS duplicate RETURN COUNT(node.value) AS n, SUM(node.value) AS total, COLLECT(node.value) AS values",
+            vec![2, 2, 2, 2, 7, 7],
+        ),
+        (
+            "WITH node.value AS value WHERE value > 2 RETURN COUNT(*) AS n, SUM(value) AS total, COLLECT(value) AS values",
+            vec![7],
+        ),
+        (
+            "WITH node.value AS value ORDER BY value DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS n, SUM(value) AS total, COLLECT(value) AS values",
+            vec![2],
+        ),
+    ] {
+        let query = prepare_output(tail);
+        let run = |records| {
+            query.execute_governed_with_procedures(
+                GqlQueryPolicy::new(records, 1, 1_000_000, 100_000),
+                |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+                    pattern.plan().execute_governed_with_properties(
+                        3,
+                        vertices,
+                        [],
+                        |_, predicates| {
+                            assert!(predicates.is_empty());
+                            Ok::<_, &'static str>(true)
+                        },
+                        |vid, key| {
+                            assert_eq!(key, VALUE);
+                            let at = vertices.iter().position(|id| *id == vid).unwrap();
+                            Ok(Some(&properties[at]))
+                        },
+                        remaining,
+                        || Ok::<_, usize>(()),
+                    )
+                },
+                procedure,
+                || Ok(()),
+            )
+        };
+        let actual = run(6).unwrap();
+        assert_eq!(actual.rows.snapshot_records, 6, "{tail}");
+        assert_eq!(actual.rows.result_rows, 1, "{tail}");
+        assert_eq!(
+            actual.value[0].values()[0].as_count(),
+            Some(expected.len() as u64)
+        );
+        assert_eq!(
+            actual.value[0].values()[1].as_integer(),
+            Some(expected.iter().copied().map(i128::from).sum())
+        );
+        assert_eq!(
+            actual.value[0].values()[2],
+            scalar_list(&expected.into_iter().map(Some).collect::<Vec<_>>()),
+            "the unrelated graph value99 must not enter the aggregate"
+        );
+        assert!(matches!(run(5), Err(GqlQueryError::Rows(error))
+            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                && error.observed == error.limit + 1));
+    }
+}
+
+#[test]
 fn missing_properties_are_null_but_an_unavailable_reader_is_not_null() {
     let query = prepare("RETURN COUNT(*) AS rows, COUNT(value) AS present, SUM(value) AS total");
     let result = query

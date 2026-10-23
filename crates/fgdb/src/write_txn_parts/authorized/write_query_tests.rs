@@ -322,11 +322,14 @@ fn original_native_record_row_work_and_scratch_ceilings_cover_both_phases() {
             .unwrap();
         let records = write.selection.snapshot_records + read.rows.snapshot_records;
         let rows = write.selection.result_rows + read.rows.result_rows;
-        assert_eq!((records, rows), (4, 3)); // independent two-source/one-update witness
+        // The equality index admits the one matching write-source vertex;
+        // the staged read then admits both visible vertices independently.
+        assert_eq!((records, rows), (3, 3));
         let work = write.evaluator.work_units + read.evaluator.work_units;
         let scratch = write.evaluator.scratch_entries + read.evaluator.scratch_entries;
         for dimension in 0..4 {
-            for below in [false, true] {
+            for delta in [-1_i64, 0, 1] {
+                let below = delta < 0;
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 seed(&mut db, &commit, false).await;
                 let before = (
@@ -336,7 +339,7 @@ fn original_native_record_row_work_and_scratch_ceilings_cover_both_phases() {
                 );
                 let mut bounded = policy();
                 let mut caps = [records, rows, work, scratch];
-                caps[dimension] -= u64::from(below);
+                caps[dimension] = caps[dimension].checked_add_signed(delta).unwrap();
                 bounded.mutations.query = GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]);
                 let result = db
                     .execute_graph_write_program_then_query_authorized(

@@ -657,8 +657,30 @@ mod tests {
             refs: vec![],
             block_props: vec![],
             patches: patches
-                .iter()
-                .map(|rows| decode_patch(&encode_patch(rows).unwrap()).unwrap())
+                .into_iter()
+                .flat_map(|rows| {
+                    let expected = rows.len();
+                    if expected > fgdb_strata::vertex::MAX_PATCH_ROWS as usize {
+                        assert!(matches!(
+                            encode_patch(&rows),
+                            Err(fgdb_strata::vertex::VertexPatchError::ImplausibleRowCount {
+                                declared
+                            }) if declared as usize == expected
+                        ));
+                    }
+                    let packed = fgdb_strata::vertex::pack_rows(rows).unwrap();
+                    assert_eq!(
+                        packed.iter().map(|rows| rows.len()).sum::<usize>(),
+                        expected
+                    );
+                    packed.into_iter().map(|rows| {
+                        let bytes = encode_patch(&rows).unwrap();
+                        assert!(bytes.len() <= 16_384);
+                        let decoded = decode_patch(&bytes).unwrap();
+                        assert_eq!(decoded, rows);
+                        decoded
+                    })
+                })
                 .collect(),
             patch_refs: vec![],
             frontier: CommitSeq(3),

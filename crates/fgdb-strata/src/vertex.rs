@@ -516,7 +516,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
 /// An individually oversized row is refused: splitting a logical row is
 /// not part of this format. Callers can therefore establish admission before
 /// committing effects that would require an unsupported representation.
-pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, VertexPatchError> {
+pub fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, VertexPatchError> {
     let header_bytes = encode_patch(&[])?.len();
     let mut packed = Vec::new();
     let mut pending = Vec::new();

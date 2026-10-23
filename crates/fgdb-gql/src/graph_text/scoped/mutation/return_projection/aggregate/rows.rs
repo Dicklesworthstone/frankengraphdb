@@ -96,14 +96,43 @@ pub(super) fn prefix<'a>(
     // An initial procedure supplies the source, exactly as in a non-aggregate
     // read. Subsequent calls are independent sources joined by the row prefix.
     let mut schema = Vec::new();
-    let call = if parser.is_word("CALL") {
+    let mut leading = Vec::new();
+    if parser.is_word("CALL") {
         let at = parser.current.at;
         parser.advance()?;
-        Some(parser.call_stage(&mut schema, at)?)
-    } else {
-        None
-    };
-    if call.is_none()
+        leading.push(parser.call_stage(&mut schema, at)?);
+        while parser.is_word("UNWIND") {
+            let at = parser.current.at;
+            parser.advance()?;
+            leading.push(parser.unwind_stage(&mut schema, at)?);
+        }
+        let implied = if parser.is_word("MATCH") {
+            Vec::new()
+        } else {
+            parser.implied_call_vertices(&schema, &leading)?
+        };
+        if parser.is_word("MATCH") || !implied.is_empty() {
+            // A yielded vertex's first-scope property reads use the same
+            // identity-correlated graph source as an ordinary CALL read.
+            // Expression-produced UNWIND elements remain row values.
+            let at = parser.current.at;
+            let (first, tail) =
+                parser.leading_graph_part(statement, schema, leading, implied, true)?;
+            let schema = tail
+                .ok_or_else(|| expected(at, "a row schema before a pipeline aggregate RETURN"))?;
+            let depth = first.depth();
+            return Ok((
+                Head::Multipart {
+                    first: Box::new(first),
+                    continuations: Vec::new(),
+                },
+                Vec::new(),
+                schema,
+                depth,
+            ));
+        }
+    }
+    if leading.is_empty()
         && !parser.is_word("WITH")
         && !parser.is_word("UNWIND")
         && !parser.is_word("RETURN")
@@ -118,11 +147,11 @@ pub(super) fn prefix<'a>(
     // The shared prefix starts at depth two (graph leaf + first projection).
     // This input starts with only Singleton. Its Aggregate parent uses the
     // freed level, so the prefix's existing early depth refusal stays sound.
-    // A CALL source is one more level above that Singleton.
-    let depth = depth - 1 + usize::from(call.is_some());
+    // Each initial CALL/UNWIND contributes its ordinary relational node.
+    let depth = depth - 1 + leading.len();
     Ok((
         Head::Single(None),
-        call.into_iter().chain(stages).collect(),
+        leading.into_iter().chain(stages).collect(),
         schema,
         depth,
     ))
