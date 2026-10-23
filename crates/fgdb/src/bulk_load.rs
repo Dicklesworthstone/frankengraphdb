@@ -347,24 +347,135 @@ impl VertexKeys for HashMap<String, VId> {
     }
 }
 
+/// One load's discardable, exact endpoint resolutions at its admitted basis.
+/// The direct-mapped table is probed, never iterated for graph output. A
+/// collision, oversized key or allocation refusal merely repeats the ordinary
+/// lookup; the source, checkpoint and write admissions remain authoritative.
+struct EndpointMemo {
+    basis: CommitSeq,
+    slots: Box<[Option<EndpointMemoEntry>]>,
+    retained_bytes: usize,
+    #[cfg(test)]
+    uncached_matches: usize,
+}
+
+struct EndpointMemoEntry {
+    matched: EndpointMatch,
+    vertex: VId,
+    heap_bytes: usize,
+}
+
+impl EndpointMemo {
+    const MAX_SLOTS: usize = 4_096;
+    const MAX_BYTES: usize = 1024 * 1024;
+
+    fn new(basis: CommitSeq) -> Self {
+        Self {
+            basis,
+            slots: Box::default(),
+            retained_bytes: core::mem::size_of::<Self>(),
+            #[cfg(test)]
+            uncached_matches: 0,
+        }
+    }
+
+    fn slot(&self, matched: &EndpointMatch) -> usize {
+        use std::hash::{Hash, Hasher};
+
+        // Variant-preserving scalar Hash/Eq is intentional: load endpoint
+        // matching uses exact stored-value equality, not MERGE's numeric
+        // equivalence classes. Equality still checks every possible collision.
+        let mut hash = std::hash::DefaultHasher::new();
+        matched.label.hash(&mut hash);
+        matched.key.hash(&mut hash);
+        matched.value.hash(&mut hash);
+        (hash.finish() % self.slots.len() as u64) as usize
+    }
+
+    fn get(&self, matched: &EndpointMatch) -> Option<VId> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        self.slots[self.slot(matched)]
+            .as_ref()
+            .filter(|entry| entry.matched == *matched)
+            .map(|entry| entry.vertex)
+    }
+
+    fn remember(&mut self, matched: &EndpointMatch, vertex: VId) {
+        let Some(heap_bytes) = matched.value.owned_heap_bytes() else {
+            return;
+        };
+        if self.slots.is_empty() {
+            // Count every slot, including its inline key/identity and empty
+            // slots, before allocation. Scalar heap ownership is additional:
+            // text bindings/sort keys, byte capacity and timestamp zones all
+            // use the native accounting. Allocator bookkeeping is excluded.
+            let slot_bytes = core::mem::size_of::<Option<EndpointMemoEntry>>();
+            let slots = Self::MAX_SLOTS
+                .min(Self::MAX_BYTES.saturating_sub(core::mem::size_of::<Self>()) / slot_bytes);
+            let retained = core::mem::size_of::<Self>() + slots * slot_bytes;
+            if slots == 0 || heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+                return;
+            }
+            let mut storage = Vec::new();
+            if storage.try_reserve_exact(slots).is_err() {
+                return;
+            }
+            storage.resize_with(slots, || None);
+            // A boxed slice retains precisely the charged number of slots,
+            // independent of any spare capacity granted by Vec's allocator.
+            self.slots = storage.into_boxed_slice();
+            self.retained_bytes = retained;
+        }
+        let slot = self.slot(matched);
+        let old_heap = self.slots[slot]
+            .as_ref()
+            .map_or(0, |entry| entry.heap_bytes);
+        let retained = self.retained_bytes - old_heap;
+        if heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+            return;
+        }
+        // Release the displaced payload before cloning a fitting replacement.
+        // No failed or ambiguous resolution ever calls this method.
+        let previous = self.slots[slot].take();
+        self.retained_bytes = retained;
+        drop(previous);
+        let matched = matched.clone();
+        let Some(heap_bytes) = matched.value.owned_heap_bytes() else {
+            return;
+        };
+        if heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+            return;
+        }
+        self.slots[slot] = Some(EndpointMemoEntry {
+            matched,
+            vertex,
+            heap_bytes,
+        });
+        self.retained_bytes = retained + heap_bytes;
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Resolve an edge endpoint: a caller key against this source's vertices
     /// (`fresh` for the current chunk, then the committed prefix), a match
-    /// against the committed graph as of `basis` through the property index.
+    /// against the committed graph as of the memo's pinned basis through the
+    /// property index. Successful exact resolutions may reuse that same basis.
     /// A match must name exactly one visible vertex carrying the label (when
     /// given) and the exact property value on its visible row.
     #[allow(clippy::too_many_arguments)]
     fn resolve_endpoint(
         &self,
         cx: &QueryCx,
-        basis: CommitSeq,
+        memo: &mut EndpointMemo,
         row: usize,
         edge: &str,
         endpoint: &BulkEndpoint,
         fresh: &impl VertexKeys,
         committed: &impl VertexKeys,
     ) -> Result<VId, BulkLoadErrorKind> {
-        let (label, key, value) = match endpoint {
+        let matched = match endpoint {
             BulkEndpoint::Key(key) => {
                 return fresh
                     .find(key)
@@ -374,8 +485,9 @@ impl<V: Vfs + Clone> Database<V> {
                         endpoint: key.clone(),
                     });
             }
-            BulkEndpoint::Match(matched) => (&matched.label, &matched.key, &matched.value),
+            BulkEndpoint::Match(matched) => matched.as_ref(),
         };
+        let EndpointMatch { label, key, value } = matched;
         let unresolved = || BulkLoadErrorKind::UnresolvedEndpoint {
             row,
             edge: edge.to_owned(),
@@ -385,11 +497,25 @@ impl<V: Vfs + Clone> Database<V> {
         if matches!(value, CanonicalScalar::Null) {
             return Err(unresolved());
         }
+        if let Some(vertex) = memo.get(matched) {
+            // Repeated endpoints still observe cancellation without re-reading
+            // the same historical vertex and cloning its property payload.
+            source::checkpoint(cx)?;
+            return Ok(vertex);
+        }
+        #[cfg(test)]
+        {
+            memo.uncached_matches += 1;
+        }
         let mut control = |_| source::checkpoint(cx);
         let mut found = None;
         for vid in self.snapshot.property_index().lookup(*key, value) {
-            let Some(vertex) =
-                crate::gql_exec::source::find_vertex(&self.snapshot, *vid, basis, &mut control)?
+            let Some(vertex) = crate::gql_exec::source::find_vertex(
+                &self.snapshot,
+                *vid,
+                memo.basis,
+                &mut control,
+            )?
             else {
                 continue;
             };
@@ -411,7 +537,9 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         }
-        found.ok_or_else(unresolved)
+        let vertex = found.ok_or_else(unresolved)?;
+        memo.remember(matched, vertex);
+        Ok(vertex)
     }
 
     // BulkLoadError is a resume report (kind plus committed and pending
@@ -570,7 +698,6 @@ impl<V: Vfs + Clone> Database<V> {
         let mut source = source.into_iter();
         // The frontier before this load's first chunk: every chunk commits
         // exactly one sequence, and a resume requires no interleaved writer.
-        let mut basis = CommitSeq(0);
         let no_keys = BTreeMap::<String, VId>::new();
         let preflight = (|| {
             source::checkpoint(cx)?;
@@ -590,11 +717,12 @@ impl<V: Vfs + Clone> Database<V> {
             if !resuming {
                 committed.frontier = frontier;
             }
-            basis = u64::try_from(committed.committed_chunks)
+            let basis = u64::try_from(committed.committed_chunks)
                 .ok()
                 .and_then(|chunks| committed.frontier.0.checked_sub(chunks))
                 .map(CommitSeq)
                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
+            let mut endpoint_memo = EndpointMemo::new(basis);
             source::admit_checkpoint(cx, &committed, &policy)?;
             // Probed, never iterated: hashed sets spare an ordered set's string
             // comparisons over every source key (fgdb-79kyi).
@@ -675,7 +803,13 @@ impl<V: Vfs + Clone> Database<V> {
                                 }
                                 BulkEndpoint::Match(_) => {
                                     self.resolve_endpoint(
-                                        cx, basis, index, &e.key, endpoint, &no_keys, &no_keys,
+                                        cx,
+                                        &mut endpoint_memo,
+                                        index,
+                                        &e.key,
+                                        endpoint,
+                                        &no_keys,
+                                        &no_keys,
                                     )?;
                                 }
                             }
@@ -689,10 +823,10 @@ impl<V: Vfs + Clone> Database<V> {
                                 .edge(*id)
                                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?
                                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
-                            let prefix = |endpoint| {
+                            let mut prefix = |endpoint| {
                                 self.resolve_endpoint(
                                     cx,
-                                    basis,
+                                    &mut endpoint_memo,
                                     index,
                                     &e.key,
                                     endpoint,
@@ -728,10 +862,10 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(|_| BulkLoadErrorKind::SourceAllocation { row: count })?;
                 seals.push(transcript.finish());
             }
-            Ok(seals)
+            Ok((seals, endpoint_memo))
         })();
-        let seals = match preflight {
-            Ok(seals) => seals,
+        let (seals, mut endpoint_memo) = match preflight {
+            Ok(preflight) => preflight,
             Err(kind) => {
                 return Err(BulkLoadError {
                     kind,
@@ -826,7 +960,7 @@ impl<V: Vfs + Clone> Database<V> {
                         BulkRow::Edge(e) => {
                             let src = self.resolve_endpoint(
                                 cx,
-                                basis,
+                                &mut endpoint_memo,
                                 ordinal,
                                 &e.key,
                                 &e.source,
@@ -835,7 +969,7 @@ impl<V: Vfs + Clone> Database<V> {
                             )?;
                             let dst = self.resolve_endpoint(
                                 cx,
-                                basis,
+                                &mut endpoint_memo,
                                 ordinal,
                                 &e.key,
                                 &e.destination,
@@ -917,5 +1051,182 @@ impl<V: Vfs + Clone> Database<V> {
             }
         }
         Ok(committed)
+    }
+}
+
+#[cfg(test)]
+mod endpoint_memo_tests {
+    use super::*;
+    use crate::DatabaseKeys;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{
+        CanonicalDecimal, CanonicalF64, DatabaseSecurityNamespaceId, PurposeContexts,
+    };
+
+    fn matched(value: CanonicalScalar) -> EndpointMatch {
+        EndpointMatch {
+            label: Some(LabelId(3)),
+            key: PropertyKeyId(5),
+            value,
+        }
+    }
+
+    #[test]
+    fn exact_keys_do_not_alias_numeric_variants_labels_properties_or_hash_collisions() {
+        let mut memo = EndpointMemo::new(CommitSeq(7));
+        let integer = matched(CanonicalScalar::Int(1));
+        memo.remember(&integer, VId(10));
+        for other in [
+            matched(CanonicalScalar::Float(CanonicalF64::new(1.0))),
+            matched(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_integer(1).unwrap(),
+            )),
+            matched(CanonicalScalar::ucs_basic_text("1").unwrap()),
+            EndpointMatch {
+                label: None,
+                ..integer.clone()
+            },
+            EndpointMatch {
+                key: PropertyKeyId(6),
+                ..integer.clone()
+            },
+        ] {
+            assert_eq!(memo.get(&other), None);
+            memo.remember(&other, VId(20));
+            assert_eq!(memo.get(&other), Some(VId(20)));
+            assert_ne!(memo.get(&integer), Some(VId(20)));
+            memo.remember(&integer, VId(10));
+        }
+        // Pigeonhole construction forces a real slot collision, independently
+        // of the hasher's implementation or the particular scalar encoding.
+        let mut seen = BTreeMap::new();
+        let mut collision = None;
+        for value in 0..=memo.slots.len() {
+            let key = matched(CanonicalScalar::Int(value as i64));
+            if let Some(previous) = seen.insert(memo.slot(&key), key.clone()) {
+                collision = Some((previous, key));
+                break;
+            }
+        }
+        let (first, second) = collision.expect("more distinct keys than slots");
+        memo.remember(&first, VId(30));
+        memo.remember(&second, VId(40));
+        assert_eq!(memo.get(&first), None);
+        assert_eq!(memo.get(&second), Some(VId(40)));
+        memo.remember(&first, VId(30));
+        assert_eq!(memo.get(&first), Some(VId(30)));
+        assert_eq!(memo.get(&second), None);
+    }
+
+    #[test]
+    fn byte_ceiling_counts_slot_storage_and_actual_owned_payloads() {
+        let mut memo = EndpointMemo::new(CommitSeq(0));
+        // The canonical bytes are tiny, but the caller retains a large Vec.
+        // Bypass before cloning or allocating a table, rather than treating
+        // encoded length as the retained heap bound.
+        let mut spare = Vec::with_capacity(EndpointMemo::MAX_BYTES + 1);
+        spare.push(1);
+        let large = matched(CanonicalScalar::bytes(spare).unwrap());
+        memo.remember(&large, VId(1));
+        assert!(memo.slots.is_empty());
+        assert_eq!(memo.get(&large), None);
+
+        for value in 0_u64..256 {
+            let mut bytes = vec![0; 16 * 1024];
+            bytes[..8].copy_from_slice(&value.to_be_bytes());
+            let key = matched(CanonicalScalar::bytes(bytes).unwrap());
+            memo.remember(&key, VId(u128::from(value)));
+            let actual = core::mem::size_of::<EndpointMemo>()
+                + core::mem::size_of_val(memo.slots.as_ref())
+                + memo
+                    .slots
+                    .iter()
+                    .flatten()
+                    .map(|entry| entry.matched.value.owned_heap_bytes().unwrap())
+                    .sum::<usize>();
+            assert_eq!(memo.retained_bytes, actual);
+            assert!(actual <= EndpointMemo::MAX_BYTES);
+        }
+        assert!(!memo.slots.is_empty());
+        assert!(memo.slots.len() <= EndpointMemo::MAX_SLOTS);
+        // Lack of room is an optimization miss, never a new input refusal.
+        let small = matched(CanonicalScalar::Int(99));
+        memo.remember(&small, VId(999));
+        assert_eq!(memo.get(&small), Some(VId(999)));
+    }
+
+    #[test]
+    fn repeated_resolution_matches_uncached_history_and_never_memoizes_errors() {
+        let ((), report) = run_async_under_lab(0xb71c_0301, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let query = contexts.query();
+            let commit = contexts.commit();
+            let keys = DatabaseKeys::new(
+                [0x71; 32],
+                DatabaseSecurityNamespaceId([0x72; 32]),
+                [0x73; 32],
+            );
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(17),
+                vec![LabelId(3)],
+                vec![
+                    (PropertyKeyId(5), CanonicalScalar::Int(7)),
+                    (
+                        PropertyKeyId(6),
+                        CanonicalScalar::ucs_basic_text(&"payload".repeat(1024)).unwrap(),
+                    ),
+                ],
+            );
+            for vertex in [VId(18), VId(19)] {
+                seed.create_vertex(
+                    vertex,
+                    vec![LabelId(3)],
+                    vec![(PropertyKeyId(5), CanonicalScalar::Int(9))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let endpoint = BulkEndpoint::Match(Box::new(matched(CanonicalScalar::Int(7))));
+            let keys = BTreeMap::<String, VId>::new();
+            let mut hot = EndpointMemo::new(basis);
+            let mut uncached = 0;
+            for row in 0..64 {
+                // A fresh memo runs the unchanged indexed historical resolver
+                // on every occurrence, providing the incumbent in this call.
+                let mut cold = EndpointMemo::new(basis);
+                let expected = db
+                    .resolve_endpoint(&query, &mut cold, row, "edge", &endpoint, &keys, &keys)
+                    .unwrap();
+                uncached += cold.uncached_matches;
+                let actual = db
+                    .resolve_endpoint(&query, &mut hot, row, "edge", &endpoint, &keys, &keys)
+                    .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual, VId(17));
+            }
+            assert_eq!(uncached, 64);
+            assert_eq!(hot.uncached_matches, 1);
+            for (value, ambiguous) in [(8, false), (9, true)] {
+                let endpoint = BulkEndpoint::Match(Box::new(matched(CanonicalScalar::Int(value))));
+                for row in [64, 65] {
+                    let error = db
+                        .resolve_endpoint(&query, &mut hot, row, "edge", &endpoint, &keys, &keys)
+                        .unwrap_err();
+                    match error {
+                        BulkLoadErrorKind::UnresolvedEndpoint { row: actual, .. } if !ambiguous => {
+                            assert_eq!(actual, row);
+                        }
+                        BulkLoadErrorKind::AmbiguousEndpoint { row: actual, .. } if ambiguous => {
+                            assert_eq!(actual, row);
+                        }
+                        error => panic!("{error:?}"),
+                    }
+                }
+            }
+            assert_eq!(hot.uncached_matches, 5);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

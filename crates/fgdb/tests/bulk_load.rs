@@ -961,3 +961,102 @@ fn match_endpoints_resume_against_the_original_basis() {
         assert_trips(&db, &zones, &trips);
     });
 }
+
+/// Repeated property endpoints keep their exact scalar variant, label and
+/// property coordinate through preflight and multiple publication chunks.
+#[test]
+fn repeated_match_endpoints_keep_exact_identity_and_do_not_escape_the_load() {
+    under_lab(0xb71c_0103, |contexts| async move {
+        use fgdb_types::{CanonicalDecimal, CanonicalF64};
+
+        let (query, commit) = (contexts.query(), contexts.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let targets = [
+            (PERSON, K, CanonicalScalar::Int(7)),
+            (PERSON, K, CanonicalScalar::Float(CanonicalF64::new(7.0))),
+            (
+                PERSON,
+                K,
+                CanonicalScalar::Decimal(CanonicalDecimal::from_integer(7).unwrap()),
+            ),
+            (PERSON, K, CanonicalScalar::ucs_basic_text("7").unwrap()),
+            (PERSON, K, CanonicalScalar::bytes(vec![7]).unwrap()),
+            (OTHER, K, CanonicalScalar::Int(7)),
+            (PERSON, P, CanonicalScalar::Int(7)),
+        ];
+        let initial: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(index, (label, key, value))| {
+                BulkRow::Vertex(BulkVertex {
+                    key: format!("endpoint-{index}"),
+                    labels: vec![*label],
+                    props: vec![(*key, value.clone().into())],
+                })
+            })
+            .collect();
+        let committed = db
+            .bulk_load(&query, &commit, initial, BulkLoadPolicy::new(32, R))
+            .await
+            .unwrap();
+        let endpoint = |index: usize| {
+            let (label, key, value) = &targets[index];
+            BulkEndpoint::matching(Some(*label), *key, value.clone())
+        };
+        let input: Vec<_> = (0..128)
+            .map(|row| {
+                trip(
+                    row as i64,
+                    endpoint(row % targets.len()),
+                    endpoint((row + 1) % targets.len()),
+                )
+            })
+            .collect();
+        let loaded = db
+            .bulk_load(&query, &commit, input, BulkLoadPolicy::new(32, R))
+            .await
+            .unwrap();
+        assert_eq!(loaded.committed_chunks, 4);
+        for row in 0..128 {
+            let edge = db.edge(loaded.edges[&format!("t{row}")]).unwrap().unwrap();
+            // Independently known seed identities, not another endpoint-cache
+            // lookup, are the oracle for every materialized edge.
+            assert_eq!(
+                (edge.entry.src, edge.entry.dst),
+                (
+                    committed.vertices[&format!("endpoint-{}", row % targets.len())],
+                    committed.vertices[&format!("endpoint-{}", (row + 1) % targets.len())],
+                ),
+                "edge {row}",
+            );
+        }
+
+        // A later invocation has a new basis. A previously unique exact key
+        // is now ambiguous; no earlier invocation's memo may hide the change.
+        db.bulk_load(
+            &query,
+            &commit,
+            [zone("duplicate", PERSON, 7)],
+            BulkLoadPolicy::new(1, R),
+        )
+        .await
+        .unwrap();
+        let before = db.frontier().unwrap();
+        let error = db
+            .bulk_load(
+                &query,
+                &commit,
+                [trip(999, endpoint(0), endpoint(1))],
+                BulkLoadPolicy::new(1, R),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            BulkLoadErrorKind::AmbiguousEndpoint { row: 0, .. }
+        ));
+        assert_eq!(error.committed.committed_chunks, 0);
+        assert!(error.pending.is_none());
+        assert_eq!(db.frontier().unwrap(), before);
+    });
+}

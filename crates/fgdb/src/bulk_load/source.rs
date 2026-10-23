@@ -42,14 +42,16 @@ pub(super) fn admit_keys(
                 // A match endpoint's encoded value is bounded like a key.
                 let len = match endpoint {
                     BulkEndpoint::Key(key) => key.len(),
-                    BulkEndpoint::Match(matched) => matched
-                        .value
-                        .encode()
-                        .map_err(|source| BulkLoadErrorKind::SourceEncoding {
-                            row,
-                            source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(source),
+                    BulkEndpoint::Match(matched) => {
+                        matched.value.canonical_encoded_len().map_err(|source| {
+                            BulkLoadErrorKind::SourceEncoding {
+                                row,
+                                source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(
+                                    source,
+                                ),
+                            }
                         })?
-                        .len(),
+                    }
                 };
                 limit(row, "key_bytes", policy.max_key_bytes, len)?;
             }
