@@ -816,24 +816,43 @@ fn expression<'g, E, C>(
                     Err(_) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
                 }
             } else {
-                let Cell::Value(ValueRef::List(values)) = list_cell else {
-                    return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+                // A compact vertex or edge list (`nodes(p)`, collected
+                // `relationships(p)`) indexes as the list of its elements.
+                let len = match list_cell {
+                    Cell::Value(ValueRef::List(values)) => values.len(),
+                    Cell::Value(ValueRef::Vertices(values)) => values.len(),
+                    Cell::Value(ValueRef::Edges(values)) => values.len(),
+                    _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
                 };
                 let index = index
                     .integer()
                     .ok_or_else(|| failure(column, GraphIntegerErrorKind::NonInteger))?;
                 let at = if index < 0 {
-                    (values.len() as i128).checked_add(index)
+                    (len as i128).checked_add(index)
                 } else {
                     Some(index)
                 };
                 match at
                     .and_then(|at| usize::try_from(at).ok())
-                    .and_then(|at| values.get(at))
+                    .filter(|&at| at < len)
                 {
-                    Some(value) => OutputValue::Owned(GraphAggregateValue::Value(
-                        value.copy_with_control(control)?,
-                    )),
+                    Some(at) => OutputValue::Owned(GraphAggregateValue::Value(match list_cell {
+                        Cell::Value(ValueRef::Vertices(values)) => {
+                            GraphValue::Vertex(values[at]).copy_with_control(control)?
+                        }
+                        Cell::Value(ValueRef::Edges(values)) => {
+                            GraphValue::Edge(values[at]).copy_with_control(control)?
+                        }
+                        Cell::Value(ValueRef::List(values)) => {
+                            values[at].copy_with_control(control)?
+                        }
+                        _ => {
+                            return Err(failure(
+                                column,
+                                GraphIntegerErrorKind::IncompatibleOperands,
+                            ));
+                        }
+                    })),
                     None => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
                 }
             }

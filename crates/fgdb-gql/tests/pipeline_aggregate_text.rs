@@ -1277,3 +1277,58 @@ fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
         );
     }
 }
+
+/// A terminal aggregate RETURN over collected paths (TCK List12 [4]):
+/// `nodes(x)` and `relationships(x)` of each collected path value, and the
+/// aggregate output evaluator indexing those compact vertex and edge lists
+/// (`head(...)`, `[-1]`) as the lists of their elements. Two one-hop paths,
+/// 0 -> 1 over edge 1 and 1 -> 2 over edge 2.
+#[test]
+fn an_aggregate_output_indexes_compact_vertex_and_edge_lists() {
+    use fgdb_gql::algebra::GraphValue;
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let text = "MATCH p = (a)-[:R]->(b) RETURN [x IN collect(p) | head(nodes(x))] AS h, \
+                [x IN collect(p) | relationships(x)[-1]] AS r, \
+                [x IN collect(p) | nodes(x)[5]] AS beyond";
+    let rows = fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed_with_identified_properties(
+            (stored.len() + edges.len()) as u64,
+            (0..3).map(VId),
+            edges,
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"))
+        .value;
+    assert_eq!(rows.len(), 1);
+    let list = |at: usize| {
+        let mut values = rows[0].values()[at]
+            .as_value()
+            .and_then(GraphValue::as_list)
+            .unwrap_or_else(|| panic!("column {at}"))
+            .to_vec();
+        values.sort();
+        values
+    };
+    assert_eq!(list(0), [GraphValue::Vertex(VId(0)), GraphValue::Vertex(VId(1))]);
+    assert_eq!(
+        list(1),
+        [
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::Edge(fgdb_types::EId(2))
+        ]
+    );
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    assert_eq!(list(2), [null.clone(), null]);
+}
