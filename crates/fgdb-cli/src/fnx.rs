@@ -571,6 +571,7 @@ mod tests {
             "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
             "/* leading */ cAlL fnx.pagerank ( weighted => false, iterations /* count */ => 2 ) YIELD score AS rank",
             "CALL fnx.pagerank(alpha => 0.85, max_iter => 100, tol => 1e-6, weighted => false)",
+            "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => 1000, weighted => false)",
         ] {
             assert!(is_call(text, &[]), "{text}");
         }
@@ -585,6 +586,14 @@ mod tests {
             assert!(!is_call(&format!("{text} RETURN vertex,score"), &raw));
         }
         assert!(!is_call(text, &[]), "routing must not invent parameters");
+        assert!(is_call(
+            "CALL fnx.pagerank(l1_tol => $accuracy) YIELD vertex,score",
+            &[("accuracy".to_owned(), "float:1e-9".to_owned())],
+        ));
+        assert!(!is_call(
+            "CALL fnx.pagerank(l1_tol => 1e-9, tol => 1e-6) YIELD vertex,score",
+            &[],
+        ));
         for value in ["int:0", "int:-1", "float:2", "null", "int:overflow"] {
             let raw = [
                 ("steps".to_owned(), value.to_owned()),

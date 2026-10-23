@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 12;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 13;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -132,6 +132,12 @@ const PAGERANK_PARAMETERS: &[FnxParameterSpec] = &[
         positional: false,
         default: None,
     },
+    FnxParameterSpec {
+        name: "l1_tol",
+        value_type: FnxParameterType::FiniteFloat,
+        positional: false,
+        default: None,
+    },
 ];
 const BFS_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
@@ -183,7 +189,7 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_kind: FnxGraphKind::Any,
         numeric_profile: FNX_NUMERIC_PROFILE,
         rng_policy: "none",
-        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained; convergence by default, named iterations selects exact updates and conflicts with max_iter/tol",
+        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained; default convergence uses L1 < N*tol; named l1_tol selects L1 < l1_tol and conflicts with tol/iterations; named iterations selects exact updates and conflicts with max_iter/tol/l1_tol",
         complexity: "O(k * (|V| + |E|))",
         execution_kernel: "fgdb-prism/pagerank-row-cursor-v1",
     },
@@ -474,13 +480,16 @@ fn registered(namespace: &str, name: &str) -> Option<&'static FnxSignature> {
     })
 }
 
-/// The requested answer: convergence under the registered tolerance, or an
+/// The requested answer: convergence under a named residual rule, or an
 /// exact number of updates. Fixed iterations do not claim convergence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageRankStoppingRule {
+    /// Compatibility rule: successive-iterate L1 < vertex count * tolerance.
     Convergence = 0,
     ExactIterations = 1,
+    /// Absolute global rule: successive-iterate L1 < tolerance.
+    GlobalL1 = 2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -519,6 +528,26 @@ impl PageRankOptions {
             stopping_rule: PageRankStoppingRule::Convergence,
         })
     }
+    /// Converge when the global L1 change between successive rank vectors is
+    /// below `l1_tol`, independently of the number of vertices. The graph,
+    /// dangling redistribution, arithmetic order and maximum-iteration refusal
+    /// are the same as `new`; only the stopping rule differs.
+    ///
+    /// This bounds the iteration change, not an exact-solution error. Under
+    /// the usual nonnegative stochastic PageRank assumptions, the exact
+    /// arithmetic error is at most alpha / (1 - alpha) times that change;
+    /// floating-point rounding is not included in that bound.
+    pub fn global_l1(
+        alpha: f64,
+        max_iter: usize,
+        l1_tol: f64,
+        weighted: bool,
+    ) -> Result<Self, FnxBindError> {
+        let mut options = Self::new(alpha, max_iter, l1_tol, weighted)?;
+        options.stopping_rule = PageRankStoppingRule::GlobalL1;
+        Ok(options)
+    }
+
     /// Request exactly `iterations` PageRank updates, including dangling-mass
     /// redistribution. Positive counts are required; execution still admits
     /// the count against the caller's iteration/work limits. No convergence
@@ -544,7 +573,9 @@ impl PageRankOptions {
     pub const fn max_iter(self) -> usize {
         self.max_iter
     }
-    /// The convergence tolerance; unused under `ExactIterations`.
+    /// The tolerance for the selected stopping rule: per-vertex under
+    /// `Convergence`, absolute global L1 under `GlobalL1`, and unused under
+    /// `ExactIterations`.
     pub const fn tolerance(self) -> f64 {
         self.tol
     }
@@ -556,19 +587,21 @@ impl PageRankOptions {
     }
     pub const fn iterations(self) -> Option<usize> {
         match self.stopping_rule {
-            PageRankStoppingRule::Convergence => None,
+            PageRankStoppingRule::Convergence | PageRankStoppingRule::GlobalL1 => None,
             PageRankStoppingRule::ExactIterations => Some(self.max_iter),
         }
     }
     pub(crate) fn iteration_complete(self, completed: usize, delta: f64, population: f64) -> bool {
         match self.stopping_rule {
             PageRankStoppingRule::Convergence => delta < population * self.tol,
+            PageRankStoppingRule::GlobalL1 => delta < self.tol,
             PageRankStoppingRule::ExactIterations => completed == self.max_iter,
         }
     }
     pub(crate) const fn witness_algorithm(self) -> &'static str {
         match self.stopping_rule {
             PageRankStoppingRule::Convergence => "pagerank_power_iteration",
+            PageRankStoppingRule::GlobalL1 => "pagerank_global_l1",
             PageRankStoppingRule::ExactIterations => "pagerank_fixed_iterations",
         }
     }
@@ -1039,10 +1072,12 @@ impl FnxCallSpec {
     /// registry's parameter order.
     ///
     /// PageRank's named-only `iterations` requests an exact positive number
-    /// of updates. It conflicts with explicitly supplied `max_iter` or `tol`,
-    /// including their normal default values; omitting all three keeps the
-    /// existing convergence rule. NULL is not an iteration count. Names may
-    /// not repeat, and this API never interprets a name as a positional slot.
+    /// of updates. It conflicts with explicitly supplied `max_iter`, `tol`
+    /// or `l1_tol`, including their normal default values. Named-only `l1_tol`
+    /// selects an absolute global L1 threshold and conflicts with `tol` and
+    /// `iterations`. Omitting both named-only controls keeps the existing
+    /// N * tol convergence rule. Names may not repeat, and this API never
+    /// interprets a name as a positional slot.
     pub fn from_named_arguments(
         namespace: &str,
         name: &str,
@@ -1077,12 +1112,36 @@ impl FnxCallSpec {
                 .find_map(|(parameter, value)| {
                     (parameter.name == "iterations").then_some(*value).flatten()
                 });
-        let exact = if let Some((index, value)) = iterations {
+        let global = registration
+            .parameters
+            .iter()
+            .zip(&named)
+            .find_map(|(parameter, value)| {
+                (parameter.name == "l1_tol").then_some(*value).flatten()
+            });
+        let global = if let Some((index, value)) = global {
             for (supplied_index, &(parameter, _)) in supplied.iter().enumerate() {
-                if matches!(parameter, "max_iter" | "tol") {
+                if matches!(parameter, "tol" | "iterations") {
                     return Err(invalid(
                         supplied_index,
-                        "iterations conflicts with max_iter and tol",
+                        "l1_tol conflicts with tol and iterations",
+                    ));
+                }
+            }
+            Some(
+                float_argument(value)
+                    .filter(|&value| value > 0.0)
+                    .ok_or_else(|| invalid(index, "finite positive exact l1_tol required"))?,
+            )
+        } else {
+            None
+        };
+        let exact = if let Some((index, value)) = iterations {
+            for (supplied_index, &(parameter, _)) in supplied.iter().enumerate() {
+                if matches!(parameter, "max_iter" | "tol" | "l1_tol") {
+                    return Err(invalid(
+                        supplied_index,
+                        "iterations conflicts with max_iter, tol and l1_tol",
                     ));
                 }
             }
@@ -1143,9 +1202,28 @@ impl FnxCallSpec {
                 }
                 failure
             })?;
-        match exact {
-            None => Ok(call),
-            Some(iterations) => {
+        match (exact, global) {
+            (None, None) => Ok(call),
+            (None, Some(tolerance)) => {
+                let Some(options) = call.options() else {
+                    return Err(error(
+                        FnxCallSite::Procedure,
+                        FnxBindErrorKind::UnknownProcedure,
+                    ));
+                };
+                let options = PageRankOptions::global_l1(
+                    options.alpha(),
+                    options.max_iter(),
+                    tolerance,
+                    options.weighted(),
+                )
+                .map_err(|failure| error(FnxCallSite::Call, failure.kind))?;
+                Ok(Self::compiled(
+                    FnxAlgorithm::PageRank(options),
+                    call.outputs,
+                ))
+            }
+            (Some(iterations), _) => {
                 let Some(options) = call.options() else {
                     return Err(error(
                         FnxCallSite::Procedure,
@@ -1178,7 +1256,7 @@ impl FnxCallSpec {
                 hash.update(&[options.stopping_rule as u8]);
                 hash.update(&options.alpha.to_bits().to_le_bytes());
                 hash.update(&(options.max_iter as u128).to_le_bytes());
-                if options.stopping_rule == PageRankStoppingRule::Convergence {
+                if options.stopping_rule != PageRankStoppingRule::ExactIterations {
                     hash.update(&options.tol.to_bits().to_le_bytes());
                 }
                 hash.update(&[u8::from(options.weighted)]);

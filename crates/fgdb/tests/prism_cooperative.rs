@@ -474,6 +474,9 @@ fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_acros
                     calls.push(FnxCallSpec::pagerank(
                         PageRankOptions::new(0.85, 1000, 1e-9, weighted).unwrap(),
                     ));
+                    calls.push(FnxCallSpec::pagerank(
+                        PageRankOptions::global_l1(0.85, 1000, 1e-9, weighted).unwrap(),
+                    ));
                 }
                 for source in [VId(0), VId(u128::MAX)] {
                     for cutoff in [None, Some(0), Some(1)] {
@@ -718,6 +721,65 @@ fn fixed_iteration_pagerank_and_cdlp_reach_public_and_prepared_authorized_calls(
                 assert_eq!(
                     rows, expected_rows,
                     "prepared fixed iteration count {steps}"
+                );
+            }
+        }
+
+        // Absolute residual control uses the same signed induced graph and
+        // survives prepared argument rebinding through the public native host.
+        let global_text = "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => $cap, \
+                           weighted => true, label => 'Visible', relation => 'R', \
+                           weight => 'weight', parallel => 'min', self_loops => 'keep') \
+                           YIELD vertex,score RETURN vertex,score ORDER BY vertex";
+        let global_parameters = GqlParameters::new().with_int64("cap", 1000).unwrap();
+        let global_prepared = session
+            .prepare(&cx, global_text, &global_parameters)
+            .unwrap();
+        for cap in [500, 1000] {
+            let standalone = format!(
+                "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => {cap}, weighted => true) YIELD vertex,score"
+            );
+            let actual = db
+                .call_fnx_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &standalone,
+                    &FnxParameters::new(),
+                    native_options,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(actual.len(), 4);
+            let expected_rows: Vec<Vec<QueryValue>> = actual
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|value| {
+                            QueryValue::Value(match value {
+                                FnxValue::Vertex(vertex) => GraphValue::Vertex(*vertex),
+                                FnxValue::Score(score) => GraphValue::Scalar(
+                                    CanonicalScalar::Float(fgdb_types::CanonicalF64::new(*score)),
+                                ),
+                                _ => panic!("unexpected global PageRank output domain"),
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            let parameters = GqlParameters::new().with_int64("cap", cap).unwrap();
+            for result in [
+                db.query(&cx, global_text, &parameters, symbols, policy)
+                    .unwrap(),
+                session.execute(&cx, &global_prepared, &parameters).unwrap(),
+            ] {
+                let QueryResult::Rows { rows, .. } = result else {
+                    panic!("global PageRank returned a write receipt");
+                };
+                assert_eq!(
+                    rows, expected_rows,
+                    "prepared global PageRank max_iter={cap}"
                 );
             }
         }
@@ -1164,7 +1226,8 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
         let graph = projection(&db, &cx, opt).await;
         for call in [FnxCallSpec::single_source_shortest_path_length(VId(0), None),
             FnxCallSpec::pagerank(PageRankOptions::default()),
-            FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap())] {
+            FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
+            FnxCallSpec::pagerank(PageRankOptions::global_l1(0.85, 1000, 1e-9, true).unwrap())] {
             let expected = call.execute_sealed_cooperative(&cx, &graph,
                 opt.execution_limits, memory(), quantum(7), yield_now).await.unwrap();
             let columns = call.outputs().len() * size_of::<String>()
@@ -1428,6 +1491,7 @@ fn public_cooperative_calls_share_exact_source_preparation_and_keep_old_entrypoi
             "CALL fnx.single_source_shortest_path_length($source) YIELD distance AS hops,vertex AS id",
             "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD score AS rank,vertex AS id",
             "CALL fnx.pagerank(iterations => 2, weighted => true) YIELD score AS rank,vertex AS id",
+            "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => 1000, weighted => true) YIELD score AS rank,vertex AS id",
             "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD distance AS cost,vertex AS id",
             "CALL fnx.triangles() YIELD triangles AS total,vertex AS id",
             "CALL fnx.clustering_coefficient() YIELD score AS coefficient,vertex AS id",

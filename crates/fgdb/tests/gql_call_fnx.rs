@@ -213,7 +213,12 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
     run_transaction(async |commit, cx, txcx| {
         let mut db = open(commit).await;
         let txn = db.begin(txcx).unwrap();
-        for (name, arguments, field, undirected) in CALLS {
+        for (name, arguments, field, undirected) in CALLS.into_iter().chain([(
+            "pagerank",
+            "l1_tol => 1e-9, max_iter => 1000",
+            "score",
+            false,
+        )]) {
             let standalone = db
                 .call_fnx(
                     cx,
