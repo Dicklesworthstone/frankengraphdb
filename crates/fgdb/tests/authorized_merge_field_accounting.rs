@@ -238,6 +238,164 @@ async fn edge_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
     db
 }
 
+async fn singular_edge_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    let mut db = edge_database(cx, hidden).await;
+    let mut batch = WriteBatch::new(R);
+    batch.delete_edge(EId(2));
+    db.write(cx, batch).await.unwrap();
+    db
+}
+
+#[test]
+fn singular_edge_actions_and_return_have_scope_stable_work_floors() {
+    let (_, report) = run_async_under_lab(0xb176, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn = contexts.txn();
+        let (authority, token) = authority();
+        let query = PreparedGraphEdgeUpsertQueryText::prepare(
+            "MATCH (a:Visible),(b:Visible) WHERE a.p=1 AND b.p=2 \
+             MERGE (a)-[r:R]->(b) ON MATCH SET r.q=r.p+1 SET r.q=r.q+1 \
+             RETURN r.p AS p,r.q AS q",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let default_policy = GraphEdgeUpsertPolicy::new(
+            GraphEdgeMergePolicy::new(GqlQueryPolicy::new(10_000, 100, 1_000_000, 100_000)),
+            100,
+        );
+        // The explicit singular entrypoints own a different host from the
+        // occurrence-preserving program APIs. Exercise both action-only and
+        // final RETURN reads, and both independently enforceable work limits.
+        for returning in [false, true] {
+            for signed in [true, false] {
+                let mut floors = Vec::new();
+                let mut expected_stats = None;
+                let mut boundary_errors = Vec::new();
+                for hidden in [false, true] {
+                    let (mut low, mut high) = (0_u64, 8192_u64);
+                    let mut last_refusal = None;
+                    while low < high {
+                        let allowance = low + (high - low) / 2;
+                        let limited = if signed {
+                            token.attenuate(Restriction::MaxWork(allowance)).unwrap()
+                        } else {
+                            token.clone()
+                        };
+                        let mut limits = default_policy;
+                        if !signed {
+                            limits.merge.query.evaluator.max_work_units = allowance;
+                        }
+                        let mut db = singular_edge_database(&commit, hidden).await;
+                        let before = (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap(),
+                        );
+                        let result = if returning {
+                            db.execute_graph_edge_upsert_query_authorized(
+                                &txn,
+                                &query_cx,
+                                &commit,
+                                &authority,
+                                &limited,
+                                "main",
+                                &query,
+                                limits,
+                                || 100,
+                            )
+                            .await
+                            .map(|(stats, outcome, rows, _)| {
+                                assert_eq!(rows.value.len(), 1);
+                                assert_eq!(
+                                    rows.value[0].values(),
+                                    &[
+                                        GraphValue::Scalar(CanonicalScalar::Int(7)),
+                                        GraphValue::Scalar(CanonicalScalar::Int(9)),
+                                    ]
+                                );
+                                (stats, outcome, Some((rows.rows, rows.evaluator)))
+                            })
+                            .map_err(|error| format!("{error:?}"))
+                        } else {
+                            db.execute_graph_edge_upsert_authorized(
+                                &txn,
+                                &query_cx,
+                                &commit,
+                                &authority,
+                                &limited,
+                                "main",
+                                query.upsert(),
+                                limits,
+                                || 100,
+                            )
+                            .await
+                            .map(|(stats, outcome, _)| (stats, outcome, None))
+                            .map_err(|error| format!("{error:?}"))
+                        };
+                        match result {
+                            Ok(trace) => {
+                                high = allowance;
+                                assert_eq!(trace.0.action_effects, 2);
+                                if let Some(expected) = &expected_stats {
+                                    assert_eq!(
+                                        &trace, expected,
+                                        "hidden data changed native work: returning={returning}, signed={signed}"
+                                    );
+                                } else {
+                                    expected_stats = Some(trace);
+                                }
+                                let after = db.edge(EId(1)).unwrap().unwrap();
+                                assert_eq!(after.props[0], (P, CanonicalScalar::Int(7).into()));
+                                assert_eq!(after.props[1], (Q, CanonicalScalar::Int(9).into()));
+                                assert_eq!(&after.props[2..], &before.2[0].props[1..]);
+                                assert_eq!(db.vertices().unwrap(), before.1);
+                                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                            }
+                            Err(error) => {
+                                assert_eq!(
+                                    (
+                                        db.frontier().unwrap(),
+                                        db.vertices().unwrap(),
+                                        db.edges().unwrap(),
+                                    ),
+                                    before,
+                                    "refusal published a partial upsert"
+                                );
+                                last_refusal = Some((allowance, error));
+                                low = allowance + 1;
+                            }
+                        }
+                        assert_eq!(txn.outstanding_obligations(), 0);
+                    }
+                    assert!(
+                        low > 0 && low < 8192,
+                        "a real admission boundary must exist"
+                    );
+                    let (refused_at, error) = last_refusal.unwrap();
+                    assert_eq!(refused_at, low - 1);
+                    floors.push(low);
+                    boundary_errors.push(error);
+                }
+                assert!(expected_stats.is_some());
+                assert_eq!(
+                    floors[0], floors[1],
+                    "returning={returning}, signed={signed}"
+                );
+                assert_eq!(
+                    boundary_errors[0], boundary_errors[1],
+                    "returning={returning}, signed={signed}"
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn parallel_edge_actions_and_final_return_share_scope_stable_field_accounting() {
     let (_, report) = run_async_under_lab(0xb175, |root| async move {
