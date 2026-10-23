@@ -595,9 +595,10 @@ impl<'a> Parser<'a> {
                 {
                     before_return = false;
                 }
-                TokenKind::Word(word) if !after_dot && !declaration && !locals.shadows(word) => {
+                TokenKind::Word(word) if !after_dot && !declaration => {
                     let next = lexer.clone().next()?.kind;
                     if before_return
+                        && !locals.shadows(word)
                         && !matches!(next, TokenKind::Punct(b'.' | b'(' | b'{' | b':'))
                         && head.outputs.iter().all(|(output, _)| output.text != word)
                         && !scoped
