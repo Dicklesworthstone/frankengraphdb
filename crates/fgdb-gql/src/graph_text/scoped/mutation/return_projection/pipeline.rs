@@ -1179,6 +1179,30 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            // A plain WITH's WHERE may read a binding the WITH drops, as its
+            // ORDER BY may: each such column rides under its own name to the
+            // filter, and is removed after it (TCK Comparison2 [3], `WITH
+            // types[i] AS lhs, types[j] AS rhs WHERE i <> j`). An alias
+            // shadows the incoming name. Under DISTINCT a hidden column would
+            // change what is distinct, so that WHERE reads the WITH's row.
+            let dropped = if distinct || page.is_some() {
+                Vec::new()
+            } else {
+                self.where_dropped_columns(&schema, &next_schema)?
+            };
+            let width = next_schema.len();
+            for &column in &dropped {
+                self.capacity(
+                    projection.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                projection.push(ReadProjectionTemplate {
+                    name: schema[column].0.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                next_schema.push(schema[column]);
+            }
             append_stage(
                 &mut stages,
                 ReadStageTemplate::Project {
@@ -1190,6 +1214,32 @@ impl<'a> Parser<'a> {
             )?;
             if let Some(page) = page {
                 append_stage(&mut stages, page, &mut depth)?;
+            }
+            if !dropped.is_empty() {
+                let where_at = self.current.at;
+                self.word("WHERE")?;
+                self.row_selection(&next_schema, &mut stages, &mut depth, where_at)?;
+                if let Some(page) = self.row_expression_page(&next_schema)? {
+                    append_stage(&mut stages, page, &mut depth)?;
+                }
+                let projection = next_schema[..width]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, _))| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(index),
+                    })
+                    .collect();
+                append_stage(
+                    &mut stages,
+                    ReadStageTemplate::Project {
+                        at: where_at,
+                        projection,
+                        quantifier: GraphSetQuantifier::All,
+                    },
+                    &mut depth,
+                )?;
+                next_schema.truncate(width);
             }
             schema = next_schema;
         }
@@ -1239,6 +1289,61 @@ impl<'a> Parser<'a> {
             }
             previous = Some(token.kind);
         }
+    }
+
+    /// The columns of `input` that a WHERE starting here names, bare or by
+    /// property (`i`, `a.name`), and `output` does not carry, in input
+    /// order. Lookahead only, to the end of the WHERE.
+    fn where_dropped_columns(
+        &self,
+        input: &[(Name<'a>, GraphSetColumnType)],
+        output: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Vec<usize>, GraphPatternTextError> {
+        if !self.is_word("WHERE") {
+            return Ok(Vec::new());
+        }
+        let visible = self.visible_width(input);
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        let mut columns = Vec::new();
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0
+                        && [
+                            "WITH", "RETURN", "UNWIND", "MATCH", "OPTIONAL", "UNION", "ORDER",
+                            "SKIP", "LIMIT",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                        && !self.elements.contains(&word)
+                        && !output.iter().any(|(name, _)| name.text == word) =>
+                {
+                    if let Some(column) = input[..visible]
+                        .iter()
+                        .position(|(name, _)| name.text == word)
+                        && !columns.contains(&column)
+                    {
+                        columns.push(column);
+                    }
+                }
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+        columns.sort_unstable();
+        Ok(columns)
     }
 
     /// A RETURN (`returning`) names an unaliased computed value by its

@@ -2162,3 +2162,46 @@ fn a_with_alias_shadows_a_name_of_the_previous_row() {
     .value;
     assert_eq!(ints(&rows, 0), [Some(2), Some(3)]);
 }
+
+/// A plain WITH's WHERE may read a binding the WITH drops (TCK Comparison2
+/// [3]). The dropped column rides hidden to the filter and is removed after
+/// it, so the template and rows equal the explicit spelling's, which carries
+/// the binding and projects it away. An alias shadows the incoming name.
+/// A dropped vertex's property reads through the element reader.
+#[test]
+fn a_with_where_reads_a_binding_the_with_drops() {
+    let template = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str, elements: bool| {
+        run_reading(&prepare(text), &values, wide(), &mut || Ok(()), elements)
+            .unwrap()
+            .value
+    };
+    let implicit = "UNWIND [10, 20] AS v UNWIND range(0, 2) AS i UNWIND range(0, 2) AS j \
+                    WITH v + i AS a, v + j AS b WHERE i < j RETURN a, b ORDER BY a, b";
+    let explicit = "UNWIND [10, 20] AS v UNWIND range(0, 2) AS i UNWIND range(0, 2) AS j \
+                    WITH v + i AS a, v + j AS b, i, j WHERE i < j WITH a, b \
+                    RETURN a, b ORDER BY a, b";
+    assert_eq!(template(implicit), template(explicit));
+    let found = rows(implicit, false);
+    assert_eq!(found, rows(explicit, false));
+    // i < j over 0..2 for v = 10 and 20: (v, v+1), (v, v+2), (v+1, v+2).
+    assert_eq!(ints(&found, 0), [10, 10, 11, 20, 20, 21].map(Some));
+    assert_eq!(ints(&found, 1), [11, 12, 12, 21, 22, 22].map(Some));
+    // The alias x, not the incoming x, is what the WHERE reads.
+    let shadowed = rows(
+        "UNWIND [1, 2] AS x WITH x + 10 AS x WHERE x > 11 RETURN x",
+        false,
+    );
+    assert_eq!(ints(&shadowed, 0), [Some(12)]);
+    // p = 3, 1, 2: n.p > 1 keeps 3 and 2.
+    let found = rows(
+        "MATCH (n) WITH n.p AS q WHERE n.p > 1 RETURN q ORDER BY q",
+        true,
+    );
+    assert_eq!(ints(&found, 0), [Some(2), Some(3)]);
+}
