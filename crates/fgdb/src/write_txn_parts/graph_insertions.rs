@@ -446,7 +446,7 @@ impl WriteTxn {
                                 frozen.as_mut(),
                                 &mut allocate,
                             )
-                            .map_err(|error| error.map_source(&vertex_merge))?;
+                            .map_err(|error| error.map_source(vertex_merge))?;
                         receipts.push(receipt);
                         // Multiplicity can repeat a large carried value for
                         // every matching vertex. Admit each complete copy
@@ -584,7 +584,7 @@ impl WriteTxn {
                                 None,
                                 &mut allocate,
                             )
-                            .map_err(|error| error.map_source(&vertex_merge))?;
+                            .map_err(|error| error.map_source(vertex_merge))?;
                         receipts.push(receipt);
                         // RETURN's input: each bound column of each pair,
                         // properties read after the statement: the merged

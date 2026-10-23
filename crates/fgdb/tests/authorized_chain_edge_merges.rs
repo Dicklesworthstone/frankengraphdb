@@ -370,7 +370,15 @@ fn relationship_actions_mask_hidden_rhs_and_admit_only_selected_branch_writes() 
             }
             let edges = db.edges().unwrap();
             assert_eq!(edges.len(), 1);
-            assert!(!edges[0].props.iter().any(|(key, _)| *key == Q));
+            assert_eq!(
+                edges[0]
+                    .props
+                    .iter()
+                    .find(|(key, _)| *key == Q)
+                    .map(|(_, value)| value),
+                Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)),
+                "masked NULL replaces the old allowed value with stored NULL"
+            );
             assert_eq!(edges[0].props.iter().any(|(key, _)| *key == SECRET), hidden);
             let observed = (stats, result.value);
             if let Some(expected) = &absent {
@@ -1648,9 +1656,14 @@ fn hidden_merge_action_inputs_are_null_before_reading_and_do_not_change_work() {
             );
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             let stored = db.vertex(VId(1)).unwrap().unwrap();
-            assert!(
-                !stored.props.iter().any(|(key, _)| *key == Q),
-                "masked NULL removes the old allowed value"
+            assert_eq!(
+                stored
+                    .props
+                    .iter()
+                    .find(|(key, _)| *key == Q)
+                    .map(|(_, value)| value),
+                Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)),
+                "masked NULL replaces the old allowed value with stored NULL"
             );
             assert_eq!(
                 stored

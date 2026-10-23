@@ -457,7 +457,7 @@ impl WriteTxn {
                             })
                     },
                 )
-                .map_err(|error| error.map_source(&chained))?;
+                .map_err(|error| error.map_source(chained))?;
                 effects = observed as u64;
                 if retain_receipt {
                     vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
@@ -533,7 +533,7 @@ impl WriteTxn {
                     returning.push(cells);
                 }
                 Ok(returning)
-            })().map_err(|error| error.map_source(&chained))?;
+            })().map_err(|error| error.map_source(chained))?;
             query
                 .finish_governed(
                     returning,
@@ -573,7 +573,7 @@ impl WriteTxn {
         };
         stats.selection = result.rows;
         stats.evaluator = result.evaluator;
-        let receipt = retain_receipt.then(|| match outcomes.as_slice() {
+        let receipt = retain_receipt.then_some(match outcomes.as_slice() {
             [] => GraphWriteStepReceipt::EdgeUpsert {
                 outcome: GraphEdgeMergeOutcome::NoInput,
             },
