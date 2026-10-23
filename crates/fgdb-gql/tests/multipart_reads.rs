@@ -465,20 +465,17 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
     }
     // Inside a scope that hides the imported columns: refused before any
     // catalog call, as before.
-    for text in [
-        "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) WHERE q.p = m RETURN a, q",
-    ] {
-        let mut calls = 0;
-        assert!(
-            PreparedGraphSetText::prepare(text, |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            })
-            .is_err(),
-            "{text}"
-        );
-        assert_eq!(calls, 0, "{text}");
-    }
+    let text = "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) \
+                WHERE q.p = m RETURN a, q";
+    let mut calls = 0;
+    assert!(
+        PreparedGraphSetText::prepare(text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(calls, 0);
 }
 
 /// A required continuation's WHERE that is no graph predicate, such as a
@@ -574,23 +571,20 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
             .map(|id| vertices(&[id]))
             .to_vec()
     );
-    // Not a top-level AND conjunct: refused before any catalog call, as for
-    // the property form.
-    for text in [
-        "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
-        "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",
-    ] {
-        let mut calls = 0;
-        assert!(
-            PreparedGraphSetText::prepare(text, |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            })
-            .is_err(),
-            "{text}"
-        );
-        assert_eq!(calls, 0, "{text}");
-    }
+    // Not a top-level AND conjunct: no join key, but the row filter after the
+    // join that `WITH * WHERE` spells, as for the property form (fgdb-c6hvm).
+    // Only vertex 1 has p = 1, so every carried a keeps it: a = 1 keeps 1;
+    // a = 2, 3 and 4 keep themselves and 1.
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b ORDER BY b"),
+        [1, 1, 1, 1, 2, 3, 4].map(|id| vertices(&[id])).to_vec()
+    );
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b ORDER BY b"),
+        [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+            .map(|id| vertices(&[id]))
+            .to_vec()
+    );
 }
 
 /// fgdb-dhcfo: a carried vertex's property read after a later MATCH is that

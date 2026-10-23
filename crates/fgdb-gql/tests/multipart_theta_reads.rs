@@ -365,7 +365,7 @@ fn computed_carried_operands_keep_required_theta_results_and_direction() {
 }
 
 #[test]
-fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
+fn boolean_comparison_forms_filter_after_the_join_and_unsupported_domains_refuse() {
     // A carried vertex's property re-matches it by identity (fgdb-dhcfo;
     // multipart_reads pins the rows).
     assert!(
@@ -375,14 +375,39 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         )
         .is_ok()
     );
+    // A WHERE that is no join key or ON comparison is the row filter after
+    // the join, as `WITH * WHERE` spells it (fgdb-c6hvm): the same template,
+    // so the same rows. p = [1, 2, 2, 3], so m.p = 2 adds the pairs (2, 2)
+    // and (3, 3) to the 12 unequal ones, and t + m.p > m.p for every t.
+    for (text, rows) in [
+        (
+            "MATCH (n) WITH n MATCH (m) WHERE n <> m OR m.p = 2 RETURN n,m",
+            14,
+        ),
+        ("MATCH (n) WITH n MATCH (m) WHERE NOT n <> m RETURN n,m", 4),
+        ("MATCH (n) WITH n MATCH (m) WHERE (n <> m) RETURN n,m", 12),
+        (
+            "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m",
+            0,
+        ),
+    ] {
+        let explicit = text.replacen(" WHERE ", " WITH * WHERE ", 1);
+        assert_eq!(
+            PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .canonical_template_bytes(),
+            PreparedGraphSetText::prepare(&explicit, symbols)
+                .unwrap()
+                .canonical_template_bytes(),
+            "{text}"
+        );
+        assert_eq!(execute(text).len(), rows, "{text}");
+    }
+    // Vertex ordering and a comparison beside a later OPTIONAL scope stay
+    // refused before any catalog call.
     for text in [
-        "MATCH (n) WITH n MATCH (m) WHERE n <> m OR m.p = 2 RETURN n,m",
-        "MATCH (n) WITH n MATCH (m) WHERE NOT n <> m RETURN n,m",
-        "MATCH (n) WITH n MATCH (m) WHERE (n <> m) RETURN n,m",
         "MATCH (n) WITH n MATCH (m) WHERE n < m RETURN n,m",
-        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.p > t + m.p RETURN m",
         "MATCH (n) WITH n MATCH (m) WHERE n <> m OPTIONAL MATCH (m)-[:R]->(x) RETURN n,m",
-        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
     ] {
         let mut calls = 0;
         let result = PreparedGraphSetText::prepare(text, |kind, name| {
@@ -392,4 +417,17 @@ fn unsupported_boolean_scope_and_comparison_domains_refuse_before_catalog() {
         assert!(result.is_err(), "{text}");
         assert_eq!(calls, 0, "{text}");
     }
+    // openCypher allows a reserved word as a property name. The row filter
+    // reads `m.RETURN`, so this refusal now comes from the catalog, which
+    // binds only `p`.
+    let mut calls = 0;
+    let result = PreparedGraphSetText::prepare(
+        "MATCH (n) WITH n.p AS t MATCH (m) WHERE m.RETURN > t RETURN m",
+        |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        },
+    );
+    assert!(result.is_err());
+    assert!(calls > 0);
 }
