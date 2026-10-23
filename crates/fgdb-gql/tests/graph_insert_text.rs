@@ -235,7 +235,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         "MATCH (n) CREATE (x {p:n.p+})",
         "MATCH (n) CREATE (x {p:TRUE+1})",
         "MATCH (n) CREATE (x {p:CASE WHEN TRUE THEN 1 ELSE missing.p END})",
-        "MATCH (n) CREATE (x {p:1}),(y {q:x.p})",
+        "MATCH (n) CREATE (y {q:x.p}),(x {p:1})",
         "CREATE (x {p:x.p})",
         "CREATE (a)-[:R]-(b)",
         "CREATE (a)<-[:R]->(b)",
@@ -243,7 +243,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         "MATCH (n) CREATE (n:Copy)-[:R]->(x)",
         "MATCH (n) CREATE (n {})-[:R]->(x)",
         "CREATE (a)-[a:R]->(b)",
-        "CREATE (a)-[:R]->(b {q:a.p})",
+        "CREATE (a {q:b.p})-[:R]->(b)",
         "MATCH (n) CREATE (x) RETURN x",
         "MATCH (n) CREATE (x) SET n.p=1",
     ] {

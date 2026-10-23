@@ -2066,13 +2066,13 @@ fn a_with_order_by_may_rank_by_a_binding_it_drops() {
     };
     // score is -p, so its two lowest keep p = 3 and p = 2.
     let kept = rows(
-        "MATCH (n) WITH n, 0 - n.p AS score WITH n.p AS p ORDER BY score LIMIT 2 \
+        "MATCH (n) WITH n, 0 - n.p AS score WITH n, n.p AS p ORDER BY score LIMIT 2 \
          RETURN p ORDER BY p",
     );
     assert_eq!(ints(&kept, 0), [Some(2), Some(3)]);
     for text in [
-        "MATCH (n) WITH n, n.p AS score WITH n.p AS p ORDER BY score RETURN score",
-        "MATCH (n) WITH n, n.p AS score WITH DISTINCT n.p AS p ORDER BY score RETURN p",
+        "MATCH (n) WITH n, n.p AS score WITH n, n.p AS p ORDER BY score RETURN score",
+        "MATCH (n) WITH n, n.p AS score WITH DISTINCT n, n.p AS p ORDER BY score RETURN p",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),
