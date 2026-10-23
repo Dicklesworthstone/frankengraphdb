@@ -305,6 +305,25 @@ fn source_expression_and_reducer_work_share_exact_and_short_allowances() {
 }
 
 #[test]
+fn post_group_local_shadowing_keeps_the_original_call_element_source() {
+    for local in ["item", "node"] {
+        let query = prepare_output(&format!(
+            "RETURN [{local} IN COLLECT(node) | {local}.value] AS values"
+        ));
+        // Renaming a comprehension-local binding cannot admit a graph source.
+        // `run`'s no_pattern host refuses any such accidental graph demand.
+        let actual = run(&query, policy()).unwrap();
+        assert_eq!(actual.rows.snapshot_records, 3, "{local}");
+        assert_eq!(actual.rows.result_rows, 1, "{local}");
+        assert_eq!(
+            actual.value[0].values(),
+            &[scalar_list(&[Some(2), Some(2), Some(7)])],
+            "{local}"
+        );
+    }
+}
+
+#[test]
 fn post_group_collected_elements_keep_duplicates_full_identities_and_first_occurrence_order() {
     let query = prepare_output(
         "RETURN COLLECT(node) AS ids, \
