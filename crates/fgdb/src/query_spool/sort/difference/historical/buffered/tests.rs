@@ -104,6 +104,13 @@ fn plan(text: &str) -> PreparedNativeRead {
     PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols).unwrap()
 }
 async fn cold(cx: &CommitCx, vfs: &MemVfs) -> BufferedReadView<MemVfs> {
+    cold_with_extent(cx, vfs, 4096).await
+}
+async fn cold_with_extent(
+    cx: &CommitCx,
+    vfs: &MemVfs,
+    max_extent_bytes: usize,
+) -> BufferedReadView<MemVfs> {
     Database::open_buffered_read_view_with_vfs(
         cx,
         vfs.clone(),
@@ -119,7 +126,7 @@ async fn cold(cx: &CommitCx, vfs: &MemVfs) -> BufferedReadView<MemVfs> {
             buffer: BufferLimits {
                 max_frames: 2,
                 max_ghost_entries: 4,
-                max_extent_bytes: 4096,
+                max_extent_bytes,
             },
         },
     )
@@ -705,6 +712,9 @@ fn late_second_endpoint_failure_under_limit_zero_cannot_publish_a_difference() {
 
 #[test]
 fn large_duplicate_inputs_use_cold_sources_and_return_one_compressed_change() {
+    use fgdb_strata::store::BufferedReadError;
+    use fgdb_strata::tiered::buffer::BufferError;
+
     let ((), report) = run_async_under_lab(0xd1ff_7106, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -727,7 +737,38 @@ fn large_duplicate_inputs_use_cold_sources_and_return_one_compressed_change() {
         let resident = Arc::downgrade(&db.snapshot);
         drop(db);
         assert!(resident.upgrade().is_none());
+        // The writer permits 16 KiB objects; this fixture actually exceeds
+        // the small tests' 4 KiB ceiling. Keep that refusal and prove the
+        // exact point-read boundary before admitting the full spill source.
         let mut view = cold(&commit, &vfs).await;
+        let retained = view.memory_pool().used();
+        let required = match view.vertex_at(&cx, VId(0), before).await {
+            Err(BufferedReadError::Buffer(BufferError::ExtentTooLarge { bytes, limit: 4096 })) => {
+                bytes
+            }
+            Err(other) => panic!("expected an extent refusal, got {other:?}"),
+            Ok(_) => panic!("4 KiB must not admit the fixture's stored object"),
+        };
+        assert!(required > 4096 && required <= 16_384);
+        assert_eq!(view.memory_pool().used(), retained);
+        drop(view);
+        let mut short = cold_with_extent(&commit, &vfs, required - 1).await;
+        assert!(matches!(
+            short.vertex_at(&cx, VId(0), before).await,
+            Err(BufferedReadError::Buffer(BufferError::ExtentTooLarge { bytes, limit }))
+                if bytes == required && limit == required - 1
+        ));
+        drop(short);
+        let mut exact = cold_with_extent(&commit, &vfs, required).await;
+        assert!(
+            exact
+                .vertex_at(&cx, VId(0), before)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        drop(exact);
+        let mut view = cold_with_extent(&commit, &vfs, 16_384).await;
         let pool = MemoryPool::new(65_536, 0).unwrap();
         let (mut source, _) = file(&cx, &pool).await;
         let (mut scratch, _) = file(&cx, &pool).await;

@@ -24,9 +24,9 @@ pub(crate) struct BoundReadInput {
 pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     let mut depth = 0_usize;
     let mut with = false;
-    // A leading UNWIND joins a MATCH as the correlated root, an inner join
-    // only. OPTIONAL MATCH directly after the unwound rows is instead a Left
-    // continuation of them: one NULL-extended row per unmatched value.
+    // Leading UNWIND rows feed the same join as an explicit WITH boundary.
+    // MATCH is an inner continuation; OPTIONAL MATCH is a Left continuation
+    // with one NULL-extended row per unmatched value.
     let leading_unwind = tokens.first().is_some_and(|token| token.word("UNWIND"));
     // A leading OPTIONAL MATCH is a Left continuation of the unit relation:
     // its witnesses, or exactly one NULL-extended row.
@@ -45,6 +45,9 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 let name =
                     previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS"));
                 if !name && token.word("MATCH") && !previous.is_some_and(|p| p.word("OPTIONAL")) {
+                    if leading_unwind && !matched {
+                        return true;
+                    }
                     matched = true;
                 }
                 if leading_unwind

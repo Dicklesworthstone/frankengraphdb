@@ -114,11 +114,12 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
-        // A list or map argument, as in COUNT(DISTINCT [a, b]), reads with the
-        // RETURN value grammar over the same input sources. The input binder
-        // already lowers every composite template, so no new evaluator exists.
+        // Composite and temporal arguments use the RETURN value grammar over
+        // the same input sources. The input binder already lowers their value
+        // templates; the scalar compiler has no temporal-constructor operand.
         let composite = self.is_punct(b'[')
             || self.is_punct(b'{')
+            || self.temporal_call()?.is_some()
             || ((self.is_word("KEYS") || self.is_word("PROPERTIES"))
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
             || (matches!(self.current.kind, TokenKind::Word(_))

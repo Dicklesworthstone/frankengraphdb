@@ -563,6 +563,187 @@ fn each_call_in_a_set_expression_runs_exactly_once() {
 }
 
 #[test]
+fn successive_constant_calls_preserve_the_incoming_bag_and_pages() {
+    let query = prepare(
+        "CALL t.scores() YIELD score AS a WITH a ORDER BY a DESC LIMIT 2 \
+         CALL t.scores() YIELD score AS b RETURN a, b ORDER BY a, b",
+        &GqlParameters::new(),
+    );
+    let seen = RefCell::new(Vec::new());
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                seen.borrow_mut().push(call.outputs().to_vec());
+                host(call, arguments)
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    let expected: Vec<_> = [3, 5]
+        .into_iter()
+        .flat_map(|a| [1, 2, 3, 5].map(|b| vec![int(a), int(b)]))
+        .collect();
+    assert_eq!(
+        result
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(*seen.borrow(), vec![vec!["score".to_owned()]; 2]);
+    assert_eq!(result.rows.snapshot_records, 8);
+
+    let both = prepare(
+        "CALL t.scores() YIELD score AS a CALL t.scores() YIELD score AS b RETURN a, b",
+        &GqlParameters::new(),
+    );
+    for records in [8, 7] {
+        let result = both.execute_governed_with_procedures(
+            GqlQueryPolicy::new(records, 16, u64::MAX, u64::MAX),
+            no_graph,
+            |call, arguments, _| host(call, arguments),
+            || Ok::<_, usize>(()),
+        );
+        if records == 8 {
+            assert_eq!(result.unwrap().value.len(), 16);
+        } else {
+            assert!(
+                result.is_err(),
+                "both sources share one snapshot-record grant"
+            );
+        }
+    }
+}
+
+#[test]
+fn constant_calls_after_unwind_keep_duplicates_nulls_and_empty_source_execution() {
+    let query = prepare(
+        "UNWIND [1,1,NULL] AS x CALL t.echo(9) YIELD y RETURN x, y",
+        &GqlParameters::new(),
+    );
+    assert_eq!(
+        call(&query)
+            .unwrap()
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![int(1), int(9)],
+            vec![int(1), int(9)],
+            vec![GraphValue::Scalar(CanonicalScalar::Null), int(9)]
+        ]
+    );
+    // This formerly unsupported syntax is now a real product, not a parse-only
+    // admission: all four host rows survive the incoming singleton occurrence.
+    let former_refusal = prepare(
+        "UNWIND [1] AS x CALL t.scores() YIELD score RETURN score",
+        &GqlParameters::new(),
+    );
+    assert_eq!(
+        column(&call(&former_refusal).unwrap(), 0),
+        [int(1), int(2), int(3), int(5)]
+    );
+
+    for text in [
+        "CALL t.empty() YIELD a CALL t.scores() YIELD score RETURN score",
+        "CALL t.scores() YIELD a WITH a LIMIT 0 CALL t.scores() YIELD b RETURN b",
+    ] {
+        let seen = RefCell::new(0);
+        let result = prepare(text, &GqlParameters::new())
+            .execute_governed_with_procedures(
+                wide(),
+                no_graph,
+                |call, arguments, _| {
+                    *seen.borrow_mut() += 1;
+                    host(call, arguments)
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert!(result.value.is_empty(), "{text}");
+        assert_eq!(
+            *seen.borrow(),
+            2,
+            "each source executes even for an empty product"
+        );
+    }
+    let late_failure = prepare(
+        "CALL t.empty() YIELD a CALL t.nope() YIELD b RETURN b LIMIT 0",
+        &GqlParameters::new(),
+    );
+    assert!(call(&late_failure).is_err());
+}
+
+#[test]
+fn call_continuations_refuse_correlated_arguments_alias_collisions_and_excess_width() {
+    let excess = (0..fgdb_gql::algebra::MAX_PATTERN_VERTICES)
+        .map(|i| format!("value AS b{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for text in [
+        "CALL t.echo(1) YIELD a WITH a CALL t.echo(a) YIELD b RETURN b".to_owned(),
+        "UNWIND [1] AS x CALL t.echo(x) YIELD y RETURN y".to_owned(),
+        "CALL t.echo(1) YIELD a CALL t.echo(2) YIELD a RETURN a".to_owned(),
+        format!("CALL t.echo(1) YIELD a CALL t.echo() YIELD {excess} RETURN a"),
+    ] {
+        let mut lookups = 0;
+        assert!(
+            PreparedGraphSetText::prepare(&text, |kind, name| {
+                lookups += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(lookups, 0, "{text}");
+    }
+    let input = PreparedGraphSet::singleton()
+        .unwind(
+            "x".to_owned(),
+            fgdb_gql::GraphSetValue::Value(GraphValue::List(vec![int(1)].into())),
+        )
+        .unwrap();
+    assert!(matches!(
+        input.procedure_call(
+            "t".to_owned(),
+            "echo".to_owned(),
+            vec![],
+            vec![],
+            vec![("a".to_owned(), "a".to_owned())],
+            vec![]
+        ),
+        Err(fgdb_gql::GraphSetProjectionError::ProcedureNotFirst)
+    ));
+}
+
+#[test]
+fn read_procedure_sources_do_not_enter_write_prefixes_or_owned_write_tails() {
+    for text in [
+        "WITH 1 AS k CALL t.echo(2) YIELD x CREATE (n) RETURN x",
+        "UNWIND [1] AS k CALL t.echo(2) YIELD x CREATE (n) RETURN x",
+        "CREATE (n) WITH n CALL t.echo(2) YIELD x RETURN x",
+        "CREATE (n) WITH 1 AS k CALL t.echo(2) YIELD x RETURN COUNT(*) AS count",
+    ] {
+        let mut lookups = 0;
+        assert!(
+            fgdb_gql::PreparedGraphInsertQueryText::prepare(text, RelationId(1), |kind, name| {
+                lookups += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(
+            lookups, 0,
+            "a refused write CALL resolved catalog names: {text}"
+        );
+    }
+}
+
+#[test]
 fn procedure_columns_correlate_with_a_later_match() {
     // Graph: VId(i) has p = values[i]. The procedure yields ids to look up.
     let values = [10, 20, 30].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
@@ -605,7 +786,7 @@ fn malformed_or_misplaced_calls_refuse_before_any_catalog_access() {
         "CALL t.scores YIELD score RETURN score",
         "CALL scores() YIELD score RETURN score",
         "CALL t.scores() YIELD score, score RETURN score",
-        "UNWIND [1] AS x CALL t.scores() YIELD score RETURN score",
+        "UNWIND [1] AS x CALL t.scores(x) YIELD score RETURN score",
         "CALL t.scores(1 YIELD score RETURN score",
     ] {
         let mut lookups = 0;

@@ -504,6 +504,16 @@ impl PreparedGraphSet {
         }
     }
 
+    /// The actual unit source, without a filter, projection, ordering or page.
+    /// Only this node can be replaced by another source without losing rows.
+    pub(crate) fn is_singleton_source(&self) -> bool {
+        matches!(self.node, SetNode::Values)
+            && self.columns.is_empty()
+            && self.order.is_empty()
+            && self.offset == 0
+            && self.count.is_none()
+    }
+
     /// Append each element of the evaluated list to its input row, preserving
     /// input and element order. NULL and empty lists emit no rows; other
     /// non-list values fail atomically during governed execution.
@@ -583,12 +593,7 @@ impl PreparedGraphSet {
         graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
-        if !matches!(self.node, SetNode::Values)
-            || !self.columns.is_empty()
-            || !self.order.is_empty()
-            || self.offset != 0
-            || self.count.is_some()
-        {
+        if !self.is_singleton_source() {
             return Err(Error::ProcedureNotFirst);
         }
         if outputs.is_empty() {

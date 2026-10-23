@@ -107,6 +107,50 @@ fn scalar_vertex(value: i64, vid: u128) -> GraphValueRow {
 }
 
 #[test]
+fn leading_unwind_predicates_read_imported_values_without_an_explicit_with() {
+    let expected: Vec<_> = [(2, 1), (2, 1), (3, 1), (3, 2), (3, 2)]
+        .into_iter()
+        .map(|(p, x)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(p)),
+                GraphValue::Scalar(CanonicalScalar::Int(x)),
+            ])
+        })
+        .collect();
+    for boundary in ["", "WITH x "] {
+        let text = format!(
+            "UNWIND [1,2,NULL,2] AS x {boundary}MATCH (n) WHERE n.p > x RETURN n.p AS p,x ORDER BY p,x"
+        );
+        let query = prepare(&text);
+        assert_eq!(query.columns(), ["p", "x"]);
+        let exact = GqlQueryPolicy::new(u64::MAX, 5, u64::MAX, u64::MAX);
+        assert_eq!(run(&query, exact, &mut || Ok(())).unwrap().value, expected);
+        let short = GqlQueryPolicy::new(u64::MAX, 4, u64::MAX, u64::MAX);
+        assert!(run(&query, short, &mut || Ok(())).is_err());
+    }
+    for source in ["[]", "[NULL]"] {
+        assert!(
+            execute(&format!(
+                "UNWIND {source} AS x MATCH (n) WHERE n.p > x RETURN n.p AS p,x"
+            ))
+            .is_empty()
+        );
+    }
+    let mut calls = 0;
+    assert!(
+        PreparedGraphSetText::prepare(
+            "UNWIND [1] AS x WITH x AS y MATCH (n) WHERE n.p > x RETURN n",
+            |kind, name: &str| {
+                calls += 1;
+                symbols(kind, name)
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 0, "WITH must retire the old imported name");
+}
+
+#[test]
 fn required_continuation_preserves_parallel_edges_and_applies_input_page_first() {
     // This exact form used to be on with_pipelines' refusal list. Independent
     // edge enumeration determines its positive result, including parallel edges.

@@ -65,6 +65,62 @@ fn properties() -> Props {
     props
 }
 
+#[test]
+fn temporal_constructor_arguments_keep_values_offsets_and_empty_aggregate_semantics() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{CanonicalDate, CanonicalTimestamp};
+
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN MAX(date('2020-01-01')) AS stamp",
+            CanonicalScalar::Date(CanonicalDate::from_civil(2020, 1, 1).unwrap()),
+        ),
+        (
+            "MATCH (n) RETURN MAX(datetime({year:2020,month:1,day:1,timezone:'+01:00'})) AS stamp",
+            CanonicalScalar::Timestamp(
+                CanonicalTimestamp::offset_only(1_577_833_200_000_000_000, 3600).unwrap(),
+            ),
+        ),
+        (
+            "MATCH (n) RETURN MAX(date('2020-01-01').year) AS year",
+            CanonicalScalar::Int(2020),
+        ),
+    ] {
+        let plan = prepare(text);
+        let rows = run(&plan, &[VId(1), VId(2)], &[], &Props::new())
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphAggregateValue::Value(GraphValue::Scalar(expected))],
+            "{text}"
+        );
+        let empty = run(&plan, &[], &[], &Props::new()).unwrap().value;
+        assert_eq!(empty.len(), 1, "{text}");
+        assert_eq!(
+            empty[0].values(),
+            &[GraphAggregateValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Null
+            ))],
+            "{text}"
+        );
+    }
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN MAX(clocktime()) AS stamp",
+            |_, _| {
+                calls.set(calls.get() + 1);
+                None
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+}
+
 fn run_collection_relation(
     plan: &PreparedGraphAggregate,
     vertices: &[VId],

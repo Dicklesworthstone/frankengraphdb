@@ -856,8 +856,8 @@ pub(crate) enum ReadStageTemplate {
         at: usize,
         stage: aggregate::ReadAggregateStage,
     },
-    /// `CALL namespace.name(arguments) YIELD output [AS alias], ...`, the
-    /// first stage of a read pipeline (Appendix C `ProcedureCall`).
+    /// `CALL namespace.name(arguments) YIELD output [AS alias], ...`: a
+    /// constant-argument source joined to incoming rows (Appendix C `ProcedureCall`).
     Call {
         at: usize,
         namespace: String,

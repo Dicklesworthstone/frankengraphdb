@@ -984,7 +984,8 @@ impl<'a> Parser<'a> {
         schema: RowSchema<'a>,
         aggregate_return: bool,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
-        let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
+        let (mut stages, schema, mut depth) =
+            self.row_pipeline_prefix_with_calls(schema, !aggregate_return)?;
         // A write tail that meets the next write of a chain ends here: that
         // write reads this row, hidden boundary reads included.
         if self.chain_write && self.at_chained_write()? {
@@ -1039,7 +1040,15 @@ impl<'a> Parser<'a> {
     /// aggregation; no caller rewrites a prefix into a synthetic RETURN query.
     pub(in crate::graph_text) fn row_pipeline_prefix(
         &mut self,
+        schema: RowSchema<'a>,
+    ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
+        self.row_pipeline_prefix_with_calls(schema, true)
+    }
+
+    fn row_pipeline_prefix_with_calls(
+        &mut self,
         mut schema: RowSchema<'a>,
+        read_calls: bool,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
         let mut stages = Vec::new();
         // The MATCH input and first WITH projection each own one relational node.
@@ -1114,6 +1123,33 @@ impl<'a> Parser<'a> {
             }
             self.projected_sources = None;
             let at = self.current.at;
+            // Read sources have a procedure host. Write prefixes and owned
+            // post-write tails do not, so they retain preparation-time refusal.
+            if read_calls
+                && !self.write_prefix
+                && !self.write_row_scope
+                && !self.chain_write
+                && self.take_word("CALL")?
+            {
+                self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+                // Procedure arguments resolve against the empty source schema,
+                // never a carried row. Only its yielded columns extend scope.
+                let mut yielded = Vec::new();
+                let stage = self.call_stage(&mut yielded, at)?;
+                for column in yielded {
+                    if schema.iter().any(|(name, _)| name.text == column.0.text) {
+                        return Err(expected(column.0.at, "new YIELD column name"));
+                    }
+                    self.capacity(
+                        schema.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    schema.push(column);
+                }
+                append_stage(&mut stages, stage, &mut depth)?;
+                continue;
+            }
             if !self.is_word("WITH") {
                 // A terminal RETURN, plain or aggregate, resolves the hidden
                 // reads; the next MATCH part or the end must not see them.

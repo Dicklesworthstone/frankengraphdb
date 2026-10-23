@@ -93,8 +93,8 @@ pub(super) fn prefix<'a>(
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         return Ok((Head::Single(Some(head)), stages, schema, depth));
     }
-    // A procedure is a source, so it can only start the pipeline, exactly as
-    // in a non-aggregate read: `CALL ... YIELD c RETURN COUNT(DISTINCT c)`.
+    // An initial procedure supplies the source, exactly as in a non-aggregate
+    // read. Subsequent calls are independent sources joined by the row prefix.
     let mut schema = Vec::new();
     let call = if parser.is_word("CALL") {
         let at = parser.current.at;

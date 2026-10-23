@@ -634,7 +634,7 @@ impl<'a> Parser<'a> {
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
         let mut schema = Vec::new();
         let mut leading = Vec::new();
-        // A procedure is a source: it can only start the pipeline.
+        // The first procedure supplies this pipeline's initial source.
         if self.is_word("CALL") {
             let at = self.current.at;
             self.advance()?;
@@ -1745,7 +1745,7 @@ impl<'a> Parser<'a> {
     /// constructor `date(`, `localtime(`, `time(`, `localdatetime(` or
     /// `datetime(`, or a dotted call such as `date.truncate(` or
     /// `datetime.fromepoch(`, which is reported with `true`.
-    fn temporal_call(
+    pub(super) fn temporal_call(
         &self,
     ) -> Result<Option<(crate::GraphTemporalFunction, bool)>, GraphPatternTextError> {
         let TokenKind::Word(word) = self.current.kind else {
@@ -3302,7 +3302,10 @@ pub(super) fn bind_stages(
                 for argument in arguments {
                     bound.push(bind_read_value(argument, values)?);
                 }
-                input
+                // Each call remains a separately validated constant-argument
+                // source. A continuation joins it to the incoming bag; only
+                // the actual zero-column unit source may be replaced.
+                let source = PreparedGraphSet::singleton()
                     .procedure_call_with_projection(
                         namespace.clone(),
                         name.clone(),
@@ -3315,7 +3318,15 @@ pub(super) fn bind_stages(
                     .map_err(|kind| GraphSetTextError {
                         offset: *at,
                         kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?;
+                if input.is_singleton_source() {
+                    source
+                } else {
+                    input.cross_join(source).map_err(|kind| GraphSetTextError {
+                        offset: *at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
                     })?
+                }
             }
             ReadStageTemplate::Project {
                 at,
