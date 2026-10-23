@@ -840,3 +840,42 @@ fn relationship_upsert_uses_write_query_limits_and_final_row_admission() {
         fixture.finish(cx, &after).await;
     });
 }
+
+#[test]
+fn mixed_chains_preserve_host_effect_limits_and_rollback_the_creation_prefix() {
+    run(async |cx| {
+        threshold_case(
+            cx,
+            "chain-set-effects",
+            policy(0, 1, 0),
+            policy(1, 1, 0),
+            "CREATE (n:Person {name:'New',age:3}) WITH n \
+             SET n.age=n.age+4 RETURN n.age AS age",
+            3,
+            1,
+        )
+        .await;
+        threshold_case(
+            cx,
+            "chain-remove-effects",
+            policy(0, 1, 0),
+            policy(1, 1, 0),
+            "CREATE (n:Person {name:'New',age:3}) WITH n \
+             REMOVE n.age RETURN n.name AS name",
+            3,
+            1,
+        )
+        .await;
+        threshold_case(
+            cx,
+            "chain-delete-effects",
+            policy(0, 2, 0),
+            policy(1, 2, 0),
+            "CREATE (a:Person {name:'Keep'}),(b:Person {name:'Drop'}) WITH a,b \
+             DELETE b RETURN a.name AS name",
+            3,
+            1,
+        )
+        .await;
+    });
+}

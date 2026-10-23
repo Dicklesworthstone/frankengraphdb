@@ -1,17 +1,20 @@
-//! Creation chains compose the native collectors and authorized staging owner.
+//! Write chains compose the native collectors and authorized staging owners.
 //! Private WITH rows never mint authority, a new allowance or a commit.
 
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
-    WriteTxnError, insert, selection,
+    WriteTxnError, insert, mutation, selection,
 };
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
-use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};
+use fgdb_gql::insertion::{
+    GraphInsertBatch, GraphInsertError, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
+};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphInsertBinding, GraphInsertQueryError, GraphPatternFactorExecution, GraphSetSource,
-    GraphWriteChainError, GraphWriteChainStep, PreparedGraphPatternFactors,
-    PreparedGraphWriteChain,
+    GraphInsertBinding, GraphInsertQueryError, GraphMutationBatch, GraphMutationError,
+    GraphMutationPolicy, GraphMutationQueryError, GraphMutationStats, GraphPatternFactorExecution,
+    GraphSetSource, GraphWriteChainError, GraphWriteChainStep, PreparedGraphMutation,
+    PreparedGraphPatternFactors, PreparedGraphWriteChain,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
@@ -104,6 +107,7 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
 fn remaining(
     policy: GraphInsertPolicy,
     used: &GraphInsertStats,
+    mutation_effects: u64,
     delivers: bool,
 ) -> GraphInsertPolicy {
     GraphInsertPolicy::new(
@@ -133,10 +137,109 @@ fn remaining(
         policy.max_vertices.saturating_sub(used.created_vertices),
         policy.max_edges.saturating_sub(used.created_edges),
     )
+    .with_mutation_limit(policy.max_mutation_effects.saturating_sub(mutation_effects))
+}
+
+enum Proposal<'a> {
+    Insert(&'a PreparedGraphInsert, GraphInsertBatch),
+    Mutation(
+        &'a PreparedGraphMutation,
+        GraphMutationBatch,
+        GraphMutationPolicy,
+    ),
+}
+
+fn mutation_error(
+    error: GraphMutationError<WriteTxnError>,
+) -> GraphWriteChainError<WriteTxnError, WriteTxnError> {
+    GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error))
+}
+
+fn invalid_mutation_statistics() -> Fault {
+    GqlQueryError::Source(mutation_error(GraphMutationError::InvalidSourceStatistics))
+}
+
+struct MutationTail {
+    snapshot_records: u64,
+    work_units: u64,
+    scratch_entries: u64,
+}
+
+// The query result already includes its mutation prefix. Plain DELETE's
+// authorization owner adds an incidence proof after collection. Reserve the
+// projection's extra usage before that owner checks or allocates anything.
+fn mutation_staging_policy(
+    policy: GraphMutationPolicy,
+    prefix: GraphMutationStats,
+    result: &GqlQueryExecution<GraphValueRow>,
+) -> Result<(GraphMutationPolicy, MutationTail), Fault> {
+    let tail = MutationTail {
+        snapshot_records: result
+            .rows
+            .snapshot_records
+            .checked_sub(prefix.selection.snapshot_records)
+            .ok_or_else(invalid_mutation_statistics)?,
+        work_units: result
+            .evaluator
+            .work_units
+            .checked_sub(prefix.evaluator.work_units)
+            .ok_or_else(invalid_mutation_statistics)?,
+        scratch_entries: result
+            .evaluator
+            .scratch_entries
+            .checked_sub(prefix.evaluator.scratch_entries)
+            .ok_or_else(invalid_mutation_statistics)?,
+    };
+    let reserved = GqlQueryPolicy::new(
+        policy
+            .query
+            .rows
+            .max_snapshot_records()
+            .unwrap_or(u64::MAX)
+            .checked_sub(tail.snapshot_records)
+            .ok_or_else(invalid_mutation_statistics)?,
+        policy.query.rows.max_result_rows().unwrap_or(u64::MAX),
+        policy
+            .query
+            .evaluator
+            .max_work_units
+            .checked_sub(tail.work_units)
+            .ok_or_else(invalid_mutation_statistics)?,
+        policy
+            .query
+            .evaluator
+            .max_scratch_entries
+            .checked_sub(tail.scratch_entries)
+            .ok_or_else(invalid_mutation_statistics)?,
+    );
+    Ok((GraphMutationPolicy::new(reserved, policy.max_effects), tail))
+}
+
+fn finish_mutation_statistics(
+    result: &mut GqlQueryExecution<GraphValueRow>,
+    staged: GraphMutationStats,
+    tail: MutationTail,
+) -> Result<(), Fault> {
+    result.rows.snapshot_records = staged
+        .selection
+        .snapshot_records
+        .checked_add(tail.snapshot_records)
+        .ok_or_else(invalid_mutation_statistics)?;
+    result.evaluator.work_units = staged
+        .evaluator
+        .work_units
+        .checked_add(tail.work_units)
+        .ok_or_else(invalid_mutation_statistics)?;
+    result.evaluator.scratch_entries = staged
+        .evaluator
+        .scratch_entries
+        .checked_add(tail.scratch_entries)
+        .ok_or_else(invalid_mutation_statistics)?;
+    Ok(())
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Execute a CREATE/INSERT chain under one capability and one completion.
+    /// Execute a creation and mutation chain under one capability and one completion.
     ///
     /// Every graph leaf uses the same masked transaction overlay as an
     /// authorized single insertion. Every original intent passes its ordinary
@@ -146,14 +249,18 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Private continuation rows spend evaluator work/scratch but no signed
     /// result rows. A source-free chain without RETURN needs Write rights;
-    /// graph-selected creation or a public RETURN requires ReadWrite. Explicit
+    /// graph-selected creation, a mutation or a public RETURN requires ReadWrite. Explicit
     /// hidden-property continuation reads refuse before publication. All native
     /// limits accumulate across the statement, and one live permit covers all
     /// steps and the sole commit. A failure discards every unpublished step.
     ///
-    /// MERGE, SET, REMOVE and DELETE chain steps currently refuse the entire
-    /// statement during preflight, before opening a transaction or allocating
-    /// an identity. Their standalone authorized APIs remain separate owners.
+    /// SET, REMOVE and DELETE steps use the same original-intent admission and
+    /// native incidence proof as standalone authorized mutations. Their effect
+    /// counts share one statement limit; projection and deletion proof share the
+    /// same native work/scratch allowance. Restricted deletion retains the
+    /// capability-only refusal that prevents probing hidden fields or incidence.
+    /// MERGE steps currently refuse during preflight, before opening a transaction
+    /// or allocating an identity.
     /// Native unknown/recovery outcomes and the existing authorized insertion's
     /// durable-identity and security boundaries apply unchanged.
     #[allow(clippy::too_many_arguments)]
@@ -227,6 +334,20 @@ impl<V: Vfs + Clone> Database<V> {
         let mut reads = chain.returns_rows();
         for (step, statement) in chain.steps().iter().enumerate() {
             execution.checkpoint().map_err(source)?;
+            let mutation = match statement {
+                GraphWriteChainStep::Mutation(mutation) => Some(mutation.as_ref()),
+                GraphWriteChainStep::MutationQuery(query) => Some(query.mutation()),
+                _ => None,
+            };
+            if let Some(mutation) = mutation {
+                // Match the standalone mutation contract even when the target
+                // identity comes from a creation earlier in this statement.
+                reads = true;
+                if let Some(pattern) = mutation.selection() {
+                    admit_pattern(pattern, scope).map_err(source)?;
+                }
+                continue;
+            }
             let insertion = match statement {
                 GraphWriteChainStep::Insert(insertion) => insertion,
                 GraphWriteChainStep::Query(query) => {
@@ -275,13 +396,19 @@ impl<V: Vfs + Clone> Database<V> {
                 };
                 let mut rows = None;
                 let mut result = None;
+                let mut mutation_effects = 0;
                 let last = chain.steps().len().saturating_sub(1);
                 for (at, statement) in chain.steps().iter().enumerate() {
-                    let allowance = remaining(policy, &used, at == last && chain.returns_rows());
-                    let (proposal, returning, insertion) = query_cx.with_restriction(|| {
+                    let allowance = remaining(
+                        policy,
+                        &used,
+                        mutation_effects,
+                        at == last && chain.returns_rows(),
+                    );
+                    let (proposal, mut returning) = query_cx.with_restriction(|| {
                         let controls = RefCell::new(&mut execution);
                         let database = RefCell::new(&mut *self);
-                        let graph = ChainSource {
+                        let mut graph = ChainSource {
                             transaction: workspace.transaction(),
                             database: &database,
                             cx: query_cx,
@@ -308,7 +435,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         error.map_source(GraphWriteChainError::Insert)
                                     })?;
                                 let (creation, returning) = proposal.into_parts();
-                                Ok((creation, returning, query.insertion()))
+                                Ok((Proposal::Insert(query.insertion(), creation), returning))
                             }
                             GraphWriteChainStep::Insert(insertion) => {
                                 let proposal = insertion
@@ -335,27 +462,115 @@ impl<V: Vfs + Clone> Database<V> {
                                     },
                                     evaluator: stats.evaluator,
                                 };
-                                Ok((proposal, returning, insertion))
+                                Ok((Proposal::Insert(insertion, proposal), returning))
+                            }
+                            GraphWriteChainStep::Mutation(mutation) => {
+                                let policy = GraphMutationPolicy::new(
+                                    allowance.query,
+                                    allowance.max_mutation_effects,
+                                );
+                                let proposal = mutation
+                                    .execute_governed_over(
+                                        rows.take(),
+                                        policy,
+                                        |pattern, budget| graph.pattern(pattern, budget),
+                                        checkpoint,
+                                    )
+                                    .map_err(|error| error.map_source(mutation_error))?;
+                                let stats = proposal.stats();
+                                let returning = GqlQueryExecution {
+                                    value: Vec::new(),
+                                    rows: GqlExecutionStats {
+                                        snapshot_records: stats.selection.snapshot_records,
+                                        result_rows: 0,
+                                    },
+                                    evaluator: stats.evaluator,
+                                };
+                                Ok((Proposal::Mutation(mutation, proposal, policy), returning))
+                            }
+                            GraphWriteChainStep::MutationQuery(query) => {
+                                let policy = GraphMutationPolicy::new(
+                                    allowance.query,
+                                    allowance.max_mutation_effects,
+                                );
+                                let proposal = query
+                                    .execute_governed_over(
+                                        rows.take(),
+                                        policy,
+                                        |pattern, budget| graph.pattern(pattern, budget),
+                                        checkpoint,
+                                    )
+                                    .map_err(|error| {
+                                        error.map_source(GraphWriteChainError::Mutation)
+                                    })?;
+                                let (mutation, returning) = proposal.into_parts();
+                                Ok((
+                                    Proposal::Mutation(query.mutation(), mutation, policy),
+                                    returning,
+                                ))
                             }
                             _ => Err(source(WriteTxnError::AuthorizedChainStepUnsupported {
                                 step: at,
                             })),
                         }
                     })?;
-                    let (stats, _, _) = insert::stage_proposal(
-                        workspace.transaction(),
-                        self,
-                        query_cx,
-                        insertion,
-                        proposal,
-                        &mut execution,
-                        false,
-                    )
-                    .map_err(|error| {
-                        error.map_source(|error| {
-                            GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(error))
-                        })
-                    })?;
+                    let (stats, effects) = match proposal {
+                        Proposal::Insert(insertion, proposal) => {
+                            let (stats, _, _) = insert::stage_proposal(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                insertion,
+                                proposal,
+                                &mut execution,
+                                false,
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(
+                                        error,
+                                    ))
+                                })
+                            })?;
+                            (stats, 0)
+                        }
+                        Proposal::Mutation(mutation, proposal, policy) => {
+                            let (staging_policy, tail) =
+                                mutation_staging_policy(policy, proposal.stats(), &returning)?;
+                            let (staged, _, _) = mutation::stage_proposal(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                mutation,
+                                proposal,
+                                staging_policy,
+                                scope,
+                                &mut execution,
+                                false,
+                            )
+                            .map_err(|error| error.map_source(mutation_error))?;
+                            finish_mutation_statistics(&mut returning, staged, tail)?;
+                            (
+                                GraphInsertStats {
+                                    selection: returning.rows,
+                                    evaluator: returning.evaluator,
+                                    created_vertices: 0,
+                                    created_edges: 0,
+                                },
+                                staged.effects,
+                            )
+                        }
+                    };
+                    let observed = u128::from(mutation_effects) + u128::from(effects);
+                    if observed > u128::from(policy.max_mutation_effects) {
+                        return Err(GqlQueryError::Source(mutation_error(
+                            GraphMutationError::EffectLimit {
+                                limit: policy.max_mutation_effects,
+                                observed,
+                            },
+                        )));
+                    }
+                    mutation_effects = observed as u64;
                     // Query counters include their write prefix and complete
                     // WITH tail. Do not lose that work or count it twice.
                     used.selection.snapshot_records = used

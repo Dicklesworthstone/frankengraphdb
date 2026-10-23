@@ -496,3 +496,77 @@ fn authorized_creation_chain_refusal_rolls_back_every_step() {
         fixture.stop(cx, 0, 0, 0).await;
     });
 }
+
+#[test]
+fn zero_row_mixed_chains_update_remove_and_delete_with_one_completion_each() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "mixed-chain-zero-rows", |_| {}).await;
+        let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
+        let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (a:Person {name:'Ada',age:1}) WITH a SET a.age=a.age+10",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
+        let after_set = state(cx, &mut observer).await;
+        assert_eq!(after_set.0.rows.len(), 1);
+        assert_eq!(after_set.0.rows[0][2], WireValue::Int(11));
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Ada'}) CREATE (b:Person {name:'Bob',age:2}) \
+                     WITH a,b REMOVE a.age",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
+        let after_remove = state(cx, &mut observer).await;
+        assert_eq!(after_remove.0.rows.len(), 2);
+        assert_eq!(after_remove.0.rows[0][1], WireValue::Text("Ada".into()));
+        assert_eq!(after_remove.0.rows[0][2], WireValue::Null);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (a:Person {name:'Bob'}) CREATE (b:Person {name:'Survivor'}) \
+                     WITH a,b DELETE a",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            3,
+            1,
+        );
+        let after_delete = state(cx, &mut observer).await;
+        assert_eq!(
+            after_delete
+                .0
+                .rows
+                .iter()
+                .map(|row| row[1].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                WireValue::Text("Ada".into()),
+                WireValue::Text("Survivor".into())
+            ]
+        );
+        assert!(after_delete.1.rows.is_empty());
+        writer.close(cx).await.unwrap();
+        observer.close(cx).await.unwrap();
+        fixture.stop(cx, 3, 2, 0).await;
+    });
+}
