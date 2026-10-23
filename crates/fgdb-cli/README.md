@@ -150,13 +150,15 @@ script (`MERGE (a ...); MERGE (b ...); MATCH (a ...), (b ...) MERGE
 - Statements the script grammar accepts keep the per-record path above.
 - Parameter types come from `--types-file`; an undeclared parameter is int64.
   `--types-file` must not declare a parameter the statement does not read.
-- The import stays one transaction. This path reads the whole CSV and its
-  records into memory before binding.
-- The records travel as one list parameter, capped at 65,536 values. A
-  record of k columns counts k + 1, so a two-column file holds at most 21,845
-  records (measured: 21,845 commit, 22,000 refuse with "list parameter exceeds
-  canonical admission bounds"). Split a larger file into separate imports,
-  each its own transaction.
+- The import stays one transaction. Preparation streams the CSV through the
+  native framer and typed decoder into one bounded row relation, retaining
+  only that relation plus the header/current record. Execution retains the
+  relation and its writes in memory; this is not a constant-memory bulk loader.
+- Each record is admitted as its own map, so column count no longer divides
+  a single list parameter's 65,536-value allowance. The unchanged CSV ceiling
+  is 65,536 records, also bounded by source bytes, field sizes and cumulative
+  parameter bytes. Execution still spends the selected work, scratch and
+  change allowances; a larger import may require explicit budget flags.
 - The text must not already use the names `__csv_rows` or `__csv_row`.
 
 ### Floating-point, decimal and binary CSV columns

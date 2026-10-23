@@ -407,7 +407,7 @@ where
         }
         // The write charged these rows as it built them; the tail counts its
         // own work over them from here.
-        SetNode::Owned => source.owned().ok_or(GqlQueryError::Source(
+        SetNode::Owned { .. } => source.owned().ok_or(GqlQueryError::Source(
             GraphSetExecutionError::OwnedRowsUnavailable,
         ))?,
         SetNode::Unwind { input, value } => {

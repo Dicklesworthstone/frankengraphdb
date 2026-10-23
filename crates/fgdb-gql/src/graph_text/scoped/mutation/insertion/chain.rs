@@ -148,7 +148,7 @@ impl PreparedGraphWriteChainText {
                             // `UNWIND $rows`, or a relationship MERGE after a
                             // leading MATCH: a chain once another write
                             // follows.
-                            merged = vertex || matched;
+                            merged = vertex || matched || parameter_matched;
                         }
                     } else if clause
                         && parameter_unwound
@@ -441,6 +441,93 @@ impl PreparedGraphWriteChainText {
         schema
     }
 
+    /// Replace exactly one leading list-parameter expansion with a typed
+    /// external row relation. The native CSV adapter supplies one map cell per
+    /// record; every later read stage and write keeps its compiled row schema.
+    /// The parameter remains as an empty, admitted shape argument only: no
+    /// source record is ever collected into that scalar container.
+    pub(crate) fn bind_csv_row_source(
+        &self,
+        parameter: &str,
+    ) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
+        use crate::set_text::{ReadStageTemplate, ReadValueTemplate};
+        let refused = || expected(0, "one leading UNWIND of the CSV row source");
+        let schema = self.parameter_schema();
+        if schema.len() != 1
+            || schema[0].name != parameter
+            || schema[0].parameter_type != GqlParameterType::List
+            || schema[0].occurrences != 1
+        {
+            return Err(refused().into());
+        }
+        // parameter_schema() keeps the first step's entry for a shared name.
+        // Count actual native tokens too: a later clause must not observe the
+        // empty shape argument in place of the caller's complete row source.
+        let mut lexer = Lexer {
+            text: &self.statement,
+            at: 0,
+            tokens: 0,
+        };
+        let mut occurrences = 0;
+        loop {
+            match script::next_script_token(&mut lexer)?.kind {
+                TokenKind::Parameter(name) => {
+                    occurrences += 1;
+                    if name != parameter || occurrences > 1 {
+                        return Err(refused().into());
+                    }
+                }
+                TokenKind::End => break,
+                _ => {}
+            }
+        }
+        if occurrences != 1 {
+            return Err(refused().into());
+        }
+        let mut template = self.clone();
+        let input = match template.steps.first_mut() {
+            Some(ChainTextStep::VertexMerge(merge)) => match &mut merge.input {
+                crate::mutation_text::VertexMergeRowsTextInput::Relation(input) => &mut **input,
+                _ => return Err(refused().into()),
+            },
+            Some(ChainTextStep::Insert(step)) => match &mut step.0.input {
+                InsertTextInput::Relation { input, .. } => input,
+                _ => return Err(refused().into()),
+            },
+            Some(ChainTextStep::EdgeMerge(step)) => match &mut step.0.input {
+                crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => &mut **input,
+                _ => return Err(refused().into()),
+            },
+            Some(ChainTextStep::EdgeMergeRows(step)) => match &mut step.0.input {
+                crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => &mut **input,
+                _ => return Err(refused().into()),
+            },
+            _ => return Err(refused().into()),
+        };
+        let Some(ReadStageTemplate::Unwind {
+            name,
+            value: ReadValueTemplate::Parameter { index, .. },
+            ..
+        }) = input.leading.first()
+        else {
+            return Err(refused().into());
+        };
+        if input.owned.is_some()
+            || !input.parameters.get(*index).is_some_and(|spec| {
+                spec.name == parameter
+                    && spec.parameter_type == GqlParameterType::List
+                    && spec.occurrences == 1
+            })
+        {
+            return Err(refused().into());
+        }
+        input.leading[0] = ReadStageTemplate::InputRows { name: name.clone() };
+        let arguments = GqlParameters::new()
+            .with_list(parameter, Vec::new())
+            .map_err(|_| refused())?;
+        template.bind_parameters(&arguments)
+    }
+
     /// Bind each step with exactly the arguments it names. An argument no
     /// step names refuses, as for every native statement.
     pub fn bind_parameters(
@@ -628,7 +715,10 @@ impl PreparedGraphWriteChainText {
             ))
             .into());
         }
-        Ok(PreparedGraphWriteChain { steps })
+        Ok(PreparedGraphWriteChain {
+            steps,
+            initial_rows: None,
+        })
     }
 }
 

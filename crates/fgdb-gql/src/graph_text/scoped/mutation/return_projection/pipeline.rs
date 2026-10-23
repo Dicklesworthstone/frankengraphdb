@@ -378,6 +378,7 @@ fn append_stage(
     depth: &mut usize,
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
+        ReadStageTemplate::InputRows { .. } => (0, 1),
         ReadStageTemplate::Aggregate { at, .. } => (*at, 3),
         ReadStageTemplate::Project { at, .. }
         | ReadStageTemplate::Filter { at, .. }
@@ -2035,13 +2036,28 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
-        self.row_page_sourced(schema, &[])
+        self.row_page_in_scope(schema, &[])
     }
 
     /// `row_page` where `sources[i]` is the source spelling of output `i`, so
     /// a write RETURN may order by `n.p` whether or not the item was aliased.
     /// A key matching an output name keeps that meaning.
     pub(in crate::graph_text) fn row_page_sourced(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        sources: &[Name<'a>],
+    ) -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
+        // A write has just projected a new output row. Its input's hidden
+        // property columns describe a different scope, even when both rows
+        // happen to have the same width. Restore those reads afterwards for
+        // the write's own WITH continuation and frozen-property lowering.
+        let input_boundary = self.boundary_reads.take();
+        let page = self.row_page_in_scope(schema, sources);
+        self.boundary_reads = input_boundary;
+        page
+    }
+
+    fn row_page_in_scope(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
         sources: &[Name<'a>],

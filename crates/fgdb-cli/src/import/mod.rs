@@ -12,15 +12,13 @@
 //!
 //! A chained write that the script grammar refuses (`MERGE ... MERGE ...`)
 //! runs instead as one chain over every record ([`record_chain_text`]). That
-//! path reads the complete CSV and its row list into memory before binding.
+//! path streams preparation into one bounded resident row relation; its rows
+//! never become a single scalar list argument.
 
 use super::{Failure, Options, emit, execution_failure};
 use asupersync::fs::Vfs;
 use fgdb::Database;
-use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::csv_parameters::{
-    CsvParameterError, CsvParameterErrorKind, CsvParameterLimits, decode_csv_parameters,
-};
+use fgdb_gql::csv_parameters::{CsvParameterErrorKind, CsvParameterLimits};
 use fgdb_gql::csv_write_script::GraphWriteScriptCsvStreamError;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
@@ -29,8 +27,7 @@ use fgdb_gql::{
     PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalScalarKind, EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts,
-    QueryCx,
+    CanonicalScalarKind, EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx,
 };
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -118,7 +115,8 @@ enum Body {
     Chain(Box<PreparedGraphWriteChain>),
 }
 
-/// The list parameter and row variable a chain import reads its records from.
+/// Compiler source name and row variable; the CSV binder replaces the source
+/// parameter's UNWIND with an owned row relation before any records are read.
 const ROWS: &str = "__csv_rows";
 const ROW: &str = "__csv_row";
 
@@ -169,8 +167,11 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
             let Some((template, names)) = prepare_chain(options, &statement, &declarations)? else {
                 return Err(Failure::query(error));
             };
-            let input = read_bounded(cx, input, limit, "--input")?;
-            let (chain, records) = bind_chain(&template, &names, &declarations, &input, limit)?;
+            let mut source = open_bounded(input, limit, "--input")?;
+            let (chain, records) =
+                bind_chain(&template, &names, &declarations, &mut source, limit, || {
+                    cx.checkpoint().map_err(Failure::io)
+                })?;
             return Ok(PreparedImport {
                 body: Body::Chain(Box::new(chain)),
                 records,
@@ -195,7 +196,8 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
 /// MERGE (a)-[:E]->(b)`) is not a write script, so it cannot bind once per
 /// record. It runs instead as ONE chain over all records:
 /// `UNWIND $__csv_rows AS __csv_row` ahead of it, and every `$name` read as
-/// `__csv_row.name`. A chain applies each clause to every record before the
+/// `__csv_row.name`. Native binding replaces only that leading expansion with
+/// a typed row source. A chain applies each clause to every record before the
 /// next, as openCypher's LOAD CSV does. A chain of creating MERGEs stages its
 /// creations once (fgdb-0s2pq), where a per-record script re-reads its staged
 /// prefix for every record (fgdb-irqu2).
@@ -302,14 +304,15 @@ fn prepare_chain(
 
 /// Decode every record with the statement's parameter types (declared, or
 /// int64 as a script's stored-property operand is) and bind them as the
-/// chain's row list. The CSV framing, value decoder and limits are the
+/// chain's input relation. The CSV framing, value decoder and limits are the
 /// script import's own.
 fn bind_chain(
     template: &PreparedGraphWriteChainText,
     names: &[String],
     declarations: &[(&str, GqlParameterType)],
-    input: &str,
+    source: &mut impl Read,
     limit: u64,
+    checkpoint: impl FnMut() -> Result<(), Failure>,
 ) -> Result<(PreparedGraphWriteChain, usize), Failure> {
     let schema: Vec<GqlParameterSpec> = names
         .iter()
@@ -329,52 +332,19 @@ fn bind_chain(
         max_records: CsvParameterLimits::HARD.max_records,
         ..CsvParameterLimits::default()
     };
-    let records = decode_csv_parameters(input, &schema, limits).map_err(csv_failure)?;
-    let mut rows = Vec::with_capacity(records.len());
-    for record in &records {
-        let mut fields = Vec::with_capacity(names.len());
-        for name in names {
-            let value = match record.get(name) {
-                Some(GqlParameterValue::Int64(value)) => {
-                    GraphValue::Scalar(CanonicalScalar::Int(value))
-                }
-                Some(GqlParameterValue::UInt64(value)) => GraphValue::Scalar(CanonicalScalar::Int(
-                    i64::try_from(value).map_err(|_| {
-                        Failure::query(format!("CSV column {name} exceeds int64 in a chain import"))
-                    })?,
-                )),
-                Some(GqlParameterValue::Scalar(value)) => GraphValue::Scalar(value.value().clone()),
-                Some(GqlParameterValue::List(value)) => value.value().clone(),
-                Some(GqlParameterValue::Map(value)) => value.value().clone(),
-                None => GraphValue::Scalar(CanonicalScalar::Null),
-            };
-            fields.push((name.as_str().into(), value));
-        }
-        // Names are distinct, so the map refuses only a value it cannot hold.
-        rows.push(
-            GraphValue::map(fields)
-                .ok_or_else(|| Failure::query("a CSV record does not form a row map"))?,
-        );
-    }
-    let arguments = GqlParameters::new()
-        .with_list(ROWS, rows)
-        .map_err(Failure::query)?;
-    let chain = template
-        .bind_parameters(&arguments)
-        .map_err(Failure::query)?;
-    Ok((chain, records.len()))
-}
-
-fn csv_failure(source: CsvParameterError) -> Failure {
-    if matches!(source.kind, CsvParameterErrorKind::InvalidValue) {
-        Failure::query(format!(
-            "{source} (the field does not decode as its parameter's type; an undeclared \
-             parameter is int64, so declare text or bool columns with --types-file, e.g. \
-             text<TAB>name)"
-        ))
-    } else {
-        Failure::query(source)
-    }
+    template
+        .bind_csv_rows_stream_controlled(
+            ROWS,
+            &schema,
+            limits,
+            |buffer| {
+                source
+                    .read(buffer)
+                    .map_err(|_| Failure::io("cannot read --input"))
+            },
+            checkpoint,
+        )
+        .map_err(stream_failure)
 }
 
 /// The native adapter owns CSV framing, cumulative source/parameter admission,
@@ -405,7 +375,9 @@ fn bind_source(
         .map_err(stream_failure)
 }
 
-fn stream_failure(error: GraphWriteScriptCsvStreamError<Failure>) -> Failure {
+fn stream_failure<B: std::fmt::Display>(
+    error: GraphWriteScriptCsvStreamError<Failure, B>,
+) -> Failure {
     use GraphWriteScriptCsvStreamError as E;
     match error {
         // Preserve the caller's exit code and redacted diagnostics, rather
@@ -538,7 +510,7 @@ fn open_bounded(path: &Path, limit: u64, flag: &str) -> Result<Box<dyn Read>, Fa
 }
 
 /// Read a whole UTF-8 statement/type input, refusing once it exceeds `limit`.
-/// CSV data uses bind_source instead and is never collected into this buffer.
+/// CSV data uses the streaming native binders and is never collected here.
 fn read_bounded(cx: &QueryCx, path: &Path, limit: u64, flag: &str) -> Result<String, Failure> {
     let refused = || Failure::query(format!("{flag} exceeds {limit} bytes"));
     let mut bytes = Vec::new();

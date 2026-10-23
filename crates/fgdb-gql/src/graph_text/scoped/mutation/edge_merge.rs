@@ -484,9 +484,10 @@ impl PreparedGraphEdgeMergeText {
     }
 
     /// A chain whose first write is a relationship MERGE over a leading MATCH
-    /// (`MATCH (a), (b) MERGE (a)-[:R]->(b) CREATE ...`, fgdb-cpny9). The
-    /// MATCH rows, through its WITH head or as `WITH *` carries them, are the
-    /// ordinary read relation, as after `MATCH ... WITH ... MERGE`.
+    /// (`MATCH (a), (b) MERGE (a)-[:R]->(b) CREATE ...`, fgdb-cpny9), including
+    /// a correlated MATCH after a leading UNWIND or WITH. The MATCH rows,
+    /// through its WITH head or as `WITH *` carries them, are the ordinary
+    /// read relation, as after `MATCH ... WITH ... MERGE`.
     #[allow(clippy::type_complexity)]
     pub(crate) fn prepare_first_step<'a, R>(
         statement: &'a str,
@@ -505,18 +506,44 @@ impl PreparedGraphEdgeMergeText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        parser.parse_match_prefix()?;
-        let (head, stages, schema) = if parser.is_word("WITH") {
-            parser.write_row_prefix()?
+        let (matched, source, schema) = if parser.is_word("UNWIND") || parser.is_word("WITH") {
+            let (source, schema) =
+                parser.write_graph_row_prefix(statement, declarations, resolve.time_zones())?;
+            (None, Some(source), schema)
         } else {
-            parser.implicit_write_row_prefix()?
+            parser.parse_match_prefix()?;
+            let (head, stages, schema) = if parser.is_word("WITH") {
+                parser.write_row_prefix()?
+            } else {
+                parser.implicit_write_row_prefix()?
+            };
+            (Some((head, stages)), None, schema)
         };
         parser.chain_write = true;
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
         let continuation =
             Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
-        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let read = if let Some(mut source) = source {
+            // MERGE and its continuation may add parameters and element keys
+            // after the graph-to-row boundary; bind their complete table.
+            source
+                .syntax
+                .parameters
+                .clone_from(&parser.syntax.parameters);
+            source
+                .syntax
+                .parameter_offsets
+                .clone_from(&parser.syntax.parameter_offsets);
+            source
+                .syntax
+                .element_keys
+                .extend(parser.syntax.element_keys.iter().cloned());
+            source
+        } else {
+            let (head, stages) = matched.expect("MATCH prefix retained its projection head");
+            parser.finish_write_row_prefix(statement, head, stages)?
+        };
         let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
         let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
         Ok((merge, returning, continuation))

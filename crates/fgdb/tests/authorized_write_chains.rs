@@ -102,6 +102,209 @@ where
     result
 }
 
+fn csv_chain(text: &str) -> PreparedGraphWriteChain {
+    use fgdb_gql::csv_parameters::CsvParameterLimits;
+    use fgdb_gql::{GqlParameterSpec, GqlParameterType};
+    let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+        text,
+        R,
+        &[("rows", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
+    let schema: Vec<_> = ["p", "q"]
+        .into_iter()
+        .map(|name| GqlParameterSpec {
+            name: name.into(),
+            parameter_type: GqlParameterType::Int64,
+            requires_positive: false,
+            occurrences: 1,
+        })
+        .collect();
+    let mut input = b"p,q\n2,1\n1,2\n".as_slice();
+    let (chain, records) = template
+        .bind_csv_rows_stream_controlled(
+            "rows",
+            &schema,
+            CsvParameterLimits::default(),
+            |buffer| -> Result<usize, ()> {
+                let count = buffer.len().min(3).min(input.len());
+                buffer[..count].copy_from_slice(&input[..count]);
+                input = &input[count..];
+                Ok(count)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(records, 2);
+    chain
+}
+
+#[test]
+fn csv_initial_relations_match_list_oracle_through_native_and_authorized_hosts() {
+    lab(0xc4a1_20c1, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let arguments = GqlParameters::new()
+            .with_list(
+                "rows",
+                [(2, 1), (1, 2)]
+                    .into_iter()
+                    .map(|(p, q)| {
+                        GraphValue::map(vec![
+                            ("p".into(), GraphValue::Scalar(CanonicalScalar::Int(p))),
+                            ("q".into(), GraphValue::Scalar(CanonicalScalar::Int(q))),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        for text in [
+            "UNWIND $rows AS row MERGE (a:Visible {p:row.p}) MERGE (b:Visible {p:row.q}) MERGE (a)-[:R]->(b)",
+            "UNWIND $rows AS row WITH row MERGE (a:Visible {p:row.p}) MERGE (b:Visible {p:row.q}) MERGE (a)-[:R]->(b)",
+            "UNWIND $rows AS row UNWIND [2,1] AS repeat MERGE (a:Visible {p:row.p}) MERGE (b:Visible {p:row.q}) MERGE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (seed:Visible {p:row.p}) MERGE (a:Visible {p:row.q}) MERGE (seed)-[:R]->(a)",
+            "UNWIND $rows AS row CREATE (a:Visible {p:row.p}) WITH row,a CREATE (b:Visible {p:row.q}), (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (a:Visible {p:row.p}), (b:Visible {p:row.q}) MERGE (a)-[:R]->(b) MERGE (a)-[:S]->(b)",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+            let ordinary = PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .unwrap()
+                .bind_parameters(&arguments)
+                .unwrap();
+            let streamed = csv_chain(text);
+            let mut expected = None;
+            for mode in 0..3 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+                seed.create_vertex(VId(20), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+                db.write(&commit, seed).await.unwrap();
+                let basis = db.frontier().unwrap();
+                if mode == 2 {
+                    db.execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &streamed,
+                        policy(10),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    let mut transaction = db.begin(&txn).unwrap();
+                    transaction
+                        .execute_graph_write_chain_engine_governed(
+                            &mut db,
+                            &query,
+                            if mode == 0 { &ordinary } else { &streamed },
+                            policy(10),
+                        )
+                        .unwrap();
+                    transaction.finish(&mut db, &commit).await.unwrap();
+                }
+                assert_eq!(db.frontier().unwrap().0, basis.0 + 1, "mode {mode}: {text}");
+                let actual = (db.vertices().unwrap(), db.edges().unwrap());
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected, "mode {mode}: {text}");
+                } else {
+                    expected = Some(actual);
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn csv_input_admission_and_late_clause_failure_publish_no_prefix() {
+    lab(0xc4a1_20c2, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let program = csv_chain(
+            "UNWIND $rows AS row MERGE (a:Visible {p:row.p}) MERGE (b:Visible {p:row.q+10}) MERGE (a)-[:R]->(b)",
+        );
+        for authorized in [false, true] {
+            for input_limit in [true, false] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let mut allowance = policy(10);
+                if input_limit {
+                    allowance.query.evaluator.max_scratch_entries = 0;
+                } else {
+                    allowance.max_vertices = 3;
+                }
+                if authorized {
+                    assert!(
+                        db.execute_graph_write_chain_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &program,
+                            allowance,
+                            || NOW
+                        )
+                        .await
+                        .is_err()
+                    );
+                } else {
+                    let mut transaction = db.begin(&txn).unwrap();
+                    assert!(
+                        transaction
+                            .execute_graph_write_chain_engine_governed(
+                                &mut db, &query, &program, allowance
+                            )
+                            .is_err()
+                    );
+                    transaction.abort();
+                }
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+                assert!(db.edges().unwrap().is_empty());
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let forbidden =
+            csv_chain("UNWIND $rows AS row MERGE (a:Hidden {p:row.p}) MERGE (b:Visible {p:row.q})");
+        let mut no_work = policy(10);
+        no_work.query.evaluator.max_work_units = 0;
+        let error = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &forbidden,
+                no_work,
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            authorization(&error),
+            Some(Error::ScopeDenied),
+            "authorization must precede input copying: {error:?}"
+        );
+        assert!(db.vertices().unwrap().is_empty());
+    });
+}
+
 #[test]
 fn write_only_private_rows_create_multiple_relations_in_one_reopenable_commit() {
     lab(0xc4a1_2001, |contexts| async move {

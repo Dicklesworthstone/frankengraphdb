@@ -81,7 +81,7 @@ impl PreparedGraphSet {
             // admit_source_rows canonically sorts every completed CALL result.
             // This sequence proof does not admit a procedure derivative.
             SetNode::ProcedureCall(_) => Some((&[], None)),
-            SetNode::Owned => None,
+            SetNode::Owned { .. } => None,
             SetNode::Join { left, right, spec } => {
                 use crate::row_join::RowJoinKind;
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);

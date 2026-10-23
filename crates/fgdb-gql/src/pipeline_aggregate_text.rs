@@ -295,6 +295,7 @@ impl PreparedGraphPipelineAggregateText {
             for stage in stages {
                 operators.push(match stage {
                     ReadStageTemplate::Aggregate { .. } => "Aggregate",
+                    ReadStageTemplate::InputRows { .. } => "InputRows",
                     ReadStageTemplate::Unwind { .. } => "Unwind",
                     ReadStageTemplate::Call { .. } => "ProcedureCall",
                     ReadStageTemplate::Project { .. } => "ProjectValues",

@@ -3466,6 +3466,12 @@ pub(super) fn bind_stages(
     for stage in stages {
         input = match stage {
             ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
+            // Only the CSV chain binder constructs this validated first
+            // stage. It retains the same one-column schema and source order
+            // as UNWIND, without making the entire relation a list value.
+            ReadStageTemplate::InputRows { name } => {
+                PreparedGraphSet::ordered_owned(vec![name.clone()], vec![GraphSetColumnType::Any])
+            }
             ReadStageTemplate::Unwind { at, name, value } => input
                 .unwind(name.clone(), bind_unwind_value(value, values)?)
                 .map_err(|kind| GraphSetTextError {

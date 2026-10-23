@@ -824,3 +824,133 @@ fn a_chained_merge_imports_as_one_chain_over_every_record() {
     );
     fixture.count(1003);
 }
+
+/// A relation is not a scalar list: two-column CSV no longer stops at
+/// 21,845 records. Duplicate records retain bag semantics while MERGE still
+/// commits only distinct vertices/edges, once for the complete source.
+#[test]
+fn chained_csv_accepts_22000_records_and_commits_one_atomic_relation() {
+    let fixture = Fixture::new();
+    let mut input = String::from("src,dst\n");
+    for row in 0..22_000 {
+        input.push_str(&format!("{},{}\n", row % 16, (row + 1) % 16));
+    }
+    fixture.file("large.csv", &input);
+    let output = success(fixture.run(
+        "import-csv",
+        &[
+            "--input",
+            "large.csv",
+            "--relation",
+            "KNOWS=1",
+            "--max-snapshot-records",
+            "10000000",
+            "--max-work-units",
+            "100000000",
+            "--max-scratch-entries",
+            "100000000",
+            "MERGE (a:Person {id:$src}) MERGE (b:Person {id:$dst}) MERGE (a)-[:KNOWS]->(b)",
+        ],
+    ));
+    assert!(
+        output.contains("\"records\":22000,\"statements\":1"),
+        "{output}"
+    );
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    fixture.count(16);
+    let edges = success(fixture.run(
+        "query",
+        &[
+            "--relation",
+            "KNOWS=1",
+            "MATCH ()-[r:KNOWS]->() RETURN count(r) AS total",
+        ],
+    ));
+    assert!(
+        edges.contains("\"type\":\"count\",\"value\":\"16\""),
+        "{edges}"
+    );
+}
+
+#[test]
+fn chained_csv_preserves_clause_order_and_original_with_prefix() {
+    let fixture = Fixture::new();
+    fixture.file("ordered.csv", "src,dst\n1,2\n2,1\n");
+    let output = success(fixture.run(
+        "import-csv",
+        &[
+            "--input",
+            "ordered.csv",
+            "--relation",
+            "KNOWS=1",
+            "WITH $src AS source, $dst AS destination \
+         MERGE (a:Person {id:source}) ON CREATE SET a.score=destination \
+         MERGE (b:Person {id:destination}) ON CREATE SET b.score=-1 \
+         MERGE (a)-[:KNOWS]->(b)",
+        ],
+    ));
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    let values = success(fixture.run(
+        "query",
+        &["MATCH (n:Person) RETURN n.id AS id, n.score AS score ORDER BY id"],
+    ));
+    let rows: Vec<_> = values
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect();
+    assert_eq!(rows.len(), 2, "{values}");
+    assert!(
+        rows[0].contains(
+            "\"cells\":[{\"type\":\"int\",\"value\":\"1\"},{\"type\":\"int\",\"value\":\"2\"}]"
+        ),
+        "{values}"
+    );
+    assert!(
+        rows[1].contains(
+            "\"cells\":[{\"type\":\"int\",\"value\":\"2\"},{\"type\":\"int\",\"value\":\"1\"}]"
+        ),
+        "{values}"
+    );
+}
+
+#[test]
+fn chained_csv_late_decode_and_execution_refusals_publish_nothing() {
+    let fixture = Fixture::new();
+    fixture.file("late.csv", "src,dst\n1,2\n3,4\n5,invalid\n");
+    fixture.file("valid.csv", "src,dst\n1,2\n3,4\n5,6\n");
+    let statement = "MERGE (a:Person {id:$src}) MERGE (b:Person {id:$dst}) MERGE (a)-[:KNOWS]->(b)";
+    refusal(
+        &fixture.run(
+            "import-csv",
+            &["--input", "late.csv", "--relation", "KNOWS=1", statement],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(0);
+    // The first MERGE can create three vertices; the second exceeds the same
+    // cumulative limit. No earlier clause or accepted source prefix commits.
+    refusal(
+        &fixture.run(
+            "import-csv",
+            &[
+                "--input",
+                "valid.csv",
+                "--relation",
+                "KNOWS=1",
+                "--max-changes",
+                "4",
+                statement,
+            ],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(0);
+    let output = success(fixture.run(
+        "import-csv",
+        &["--input", "valid.csv", "--relation", "KNOWS=1", statement],
+    ));
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    fixture.count(6);
+}

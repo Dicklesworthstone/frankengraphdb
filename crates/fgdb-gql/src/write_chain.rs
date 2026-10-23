@@ -363,6 +363,11 @@ impl GraphWriteChainStep {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphWriteChain {
     pub(crate) steps: Vec<GraphWriteChainStep>,
+    /// A separately admitted input relation, never one scalar list argument.
+    /// Only the native CSV binder constructs it after accepting the complete
+    /// source. Hosts copy it under their cumulative execution allowance after
+    /// whole-statement authorization and before the first write.
+    pub(crate) initial_rows: Option<std::sync::Arc<[crate::algebra::GraphValueRow]>>,
 }
 
 impl core::fmt::Debug for PreparedGraphWriteChain {
@@ -374,6 +379,74 @@ impl core::fmt::Debug for PreparedGraphWriteChain {
 }
 
 impl PreparedGraphWriteChain {
+    /// Admit and copy this statement's initial row relation before execution.
+    /// Rows are private inputs, so they spend work and scratch, not result-row
+    /// allowance. Every nested value and payload is charged before copying.
+    /// A host must call this only after its ordinary whole-chain preflight and
+    /// add the returned evaluator counters to the chain's cumulative meter.
+    pub fn initial_rows_governed<E, C>(
+        &self,
+        policy: crate::GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        Option<crate::GqlQueryExecution<crate::algebra::GraphValueRow>>,
+        crate::GqlQueryError<E, C>,
+    > {
+        use crate::{GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded};
+        let Some(input) = &self.initial_rows else {
+            return Ok(None);
+        };
+        let mut evaluator = GlaExecutionStats::default();
+        let mut charge = |event| {
+            checkpoint().map_err(crate::GqlQueryError::Interrupted)?;
+            let work = u128::from(evaluator.work_units) + 1;
+            let scratch = u128::from(evaluator.scratch_entries)
+                + u128::from(event == GlaExecutionEvent::ScratchEntry);
+            for (observed, limit, dimension) in [
+                (
+                    work,
+                    policy.evaluator.max_work_units,
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    scratch,
+                    policy.evaluator.max_scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                if observed > u128::from(limit) {
+                    return Err(crate::GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension,
+                        limit,
+                        observed,
+                    }));
+                }
+            }
+            evaluator.work_units = work as u64;
+            evaluator.scratch_entries = scratch as u64;
+            Ok(())
+        };
+        let mut rows = Vec::new();
+        for row in input.iter() {
+            charge(GlaExecutionEvent::ScratchEntry)?;
+            let mut values = Vec::new();
+            for value in row.values() {
+                charge(GlaExecutionEvent::ScratchEntry)?;
+                values.push(value.copy_with_control(&mut charge)?);
+            }
+            rows.push(crate::algebra::GraphValueRow::from_owned_values(values));
+        }
+        checkpoint().map_err(crate::GqlQueryError::Interrupted)?;
+        Ok(Some(crate::GqlQueryExecution {
+            value: rows,
+            rows: crate::GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: 0,
+            },
+            evaluator,
+        }))
+    }
+
     #[must_use]
     pub fn steps(&self) -> &[GraphWriteChainStep] {
         &self.steps

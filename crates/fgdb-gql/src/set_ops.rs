@@ -391,7 +391,9 @@ enum SetNode {
     /// A write's RETURN head, owned and already charged by the write, under
     /// its WITH tail (`SET ... WITH n WHERE ... RETURN`). The executing host
     /// supplies the rows through `GraphSetSource::owned`; no read builds one.
-    Owned,
+    Owned {
+        preserve_order: bool,
+    },
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
@@ -479,7 +481,9 @@ impl PreparedGraphSet {
     /// executing write supplies the rows (`GraphSetSource::owned`).
     pub(crate) fn owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
         Self {
-            node: SetNode::Owned,
+            node: SetNode::Owned {
+                preserve_order: false,
+            },
             columns,
             types,
             operands: 0,
@@ -488,6 +492,15 @@ impl PreparedGraphSet {
             offset: 0,
             count: None,
         }
+    }
+
+    /// External row inputs retain source occurrence order, like UNWIND.
+    pub(crate) fn ordered_owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
+        let mut input = Self::owned(columns, types);
+        input.node = SetNode::Owned {
+            preserve_order: true,
+        };
+        input
     }
 
     /// A zero-column, one-row relation with no graph source admission.
@@ -708,9 +721,8 @@ impl PreparedGraphSet {
             // Procedure rows are canonically sorted on arrival, like a pattern,
             // unless the procedure itself defines a ranked output order (`hybrid.*`).
             SetNode::ProcedureCall(call) => call.preserves_row_order(),
-            SetNode::Pattern(_) | SetNode::Owned | SetNode::Aggregate(_) | SetNode::Join { .. } => {
-                false
-            }
+            SetNode::Owned { preserve_order } => *preserve_order,
+            SetNode::Pattern(_) | SetNode::Aggregate(_) | SetNode::Join { .. } => false,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
@@ -871,7 +883,15 @@ impl PreparedGraphSet {
                 bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
-            SetNode::Owned => bytes.push(11),
+            SetNode::Owned {
+                preserve_order: false,
+            } => bytes.push(11),
+            SetNode::Owned {
+                preserve_order: true,
+            } => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:set:ordered-owned:v1\0");
+            }
             SetNode::ProcedureCall(call) => {
                 bytes.push(10);
                 call.append_transcript(bytes);
@@ -1176,7 +1196,7 @@ impl PreparedGraphSet {
     pub fn reads_graph(&self) -> bool {
         match &self.node {
             SetNode::Pattern(_) | SetNode::ProcedureCall(_) => true,
-            SetNode::Values | SetNode::Owned => false,
+            SetNode::Values | SetNode::Owned { .. } => false,
             SetNode::Aggregate(summary) => summary.input().reads_graph(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)
@@ -1193,7 +1213,7 @@ impl PreparedGraphSet {
     pub fn calls_procedure(&self) -> bool {
         match &self.node {
             SetNode::ProcedureCall(_) => true,
-            SetNode::Pattern(_) | SetNode::Values | SetNode::Owned => false,
+            SetNode::Pattern(_) | SetNode::Values | SetNode::Owned { .. } => false,
             SetNode::Aggregate(summary) => summary.input().calls_procedure(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)

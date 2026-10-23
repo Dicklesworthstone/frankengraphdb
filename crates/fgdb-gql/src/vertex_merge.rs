@@ -593,10 +593,19 @@ impl PreparedGraphVertexMergeRows {
                 }
                 rows
             }
-            (GraphVertexMergeRowsInput::Relation(relation), None) => {
-                return relation
-                    .execute_governed(policy, patterns, checkpoint)
-                    .map_err(|error| error.map_source(GraphVertexMergeError::InputRelation));
+            (GraphVertexMergeRowsInput::Relation(relation), rows) => {
+                let mut patterns = patterns;
+                let mut source = crate::set_ops::WithOwnedRows {
+                    source: &mut patterns,
+                    rows,
+                };
+                let result = relation
+                    .execute_with_source(policy, &mut source, checkpoint)
+                    .map_err(|error| error.map_source(GraphVertexMergeError::InputRelation))?;
+                if source.rows.is_some() {
+                    return Err(schema(0, 0));
+                }
+                return Ok(result);
             }
             (input, _) => {
                 return Err(schema(

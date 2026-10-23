@@ -623,6 +623,12 @@ impl ReadStageTemplate {
                 bytes.extend_from_slice(name.as_bytes());
                 value.append_template_transcript(bytes);
             }
+            Self::InputRows { name } => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:gql:initial-rows:v1\0");
+                bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+            }
             Self::Call {
                 namespace,
                 name,
@@ -884,6 +890,11 @@ pub(crate) enum ReadStageTemplate {
         at: usize,
         name: String,
         value: ReadValueTemplate,
+    },
+    /// A typed external input relation, installed only after validating the
+    /// leading UNWIND source. Each input row has one canonical map cell.
+    InputRows {
+        name: String,
     },
     Project {
         at: usize,

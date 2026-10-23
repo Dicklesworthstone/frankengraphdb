@@ -277,7 +277,13 @@ impl WriteTxn {
                 created_vertices: 0,
                 created_edges: 0,
             };
-            let mut rows = None;
+            let mut rows = match chain.initial_rows_governed(policy.query, || cx.checkpoint())? {
+                Some(input) => {
+                    used.evaluator = input.evaluator;
+                    Some(input.value)
+                }
+                None => None,
+            };
             let mut result = None;
             let mut mutation_effects = 0;
             let mut receipts = Vec::with_capacity(chain.steps().len());
@@ -1061,6 +1067,20 @@ fn graph_insert_batches<A>(
     retain_identities: bool,
 ) -> Result<InsertBatches, TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>> {
     use fgdb_gql::GqlQueryError;
+    graph_insert_batches_with_control(relation, proposal, retain_identities, || {
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)
+    })
+}
+
+// Authorized and native hosts must prepare the same birth order. The caller's
+// live control admits every moved intent and the final grouping allocation;
+// authorization of each original row still belongs to its staging owner.
+fn graph_insert_batches_with_control<E>(
+    relation: RelationId,
+    proposal: fgdb_gql::insertion::GraphInsertBatch,
+    retain_identities: bool,
+    mut checkpoint: impl FnMut() -> Result<(), E>,
+) -> Result<InsertBatches, E> {
     use fgdb_gql::insertion::GraphInsertIntent;
     let stats = proposal.stats();
     // Preserve the preexisting stats-only physical path: identity result
@@ -1072,7 +1092,7 @@ fn graph_insert_batches<A>(
     let mut batch = WriteBatch::new(relation);
     let mut groups = std::collections::BTreeMap::new();
     for intent in proposal.into_intents() {
-        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        checkpoint()?;
         match intent {
             GraphInsertIntent::Vertex {
                 vertex,
@@ -1101,7 +1121,7 @@ fn graph_insert_batches<A>(
             }
         }
     }
-    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+    checkpoint()?;
     let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
     if !batch.is_empty() {
         batches.push(batch);

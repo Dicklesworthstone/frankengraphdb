@@ -527,7 +527,19 @@ impl<V: Vfs + Clone> Database<V> {
                     created_vertices: 0,
                     created_edges: 0,
                 };
-                let mut rows = None;
+                // The complete definition was authorized above. Input
+                // materialization now spends both the query's cumulative
+                // allowance and the live signed work meter before copying.
+                let mut rows = match chain.initial_rows_governed(policy.query, || {
+                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    execution.checkpoint()
+                })? {
+                    Some(input) => {
+                        used.evaluator = input.evaluator;
+                        Some(input.value)
+                    }
+                    None => None,
+                };
                 let mut result = None;
                 let mut mutation_effects = 0;
                 let last = chain.steps().len().saturating_sub(1);

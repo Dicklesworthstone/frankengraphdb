@@ -477,50 +477,30 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphInsertStats, Vec<VId>, Vec<EId>), Fault> {
     let stats = proposal.stats();
-    let mut vertices = Vec::new();
-    let mut edges = Vec::new();
-    for intent in proposal.into_intents() {
-        query_cx
-            .checkpoint()
-            .map_err(WriteTxnError::Interrupted)
-            .map_err(source)?;
-        execution.checkpoint().map_err(source)?;
-        // Receipt admission precedes both its allocation and native
-        // publication. The stats-only path allocates no ID vectors.
-        if returning {
-            execution
-                .permit
-                .charge_rows_at((execution.clock)(), 1)
-                .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-        }
-        let batch = match intent {
-            GraphInsertIntent::Vertex {
-                vertex,
-                labels,
-                properties,
-            } => {
-                if returning {
-                    vertices.push(vertex);
-                }
-                let mut batch = WriteBatch::new(insertion.relation());
-                batch.create_vertex_values(vertex, labels, properties);
-                batch
-            }
-            GraphInsertIntent::Edge {
-                edge,
-                relation,
-                source,
-                destination,
-                properties,
-            } => {
-                if returning {
-                    edges.push(edge);
-                }
-                let mut batch = WriteBatch::new(relation);
-                batch.add_edge_values(edge, source, destination, properties);
-                batch
-            }
-        };
+    // Reserve the complete identity receipt before allocating its vectors.
+    // The stats-only path retains no IDs; either path stages the same native
+    // order: vertices first, then each relation's edges in declaration order.
+    if returning {
+        let count = stats
+            .created_vertices
+            .checked_add(stats.created_edges)
+            .ok_or_else(|| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), count)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+    }
+    let (stats, batches, vertices, edges) = crate::write_txn::graph_insert_batches_with_control(
+        insertion.relation(),
+        proposal,
+        returning,
+        || {
+            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.checkpoint()
+        },
+    )
+    .map_err(source)?;
+    for batch in batches {
         super::chain::stage_batch(
             transaction,
             database,
