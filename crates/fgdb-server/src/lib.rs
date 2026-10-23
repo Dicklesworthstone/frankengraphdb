@@ -340,6 +340,20 @@ impl core::error::Error for MaintenanceError {
 /// engine erases its commit boundary futures).
 type ConnectionFuture<T> = core::pin::Pin<Box<dyn core::future::Future<Output = T> + Send>>;
 
+// Keep the existing connection box behind a named, nongeneric constructor.
+// Downstream serving futures then use its declared Send return type instead
+// of re-proving the private connection stack's coercion inside a closure.
+fn fgp_connection(
+    server: Arc<Server>,
+    child: Cx,
+    stream: Box<dyn DuplexIo>,
+    _local: Option<std::net::SocketAddr>,
+) -> ConnectionFuture<()> {
+    Box::pin(async move {
+        connection::run(&child, &server, stream).await;
+    })
+}
+
 /// A capability token from its hex text, decoded but not yet verified.
 pub(crate) fn capability_from_hex(hex: &str) -> Option<CapabilityToken> {
     let hex = hex.trim();
@@ -604,43 +618,26 @@ impl Server {
 
     /// Accept and serve FGP connections until the drain signal fires or `cx`
     /// is cancelled, then wait for every connection task to finish.
-    /// The returned future's `Send` contract is checked here, so downstream
-    /// hosts do not need to expand the private connection future types.
-    pub fn serve(
-        self: Arc<Self>,
-        cx: &Cx,
-        listener: TcpListener,
-    ) -> impl core::future::Future<Output = Result<(), ServerError>> + Send + '_ {
-        async move {
-            let connections = self
-                .accept(
-                    cx,
-                    &listener,
-                    tls::Protocol::Fgp,
-                    |server, child, stream, _local| {
-                        Box::pin(async move {
-                            connection::run(&child, &server, stream).await;
-                        })
-                    },
-                )
-                .await;
-            // Admission is closed. Every connection drains at its next receive
-            // point (an admitted statement finishes first), so this join is
-            // bounded by in-flight statements, never by an idle client.
-            self.shutdown.trigger();
-            let connections = match connections {
-                Ok(connections) => connections,
-                Err(error) => {
-                    self.join_database_workers(cx).await;
-                    return Err(error);
-                }
-            };
-            for mut handle in connections {
-                let _ = handle.join(cx).await;
+    pub async fn serve(self: Arc<Self>, cx: &Cx, listener: TcpListener) -> Result<(), ServerError> {
+        let connections = self
+            .accept(cx, &listener, tls::Protocol::Fgp, fgp_connection)
+            .await;
+        // Admission is closed. Every connection drains at its next receive
+        // point (an admitted statement finishes first), so this join is
+        // bounded by in-flight statements, never by an idle client.
+        self.shutdown.trigger();
+        let connections = match connections {
+            Ok(connections) => connections,
+            Err(error) => {
+                self.join_database_workers(cx).await;
+                return Err(error);
             }
-            self.join_database_workers(cx).await;
-            Ok(())
+        };
+        for mut handle in connections {
+            let _ = handle.join(cx).await;
         }
+        self.join_database_workers(cx).await;
+        Ok(())
     }
 
     /// Serve the Bolt-compat adapter (`BoltCompatProfileV1`, see the `bolt`

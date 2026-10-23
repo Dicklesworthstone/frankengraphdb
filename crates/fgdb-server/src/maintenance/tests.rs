@@ -4,7 +4,7 @@ use super::*;
 use crate::recovery::tests::{WakeCounter, served, vertex};
 use crate::{DatabaseStatus, ServerLimits};
 use asupersync::Budget;
-use asupersync::lab::{LabConfig, run_async_under_lab_with_config};
+use asupersync::lab::{LabConfig, LabRunReport, LabRuntime, lab_test_config_from_env};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::CancelKind;
@@ -12,6 +12,49 @@ use fgdb_types::{CommitSeq, PurposeContexts, VId};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
+
+/// The plain async lab helper does not drive virtual deadlines. Use the
+/// foundation's auto-advance runner, retaining root completion, all oracles,
+/// replay overrides, the original step budget and automatic failure artifacts.
+#[cfg(test)]
+fn run_with_elapsed_time<F, Fut>(seed: u64, task: F) -> ((), LabRunReport)
+where
+    F: FnOnce(Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let config = lab_test_config_from_env(LabConfig::new(seed).with_auto_advance());
+    let seed = config.seed;
+    let mut lab = LabRuntime::new(config);
+    let region = lab.state.create_root_region(Budget::INFINITE);
+    let (task_id, mut handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            let root = Cx::current().expect("the lab installs the task context");
+            task(root).await;
+        })
+        .unwrap();
+    lab.scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    let elapsed = lab.run_with_auto_advance();
+    let report = lab.report();
+    let completion = handle.try_join();
+    if !matches!(&completion, Ok(Some(())))
+        || !report.lab_test_passed()
+        || elapsed.auto_advances == 0
+    {
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("timed-maintenance")
+            .to_owned();
+        let failure = format!(
+            "seed {seed}: completion={completion:?}, elapsed={elapsed:?}, report={report:?}"
+        );
+        let artifact = lab.write_auto_crashpack_for_panic(&name, &report, &failure);
+        panic!("{failure}; crashpack={artifact:?}");
+    }
+    ((), report)
+}
 
 #[test]
 fn intervals_and_absolute_deadlines_refuse_zero_and_overflow() {
@@ -107,8 +150,7 @@ fn idle_wait_is_woken_by_drain_or_direct_context_cancellation() {
 #[test]
 fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
     // The intervals need modeled elapsed time, with the original step budget.
-    let config = LabConfig::new(0x79a0_0020).with_auto_advance();
-    let ((), report) = run_async_under_lab_with_config(config, |root| async move {
+    let ((), report) = run_with_elapsed_time(0x79a0_0020, |root| async move {
         let (server, token, path) = served(&root, "periodic-maintenance").await;
         let database = &server.databases["test"];
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -208,8 +250,7 @@ fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
 
 #[test]
 fn drain_finishes_an_admitted_operation_and_starts_no_second_operation() {
-    let config = LabConfig::new(0x79a0_0021).with_auto_advance();
-    let ((), report) = run_async_under_lab_with_config(config, |root| async move {
+    let ((), report) = run_with_elapsed_time(0x79a0_0021, |root| async move {
         let (server, _, _) = served(&root, "periodic-maintenance-drain").await;
         let database = &server.databases["test"];
         let held = database.db.write(&root).await.unwrap();
