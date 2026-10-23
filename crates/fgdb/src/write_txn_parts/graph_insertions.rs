@@ -189,7 +189,8 @@ impl WriteTxn {
             created_vertices: 0,
             created_edges: 0,
         };
-        let mutation = |error| GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error));
+        let mutation =
+            |error| GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error));
         self.ensure_database(database).map_err(source)?;
         let live = database
             .frontier()
@@ -637,8 +638,10 @@ impl WriteTxn {
                     // (fgdb-cpny9): its proposal is complete before anything
                     // is staged, as for `MATCH ... WITH ... SET`.
                     GraphWriteChainStep::Mutation(step) => {
-                        let policy =
-                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let policy = GraphMutationPolicy::new(
+                            allowance.query,
+                            allowance.max_mutation_effects,
+                        );
                         let proposal = step
                             .execute_governed_over(
                                 rows.take(),
@@ -666,8 +669,10 @@ impl WriteTxn {
                         (stats, unreturned(&stats))
                     }
                     GraphWriteChainStep::MutationQuery(query) => {
-                        let policy =
-                            GraphMutationPolicy::new(allowance.query, allowance.max_mutation_effects);
+                        let policy = GraphMutationPolicy::new(
+                            allowance.query,
+                            allowance.max_mutation_effects,
+                        );
                         let proposal = query
                             .execute_governed_over(
                                 rows.take(),
