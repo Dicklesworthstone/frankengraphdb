@@ -438,3 +438,29 @@ fn created_vertex_labels_are_the_create_labels_in_identity_order() {
         prepare(statement, Labels("Baz")).canonical_bytes()
     );
 }
+
+/// openCypher: a property map may read a vertex an earlier pattern of the
+/// same CREATE made (`CREATE (a {id: 0}), ({num: a.id})`, the fixture of TCK
+/// WithSkipLimit1 [1]): that vertex's value for the key, or NULL when its map
+/// does not set it. A vertex made later is not yet in scope.
+#[test]
+fn a_create_map_reads_a_sibling_vertex_made_before_it() {
+    let batch = create(
+        &prepare(
+            "CREATE (a {p: 7}), (b {p: a.p, q: a.q})-[r:R {p: a.p}]->(a) \
+             RETURN b.p AS p, b.q AS q, r.p AS weight",
+            Catalog(Some("p")),
+        ),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(rows(&batch), vec![vec![int(7), null(), int(7)]]);
+    assert!(
+        PreparedGraphInsertQueryText::prepare(
+            "CREATE (b {p: a.p}), (a {p: 7}) RETURN b",
+            R,
+            Catalog(Some("p")),
+        )
+        .is_err()
+    );
+}

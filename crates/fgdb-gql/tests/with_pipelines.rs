@@ -2045,3 +2045,31 @@ fn an_aggregating_with_combines_aggregate_results_like_a_second_stage() {
         .is_err()
     );
 }
+
+/// openCypher: an ORDER BY right after a plain WITH's items may name a
+/// binding that WITH drops (TCK WithOrderBy4 [8]). It ranks the rows, then it
+/// is gone; under DISTINCT only the projected names rank.
+#[test]
+fn a_with_order_by_may_rank_by_a_binding_it_drops() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap()
+            .value
+    };
+    // score is -p, so its two lowest keep p = 3 and p = 2.
+    let kept = rows(
+        "MATCH (n) WITH n, 0 - n.p AS score WITH n.p AS p ORDER BY score LIMIT 2 \
+         RETURN p ORDER BY p",
+    );
+    assert_eq!(ints(&kept, 0), [Some(2), Some(3)]);
+    for text in [
+        "MATCH (n) WITH n, n.p AS score WITH n.p AS p ORDER BY score RETURN score",
+        "MATCH (n) WITH n, n.p AS score WITH DISTINCT n.p AS p ORDER BY score RETURN p",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

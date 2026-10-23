@@ -1165,6 +1165,15 @@ impl<'a> Parser<'a> {
             if let Some(carried) = carried {
                 self.carry_boundary_reads(carried, &schema, &mut projection, &mut next_schema);
             }
+            // An ORDER BY right after the items that names a binding this
+            // WITH dropped reads the incoming row, as RETURN's does: a private
+            // sort key, removed after ranking (TCK WithOrderBy4 [8]). Every
+            // other ORDER BY keeps reading the WITH's own row below.
+            let page = if self.order_reads_dropped_column(&schema, &next_schema)? {
+                self.return_expression_page(&schema, &mut projection, distinct)?
+            } else {
+                None
+            };
             append_stage(
                 &mut stages,
                 ReadStageTemplate::Project {
@@ -1174,9 +1183,57 @@ impl<'a> Parser<'a> {
                 },
                 &mut depth,
             )?;
+            if let Some(page) = page {
+                append_stage(&mut stages, page, &mut depth)?;
+            }
             schema = next_schema;
         }
         Ok((stages, schema, depth))
+    }
+
+    /// Whether an ORDER BY starts here and names, bare, a column of `input`
+    /// that `output` does not carry. Lookahead only, to the end of the page.
+    fn order_reads_dropped_column(
+        &self,
+        input: &[(Name<'a>, GraphSetColumnType)],
+        output: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("ORDER") {
+            return Ok(false);
+        }
+        let visible = self.visible_width(input);
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0
+                        && [
+                            "WHERE", "WITH", "RETURN", "UNWIND", "MATCH", "OPTIONAL", "UNION",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end)) =>
+                {
+                    return Ok(false);
+                }
+                TokenKind::Word(word)
+                    if !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(' | b'.'))
+                        && !self.elements.contains(&word)
+                        && input[..visible].iter().any(|(name, _)| name.text == word)
+                        && !output.iter().any(|(name, _)| name.text == word) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
     }
 
     /// A RETURN (`returning`) names an unaliased computed value by its
