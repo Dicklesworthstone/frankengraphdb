@@ -849,7 +849,7 @@ mod write_return_tests {
     use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
     use std::sync::Arc;
     // Atomics, not Cell: the counters live inside lab futures, which must be Send.
-    use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const R: RelationId = RelationId(1);
     const P: PropertyKeyId = PropertyKeyId(1);
@@ -1101,12 +1101,17 @@ mod write_return_tests {
             let txcx = contexts.txn();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
-            for text in [
-                "CREATE (n:Copy) RETURN n; CREATE (m)",
-                "CREATE (n:Copy); CREATE (m) RETURN m",
-                "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
+            for (text, chain) in [
+                ("CREATE (n:Copy) RETURN n; CREATE (m)", false),
+                ("CREATE (n:Copy); CREATE (m) RETURN m", false),
+                // CREATE ... SET ... RETURN is a chain step since 29157210
+                // (fgdb-cpny9); the chain parser refuses a write after it.
+                (
+                    "MATCH (n) CREATE (copy:Copy) SET copy.p=1 CREATE (x) RETURN copy",
+                    true,
+                ),
             ] {
-                let calls = AtomicI32::new(0);
+                let looked_up = std::sync::Mutex::new(Vec::new());
                 let result = db
                     .query_write(
                         &txcx,
@@ -1115,7 +1120,7 @@ mod write_return_tests {
                         text,
                         &GqlParameters::new(),
                         |kind, name: &str| {
-                            calls.fetch_add(1, Ordering::Relaxed);
+                            looked_up.lock().unwrap().push(name.to_owned());
                             symbols(kind, name)
                         },
                         R,
@@ -1123,12 +1128,32 @@ mod write_return_tests {
                         |_| -> Result<ElementId, ()> { panic!("refused text cannot allocate") },
                     )
                     .await;
-                assert!(matches!(result, Err(QueryWriteError::InsertText(_))));
-                assert_eq!(
-                    calls.load(Ordering::Relaxed),
-                    0,
-                    "refusal precedes catalog calls: {text}"
-                );
+                let looked_up = looked_up.into_inner().unwrap();
+                if chain {
+                    assert!(
+                        matches!(result, Err(QueryWriteError::ChainText(_))),
+                        "{text}"
+                    );
+                    // A chain prepares step by step, so the label and the
+                    // SET's property key are looked up before the CREATE
+                    // after the SET is refused (measured: `Copy`, then `p`).
+                    // A lookup is a pure catalog read; nothing is written.
+                    assert_eq!(
+                        looked_up,
+                        ["Copy", "p"],
+                        "lookups that precede the refusal: {text}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(QueryWriteError::InsertText(_))),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        looked_up,
+                        Vec::<String>::new(),
+                        "refusal precedes catalog calls: {text}"
+                    );
+                }
                 assert_eq!(db.frontier().unwrap(), before);
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
