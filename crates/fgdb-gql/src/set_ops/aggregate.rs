@@ -285,6 +285,69 @@ impl PreparedGraphSetAggregate {
         self.summary
             .execute_relational_with_source(policy, source, checkpoint)
     }
+
+    /// Execute a terminal aggregate with identity-seeded pattern admission.
+    /// This is the same source capability as
+    /// [`PreparedGraphSet::execute_governed_with_seeded_elements`]: a necessary
+    /// equality to the complete leading bag restricts the right pattern's
+    /// roots, while the original join and aggregate still evaluate every row.
+    /// The host must re-read the seeds at the same pinned cut and authority;
+    /// returning `None` declines a shape before performing source work.
+    ///
+    /// Folded counts, ordered collections and materialized groups all forward
+    /// this source through their existing engines. Source visits, seed copies,
+    /// matching and grouping spend one cumulative allowance. Empty input and
+    /// LIMIT 0 retain source failures and cancellation; only final group rows
+    /// consume the result-row allowance.
+    pub fn execute_governed_with_seeded_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            &[fgdb_types::VId],
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
+        let source = WithSeededPatterns {
+            source: WithElementReads {
+                source: WithProcedures {
+                    patterns,
+                    procedures,
+                },
+                elements,
+            },
+            seeded,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
 }
 
 impl PreparedGraphSet {

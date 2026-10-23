@@ -689,6 +689,196 @@ fn identity_seeded_call_root_expands_only_from_the_returned_vertices() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn unseeded_aggregate(
+    db: &Database<MemVfs>,
+    cx: &QueryCx,
+    query: &fgdb_gql::PreparedGraphSetAggregate,
+    as_of: CommitSeq,
+    allowance: GqlQueryPolicy,
+) -> Result<
+    GqlQueryExecution<fgdb_gql::GraphAggregateRow>,
+    GqlQueryError<fgdb_gql::GraphAggregateError<GqlError>, Cancel>,
+> {
+    // Keep the actual incumbent host live in this invocation: the same CALL,
+    // index, snapshot and aggregate, with the ordinary full pattern reader.
+    cx.with_restriction(|| {
+        query.execute_governed_with_elements(
+            allowance,
+            |pattern, remaining| {
+                db.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining)
+            },
+            |call, arguments, remaining| {
+                assert!(crate::query::is_hybrid(call));
+                crate::query::hybrid_procedure_with_registry(
+                    &db.snapshot,
+                    Some(db.maintained_beacon.query_indexes()),
+                    as_of,
+                    call,
+                    arguments,
+                    remaining,
+                    cx,
+                )
+            },
+            |element, key| crate::gql_exec::element_property_at(db, element, key, as_of),
+            || cx.checkpoint(),
+        )
+    })
+}
+
+#[test]
+fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_rescan() {
+    let ((), report) = run_async_under_lab(0xbeac_2ad1, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+                .await
+                .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..64_i64 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![LabelId(1)],
+                vec![
+                    (
+                        TEXT,
+                        CanonicalScalar::ucs_basic_text(if matches!(id, 5 | 17 | 40) {
+                            "needle background"
+                        } else {
+                            "background"
+                        })
+                        .unwrap(),
+                    ),
+                    (X, CanonicalScalar::Int(id * 10)),
+                ],
+            );
+        }
+        db.write(&c.commit(), batch).await.unwrap();
+        db.register_beacon_index(
+            &c.query(),
+            &Options::text(TEXT),
+            fgdb_beacon::read::ReadPolicy::default(),
+        )
+        .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let parameters = GqlParameters::new();
+        let prefix = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            candidates => 3, k => 3) YIELD node ";
+        for suffix in [
+            "MATCH (node) RETURN COUNT(*) AS n",
+            "RETURN COUNT(node.x) AS n",
+            "RETURN SUM(node.x) AS total, COLLECT(node.x) AS xs",
+            "UNWIND [1, 1] AS duplicate RETURN COUNT(node.x) AS n, COLLECT(node.x) AS xs",
+            "WITH node.x AS x WHERE x > 50 RETURN COUNT(*) AS n, COLLECT(x) AS xs",
+            "WITH node.x AS x ORDER BY x DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS n, SUM(x) AS total",
+            "RETURN node.x AS x, COUNT(*) AS n ORDER BY x",
+            "RETURN COUNT(node.x) AS n LIMIT 0",
+        ] {
+            let statement = format!("{prefix}{suffix}");
+            let crate::PreparedNativeRead::PipelineAggregate(prepared) =
+                crate::PreparedNativeRead::prepare(&statement, &parameters, symbols).unwrap()
+            else {
+                panic!("CALL aggregate must retain its relational input: {statement}");
+            };
+            let bound = prepared.bind_relation_parameters(&parameters).unwrap();
+            let incumbent = unseeded_aggregate(&db, &c.query(), &bound, basis, policy()).unwrap();
+            let actual = db
+                .execute_graph_set_aggregate_governed(&c.query(), &bound, policy())
+                .unwrap();
+            assert_eq!(actual.value, incumbent.value, "{statement}");
+            if suffix.starts_with("UNWIND") {
+                assert_eq!(actual.value[0].values()[0].as_count(), Some(6));
+            }
+            assert_eq!(actual.rows.result_rows, incumbent.rows.result_rows);
+            assert_eq!(incumbent.rows.snapshot_records, 64, "{statement}");
+            assert_eq!(actual.rows.snapshot_records, 3, "{statement}");
+            assert!(actual.evaluator.work_units < incumbent.evaluator.work_units);
+            let mut exact = policy();
+            exact.rows = fgdb_gql::GqlExecutionBudget::new(3, 100);
+            exact.evaluator = fgdb_gql::GlaExecutionLimits::new(
+                actual.evaluator.work_units,
+                actual.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                db.execute_graph_set_aggregate_governed(&c.query(), &bound, exact)
+                    .unwrap(),
+                actual,
+            );
+            assert_eq!(
+                pinned
+                    .execute_graph_set_aggregate_governed(&c.query(), &bound, exact)
+                    .unwrap(),
+                actual,
+            );
+            assert!(unseeded_aggregate(&db, &c.query(), &bound, basis, exact).is_err());
+            exact.rows = fgdb_gql::GqlExecutionBudget::new(2, 100);
+            assert!(
+                db.execute_graph_set_aggregate_governed(&c.query(), &bound, exact)
+                    .is_err(),
+                "even LIMIT 0 must admit all three source records: {statement}",
+            );
+        }
+
+        let statement = format!("{prefix}RETURN SUM(node.x) AS total");
+        let crate::PreparedNativeRead::PipelineAggregate(prepared) =
+            crate::PreparedNativeRead::prepare(&statement, &parameters, symbols).unwrap()
+        else {
+            panic!("CALL aggregate must retain its relational input");
+        };
+        let bound = prepared.bind_relation_parameters(&parameters).unwrap();
+        let before = db
+            .execute_graph_set_aggregate_governed(&c.query(), &bound, policy())
+            .unwrap();
+        assert_eq!(before.value[0].values()[0].as_integer(), Some(620));
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(5), X, Some(CanonicalScalar::Int(5_000)));
+        db.write(&c.commit(), edit).await.unwrap();
+        assert_eq!(
+            pinned
+                .execute_graph_set_aggregate_governed(&c.query(), &bound, policy())
+                .unwrap(),
+            before,
+        );
+        assert_eq!(
+            db.execute_graph_set_aggregate_governed_at(&c.query(), &bound, basis, policy())
+                .unwrap()
+                .value,
+            before.value,
+        );
+        let current = db
+            .execute_graph_set_aggregate_governed(&c.query(), &bound, policy())
+            .unwrap();
+        assert_eq!(current.value[0].values()[0].as_integer(), Some(5_570));
+        assert_eq!(
+            current.value,
+            unseeded_aggregate(&db, &c.query(), &bound, db.frontier().unwrap(), policy())
+                .unwrap()
+                .value,
+        );
+        let empty = "CALL hybrid.search(text => 'absent', text_property => 'body', \
+            candidates => 3, k => 3) YIELD node RETURN COUNT(node.x) AS n";
+        let crate::PreparedNativeRead::PipelineAggregate(prepared) =
+            crate::PreparedNativeRead::prepare(empty, &parameters, symbols).unwrap()
+        else {
+            panic!("empty CALL aggregate must retain its relational input");
+        };
+        let bound = prepared.bind_relation_parameters(&parameters).unwrap();
+        let mut no_records = policy();
+        no_records.rows = fgdb_gql::GqlExecutionBudget::new(0, 1);
+        let empty = db
+            .execute_graph_set_aggregate_governed(&c.query(), &bound, no_records)
+            .unwrap();
+        assert_eq!(empty.rows.snapshot_records, 0);
+        assert_eq!(empty.value[0].values()[0].as_count(), Some(0));
+        assert!(
+            unseeded_aggregate(&db, &c.query(), &bound, db.frontier().unwrap(), no_records)
+                .is_err()
+        );
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties() {
     let ((), report) = run_async_under_lab(0xbeac_3711, |root| async move {
