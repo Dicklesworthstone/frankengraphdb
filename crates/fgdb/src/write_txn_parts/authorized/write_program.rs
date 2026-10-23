@@ -37,6 +37,125 @@ fn preflight(error: WriteTxnError) -> Fault {
     GraphMutationProgramError::Preflight(error).into()
 }
 
+/// The compiler proves that these MERGE rows have disjoint keys or endpoint
+/// pairs and cannot observe one another's effects. Authorize each row through
+/// its ordinary native workspace, including its intermediate before/after
+/// images, then compose the original authorized intents once in input order.
+/// No growing prefix is rematched or re-prepared for every subsequent row.
+/// The native guard restores effects only: all read and absence witnesses and
+/// the one live permit survive each row, including refusals and unwinding.
+#[allow(clippy::too_many_arguments)]
+fn apply_frozen_merges<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    program: &PreparedGraphWriteProgram,
+    policy: GraphWriteProgramPolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>), Fault> {
+    debug_assert!(program.freezes_vertex_upsert_input() || program.freezes_edge_merge_input());
+    let mut batches = Vec::new();
+    let mut receipts = Vec::new();
+    let stats = {
+        let controls = RefCell::new(&mut *execution);
+        program.execute_governed(
+            policy,
+            |_, statement, remaining| {
+                let row = crate::write_txn::MutationProgramWorkspace::new(transaction);
+                let mut borrowed = controls.borrow_mut();
+                let execution = &mut **borrowed;
+                let (stats, receipt) = match statement {
+                    GraphWriteStatement::VertexMerge(merge) => {
+                        let (stats, receipt) = vertex_program::merge(
+                            row.txn,
+                            database,
+                            cx,
+                            merge,
+                            remaining.vertex_merge_policy(),
+                            scope,
+                            execution,
+                            returning,
+                        )
+                        .map_err(GraphWriteStepError::VertexMerge)?;
+                        (GraphWriteStepStats::VertexMerge(stats), receipt)
+                    }
+                    GraphWriteStatement::VertexUpsert(upsert) => vertex_program::upsert(
+                        row.txn,
+                        database,
+                        cx,
+                        upsert,
+                        remaining.vertex_upsert_policy(),
+                        scope,
+                        execution,
+                        returning,
+                    )
+                    .map_err(GraphWriteStepError::VertexUpsert)?,
+                    GraphWriteStatement::EdgeMerge(merge) => {
+                        let (stats, receipt) = edge_merge::apply_many(
+                            row.txn,
+                            database,
+                            cx,
+                            merge,
+                            remaining.edge_merge_policy(),
+                            scope,
+                            execution,
+                            returning,
+                        )
+                        .map_err(GraphWriteStepError::EdgeMerge)?;
+                        (
+                            GraphWriteStepStats::EdgeMerge(stats),
+                            returning.then_some(receipt),
+                        )
+                    }
+                    _ => unreachable!("native frozen MERGE profiles contain only MERGE rows"),
+                };
+                // Preserve original intents, not the normalized delta: final
+                // ordered preparation must keep value validation and birth
+                // ordinals identical to the ordinary sequential program.
+                batches.extend(row.txn.staged[row.staged_len..].iter().cloned());
+                drop(row);
+                if let Some(receipt) = receipt {
+                    receipts.push(receipt);
+                }
+                Ok(stats)
+            },
+            || {
+                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                controls.borrow_mut().checkpoint()
+            },
+        )?
+    };
+    // Per-row preparation was charged by stage_native. The final composition
+    // is additional real work, admitted once before native preparation. Its
+    // size depends only on authorized intents, never on hidden source records.
+    let finish = || -> Result<(), WriteTxnError> {
+        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        let work = batches
+            .iter()
+            .try_fold(0_u64, |work, batch: &crate::WriteBatch| {
+                u64::try_from(batch.rows.len())
+                    .ok()
+                    .and_then(|rows| work.checked_add(rows))
+                    .ok_or(WriteTxnError::Authorization(Error::TooLarge))
+            })?;
+        execution.work(work)?;
+        if !batches.is_empty() {
+            transaction
+                .write_ordered(database, batches)
+                .map_err(crate::write_txn::authorized::redacted)?;
+        }
+        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        execution.checkpoint()
+    };
+    finish().map_err(|source| GraphMutationProgramError::Interrupted {
+        completed_statements: stats.completed_statements,
+        source,
+    })?;
+    Ok((stats, receipts))
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Execute an atomic authorized CRUD program over the canonical native
     /// transaction overlay. Supports INSERT/CREATE, SET/REMOVE/DETACH DELETE
@@ -44,6 +163,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// A later statement observes preceding checked effects. A compiler-marked
     /// UNWIND vertex-update program freezes every row's MATCH and expressions
     /// against the entry overlay before applying its fields in input order.
+    /// Compiler-proven distinct-key vertex MERGEs and distinct-endpoint edge
+    /// MERGEs authorize each row against that same entry overlay, then prepare
+    /// their original checked intents together once in input order.
     /// Each ordinary statement also freezes its own MATCH and expressions.
     /// Every field/image and every plain-DELETE incidence proof uses the same
     /// rules as the corresponding authorized single-statement method.
@@ -303,6 +425,22 @@ impl<V: Vfs + Clone> Database<V> {
                     .with_restriction(|| {
                         if program.freezes_vertex_update_input() {
                             let (stats, frozen_receipts) = mutation::apply_frozen_program(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                program,
+                                policy,
+                                scope,
+                                execution,
+                                returning,
+                            )?;
+                            receipts = frozen_receipts;
+                            return Ok(stats);
+                        }
+                        if program.freezes_vertex_upsert_input()
+                            || program.freezes_edge_merge_input()
+                        {
+                            let (stats, frozen_receipts) = apply_frozen_merges(
                                 workspace.transaction(),
                                 self,
                                 query_cx,

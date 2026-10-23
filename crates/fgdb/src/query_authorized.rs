@@ -37,6 +37,8 @@ mod admission;
 mod analytics;
 #[path = "query_authorized/beacon.rs"]
 mod beacon;
+#[path = "query_authorized/keyed_writes.rs"]
+mod keyed_writes;
 #[path = "query_authorized/overlay.rs"]
 mod overlay;
 #[path = "query_authorized/positions.rs"]
@@ -1209,6 +1211,7 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
             pattern,
             scope,
             policy,
+            false,
             &mut || execution.borrow_mut().node(),
             &mut || execution.borrow_mut().poll(),
             WorkCheckpoint(execution),
@@ -1226,24 +1229,44 @@ fn pattern_at_controlled<Row: GlaOutput>(
     pattern: &PreparedGraphPattern<Row>,
     scope: &PlannerPredicates,
     policy: GqlQueryPolicy,
+    keyed_write: bool,
     node: &mut impl FnMut() -> Result<(), QueryError>,
     poll: &mut impl FnMut() -> Result<(), QueryError>,
     mut checkpoint: impl GovernedCheckpoint<QueryError>,
 ) -> Governed<Row> {
     let mut usage = AdmissionUsage::default();
-    let tables = Tables::admit(
-        snapshot,
-        pattern.plan(),
-        at,
-        false,
-        scope,
-        || node().map_err(GqlQueryError::Interrupted),
-        &mut || poll().map_err(GqlQueryError::Interrupted),
-        &mut |event| {
-            checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
-            usage.observe::<ReadError, QueryError>(policy, event)
-        },
-    )?;
+    let mut admit_node = || node().map_err(GqlQueryError::Interrupted);
+    let mut scan = || poll().map_err(GqlQueryError::Interrupted);
+    let mut control = |event| {
+        checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
+        usage.observe::<ReadError, QueryError>(policy, event)
+    };
+    let keyed = if keyed_write {
+        keyed_writes::admit(
+            snapshot,
+            pattern.plan(),
+            at,
+            scope,
+            &mut admit_node,
+            &mut |_| scan(),
+            &mut control,
+        )?
+    } else {
+        None
+    };
+    let tables = match keyed {
+        Some(tables) => tables,
+        None => Tables::admit(
+            snapshot,
+            pattern.plan(),
+            at,
+            false,
+            scope,
+            &mut admit_node,
+            &mut scan,
+            &mut control,
+        )?,
+    };
     execute_tables(tables, pattern, scope, policy, usage, checkpoint)
 }
 
@@ -1329,6 +1352,7 @@ impl<V: Vfs + Clone> Database<V> {
                 pattern,
                 scope,
                 policy,
+                true,
                 &mut node,
                 &mut poll,
                 &mut checkpoint,
