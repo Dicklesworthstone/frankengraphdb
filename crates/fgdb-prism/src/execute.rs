@@ -1085,15 +1085,18 @@ impl FnxCallSpec {
                     witness: output.witness,
                 }
             }
-            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                let output = crate::clustering::run(graph, &mut checkpoint)?;
-                let values = if matches!(algorithm, FnxAlgorithm::Triangles) {
-                    KernelValues::Counts(output.triangles)
-                } else {
-                    KernelValues::Scores(output.clustering)
-                };
+            FnxAlgorithm::Triangles => {
+                let (counts, witness) = crate::clustering::counts(graph, &mut checkpoint)?;
                 KernelOutput {
-                    values,
+                    values: KernelValues::Counts(counts),
+                    row_count: n,
+                    witness,
+                }
+            }
+            FnxAlgorithm::ClusteringCoefficient => {
+                let output = crate::clustering::run(graph, &mut checkpoint)?;
+                KernelOutput {
+                    values: KernelValues::Scores(output.clustering),
                     row_count: n,
                     witness: output.witness,
                 }
