@@ -121,8 +121,10 @@ impl<'a> Parser<'a> {
             {
                 locals.push(word);
             }
-            if matches!(token.kind, TokenKind::Punct(b'['))
-                && let Some(span) = self.hoist_comprehension(
+            if pipeline::hoist_candidate(
+                token.kind,
+                matches!(previous, Some(TokenKind::Punct(b'.'))),
+            ) && let Some(span) = self.hoist_comprehension(
                     &lexer,
                     token,
                     &mut outputs,

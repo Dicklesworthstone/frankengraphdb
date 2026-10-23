@@ -1836,6 +1836,11 @@ impl<'a> Parser<'a> {
     /// of a list literal, a parameter or a name. The scalar SIZE keeps a
     /// property read and every literal.
     pub(super) fn starts_let_operand(&self) -> Result<bool, GraphPatternTextError> {
+        // A pattern count is the size of a list the value reader gathers, or
+        // already gathered into a hidden column (hoist_comprehension).
+        if self.at_hoisted_comprehension() || self.starts_pattern_count()? {
+            return Ok(true);
+        }
         let mut lexer = self.lexer.clone();
         if self.is_punct(b'[') {
             return Ok(matches!(lexer.next()?.kind, TokenKind::Word(_))
@@ -2287,6 +2292,17 @@ impl<'a> Parser<'a> {
                 });
             };
             self.pattern_comprehension(inputs, schema, resolve, depth)?
+        } else if self.starts_pattern_count()? {
+            // `size((n)-->())` or `COUNT { ... }`, as a comprehension's list.
+            let Some(inputs) = inputs.as_deref_mut().filter(|_| resolve.is_none()) else {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "a pattern count over the MATCH bindings of a RETURN",
+                    ),
+                });
+            };
+            self.pattern_count(inputs)?
         } else if comprehension {
             // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
             self.advance()?;
@@ -3178,6 +3194,71 @@ impl<'a> Parser<'a> {
             return Ok(matches!(after.next()?.kind, TokenKind::Punct(b'(' | b'>')));
         }
         Ok(true)
+    }
+
+    /// Whether a pattern count starts here: `size(` and a pattern (the
+    /// openCypher pattern expression `size((n)-->())`), or `COUNT {` (a count
+    /// subquery). Only lexical lookahead: nothing is consumed.
+    pub(in crate::graph_text) fn starts_pattern_count(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if self.is_word("COUNT") {
+            return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')));
+        }
+        if !self.is_word("SIZE") || !matches!(lexer.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(false);
+        }
+        let first = lexer.next()?;
+        crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)
+    }
+
+    /// A pattern count over the MATCH bindings of a graph projection: the
+    /// pattern is a Collect scope, as an existence predicate's is
+    /// (existence_body), and the count is the size of its witness list, one
+    /// entry per witness. `COUNT { ... }` takes either form EXISTS takes.
+    fn pattern_count(
+        &mut self,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let at = self.current.at;
+        let scope = self.syntax.scopes.len();
+        if self.take_word("COUNT")? {
+            self.punct(b'{', "{")?;
+            self.scope(ScopeKind::Collect, ScopeForm::Clause)?;
+        } else {
+            self.word("SIZE")?;
+            self.punct(b'(', "(")?;
+            self.scope(ScopeKind::Collect, ScopeForm::Pattern)?;
+            self.punct(b')', ")")?;
+        }
+        // A list comprehension, quantifier or reduce local varies within the
+        // row, and the count is gathered once per row (pattern_comprehension).
+        let body = &self.syntax.scopes[scope].body;
+        if let Some(local) = (body.variables.iter())
+            .chain(&body.captures)
+            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
+            .find(|name| {
+                (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
+            })
+        {
+            return Err(GraphSetTextError {
+                offset: local.at,
+                kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                    "a pattern count that reads no enclosing comprehension local",
+                )),
+            });
+        }
+        let column = self.projection_slot(
+            inputs,
+            Projection {
+                variable: Name { text: "", at },
+                property: None,
+                path: None,
+                collect: Some(scope),
+            },
+        )?;
+        Ok(ReadValueTemplate::Size(Box::new(ReadValueTemplate::Column(
+            column,
+        ))))
     }
 
     /// The local of Collect scope `scope` that the projection after `|`

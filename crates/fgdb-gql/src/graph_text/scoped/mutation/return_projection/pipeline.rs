@@ -217,6 +217,19 @@ pub(super) struct HoistGuard<'g, 'a> {
     pub(super) refused: &'g [&'a str],
 }
 
+/// Whether a hoistable expression may start at a token (hoist_comprehension
+/// decides): `[` of a pattern comprehension, or `size`/`COUNT` of a pattern
+/// count, never a property key after `.`.
+pub(super) fn hoist_candidate(token: TokenKind<'_>, after_dot: bool) -> bool {
+    match token {
+        TokenKind::Punct(b'[') => true,
+        TokenKind::Word(word) => {
+            !after_dot && (word.eq_ignore_ascii_case("SIZE") || word.eq_ignore_ascii_case("COUNT"))
+        }
+        _ => false,
+    }
+}
+
 /// Whether the word between `previous` and `next` binds an element local:
 /// `[x IN`, `any(x IN`, `reduce(acc = 0, x IN` (also `, x IN`) or a reduce
 /// accumulator `reduce(acc =`. A pattern comprehension a graph head gathers
@@ -537,7 +550,7 @@ impl<'a> Parser<'a> {
             {
                 locals.push(word);
             }
-            if matches!(token.kind, TokenKind::Punct(b'['))
+            if hoist_candidate(token.kind, after_dot)
                 && carried.is_none()
                 && pending.is_none()
                 && !self.syntax.distinct
@@ -873,14 +886,27 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'(') => {
                     pattern_predicate_follows(token.kind, &mut lexer.clone())?
                 }
-                // A pattern comprehension's own pattern is no predicate: the
-                // boundary scan hoists it whole (hoist_comprehension).
+                // A pattern comprehension's or pattern count's own pattern is
+                // no predicate: the boundary scan hoists it whole
+                // (hoist_comprehension).
                 TokenKind::Punct(b'[') => {
                     self.lexer = lexer.clone();
                     self.current = token;
                     if self.starts_pattern_comprehension()? {
                         skip_group(&mut lexer)?;
                         previous = Some(TokenKind::Punct(b']'));
+                        token = lexer.next()?;
+                        continue;
+                    }
+                    false
+                }
+                TokenKind::Word(_) if !key => {
+                    self.lexer = lexer.clone();
+                    self.current = token;
+                    if self.starts_pattern_count()? {
+                        lexer.next()?;
+                        skip_group(&mut lexer)?;
+                        previous = Some(TokenKind::Punct(b')'));
                         token = lexer.next()?;
                         continue;
                     }
@@ -1186,18 +1212,26 @@ impl<'a> Parser<'a> {
         self.lexer = lexer.clone();
         self.current = token;
         let hoisted = (|| -> Result<Option<(usize, usize, usize)>, GraphSetTextError> {
-            if !self.starts_pattern_comprehension()? {
+            let count = !self.starts_pattern_comprehension()?;
+            if count && !self.starts_pattern_count()? {
                 return Ok(None);
             }
+            // The scan covers the whole expression: from `[` to its `]`, or
+            // from `size`/`COUNT` to the end of its group.
             let mut scan = lexer.clone();
             let mut previous = token.kind;
-            let mut depth = 1_usize;
-            while depth > 0 {
+            let mut depth = usize::from(!count);
+            loop {
                 let next = scan.next()?;
                 match next.kind {
                     TokenKind::End => break,
                     TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-                    TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
                     TokenKind::Word(word) if !matches!(previous, TokenKind::Punct(b'.' | b':')) => {
                         if guard.locals.contains(&word) {
                             return Ok(None);
@@ -1213,7 +1247,11 @@ impl<'a> Parser<'a> {
                 }
                 previous = next.kind;
             }
-            let mut template = self.pattern_comprehension(inputs, &[], &mut None, 0)?;
+            let mut template = if count {
+                self.pattern_count(inputs)?
+            } else {
+                self.pattern_comprehension(inputs, &[], &mut None, 0)?
+            };
             let columns: Vec<usize> = (0..inputs.len()).map(|input| width + input).collect();
             crate::graph_text::aggregate::remap_output_columns(&mut template, &columns);
             self.capacity(
