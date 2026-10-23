@@ -2266,9 +2266,15 @@ impl<'a> Parser<'a> {
                 self.read_value_template(operand, at)?
             }
         } else if let Some(column) = self.comprehension_read(schema.len())? {
-            // A grouping WITH's graph head already gathered this pattern
-            // comprehension into a hidden column (hoist_comprehension).
+            // A graph head already gathered this pattern comprehension into
+            // a hidden column (hoist_comprehension).
             ReadValueTemplate::Column(column)
+        } else if self.at_hoisted_comprehension()
+            && let Some(resolve) = resolve.as_mut()
+            && let Some(column) = resolve.leaf(self)?
+        {
+            // A resolved scope addresses its row through its resolver.
+            self.read_value_template(Operand::Column(column), at)?
         } else if self.starts_pattern_comprehension()? {
             // `[(n)-->(m) | m.p]` (fgdb-7nwox) reads the MATCH bindings of a
             // graph projection; a row or aggregate scope has none to correlate.

@@ -1208,3 +1208,72 @@ fn a_terminal_return_takes_percentiles_like_the_graph_facade() {
         "{failure:?}"
     );
 }
+
+/// A terminal aggregate RETURN reads a pattern comprehension (fgdb-1f8f7,
+/// TCK Pattern2 [6]). With no WITH, the RETURN reads its MATCH through an
+/// implicit `WITH *`, whose head gathers the comprehension into a hidden list
+/// column, one list per row; after a WITH, that WITH's head gathers it.
+/// Vertex 0 has two parallel edges to vertex 1, vertex 1 one edge to vertex
+/// 2, and vertex 2 none: lists of 2, 1 and 0 paths.
+#[test]
+fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(0), R, VId(1)),
+        (fgdb_types::EId(3), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let rows = |text: &str| {
+        let mut rows = query(text)
+            .execute_governed_with_identified_properties(
+                (stored.len() + edges.len()) as u64,
+                (0..3).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows.sort();
+        rows
+    };
+    let single = |text: &str| {
+        let rows = rows(text);
+        assert_eq!(rows.len(), 1, "{text}");
+        rows[0].values()[0].clone()
+    };
+    // Every row has a list, empty or not: count counts all three.
+    assert_eq!(
+        single("MATCH (n) RETURN count([p = (n)-->() | p]) AS c").as_count(),
+        Some(3)
+    );
+    assert_eq!(
+        single("MATCH (n) RETURN sum(size([p = (n)-->() | p])) AS s").as_integer(),
+        Some(3)
+    );
+    // After a WITH, with a WHERE inside the comprehension over its local.
+    assert_eq!(
+        single("MATCH (n) WITH n RETURN sum(size([(n)-->(m) WHERE m.p > 20 | m])) AS s")
+            .as_integer(),
+        Some(1)
+    );
+    // As a grouping key: degrees 2, 1 and 0, one vertex each.
+    let grouped = rows("MATCH (n) RETURN size([(n)-->() | 1]) AS d, count(*) AS c");
+    let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
+    let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
+    assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
+    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
+    for text in [
+        "MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c",
+        "MATCH (n)-->(k) WITH n AS k RETURN count([(k)-->() | 1]) AS c",
+    ] {
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

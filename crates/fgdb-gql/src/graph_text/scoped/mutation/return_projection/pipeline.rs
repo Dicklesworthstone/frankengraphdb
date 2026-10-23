@@ -497,7 +497,9 @@ impl<'a> Parser<'a> {
         // the scan is stepping over, and the element locals bound so far. A
         // DISTINCT head hoists none. Before the RETURN, a plain WITH's WHERE
         // and pages read a dropped MATCH binding as that binding (`scoped`),
-        // so only one an output shadows refuses there.
+        // so only one an output shadows refuses there; a RETURN right after
+        // the head is past that point.
+        let returning = self.is_word("RETURN");
         let mut comprehensions = Vec::new();
         let mut skip_until = 0_usize;
         let mut locals: Vec<&'a str> = Vec::new();
@@ -547,7 +549,11 @@ impl<'a> Parser<'a> {
                     HoistGuard {
                         names: &BOUNDARY_READ_NAMES,
                         locals: &locals,
-                        refused: if before_return { &shadowed } else { &uncarried },
+                        refused: if before_return && !returning {
+                            &shadowed
+                        } else {
+                            &uncarried
+                        },
                     },
                 )?
             {
@@ -1228,6 +1234,14 @@ impl<'a> Parser<'a> {
         })();
         (self.lexer, self.current) = saved;
         hoisted
+    }
+
+    /// Whether a hoisted pattern comprehension starts at the current token,
+    /// over a row of any width: a resolved scope (a WITH's WHERE) then asks
+    /// its resolver, which knows its row (comprehension_read).
+    pub(in crate::graph_text) fn at_hoisted_comprehension(&self) -> bool {
+        (self.comprehension_reads.as_ref())
+            .is_some_and(|(_, spans)| spans.iter().any(|&(start, _, _)| start == self.current.at))
     }
 
     /// Step past a hoisted expression that ends at `end`, returning its column.
