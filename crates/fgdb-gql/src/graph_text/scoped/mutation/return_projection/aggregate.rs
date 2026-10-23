@@ -165,10 +165,21 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
+                // A percentile is always combined: the value reader applies it
+                // after aggregation to a hidden collect (fgdb-qbaex).
                 TokenKind::Word(word)
                     if matches!(next.kind, TokenKind::Punct(b'('))
                         && [
-                            "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+                            "COUNT",
+                            "SUM",
+                            "SUM_INT",
+                            "AVG",
+                            "AVG_INT",
+                            "MIN",
+                            "MAX",
+                            "COLLECT",
+                            "PERCENTILEDISC",
+                            "PERCENTILECONT",
                         ]
                         .iter()
                         .any(|name| word.eq_ignore_ascii_case(name)) =>
@@ -385,6 +396,33 @@ impl PreparedGraphPipelineAggregateText {
                             return Ok(None);
                         }
                         let start = parser.current.at;
+                        // A percentile's first argument is a hidden collect,
+                        // which the value reader applies the percentile to
+                        // (fgdb-qbaex).
+                        if core::mem::take(&mut parser.percentile_leaf) {
+                            let outer = core::mem::replace(&mut parser.aggregate_argument, true);
+                            let column = inputs.read(parser, &schema);
+                            parser.aggregate_argument = outer;
+                            let column = match column {
+                                Ok(column) => column,
+                                Err(failed) => {
+                                    failure = Some(failed);
+                                    return Err(error(
+                                        start,
+                                        GraphPatternTextErrorKind::Expected(
+                                            "a percentile's collected argument",
+                                        ),
+                                    ));
+                                }
+                            };
+                            summaries.push(PipelineSummary {
+                                name: format!("__return_summary_{}", summaries.len()),
+                                function: GraphAggregateFunction::Collect,
+                                column: Some(column),
+                            });
+                            leaves.push(Leaf::Summary(summaries.len() - 1));
+                            return Ok(Some(leaves.len() - 1));
+                        }
                         let leaf = match parser.starts_pipeline_summary() {
                             Ok(true) => match parser.pipeline_summary(&schema, &mut inputs) {
                                 Ok((function, column)) => {

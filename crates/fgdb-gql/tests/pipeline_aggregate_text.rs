@@ -1148,3 +1148,63 @@ fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
         );
     }
 }
+
+/// percentileDisc and percentileCont in a pipeline's terminal aggregate
+/// RETURN (fgdb-qbaex) answer as the graph facade's do over the same rows,
+/// NULL skipped and per group. p may be a grouping key, read after
+/// aggregation, so out of [0, 1] it raises (TCK Aggregation6 [5]).
+#[test]
+fn a_terminal_return_takes_percentiles_like_the_graph_facade() {
+    let graph = |text: &str| {
+        fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let input = [
+        CanonicalScalar::Int(30),
+        CanonicalScalar::Int(10),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(40),
+        CanonicalScalar::Int(20),
+    ];
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x \
+             RETURN percentileDisc(x, 0.5) AS d, percentileCont(x, 0.25) AS c",
+            "MATCH (n) RETURN percentileDisc(n.p, 0.5) AS d, percentileCont(n.p, 0.25) AS c",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, percentileDisc(x, 1.0) AS top",
+            "MATCH (n) RETURN n.p AS x, percentileDisc(n.p, 1.0) AS top",
+        ),
+    ] {
+        let mut pipeline = run(&query(with), &input, wide()).value;
+        let mut reference = run(&graph(plain), &input, wide()).value;
+        pipeline.sort();
+        reference.sort();
+        assert_eq!(pipeline, reference, "{with}");
+        assert!(!pipeline.is_empty(), "{with}");
+    }
+    let stored: Vec<_> = input
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
+    let failure =
+        query("MATCH (n) WITH n.p AS deg LIMIT 100 RETURN percentileDisc(0.90, deg), deg")
+            .execute_governed(
+                input.len() as u64,
+                (0..input.len()).map(|at| VId(at as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_err();
+    assert!(
+        format!("{failure:?}").contains("NumberOutOfRange"),
+        "{failure:?}"
+    );
+}

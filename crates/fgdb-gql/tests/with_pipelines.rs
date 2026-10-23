@@ -2343,3 +2343,53 @@ fn a_comprehension_element_orders_lists_element_by_element() {
     );
     assert_eq!(ints(&precedence, 0), [Some(2), Some(2), Some(2)]);
 }
+
+/// percentileDisc and percentileCont in an aggregating WITH stage
+/// (fgdb-qbaex): each is a combined item, a percentile of a hidden collect
+/// with p read after aggregation, so p may be a grouping key (TCK
+/// Aggregation6 [5]). The terminal RETURN form is pipeline_aggregate_text's.
+#[test]
+fn percentiles_aggregate_in_a_pipelines_with_stage() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1].map(CanonicalScalar::Int);
+    let rows = |text: &str| run(&prepare(text), &values, wide(), &mut || Ok(()));
+    let float = |value: &GraphValue| match value {
+        GraphValue::Scalar(CanonicalScalar::Float(value)) => value.get(),
+        other => panic!("a float percentile, got {other:?}"),
+    };
+    // Sorted 10, 20.0, 30.0, 40.0: Disc at 0.5 is index ceil(2) - 1 = 1;
+    // Cont at 0.25 is 10 * 0.25 + 20.0 * 0.75 at position 0.75.
+    let both = rows(
+        "UNWIND [30.0, 10, 40.0, 20.0] AS x \
+         WITH percentileDisc(x, 0.5) AS d, percentileCont(x, 0.25) AS c RETURN d, c",
+    )
+    .unwrap()
+    .value;
+    assert_eq!(both.len(), 1);
+    assert_eq!(float(both[0].get(0).unwrap()), 20.0);
+    assert_eq!(float(both[0].get(1).unwrap()), 17.5);
+    // Per group, beside its key.
+    let grouped = rows(
+        "UNWIND [[1, 10.0], [1, 30.0], [2, 5.0]] AS r WITH r[0] AS g, r[1] AS v \
+         WITH g, percentileDisc(v, 1.0) AS top RETURN g, top ORDER BY g",
+    )
+    .unwrap()
+    .value;
+    assert_eq!(ints(&grouped, 0), [Some(1), Some(2)]);
+    let tops: Vec<f64> = grouped
+        .iter()
+        .map(|row| float(row.get(1).unwrap()))
+        .collect();
+    assert_eq!(tops, [30.0, 5.0]);
+    // p as a grouping key outside [0, 1] raises, as TCK Aggregation6 [5]
+    // asks: `percentileDisc(0.90, deg)` where deg > 2.
+    let failure = rows(
+        "UNWIND [3, 4] AS deg WITH deg LIMIT 100 \
+         WITH percentileDisc(0.90, deg) AS p, deg RETURN p, deg",
+    )
+    .unwrap_err();
+    assert!(
+        format!("{failure:?}").contains("NumberOutOfRange"),
+        "{failure:?}"
+    );
+}

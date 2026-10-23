@@ -26,6 +26,13 @@ pub(in crate::graph_text::scoped::mutation) fn function(word: &str) -> Option<Fu
     }
 }
 
+/// percentileDisc and percentileCont (fgdb-qbaex): aggregates the value
+/// reader applies after aggregation to a hidden collect of their first
+/// argument, so a grouping stage reads each as a combined item.
+fn percentile(word: &str) -> bool {
+    word.eq_ignore_ascii_case("PERCENTILEDISC") || word.eq_ignore_ascii_case("PERCENTILECONT")
+}
+
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
     GraphSetTextError {
         offset: at,
@@ -144,7 +151,7 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(false);
                     }
-                    if function(word).is_some()
+                    if (function(word).is_some() || percentile(word))
                         && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                     {
                         return Ok(true);
@@ -383,7 +390,8 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 TokenKind::Word(word)
-                    if function(word).is_some() && matches!(next.kind, TokenKind::Punct(b'(')) =>
+                    if (function(word).is_some() || percentile(word))
+                        && matches!(next.kind, TokenKind::Punct(b'(')) =>
                 {
                     calls += 1;
                 }
@@ -426,6 +434,20 @@ impl<'a> Parser<'a> {
                         GraphPatternTextErrorKind::Expected("a combined WITH aggregate operand"),
                     )
                 };
+                // A percentile's first argument is a hidden collect, which
+                // the value reader applies the percentile to (fgdb-qbaex).
+                if core::mem::take(&mut parser.percentile_leaf) {
+                    return match parser.with_collected_argument(schema, inputs, aggregates) {
+                        Ok(index) => {
+                            leaves.push(Leaf::Summary(index));
+                            Ok(Some(leaves.len() - 1))
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            Err(refuse())
+                        }
+                    };
+                }
                 if let TokenKind::Word(word) = parser.current.kind
                     && let Some(call) = function(word)
                     && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
@@ -480,6 +502,29 @@ impl<'a> Parser<'a> {
             return Err(error);
         }
         Ok((template?, leaves))
+    }
+
+    /// The expression at the current token, up to its delimiter, as a
+    /// collect summary: a percentile's collected argument (fgdb-qbaex).
+    /// Returns the summary index.
+    fn with_collected_argument(
+        &mut self,
+        schema: &pipeline::RowSchema<'a>,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        aggregates: &mut Vec<ReadAggregateSpec>,
+    ) -> Result<usize, GraphSetTextError> {
+        // rand() in the argument is a non-constant expression.
+        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let input = self.with_input(schema, inputs);
+        self.aggregate_argument = outer;
+        let (column, _, _) = input?;
+        let index = aggregates.len();
+        aggregates.push(ReadAggregateSpec {
+            name: format!("__with_summary_{index}"),
+            function: Function::Collect,
+            column: Some(column),
+        });
+        Ok(index)
     }
 
     /// One aggregate call at the current token as a WITH summary. Its
