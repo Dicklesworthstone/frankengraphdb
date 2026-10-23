@@ -2139,3 +2139,26 @@ fn a_grouping_with_reads_a_carried_vertex_in_its_keys_and_arguments() {
         .is_err()
     );
 }
+
+/// openCypher: a WITH alias may shadow a name of the row it receives (TCK
+/// WithOrderBy4 [7]). The new binding replaces the old one, for the WITH's
+/// own ORDER BY and for everything after it.
+#[test]
+fn a_with_alias_shadows_a_name_of_the_previous_row() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    // The new x is p + 1 = 4, 2, 3. Its two lowest keep p = 1 and 2, so x is
+    // [2, 3]. Ranking by the old x (p % 3 = 0, 1, 2) would keep p = 3 and 1,
+    // so x would be [2, 4].
+    let rows = run(
+        &prepare(
+            "MATCH (n) WITH n, n.p % 3 AS x WITH n, n.p + 1 AS x ORDER BY x LIMIT 2 \
+             RETURN x ORDER BY x",
+        ),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .value;
+    assert_eq!(ints(&rows, 0), [Some(2), Some(3)]);
+}
