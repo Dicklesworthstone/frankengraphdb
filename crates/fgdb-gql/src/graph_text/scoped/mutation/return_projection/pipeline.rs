@@ -409,6 +409,13 @@ impl<'a> Parser<'a> {
             if !word.eq_ignore_ascii_case("WITH") {
                 return Ok(());
             }
+            // A grouping WITH here after anything but a plain WITH head is the
+            // head's own: with_graph_head leaves it unconsumed and owns its
+            // reads, its grouped keys' included (fgdb-ezgeq). Hoisting here
+            // would replace those (`WITH a, min(length(p)) AS l RETURN a.name`).
+            if !head.plain && self.with_has_aggregate()? {
+                return Ok(());
+            }
             let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
             pending = Some(later_with_keeps(self.lexer.clone(), &incoming)?);
         }

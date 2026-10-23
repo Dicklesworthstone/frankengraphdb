@@ -884,3 +884,28 @@ fn carried_property_join_preserves_every_checkpoint_and_element_source_refusal()
         );
     }
 }
+
+/// A grouping WITH right after MATCH keeps its grouped keys' reads for the
+/// scope after it, even when its aggregate reads a property or a path
+/// function (`WITH p, avg(f.age) AS a RETURN p.name, a`; TCK Return6 [13]:
+/// `WITH a, other, min(length(p)) AS len RETURN a.name ...`). aa92179b let
+/// the boundary hoist scan that WITH's own items, and hoisting `b.p` or
+/// `length(p)` replaced the reads with_graph_head had made for `a.p`.
+#[test]
+fn a_grouping_head_keeps_its_key_reads_beside_a_property_aggregate() {
+    let ints = |x: i64, y: i64| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(x)),
+            GraphValue::Scalar(CanonicalScalar::Int(y)),
+        ])
+    };
+    // a = 1 reaches b = 2, 2, 3 (min p 2); a = 2 reaches 3 (p 2); a = 3
+    // reaches 4 (p 3). Their own p is 1, 2, 2.
+    assert_eq!(
+        execute(
+            "MATCH (a)-[:R]->(b) WITH a, min(b.p) AS m \
+             RETURN a.p AS ap, m ORDER BY ap, m"
+        ),
+        vec![ints(1, 2), ints(2, 2), ints(2, 3)]
+    );
+}
