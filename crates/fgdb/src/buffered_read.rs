@@ -236,8 +236,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// edges each count once. No partial count escapes a source/work/memory or
     /// cancellation failure. All history and endpoint reads use one cumulative
     /// scan allowance, and this does not bypass owner-level visibility rules.
-    /// Edge-property sidecars are not faulted for a count; initial open still
-    /// authenticates them, and endpoint payloads use the ordinary resolver.
+    /// Edge-property sidecars are not faulted and endpoint properties are not
+    /// decoded for a count. Initial open still validates all property payloads;
+    /// current endpoint faults authenticate bytes and resolve same-cut history.
     pub async fn incident_edge_count(
         &mut self,
         cx: &QueryCx,

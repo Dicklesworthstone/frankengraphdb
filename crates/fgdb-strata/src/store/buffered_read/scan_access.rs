@@ -237,6 +237,34 @@ impl<V: Vfs> BufferedPartition<V> {
         work: &mut EdgeScanWork,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
+        self.edge_scan_vertex_with_access(cx, vid, as_of, VertexPropertyAccess::Read, work, observe)
+            .await
+    }
+
+    // This projection is available only after complete root admission. The
+    // opaque owner cannot expose skipped properties as a complete VertexRow.
+    pub(crate) async fn edge_scan_vertex_topology<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        as_of: CommitSeq,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexTopology>, BufferedScanError<C>> {
+        self.edge_scan_vertex_with_access(cx, vid, as_of, VertexPropertyAccess::Skip, work, observe)
+            .await
+            .map(|row| row.map(BufferedVertexTopology))
+    }
+
+    async fn edge_scan_vertex_with_access<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        as_of: CommitSeq,
+        properties: VertexPropertyAccess,
+        work: &mut EdgeScanWork,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
         let mut result: Option<BufferedValue<VertexRow>> = None;
         let mut winner_at = 0;
         let mut candidates = self.patch_directory.candidates(vid);
@@ -257,19 +285,9 @@ impl<V: Vfs> BufferedPartition<V> {
             let bytes = self
                 .pin(cx, descriptor.extent, Admission::ScanBypass)
                 .await?;
-            let rows = crate::root::resolve_patch_ref(
-                self.store.k_oid.expose(),
-                self.store.namespace,
-                at,
-                &self.root.vertex_patches[at],
-                bytes.as_ref(),
-                self.store.decode_resolver(),
-            )
-            .map_err(StoreError::MalformedRoot)
-            .map_err(BufferedReadError::from)?;
-            if rows.len() != descriptor.rows {
-                return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
-            }
+            // Both projections keep the admitted checksum, patch range and
+            // row framing checks. Only property decoding/copying is optional.
+            let rows = self.decode_scan_patch(at, bytes.as_ref(), properties)?;
             for row in &rows {
                 work.step(cx, observe)?;
                 if row.vid == vid
@@ -279,10 +297,13 @@ impl<V: Vfs> BufferedPartition<V> {
                         .is_none_or(|old| (old.created_at, winner_at) <= (row.created_at, at))
                 {
                     match result.as_mut() {
-                        Some(old) => old.value = row.clone(),
+                        Some(old) => old.value = properties.copy_row(row),
                         None => {
                             let charge = self.reserve_scan_workspace(cx)?;
-                            result = Some(BufferedValue::from_reserved(row.clone(), charge));
+                            result = Some(BufferedValue::from_reserved(
+                                properties.copy_row(row),
+                                charge,
+                            ));
                         }
                     }
                     winner_at = at;

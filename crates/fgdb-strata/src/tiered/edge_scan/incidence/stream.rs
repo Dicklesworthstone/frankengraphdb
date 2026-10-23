@@ -2,6 +2,16 @@
 
 use super::*;
 
+// The private count lane returns only visibility. A projected endpoint can
+// never escape through the public complete-record cursor as an empty property.
+// Keep the existing complete-record footprint inline; boxing would add an
+// unmetered allocation to every property-bearing pull.
+#[allow(clippy::large_enum_variant)]
+enum IncidenceProjection {
+    Endpoints(BufferedEdgeEndpoints),
+    Visible,
+}
+
 /// A forward-only incident-edge stream in full-width EId order at one cut.
 ///
 /// The first pull seeks the shared authenticated descriptor directory and
@@ -105,6 +115,15 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
         self.next_candidate_with_access(cx, EdgePropertyAccess::Read, observe)
             .await
+            .map(|candidate| {
+                candidate.map(|candidate| BufferedEdgeCandidate {
+                    eid: candidate.eid,
+                    row: candidate.row.map(|row| match row {
+                        IncidenceProjection::Endpoints(row) => row,
+                        IncidenceProjection::Visible => unreachable!("complete-record projection"),
+                    }),
+                })
+            })
     }
 
     async fn next_candidate_with_access<C: Send>(
@@ -112,7 +131,7 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
         cx: &QueryCx,
         properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
-    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+    ) -> Result<Option<BufferedEdgeCandidate<IncidenceProjection>>, BufferedScanError<C>> {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
         };
@@ -144,11 +163,29 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
             else {
                 return Ok(None);
             };
-            driver
-                .root
-                .resolve_endpoints(cx, candidate, request.relation, &mut observe)
-                .await
-                .map(Some)
+            let candidate = match properties {
+                EdgePropertyAccess::Read => {
+                    let candidate = driver
+                        .root
+                        .resolve_endpoints(cx, candidate, request.relation, &mut observe)
+                        .await?;
+                    BufferedEdgeCandidate {
+                        eid: candidate.eid,
+                        row: candidate.row.map(IncidenceProjection::Endpoints),
+                    }
+                }
+                EdgePropertyAccess::Skip => {
+                    let candidate = driver
+                        .root
+                        .resolve_endpoint_visibility(cx, candidate, request.relation, &mut observe)
+                        .await?;
+                    BufferedEdgeCandidate {
+                        eid: candidate.eid,
+                        row: candidate.row.map(|()| IncidenceProjection::Visible),
+                    }
+                }
+            };
+            Ok(Some(candidate))
         }
         .await;
         self.work = driver.root.work.used;
@@ -186,11 +223,13 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
     }
 
     /// Consume the remaining stream and count visible edge identities without
-    /// loading edge-property sidecars. History merging, same-cut endpoint
-    /// validation, direction matching and self-loop de-duplication are exactly
-    /// the full-record path. Endpoint values still use their ordinary decoder.
-    /// No partial count escapes a source, memory, work or cancellation refusal.
-    /// Initial root admission continues to authenticate every property object.
+    /// loading edge-property sidecars or decoding endpoint properties. Both
+    /// endpoint histories are resolved through the admitted topology decoder
+    /// at this exact cut, retaining dangling-endpoint and retirement refusals.
+    /// Direction matching and self-loop de-duplication use the full-record
+    /// history merge. No partial count escapes a source, memory, work or
+    /// cancellation refusal. Initial root admission continues to authenticate
+    /// every property object and validate every vertex property value.
     pub async fn count_visible(mut self, cx: &QueryCx) -> Result<u64, BufferedReadError> {
         let mut count = 0_u64;
         loop {

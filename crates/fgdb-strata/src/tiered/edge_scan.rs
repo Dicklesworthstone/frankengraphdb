@@ -550,6 +550,56 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         })
     }
 
+    // Count-only incidence still resolves both endpoint histories at the same
+    // cut. Complete initial admission and each pinned patch checksum authorize
+    // topology projection; no endpoint property payload is decoded or exported.
+    async fn resolve_endpoint_visibility<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        candidate: BufferedEdgeCandidate,
+        relation: Option<RelationId>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<BufferedEdgeCandidate<()>, BufferedScanError<C>> {
+        let row = if let Some(edge) = candidate
+            .row
+            .filter(|row| relation.is_none_or(|r| r == row.entry.relation))
+        {
+            if self
+                .partition
+                .edge_scan_vertex_topology(cx, edge.entry.src, self.as_of, &mut self.work, observe)
+                .await?
+                .is_none()
+            {
+                return Err(BufferedReadError::DanglingEndpoint.into());
+            }
+            // Drop each projected endpoint before admitting the next. A
+            // self-loop validates its endpoint exactly once, as full rows do.
+            if edge.entry.src != edge.entry.dst
+                && self
+                    .partition
+                    .edge_scan_vertex_topology(
+                        cx,
+                        edge.entry.dst,
+                        self.as_of,
+                        &mut self.work,
+                        observe,
+                    )
+                    .await?
+                    .is_none()
+            {
+                return Err(BufferedReadError::DanglingEndpoint.into());
+            }
+            self.work.step(cx, observe)?;
+            Some(())
+        } else {
+            None
+        };
+        Ok(BufferedEdgeCandidate {
+            eid: candidate.eid,
+            row,
+        })
+    }
+
     /// Convenience visible-edge pull. Query adapters use candidate admission.
     pub async fn next(
         &mut self,
