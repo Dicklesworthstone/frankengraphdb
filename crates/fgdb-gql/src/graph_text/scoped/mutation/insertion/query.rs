@@ -258,9 +258,19 @@ impl<'a> ParsedReturn<'a> {
                 }
             }
         }
+        let element = vertex.is_some()
+            || edge.is_some()
+            || matches!(
+                matched,
+                Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            );
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
             ReturnMapInput::Property(parser.schema_name()?)
+        } else if element && parser.is_punct(b'[') {
+            // `n[key]` subscripts n's property map (openCypher Graph7), so an
+            // absent key reads NULL and a non-text key fails as for any map.
+            ReturnMapInput::Properties
         } else {
             ReturnMapInput::Identity
         };
