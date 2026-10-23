@@ -334,62 +334,121 @@ fn host_maintenance_admission_tracks_waiters_cancellation_and_drain() {
 #[test]
 fn host_scrub_loss_fences_pinned_readers_and_uses_authoritative_recovery() {
     let ((), report) = run_async_under_lab(0x79a0_0012, |root| async move {
-        let (server, token, path) = served(&root, "host-scrub-loss").await;
-        let db = &server.databases["test"];
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        db.db
-            .write(&root)
-            .await
-            .unwrap()
-            .write(&contexts.commit(), vertex(1))
-            .await
-            .unwrap();
-        let (mut pinned, _) = crate::execute::read_session(&root, db, &token)
-            .await
-            .unwrap_or_else(|error| panic!("{}", error.message));
-        let admitted = db.db.enter().unwrap();
-        // Damage only this test's newly created committed capsule. The scrub
-        // must not keep serving the retained graph merely because it is warm.
-        let capsules = std::fs::read_dir(path.join("capsules"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<Vec<_>>();
-        assert_eq!(capsules.len(), 1);
-        let capsule = &capsules[0];
-        let intact = std::fs::read(capsule).unwrap();
-        std::fs::write(capsule, b"damaged capsule for host scrub law").unwrap();
-        let summary = server.scrub_database(&root, "test").await.unwrap();
-        assert_eq!(summary.lost.len(), 1);
-        assert_eq!(db.db.status(), DatabaseStatus::Recovering { generation: 2 });
-        assert!(matches!(
-            pinned.query(
-                &contexts.query(),
-                "MATCH (n) RETURN n",
-                &fgdb_gql::GqlParameters::new(),
-            ),
-            Err(crate::execute::SessionError::Unavailable(
-                Unavailable::Recovering
-            ))
-        ));
-        assert!(matches!(
-            server.compact_database(&root, "test").await,
-            Err(MaintenanceError::DatabaseUnavailable(
-                DatabaseStatus::Recovering { generation: 2 }
-            ))
-        ));
-        drop(admitted);
-        assert!(matches!(
-            settled(db).await,
-            DatabaseStatus::Fenced { generation: 2, .. }
-        ));
-        std::fs::write(capsule, intact).unwrap();
-        assert!(matches!(
-            server.scrub_database(&root, "test").await,
-            Err(MaintenanceError::DatabaseUnavailable(
-                DatabaseStatus::Fenced { generation: 2, .. }
-            ))
-        ));
-        server.join_database_workers(&root).await;
+        for (name, checkpoint_covers_commit) in [
+            ("host-scrub-loss", true),
+            ("host-scrub-loss-uncovered-suffix", false),
+        ] {
+            let (server, token, path) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let root_path = path.join("manifest.root");
+            let initial_checkpoint = std::fs::read(&root_path).unwrap();
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let committed_checkpoint = std::fs::read(&root_path).unwrap();
+            assert_ne!(committed_checkpoint, initial_checkpoint);
+            let (mut pinned, _) = crate::execute::read_session(&root, db, &token)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            let admitted = db.db.enter().unwrap();
+            // Preserve the original capsule-loss case. The server must fence
+            // its retained generation before any authoritative reopen.
+            let capsules = std::fs::read_dir(path.join("capsules"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            assert_eq!(capsules.len(), 1);
+            let capsule = &capsules[0];
+            let intact = std::fs::read(capsule).unwrap();
+            std::fs::write(capsule, b"damaged capsule for host scrub law").unwrap();
+            let summary = server.scrub_database(&root, "test").await.unwrap();
+            assert_eq!(summary.lost.len(), 1);
+            assert_eq!(db.db.status(), DatabaseStatus::Recovering { generation: 2 });
+            assert!(matches!(
+                pinned.query(
+                    &contexts.query(),
+                    "MATCH (n) RETURN n",
+                    &fgdb_gql::GqlParameters::new(),
+                ),
+                Err(crate::execute::SessionError::Unavailable(
+                    Unavailable::Recovering
+                ))
+            ));
+            assert!(matches!(
+                server.compact_database(&root, "test").await,
+                Err(MaintenanceError::DatabaseUnavailable(
+                    DatabaseStatus::Recovering { generation: 2 }
+                ))
+            ));
+            if !checkpoint_covers_commit {
+                // Model the commit-before-root-publication crash window. This
+                // older authenticated checkpoint needs the now-lost suffix;
+                // the existing committed checkpoint can recover without it.
+                std::fs::write(&root_path, &initial_checkpoint).unwrap();
+            }
+            drop(admitted);
+            let outcome = settled(db).await;
+            if checkpoint_covers_commit {
+                assert_eq!(outcome, DatabaseStatus::Ready { generation: 2 });
+                assert!(matches!(
+                    pinned.query(
+                        &contexts.query(),
+                        "MATCH (n) RETURN n",
+                        &fgdb_gql::GqlParameters::new(),
+                    ),
+                    Err(crate::execute::SessionError::Unavailable(
+                        Unavailable::Stale
+                    ))
+                ));
+                let (view, generation) = db.db.read_view(&root).await.unwrap();
+                assert_eq!(view.frontier(), CommitSeq(1));
+                assert!(view.vertex(VId(1)).unwrap().is_some());
+                generation.check().unwrap();
+                let (mut fresh, at) = crate::execute::read_session(&root, db, &token)
+                    .await
+                    .unwrap_or_else(|error| panic!("{}", error.message));
+                assert_eq!(at, CommitSeq(1));
+                let answer = fresh
+                    .query(
+                        &contexts.query(),
+                        "MATCH (n) RETURN n",
+                        &fgdb_gql::GqlParameters::new(),
+                    )
+                    .ok()
+                    .unwrap();
+                assert!(matches!(answer, fgdb::QueryResult::Rows { rows, .. } if rows.len() == 1));
+            } else {
+                assert!(matches!(
+                    &outcome,
+                    DatabaseStatus::Fenced { generation: 2, reason } if !reason.is_empty()
+                ));
+            }
+            std::fs::write(capsule, intact).unwrap();
+            std::fs::write(&root_path, committed_checkpoint).unwrap();
+            if checkpoint_covers_commit {
+                let summary = server.scrub_database(&root, "test").await.unwrap();
+                assert!(summary.lost.is_empty());
+                assert_eq!(db.db.status(), DatabaseStatus::Ready { generation: 2 });
+                server.finish_shutdown(&root).await;
+            } else {
+                for _ in 0..3 {
+                    asupersync::runtime::yield_now().await;
+                    assert_eq!(db.db.status(), outcome);
+                }
+                assert!(matches!(
+                    server.scrub_database(&root, "test").await,
+                    Err(MaintenanceError::DatabaseUnavailable(
+                        DatabaseStatus::Fenced { generation: 2, .. }
+                    ))
+                ));
+                server.join_database_workers(&root).await;
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

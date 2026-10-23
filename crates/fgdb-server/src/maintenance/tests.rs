@@ -4,7 +4,7 @@ use super::*;
 use crate::recovery::tests::{WakeCounter, served, vertex};
 use crate::{DatabaseStatus, ServerLimits};
 use asupersync::Budget;
-use asupersync::lab::run_async_under_lab;
+use asupersync::lab::{LabConfig, run_async_under_lab_with_config};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::CancelKind;
@@ -106,7 +106,9 @@ fn idle_wait_is_woken_by_drain_or_direct_context_cancellation() {
 
 #[test]
 fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
-    let ((), report) = run_async_under_lab(0x79a0_0020, |root| async move {
+    // The intervals need modeled elapsed time, with the original step budget.
+    let config = LabConfig::new(0x79a0_0020).with_auto_advance();
+    let ((), report) = run_async_under_lab_with_config(config, |root| async move {
         let (server, token, path) = served(&root, "periodic-maintenance").await;
         let database = &server.databases["test"];
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -206,7 +208,8 @@ fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
 
 #[test]
 fn drain_finishes_an_admitted_operation_and_starts_no_second_operation() {
-    let ((), report) = run_async_under_lab(0x79a0_0021, |root| async move {
+    let config = LabConfig::new(0x79a0_0021).with_auto_advance();
+    let ((), report) = run_async_under_lab_with_config(config, |root| async move {
         let (server, _, _) = served(&root, "periodic-maintenance-drain").await;
         let database = &server.databases["test"];
         let held = database.db.write(&root).await.unwrap();

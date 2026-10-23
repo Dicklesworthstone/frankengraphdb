@@ -604,35 +604,43 @@ impl Server {
 
     /// Accept and serve FGP connections until the drain signal fires or `cx`
     /// is cancelled, then wait for every connection task to finish.
-    pub async fn serve(self: Arc<Self>, cx: &Cx, listener: TcpListener) -> Result<(), ServerError> {
-        let connections = self
-            .accept(
-                cx,
-                &listener,
-                tls::Protocol::Fgp,
-                |server, child, stream, _local| {
-                    Box::pin(async move {
-                        connection::run(&child, &server, stream).await;
-                    })
-                },
-            )
-            .await;
-        // Admission is closed. Every connection drains at its next receive
-        // point (an admitted statement finishes first), so this join is
-        // bounded by in-flight statements, never by an idle client.
-        self.shutdown.trigger();
-        let connections = match connections {
-            Ok(connections) => connections,
-            Err(error) => {
-                self.join_database_workers(cx).await;
-                return Err(error);
+    /// The returned future's `Send` contract is checked here, so downstream
+    /// hosts do not need to expand the private connection future types.
+    pub fn serve(
+        self: Arc<Self>,
+        cx: &Cx,
+        listener: TcpListener,
+    ) -> impl core::future::Future<Output = Result<(), ServerError>> + Send + '_ {
+        async move {
+            let connections = self
+                .accept(
+                    cx,
+                    &listener,
+                    tls::Protocol::Fgp,
+                    |server, child, stream, _local| {
+                        Box::pin(async move {
+                            connection::run(&child, &server, stream).await;
+                        })
+                    },
+                )
+                .await;
+            // Admission is closed. Every connection drains at its next receive
+            // point (an admitted statement finishes first), so this join is
+            // bounded by in-flight statements, never by an idle client.
+            self.shutdown.trigger();
+            let connections = match connections {
+                Ok(connections) => connections,
+                Err(error) => {
+                    self.join_database_workers(cx).await;
+                    return Err(error);
+                }
+            };
+            for mut handle in connections {
+                let _ = handle.join(cx).await;
             }
-        };
-        for mut handle in connections {
-            let _ = handle.join(cx).await;
+            self.join_database_workers(cx).await;
+            Ok(())
         }
-        self.join_database_workers(cx).await;
-        Ok(())
     }
 
     /// Serve the Bolt-compat adapter (`BoltCompatProfileV1`, see the `bolt`
@@ -829,10 +837,8 @@ pub(crate) fn unix_millis() -> u64 {
 /// reading the wall clock on every charge was 22-55% of fgdbd's busy CPU on
 /// real graphs. A few hundred charges are microseconds of work; each
 /// execution still samples on its first charge and on every delivery.
-const HOST_CLOCK_INTERVAL: core::num::NonZeroU32 = match core::num::NonZeroU32::new(256) {
-    Some(interval) => interval,
-    None => panic!("a nonzero interval"),
-};
+const HOST_CLOCK_INTERVAL: core::num::NonZeroU32 =
+    core::num::NonZeroU32::new(256).expect("a nonzero host clock interval");
 
 /// The query context every served statement runs under: the request's own,
 /// sampling [`unix_millis`] once per [`HOST_CLOCK_INTERVAL`] charges.
