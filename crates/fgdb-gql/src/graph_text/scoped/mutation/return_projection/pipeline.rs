@@ -1126,6 +1126,7 @@ impl<'a> Parser<'a> {
             // Read sources have a procedure host. Write prefixes and owned
             // post-write tails do not, so they retain preparation-time refusal.
             if read_calls
+                && self.read_procedure_sources
                 && !self.write_prefix
                 && !self.write_row_scope
                 && !self.chain_write
@@ -1382,6 +1383,13 @@ impl<'a> Parser<'a> {
         schema: &mut RowSchema<'a>,
         at: usize,
     ) -> Result<ReadStageTemplate, GraphSetTextError> {
+        if !self.read_procedure_sources
+            || self.write_prefix
+            || self.write_row_scope
+            || self.chain_write
+        {
+            return Err(expected(at, "a read pipeline with a procedure host"));
+        }
         let namespace = self.name()?;
         self.punct(b'.', "procedure name after the namespace")?;
         let name = self.name()?;

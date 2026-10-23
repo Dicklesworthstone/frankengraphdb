@@ -170,6 +170,7 @@ impl<'a> Parser<'a> {
     pub(super) fn insertion_unwind_prefix(
         &mut self,
     ) -> Result<UnwindPrefix<'a>, crate::GraphSetTextError> {
+        self.read_procedure_sources = false;
         if !self.is_word("UNWIND") && !self.is_word("WITH") {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -215,6 +216,7 @@ impl<'a> Parser<'a> {
         zones: Option<crate::GqlTimeZones>,
     ) -> Result<GraphRowPrefix<'a>, crate::GraphSetTextError> {
         *self = Self::new_with_parameter_types(statement, declarations)?.with_zones(zones);
+        self.read_procedure_sources = false;
         let (source, schema, _) = self.leading_aggregate_prefix(statement)?;
         Ok((source, schema))
     }

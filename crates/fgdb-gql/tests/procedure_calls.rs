@@ -724,6 +724,9 @@ fn read_procedure_sources_do_not_enter_write_prefixes_or_owned_write_tails() {
     for text in [
         "WITH 1 AS k CALL t.echo(2) YIELD x CREATE (n) RETURN x",
         "UNWIND [1] AS k CALL t.echo(2) YIELD x CREATE (n) RETURN x",
+        "MATCH (n) UNWIND [1] AS k CALL t.echo(2) YIELD x CREATE (m) RETURN x",
+        "UNWIND [1] AS k MATCH (n) UNWIND [1] AS j CALL t.echo(2) YIELD x CREATE (m) RETURN x",
+        "MATCH (n) WITH n CALL t.echo(2) YIELD x CREATE (m) RETURN x",
         "CREATE (n) WITH n CALL t.echo(2) YIELD x RETURN x",
         "CREATE (n) WITH 1 AS k CALL t.echo(2) YIELD x RETURN COUNT(*) AS count",
     ] {

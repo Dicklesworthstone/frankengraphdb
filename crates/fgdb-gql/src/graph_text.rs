@@ -933,6 +933,9 @@ struct Parser<'a> {
     /// The WITH stages before a write are being read: the hidden reads of
     /// the elements the row carries stay in it, for the write and RETURN.
     write_prefix: bool,
+    /// Read pipelines have a procedure host; INSERT-owned source prefixes do
+    /// not. Keep this admission separate from write_prefix's hidden reads.
+    read_procedure_sources: bool,
     /// A write's WITH tail may end at the next write of a chained statement
     /// (`CREATE (a) WITH a CREATE (b)`) instead of a RETURN.
     chain_write: bool,
@@ -1027,6 +1030,7 @@ impl<'a> Parser<'a> {
             deferred_wheres: Vec::new(),
             write_row_scope: false,
             write_prefix: false,
+            read_procedure_sources: true,
             chain_write: false,
             chained_row: None,
             syntax: Syntax {
