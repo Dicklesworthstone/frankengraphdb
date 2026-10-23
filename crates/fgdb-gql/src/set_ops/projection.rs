@@ -236,6 +236,13 @@ pub enum GraphValueFunction {
     /// openCypher `percentileCont(x, p)`: the linear interpolation at
     /// p * (n - 1) between the neighbouring sorted numbers, always a Float.
     PercentileCont,
+    /// `nodes(x)` of a path value, not a graph binding (an unwound path, a
+    /// grouping key, a list local): its vertices in order. NULL is NULL; any
+    /// other value is a typed error.
+    PathNodes,
+    /// `relationships(x)` of a path value: its edges in order. NULL is NULL;
+    /// any other value is a typed error.
+    PathRelationships,
 }
 
 impl GraphValueFunction {
@@ -249,13 +256,15 @@ impl GraphValueFunction {
             Self::Coalesce => 5,
             Self::PercentileDisc => 6,
             Self::PercentileCont => 7,
+            Self::PathNodes => 8,
+            Self::PathRelationships => 9,
         }
     }
 
     /// How many arguments a call takes; `None` for one or more.
     pub(crate) const fn arity(self) -> Option<usize> {
         match self {
-            Self::Reverse => Some(1),
+            Self::Reverse | Self::PathNodes | Self::PathRelationships => Some(1),
             Self::Split
             | Self::Add
             | Self::Subtract
@@ -995,7 +1004,9 @@ fn admit(
                 GraphValueFunction::Reverse
                 | GraphValueFunction::Add
                 | GraphValueFunction::Subtract
-                | GraphValueFunction::Coalesce => GraphSetColumnType::Any,
+                | GraphValueFunction::Coalesce
+                | GraphValueFunction::PathNodes
+                | GraphValueFunction::PathRelationships => GraphSetColumnType::Any,
                 GraphValueFunction::Split => GraphSetColumnType::List,
                 GraphValueFunction::PercentileDisc | GraphValueFunction::PercentileCont => {
                     GraphSetColumnType::Scalar
@@ -3022,6 +3033,21 @@ pub(crate) fn value_function<E>(
             column,
             control,
         ),
+        GraphValueFunction::PathNodes | GraphValueFunction::PathRelationships => match argument {
+            GraphValue::Path(path) => {
+                let value = if function == GraphValueFunction::PathNodes {
+                    GraphValue::Vertices(path.nodes().collect())
+                } else {
+                    GraphValue::Edges(path.edges().collect())
+                };
+                copy_value(&value, control).map_err(ProjectionFailure::Control)
+            }
+            _ if argument.is_null() => {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                Ok(null)
+            }
+            _ => Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+        },
     }
 }
 

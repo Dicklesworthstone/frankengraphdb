@@ -299,7 +299,9 @@ impl ReadValueTemplate {
                 crate::GraphValueFunction::Reverse
                 | crate::GraphValueFunction::Add
                 | crate::GraphValueFunction::Subtract
-                | crate::GraphValueFunction::Coalesce => GraphSetColumnType::Any,
+                | crate::GraphValueFunction::Coalesce
+                | crate::GraphValueFunction::PathNodes
+                | crate::GraphValueFunction::PathRelationships => GraphSetColumnType::Any,
                 crate::GraphValueFunction::Split => GraphSetColumnType::List,
                 crate::GraphValueFunction::PercentileDisc
                 | crate::GraphValueFunction::PercentileCont => GraphSetColumnType::Scalar,
