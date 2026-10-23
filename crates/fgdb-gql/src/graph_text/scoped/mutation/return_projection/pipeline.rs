@@ -1514,19 +1514,65 @@ impl<'a> Parser<'a> {
             token = lexer.next()?;
         }
         let mut depth = 0_usize;
+        // Like element_scope/list_function_call, bind locals only after their
+        // input expressions. A spelling in a local body is not a CALL-output
+        // demand, while the same spelling in its iterator or initializer is.
+        let mut locals: Vec<(usize, Vec<&str>, bool, bool)> = Vec::new();
         loop {
             match token.kind {
                 TokenKind::End => break,
-                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => {
+                    depth += 1;
+                    let reduce = matches!(previous, Some(TokenKind::Word(word))
+                        if word.eq_ignore_ascii_case("REDUCE"));
+                    let quantifier = matches!(previous, Some(TokenKind::Word(word))
+                        if ["ANY", "ALL", "NONE", "SINGLE"]
+                            .iter().any(|name| word.eq_ignore_ascii_case(name)));
+                    if open == b'[' || (open == b'(' && (reduce || quantifier)) {
+                        let mut ahead = lexer.clone();
+                        if let TokenKind::Word(name) = ahead.next()?.kind {
+                            let next = ahead.next()?.kind;
+                            if matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
+                                || (open == b'(' && reduce && next == TokenKind::Punct(b'='))
+                            {
+                                locals.push((depth, vec![name], false, open == b'(' && reduce));
+                            }
+                        }
+                    }
+                }
                 TokenKind::Punct(b')' | b']' | b'}') => {
+                    if locals.last().is_some_and(|scope| scope.0 == depth) {
+                        locals.pop();
+                    }
                     let Some(outer) = depth.checked_sub(1) else {
                         break;
                     };
                     depth = outer;
                 }
+                TokenKind::Punct(b'|') => {
+                    if let Some(scope) = locals.last_mut()
+                        && scope.0 == depth
+                    {
+                        scope.2 = true;
+                    }
+                }
                 TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
                     if depth == 0 && ends_boundary_scope(word, previous) {
                         break;
+                    }
+                    if let Some(scope) = locals.last_mut()
+                        && scope.0 == depth
+                    {
+                        if !scope.3 && word.eq_ignore_ascii_case("WHERE") {
+                            scope.2 = true;
+                        } else if scope.3
+                            && !scope.2
+                            && matches!(previous, Some(TokenKind::Punct(b',')))
+                            && matches!(lexer.clone().next()?.kind, TokenKind::Word(next)
+                                if next.eq_ignore_ascii_case("IN"))
+                        {
+                            scope.1.push(word);
+                        }
                     }
                     let source = if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
                         Some(Name {
@@ -1539,6 +1585,9 @@ impl<'a> Parser<'a> {
                             .map(|(source, _)| source)
                     };
                     if let Some(source) = source
+                        && !locals
+                            .iter()
+                            .any(|scope| scope.2 && scope.1.contains(&source.text))
                         && yielded.iter().any(|(name, _)| name.text == source.text)
                         && !implied.iter().any(|seen| seen.text == source.text)
                     {
