@@ -887,6 +887,13 @@ fn a_grouping_or_distinct_with_orders_by_a_repeat_of_its_item() {
              RETURN p, c",
             vec![(Some(2), Some(2))],
         ),
+        // An alias spelled like the call it names is no column before `(`:
+        // the call repeats the item (TCK WithOrderBy4 [11]).
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS count ORDER BY count(*) DESC, p LIMIT 1 \
+             RETURN p, count",
+            vec![(Some(2), Some(2))],
+        ),
         // RETURN without ORDER BY gives canonical order, so a WITH's ORDER BY
         // shows in the rows its LIMIT keeps: p - c is 2, 0, 0 for p = 3, 1, 2.
         (

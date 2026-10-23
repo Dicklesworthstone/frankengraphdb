@@ -1152,3 +1152,37 @@ fn an_aggregating_with_keys_on_captured_path_metadata() {
         .is_err()
     );
 }
+
+/// openCypher Graph8 [4], [7]: an UNWIND directly after a leading OPTIONAL
+/// MATCH reads that part's row as `WITH *` would carry it, its carried
+/// properties included, whether the part matched or was null-extended.
+#[test]
+fn an_unwind_directly_after_an_optional_part_reads_its_row() {
+    let ints = |rows: Vec<GraphValueRow>| -> Vec<Option<i64>> {
+        rows.iter()
+            .map(|row| match &row.values()[0] {
+                GraphValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
+                GraphValue::Scalar(CanonicalScalar::Null) => None,
+                other => panic!("an integer or NULL, found {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(
+        ints(rows(
+            "OPTIONAL MATCH (n:L) UNWIND [n.score, n.score] AS x RETURN x ORDER BY x"
+        )),
+        [10, 10, 20, 20, 30, 30, 40, 40].map(Some)
+    );
+    assert_eq!(
+        ints(rows(
+            "OPTIONAL MATCH (n:L) WHERE n.score > 100 UNWIND [n.score] AS x RETURN x"
+        )),
+        [None]
+    );
+    assert_eq!(
+        ints(rows(
+            "OPTIONAL MATCH (n:L) UNWIND [n.score % 20] AS x RETURN DISTINCT x ORDER BY x"
+        )),
+        [Some(0), Some(10)]
+    );
+}

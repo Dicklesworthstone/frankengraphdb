@@ -2312,9 +2312,13 @@ impl<'a> Parser<'a> {
         }
         if let TokenKind::Word(word) = self.current.kind {
             let visible = self.visible_width(schema);
-            if let Some(column) = schema[..visible]
-                .iter()
-                .position(|(name, _)| name.text == word)
+            // A name before `(` is a call, never a column: `sum(a.num)` after
+            // `... AS sum` repeats the item (TCK WithOrderBy4 [11]).
+            let call = matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+            if !call
+                && let Some(column) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == word)
             {
                 self.advance()?;
                 return Ok(Operand::Column(column));

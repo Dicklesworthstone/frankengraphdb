@@ -623,7 +623,10 @@ impl<'a> Parser<'a> {
         // it passes through the `WITH *` boundary openCypher gives it: the
         // incoming columns plus this MATCH's bindings, nothing invented. The
         // first part still needs its explicit boundary before the next MATCH.
-        let implicit_star = aggregate && kind.is_some() && self.is_word("RETURN");
+        // An UNWIND directly after a continuation reads that same row (TCK
+        // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
+        let implicit_star =
+            kind.is_some() && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND"));
         if aggregate
             && !implicit_star
             && deferred.is_none()
