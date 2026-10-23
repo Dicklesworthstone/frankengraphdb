@@ -530,13 +530,28 @@ fn initialization_admits_edges_and_failed_maintenance_can_rebuild() {
             .register_standing_query(&cx, query.clone(), policy())
             .unwrap();
         let stats = *db.standing_query(&cx, &probe).unwrap().last_maintenance();
-        let exact = GqlQueryPolicy::new(100_000, 10_000, stats.work_units, stats.scratch_entries);
+        // Numeric definitions own a private row source and a group node. A
+        // per-node grant must cover both, not only the final group's usage.
+        let nodes: Vec<_> = db
+            .standing_query_node_stats(&cx, &probe)
+            .unwrap()
+            .copied()
+            .collect();
+        assert!(nodes.len() > 1);
+        assert_eq!(nodes.last(), Some(&stats));
+        let (work, scratch) = nodes.iter().fold((0_u64, 0_u64), |(work, scratch), stats| {
+            (
+                work.max(stats.work_units),
+                scratch.max(stats.scratch_entries),
+            )
+        });
+        let exact = GqlQueryPolicy::new(100_000, 10_000, work, scratch);
         let handle = db
             .register_standing_query(&cx, query.clone(), exact)
             .unwrap();
         for cap in [
-            GqlQueryPolicy::new(100_000, 10_000, stats.work_units - 1, stats.scratch_entries),
-            GqlQueryPolicy::new(100_000, 10_000, stats.work_units, stats.scratch_entries - 1),
+            GqlQueryPolicy::new(100_000, 10_000, work - 1, scratch),
+            GqlQueryPolicy::new(100_000, 10_000, work, scratch - 1),
         ] {
             assert!(db.register_standing_query(&cx, query.clone(), cap).is_err());
         }
