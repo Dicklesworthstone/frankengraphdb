@@ -10,7 +10,7 @@ use crate::NativeResultSpool;
 type PendingInput<'q> = Box<dyn FnOnce(GqlQueryPolicy) -> OrderedInput<'q> + Send + 'q>;
 struct Endpoint<'q> {
     input: PendingInput<'q>,
-    tail: ScanSortTail,
+    order: SpoolOrder,
 }
 
 fn pending<'q, C: FnMut() -> u64 + Send>(

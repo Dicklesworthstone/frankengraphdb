@@ -20,6 +20,115 @@ mod relational_join;
 #[path = "staged.rs"]
 mod staged;
 
+/// A source sort followed, when required, by checked native unary stages.
+pub(crate) struct SpoolOrder {
+    pub(crate) columns: Vec<String>,
+    pub(crate) tail: ScanSortTail,
+    pub(crate) stages: Option<fgdb_gql::spill_set::AsyncSpillSetPlan>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SpoolOrderLimits {
+    pub(crate) run_rows: usize,
+    pub(crate) max_runs: usize,
+    pub(crate) page_bytes: usize,
+    pub(crate) max_row_bytes: usize,
+    pub(crate) max_input_rows: u64,
+    pub(crate) max_sort_work: u64,
+}
+
+// Admitted scalar projections have no element-property effect. The native
+// evaluator retains its typed refusal if a future compiler violates that
+// admission, rather than silently opening a privileged property reader.
+struct NoElements;
+impl fgdb_gql::spill_set::AsyncSpillElementSource for NoElements {
+    type Error = NativeSpoolError;
+    type Property = fgdb_types::CanonicalPropertyValue;
+
+    async fn element_property(
+        &mut self,
+        _element: fgdb_delta_types::ElementId,
+        _key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<Self::Property>>> {
+        None
+    }
+}
+
+pub(crate) async fn ordered_program<I, A, B, C>(
+    cx: &QueryCx,
+    order: SpoolOrder,
+    cursor: I,
+    policy: GqlQueryPolicy,
+    files: (&mut SpillFile<A>, &mut SpillFile<B>),
+    limits: SpoolOrderLimits,
+    mut control: C,
+) -> Result<(NativeResultSpool, u64)>
+where
+    I: SpoolInput,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    C: FnMut(fgdb_gql::GlaExecutionEvent) -> Result<()> + Send,
+{
+    let SpoolOrder {
+        columns,
+        tail,
+        stages,
+    } = order;
+    if let Some(plan) = &stages
+        && (plan.source_columns() != columns || plan.stages().is_empty())
+    {
+        return Err(SpillError::InvalidRun.into());
+    }
+    let (scratch, destination) = files;
+    let source_policy = if stages.is_some() {
+        input_policy(policy, limits.max_input_rows)
+    } else {
+        policy
+    };
+    let (input, used) = ordered_input(
+        cx,
+        columns,
+        cursor,
+        tail,
+        source_policy,
+        scratch,
+        destination,
+        limits.run_rows,
+        limits.max_runs,
+        limits.page_bytes,
+        limits.max_row_bytes,
+        limits.max_sort_work,
+    )
+    .await?;
+    match stages {
+        None => Ok((input, used)),
+        Some(plan) => {
+            staged::execute_with_elements(
+                plan,
+                input,
+                cx,
+                (scratch, destination),
+                staged::ExecutionConfig {
+                    limits: staged::Limits {
+                        run_rows: limits.run_rows,
+                        max_runs: limits.max_runs,
+                        page_bytes: limits.page_bytes,
+                        max_row_bytes: limits.max_row_bytes,
+                        max_input_rows: limits.max_input_rows,
+                    },
+                    policy,
+                    max_sort_work: limits.max_sort_work,
+                    prior_work: used,
+                    resolver: None,
+                },
+                &mut NoElements,
+                &mut control,
+            )
+            .await
+        }
+    }
+}
+
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {
         // These are PRIVATE input occurrences. The original output allowance

@@ -1253,6 +1253,25 @@ impl PreparedGraphSet {
         Some((pull, tail))
     }
 
+    /// Choose the checked physical ordering for a single-vertex projection.
+    /// Root-leading input can project during its identity-ordered scan. Other
+    /// input must finish its canonical sort before any fallible projection;
+    /// the existing unary spill program owns that evaluation barrier.
+    pub fn ordered_projection(
+        &self,
+    ) -> Result<Option<GraphSetOrderedProjection>, spill::SpillSetBuildError> {
+        if self.vertex_projection().is_none() {
+            return Ok(None);
+        }
+        if let Some((pull, tail)) = self.ordered_row_pull() {
+            Ok(Some(GraphSetOrderedProjection::Direct { pull, tail }))
+        } else {
+            spill::AsyncSpillSetPlan::compile(self)
+                .map(GraphSetOrderedProjection::Staged)
+                .map(Some)
+        }
+    }
+
     /// A projection over one vertex-rooted, relationship-free pattern with
     /// no inner order or page, whose every cell a pull can evaluate: a column,
     /// a bound constant or integer arithmetic over columns.
@@ -1309,6 +1328,16 @@ impl PreparedGraphSet {
             *quantifier,
         ))
     }
+}
+
+/// The source-order proof determines the projection phase before execution.
+#[derive(Clone, Debug)]
+pub enum GraphSetOrderedProjection {
+    Direct {
+        pull: GraphSetRowPull,
+        tail: crate::scan_stream::ScanSortTail,
+    },
+    Staged(spill::AsyncSpillSetPlan),
 }
 
 /// A relation that pulls row by row (PreparedGraphSet::row_pull): one
@@ -1505,6 +1534,69 @@ mod pulled_projection_tests {
                     .with_page(0, Some(0));
                 assert!(query.ordered_row_pull().is_none());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordered_projection_tests {
+    use super::*;
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_delta_types::PropertyKeyId;
+
+    #[test]
+    fn source_barrier_is_required_without_identity_order_proof() {
+        for (text, direct) in [
+            ("MATCH (n) RETURN n AS id,n.p AS p", true),
+            ("MATCH (n) RETURN n.p AS p,n AS id", false),
+        ] {
+            let source = PreparedGraphSet::from(
+                PreparedGraphText::prepare(text, |kind, name: &str| {
+                    (kind == GraphSymbolKind::Property && name == "p")
+                        .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+                })
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap(),
+            );
+            let source_bytes = source.incremental_pattern().unwrap().canonical_bytes();
+            let query = source
+                .clone()
+                .project(
+                    vec![GraphSetProjection::new("x", GraphSetValue::Column(0))],
+                    GraphSetQuantifier::Distinct,
+                )
+                .unwrap()
+                .with_page(0, Some(0));
+            let bytes = query.canonical_bytes();
+            assert_eq!(query.ordered_row_pull().is_some(), direct);
+            match query.ordered_projection().unwrap().unwrap() {
+                GraphSetOrderedProjection::Direct { pull, tail } => {
+                    assert!(direct);
+                    assert_eq!(pull.pattern().canonical_bytes(), source_bytes);
+                    assert!(tail.distinct());
+                    assert_eq!(tail.count(), Some(0));
+                }
+                GraphSetOrderedProjection::Staged(plan) => {
+                    assert!(!direct);
+                    assert_eq!(
+                        plan.source_pattern().unwrap().canonical_bytes(),
+                        source_bytes
+                    );
+                    assert_eq!(plan.columns(), ["x"]);
+                    assert!(plan.stages().last().unwrap().distinct());
+                    assert_eq!(plan.stages().last().unwrap().count(), Some(0));
+                }
+            }
+            assert_eq!(query.canonical_bytes(), bytes);
+            let unsupported = source
+                .with_page(1, None)
+                .project(
+                    vec![GraphSetProjection::new("x", GraphSetValue::Column(0))],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap();
+            assert!(unsupported.ordered_projection().unwrap().is_none());
         }
     }
 }

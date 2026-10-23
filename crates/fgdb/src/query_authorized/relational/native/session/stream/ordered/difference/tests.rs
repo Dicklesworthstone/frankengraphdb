@@ -627,7 +627,10 @@ fn late_second_endpoint_failure_and_signed_work_refusal_publish_no_changes() {
                 })
                 .unwrap()
                 .await;
-            assert!(outcome.is_err());
+            assert!(matches!(outcome, Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                    GraphSetExecutionError::Projection { row: 0, column: 0, error }
+                )) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(!scoped.is_closed());
             assert!(
@@ -657,6 +660,119 @@ fn late_second_endpoint_failure_and_signed_work_refusal_publish_no_changes() {
             let state = backing.0.lock().unwrap();
             assert_eq!((state.reads, state.writes), (0, 0));
         }
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_source_order_and_signed_projection_work_share_the_live_permit() {
+    let ((), report) = run_async_under_lab(0xd1ff_8108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, DatabaseKeys::new([0x18; 32], NS, [0x28; 32]))
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, p) in [(1, 3), (2, 3), (3, 7)] {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(p))],
+            );
+        }
+        let before = db.write(&commit, batch).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        // Identity order is 9,7,5; native canonical input order is 5,7,9.
+        for (id, p) in [(1, 9), (2, 7), (3, 5)] {
+            batch.set_vertex_property(VId(id), P, Some(CanonicalScalar::Int(p)));
+        }
+        let after = db.write(&commit, batch).await.unwrap();
+        let authority = authority();
+        let pool = MemoryPool::new(262_144, 0).unwrap();
+        let params = GqlParameters::new();
+        for (left, right) in [(before, after), (after, before)] {
+            for suffix in ["", " LIMIT 0"] {
+                let (mut scoped, _, _) =
+                    session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
+                let prepared = scoped
+                    .prepare(
+                        &cx,
+                        &format!("MATCH (n) RETURN 100 / (n.p - 9) AS x{suffix}"),
+                        &params,
+                    )
+                    .unwrap();
+                let calls = AtomicU64::new(0);
+                let outcome = scoped
+                    .visit_difference(&cx, &prepared, &params, left, right, |_, _| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        ready(Ok(()))
+                    })
+                    .unwrap()
+                    .await;
+                assert!(matches!(outcome, Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                        GraphSetExecutionError::Projection { row: 2, column: 0, error }
+                    )) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(!scoped.is_closed());
+                assert!(
+                    collect(&mut scoped, &cx, &prepared, &params, before, before)
+                        .await
+                        .unwrap()
+                        .1
+                        .is_empty()
+                );
+                assert_eq!(pool.used(), 0);
+            }
+        }
+
+        // A fixed grant admits the short scan. Forty-one arithmetic events
+        // per row across six rows exceed its128 additional signed units even
+        // though the physical sort already has its full separate reservation.
+        let mut bounded = grant();
+        bounded.limits.max_work = limits().max_sort_work + 128;
+        let (mut scoped, _, _) =
+            session(&db, &cx, &authority, &bounded, &pool, || 100, policy(100)).await;
+        let short = scoped.prepare(&cx, ROWS, &params).unwrap();
+        assert_eq!(
+            collect(&mut scoped, &cx, &short, &params, before, after)
+                .await
+                .unwrap()
+                .1,
+            Bag::from([(value(3), -2), (value(5), 1), (value(9), 1)])
+        );
+        let expression = std::iter::repeat_n("n.p", 21)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let text = format!("MATCH (n) RETURN {expression} AS x");
+        let (mut scoped, _, _) =
+            session(&db, &cx, &authority, &bounded, &pool, || 100, policy(100)).await;
+        let long = scoped.prepare(&cx, &text, &params).unwrap();
+        let calls = AtomicU64::new(0);
+        refusal(
+            scoped
+                .visit_difference(&cx, &long, &params, before, after, |_, _| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    ready(Ok(()))
+                })
+                .unwrap()
+                .await,
+            AuthorizationError::LimitExceeded(LimitDimension::Work),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.used(), 0);
+        let (mut scoped, _, _) =
+            session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
+        let long = scoped.prepare(&cx, &text, &params).unwrap();
+        assert_eq!(
+            collect(&mut scoped, &cx, &long, &params, before, after)
+                .await
+                .unwrap()
+                .1,
+            Bag::from([(value(63), -2), (value(105), 1), (value(189), 1)])
+        );
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

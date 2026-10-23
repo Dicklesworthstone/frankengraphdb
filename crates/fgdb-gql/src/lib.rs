@@ -224,12 +224,13 @@ pub use set_ops::row_filter;
 pub use set_ops::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphPatternFactorExecution,
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
-    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
-    GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
-    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
-    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
-    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
-    ProcedureSelfLoops, WithElementReads, WithProcedures,
+    GraphSetOperand, GraphSetOperation, GraphSetOrderedProjection, GraphSetPredicateOp,
+    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull,
+    GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH,
+    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall,
+    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
+    WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

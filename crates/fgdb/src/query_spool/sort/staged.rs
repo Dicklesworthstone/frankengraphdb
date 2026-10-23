@@ -82,12 +82,20 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
 }
 
 #[derive(Clone, Copy)]
-struct Limits {
-    run_rows: usize,
-    max_runs: usize,
-    page_bytes: usize,
-    max_row_bytes: usize,
-    max_input_rows: u64,
+pub(super) struct Limits {
+    pub(super) run_rows: usize,
+    pub(super) max_runs: usize,
+    pub(super) page_bytes: usize,
+    pub(super) max_row_bytes: usize,
+    pub(super) max_input_rows: u64,
+}
+
+pub(super) struct ExecutionConfig<'a> {
+    pub(super) limits: Limits,
+    pub(super) policy: GqlQueryPolicy,
+    pub(super) max_sort_work: u64,
+    pub(super) prior_work: u64,
+    pub(super) resolver: Option<&'a (dyn CanonicalScalarResolver + Send + Sync)>,
 }
 
 // Continue the original source's native allowance. Physical decode/encoding,
@@ -258,7 +266,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute<V, A, B>(
     plan: AsyncSpillSetPlan,
-    mut input: NativeResultSpool,
+    input: NativeResultSpool,
     view: &mut BufferedReadView<V>,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
@@ -278,33 +286,75 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
+    let mut elements = ElementSource {
+        view,
+        cx,
+        as_of: input.snapshot_seq(),
+    };
+    execute_with_elements(
+        plan,
+        input,
+        cx,
+        (scratch, destination),
+        ExecutionConfig {
+            limits: Limits {
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_row_bytes,
+                max_input_rows,
+            },
+            policy,
+            max_sort_work,
+            prior_work,
+            resolver,
+        },
+        &mut elements,
+        &mut |_| Ok(()),
+    )
+    .await
+}
+
+/// The caller owns source admission and its live per-event control. Both
+/// resident authorized and buffered hosts use this same native stage runner.
+pub(super) async fn execute_with_elements<A, B, S, C>(
+    plan: AsyncSpillSetPlan,
+    mut input: NativeResultSpool,
+    cx: &QueryCx,
+    files: (&mut SpillFile<A>, &mut SpillFile<B>),
+    config: ExecutionConfig<'_>,
+    elements: &mut S,
+    control: &mut C,
+) -> Result<(NativeResultSpool, u64)>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    S: AsyncSpillElementSource<Error = NativeSpoolError>,
+    C: FnMut(GlaExecutionEvent) -> Result<()> + Send,
+{
     if plan.stages().is_empty() || input.columns() != plan.source_columns() {
         return Err(SpillError::InvalidRun.into());
     }
-    let limits = Limits {
-        run_rows,
-        max_runs,
-        page_bytes,
-        max_row_bytes,
-        max_input_rows,
-    };
+    let (scratch, destination) = files;
+    let ExecutionConfig {
+        limits,
+        policy,
+        max_sort_work,
+        prior_work,
+        resolver,
+    } = config;
     let mut work = Work {
         cx,
         used: prior_work,
         limit: max_sort_work,
     };
     let mut evaluator = input.evaluator_stats();
-    let mut elements = ElementSource {
-        view,
-        cx,
-        as_of: input.snapshot_seq(),
-    };
     let mut in_destination = true;
     for (ordinal, stage) in plan.stages().iter().enumerate() {
         let budget = if ordinal + 1 == plan.stages().len() {
             policy.rows
         } else {
-            GqlExecutionBudget::result_rows(max_input_rows)
+            GqlExecutionBudget::result_rows(limits.max_input_rows)
         };
         input = if in_destination {
             run_stage(
@@ -318,7 +368,8 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
-                &mut elements,
+                elements,
+                control,
             )
             .await?
         } else {
@@ -333,14 +384,15 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
-                &mut elements,
+                elements,
+                control,
             )
             .await?
         };
         in_destination = !in_destination;
     }
     if !in_destination {
-        input = copy(&input, scratch, destination, page_bytes, &mut work).await?;
+        input = copy(&input, scratch, destination, limits.page_bytes, &mut work).await?;
     }
     if input.columns() != plan.columns() {
         return Err(SpillError::InvalidRun.into());
@@ -352,7 +404,7 @@ where
 // This function always leaves its result in destination. Both files append;
 // no handle is overwritten, recycled or selected by retrying a failed phase.
 #[allow(clippy::too_many_arguments)]
-async fn run_stage<A, B, S>(
+async fn run_stage<A, B, S, C>(
     input: NativeResultSpool,
     stage: &SpillSetStage,
     source: &mut SpillFile<A>,
@@ -364,11 +416,13 @@ async fn run_stage<A, B, S>(
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &mut S,
+    control: &mut C,
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     S: AsyncSpillElementSource<Error = NativeSpoolError>,
+    C: FnMut(GlaExecutionEvent) -> Result<()> + Send,
 {
     let transformed = transform(
         &input,
@@ -381,6 +435,7 @@ where
         work,
         resolver,
         elements,
+        control,
     )
     .await?;
     if let Some(requested) = stage.order()
@@ -462,7 +517,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn transform<A, B, S>(
+async fn transform<A, B, S, C>(
     input: &NativeResultSpool,
     stage: &SpillSetStage,
     source: &mut SpillFile<A>,
@@ -473,11 +528,13 @@ async fn transform<A, B, S>(
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &mut S,
+    control: &mut C,
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     S: AsyncSpillElementSource<Error = NativeSpoolError>,
+    C: FnMut(GlaExecutionEvent) -> Result<()> + Send,
 {
     if input.encoded_columns != stage.input_types().len() {
         return Err(SpillError::InvalidRun.into());
@@ -509,6 +566,7 @@ where
                 row,
                 row_index,
                 &mut |event| {
+                    control(event)?;
                     native_event(work.cx, policy, evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
@@ -546,6 +604,7 @@ where
             let next = state
                 .0
                 .next_with_control(&mut |event| {
+                    control(event)?;
                     native_event(work.cx, policy, evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);

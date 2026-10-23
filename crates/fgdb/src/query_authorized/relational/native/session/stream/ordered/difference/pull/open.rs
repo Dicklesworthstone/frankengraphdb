@@ -94,7 +94,7 @@ where
                 }
                 bind_ordered(native, params, before)
             },
-            |(plan, tail, _, columns, pull), view, cx, execution, policy| {
+            |(plan, tail, _, columns, phase), view, cx, execution, policy| {
                 view.snapshot
                     .check_frontier(before)
                     .map_err(QueryError::Read)?;
@@ -106,7 +106,9 @@ where
                     RowPlan::Vertex(plan) => RowPlan::Vertex(plan.clone()),
                     RowPlan::Edge(plan) => RowPlan::Edge(plan.clone()),
                 };
-                let second_pull = pull.clone();
+                let (second_pull, second_order) =
+                    phase.clone().into_source(columns.clone(), tail.clone());
+                let (pull, first_order) = phase.into_source(columns.clone(), tail);
                 let first = Endpoint {
                     input: pending(
                         plan,
@@ -117,7 +119,7 @@ where
                         execution.clone(),
                         limits.max_input_rows,
                     )?,
-                    tail: tail.clone(),
+                    order: first_order,
                 };
                 let second = Endpoint {
                     input: pending(
@@ -129,7 +131,7 @@ where
                         execution.clone(),
                         limits.max_input_rows,
                     )?,
-                    tail,
+                    order: second_order,
                 };
                 execution.borrow_mut().checkpoint()?;
                 Ok((first, second, columns, policy, execution))
@@ -149,38 +151,35 @@ where
         let future = Box::pin(async move {
             let future = async {
                 let input_policy = private_policy(policy);
-                let (first, used) = ordered_input(
+                let control = execution.clone();
+                let (first, used) = ordered_program(
                     cx,
-                    columns.clone(),
+                    first.order,
                     (first.input)(input_policy),
-                    first.tail,
                     input_policy,
-                    &mut *scratch,
-                    &mut *destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_sort_work,
+                    (&mut *scratch, &mut *destination),
+                    limits.into(),
+                    move |_| control.borrow_mut().checkpoint().map_err(authorized),
                 )
-                .await?;
+                .await
+                .map_err(projection_error)?;
                 let input_policy = after_policy(input_policy, &first)?;
                 let allowance = remainder(limits.max_sort_work, used)?;
-                let (second, spent) = ordered_input(
+                let control = execution.clone();
+                let (second, spent) = ordered_program(
                     cx,
-                    columns.clone(),
+                    second.order,
                     (second.input)(input_policy),
-                    second.tail,
                     input_policy,
-                    &mut *scratch,
-                    &mut *destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    allowance,
+                    (&mut *scratch, &mut *destination),
+                    SpoolOrderLimits {
+                        max_sort_work: allowance,
+                        ..limits.into()
+                    },
+                    move |_| control.borrow_mut().checkpoint().map_err(authorized),
                 )
-                .await?;
+                .await
+                .map_err(projection_error)?;
                 if first.snapshot_seq() != before || second.snapshot_seq() != after {
                     return Err(NativeSpoolError::IncompleteCursor);
                 }

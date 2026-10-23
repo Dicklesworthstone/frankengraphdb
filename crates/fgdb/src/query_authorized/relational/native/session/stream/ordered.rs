@@ -3,12 +3,15 @@
 //! cross the narrowed session boundary; only live-admitted final rows do.
 
 use super::*;
-use crate::query::view::{SpoolInput, SpoolRow, ordered_input};
+use crate::query::view::{SpoolInput, SpoolOrder, SpoolOrderLimits, SpoolRow, ordered_program};
 use crate::{NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
 use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
-use fgdb_gql::{GlaExecutionStats, GqlExecutionBudget, GqlExecutionStats};
+use fgdb_gql::spill_set::AsyncSpillSetPlan;
+use fgdb_gql::{
+    GlaExecutionStats, GqlExecutionBudget, GqlExecutionStats, GraphSetOrderedProjection,
+};
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
@@ -52,6 +55,38 @@ impl AuthorizedSortLimits {
             });
         }
         Ok(())
+    }
+}
+
+impl From<AuthorizedSortLimits> for SpoolOrderLimits {
+    fn from(limits: AuthorizedSortLimits) -> Self {
+        Self {
+            run_rows: limits.run_rows,
+            max_runs: limits.max_runs,
+            page_bytes: limits.page_bytes,
+            max_row_bytes: limits.max_row_bytes,
+            max_input_rows: limits.max_input_rows,
+            max_sort_work: limits.max_sort_work,
+        }
+    }
+}
+
+fn projection_error(error: NativeSpoolError) -> NativeSpoolError {
+    match error {
+        NativeSpoolError::SetExecution(error) => authorized(QueryError::Set(
+            GqlQueryError::Source(error.map_source(|never| match never {})),
+        )),
+        NativeSpoolError::BufferedExecute(error) => match *error {
+            GqlQueryError::Rows(error) => authorized(QueryError::Set(GqlQueryError::Rows(error))),
+            GqlQueryError::Evaluator(error) => {
+                authorized(QueryError::Set(GqlQueryError::Evaluator(error)))
+            }
+            GqlQueryError::Interrupted(error) => {
+                authorized(QueryError::Set(GqlQueryError::Interrupted(error)))
+            }
+            error => NativeSpoolError::BufferedExecute(Box::new(error)),
+        },
+        error => error,
     }
 }
 
@@ -422,8 +457,49 @@ type BoundOrder = (
     ScanSortTail,
     CommitSeq,
     Vec<String>,
-    Option<GraphSetRowPull>,
+    ProjectionPhase,
 );
+
+#[derive(Clone)]
+enum ProjectionPhase {
+    Scan,
+    Direct(GraphSetRowPull),
+    Staged(AsyncSpillSetPlan),
+}
+impl ProjectionPhase {
+    fn into_source(
+        self,
+        columns: Vec<String>,
+        tail: ScanSortTail,
+    ) -> (Option<GraphSetRowPull>, SpoolOrder) {
+        match self {
+            Self::Scan => (
+                None,
+                SpoolOrder {
+                    columns,
+                    tail,
+                    stages: None,
+                },
+            ),
+            Self::Direct(pull) => (
+                Some(pull),
+                SpoolOrder {
+                    columns,
+                    tail,
+                    stages: None,
+                },
+            ),
+            Self::Staged(plan) => (
+                None,
+                SpoolOrder {
+                    columns: plan.source_columns().to_vec(),
+                    tail,
+                    stages: Some(plan),
+                },
+            ),
+        }
+    }
+}
 
 fn bind_ordered(
     prepared: &PreparedNativeRead,
@@ -448,22 +524,25 @@ fn bind_ordered(
         // sort applies the set's own ORDER BY and page.
         PreparedNativeRead::Set(set) => {
             let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
-            let (pull, tail) =
-                query
-                    .ordered_row_pull()
-                    .ok_or(QueryError::StreamingUnsupported {
-                        facade: prepared.facade_class(),
-                    })?;
-            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-                unreachable!("an ordered row pull is rooted at its one vertex scan")
+            let unsupported = || QueryError::StreamingUnsupported {
+                facade: prepared.facade_class(),
             };
-            return Ok((
-                RowPlan::Vertex(plan),
-                tail,
-                default,
-                query.columns().to_vec(),
-                Some(pull),
-            ));
+            let (plan, tail, phase) = match query
+                .ordered_projection()
+                .map_err(|_| unsupported())?
+                .ok_or_else(unsupported)?
+            {
+                GraphSetOrderedProjection::Direct { pull, tail } => {
+                    let plan = compile(pull.pattern())?;
+                    (plan, tail, ProjectionPhase::Direct(pull))
+                }
+                GraphSetOrderedProjection::Staged(program) => {
+                    let pattern = program.source_pattern().ok_or_else(unsupported)?;
+                    let (plan, tail) = compile_ordered(pattern)?;
+                    (plan, tail, ProjectionPhase::Staged(program))
+                }
+            };
+            return Ok((plan, tail, default, query.columns().to_vec(), phase));
         }
         _ => {
             return Err(QueryError::StreamingUnsupported {
@@ -472,12 +551,18 @@ fn bind_ordered(
         }
     };
     let (plan, tail) = compile_ordered(&query)?;
-    Ok((plan, tail, at, query.columns().to_vec(), None))
+    Ok((
+        plan,
+        tail,
+        at,
+        query.columns().to_vec(),
+        ProjectionPhase::Scan,
+    ))
 }
 
 struct OpenedOrder<'q, C> {
     input: OrderedInput<'q>,
-    tail: ScanSortTail,
+    order: SpoolOrder,
     columns: Vec<String>,
     at: CommitSeq,
     policy: GqlQueryPolicy,
@@ -526,7 +611,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
             params,
             *policy,
             bind_ordered,
-            |(plan, tail, at, columns, pull), view, cx, execution, policy| {
+            |(plan, tail, at, columns, phase), view, cx, execution, policy| {
+                let (pull, order) = phase.into_source(columns.clone(), tail);
                 execution.borrow_mut().reserve_work(limits.max_sort_work)?;
                 let input_policy = GqlQueryPolicy {
                     rows: match policy.rows.max_snapshot_records() {
@@ -570,15 +656,15 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                     }
                 };
                 execution.borrow_mut().checkpoint()?;
-                Ok((OrderedInput(input), tail, columns, at, policy, execution))
+                Ok((OrderedInput(input), order, columns, at, policy, execution))
             },
         );
         match result {
-            Ok((input, tail, columns, at, policy, execution)) => {
+            Ok((input, order, columns, at, policy, execution)) => {
                 guard.armed = false;
                 Ok(OpenedOrder {
                     input,
-                    tail,
+                    order,
                     columns,
                     at,
                     policy,
@@ -674,29 +760,27 @@ where
         let future = Box::pin(async move {
             let OpenedOrder {
                 input,
-                tail,
-                columns,
+                order,
                 at,
                 policy,
                 execution,
                 mut guard,
+                ..
             } = opened;
-            let future = ordered_input(
+            let control = execution.clone();
+            let future = ordered_program(
                 cx,
-                columns,
+                order,
                 input,
-                tail,
                 policy,
-                scratch,
-                destination,
-                limits.run_rows,
-                limits.max_runs,
-                limits.page_bytes,
-                limits.max_row_bytes,
-                limits.max_sort_work,
+                (scratch, destination),
+                limits.into(),
+                move |_| control.borrow_mut().checkpoint().map_err(authorized),
             );
             let (spool, _) =
-                checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await?;
+                checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future)
+                    .await
+                    .map_err(projection_error)?;
             guard.armed = true;
             let admitted = (|| {
                 let bytes =

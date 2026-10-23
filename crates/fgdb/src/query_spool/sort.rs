@@ -19,7 +19,7 @@ mod prepared;
 pub(in crate::query::view::spool) use difference::Merge;
 pub use difference::NativeSpoolDifference;
 pub use prepared::PreparedBufferedOrder;
-pub(crate) use prepared::ordered_input;
+pub(crate) use prepared::{SpoolOrder, SpoolOrderLimits, ordered_input, ordered_program};
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
