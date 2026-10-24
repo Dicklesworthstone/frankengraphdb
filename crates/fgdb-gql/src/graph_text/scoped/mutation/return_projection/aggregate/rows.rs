@@ -284,7 +284,9 @@ impl PreparedGraphPipelineAggregateText {
     /// owns the sole graph leaf. A source count is not an execution shape.
     #[must_use]
     pub fn requires_relational_input(&self) -> bool {
-        self.input.first.selection.is_none() || !self.input.continuations.is_empty()
+        self.input.first.selection.is_none()
+            || !self.input.first.leading.is_empty()
+            || !self.input.continuations.is_empty()
     }
 
     /// Bind the entire relational pipeline, including zero-source WITH/UNWIND

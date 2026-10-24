@@ -27,6 +27,61 @@ fn wide() -> GqlQueryPolicy {
 }
 
 #[test]
+fn leading_identity_bags_keep_the_seeded_source_for_terminal_aggregates() {
+    use fgdb_gql::algebra::GraphValue;
+    use std::cell::Cell;
+
+    let template = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+        "UNWIND $nodes AS n MATCH (n)-[:R]->(m) RETURN COUNT(*) AS count, COUNT(m.p) AS present",
+        &[("nodes", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.graph_source_count(), 1);
+    assert!(template.requires_relational_input());
+    let arguments = GqlParameters::new()
+        .with_list(
+            "nodes",
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap();
+    let query = template.bind_relation_parameters(&arguments).unwrap();
+    let calls = Cell::new(0);
+    let property = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
+    let result = query
+        .execute_governed_with_seeded_elements(
+            wide(),
+            |_, _| panic!("a leading identity equality must not admit the whole graph"),
+            |pattern, seeds, remaining| {
+                calls.set(calls.get() + 1);
+                assert_eq!(seeds, &[VId(1)]);
+                Some(pattern.plan().execute_governed_with_properties(
+                    3,
+                    [VId(1), VId(3)],
+                    [(VId(1), R, VId(3))],
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(Some(&property)),
+                    remaining,
+                    || Ok::<_, ()>(()),
+                ))
+            },
+            |_, _, _| panic!("no procedure in this definition"),
+            |_, _| Ok(None),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(result.rows.snapshot_records, 3);
+    assert_eq!(result.value.len(), 1);
+    assert_eq!(result.value[0].values()[0].as_count(), Some(2));
+    assert_eq!(result.value[0].values()[1].as_count(), Some(2));
+}
+
+#[test]
 fn inline_call_aggregate_keeps_its_one_source_relational() {
     let template = PreparedGraphPipelineAggregateText::prepare(
         "CALL { MATCH (n) RETURN n } RETURN count(n) AS total",
