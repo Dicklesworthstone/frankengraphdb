@@ -61,6 +61,12 @@ mkdir -p "$WORK"
 # shellcheck source=lib/private_subject.sh
 . "$ROOT/scripts/lib/private_subject.sh"
 
+if reapable_lock_fd_lifetime_control "$ROOT/AGENTS.md"; then
+  ok "control: seven FD lifetime cases accept open/inherited leases and reject closed/malformed descriptors"
+else
+  die "control: FD liveness does not distinguish retained leases from closed or malformed descriptors"
+fi
+
 mkdir -p "$WORK/bin"
 log "acquiring the subject for this tree state"
 SUBJECT_REAPER_LOCK_FD=""

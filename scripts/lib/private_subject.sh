@@ -358,7 +358,39 @@ reapable_dir_lock_shared() {
 reapable_lock_fd_is_open() {
   local lock_fd="$1"
   [[ "$lock_fd" =~ ^[0-9]+$ ]] || return 1
-  [ -e "/proc/${BASHPID:-$$}/fd/$lock_fd" ]
+  # /dev/fd names this shell's descriptors on both Linux and macOS. Linux's
+  # /proc/<pid>/fd spuriously rejects every retained lease on macOS.
+  [ -e "/dev/fd/$lock_fd" ]
+}
+
+# Seven kernel-state controls, not a second implementation of the predicate:
+# an open FD in the caller and child, the same FD after close, and four values
+# that cannot name a descriptor. Used before a gate trusts its subject leases.
+reapable_lock_fd_lifetime_control() {
+  local readable_file="$1" probe_fd closed_fd candidate failed=0
+  exec {probe_fd}<"$readable_file" || return 1
+  if ! reapable_lock_fd_is_open "$probe_fd"; then
+    printf 'fd-lifetime control: rejected the open caller descriptor\n' >&2
+    failed=1
+  fi
+  if ! (reapable_lock_fd_is_open "$probe_fd"); then
+    printf 'fd-lifetime control: rejected the inherited child descriptor\n' >&2
+    failed=1
+  fi
+  closed_fd="$probe_fd"
+  exec {probe_fd}<&-
+  if reapable_lock_fd_is_open "$closed_fd"; then
+    printf 'fd-lifetime control: accepted the descriptor after close\n' >&2
+    failed=1
+  fi
+  for candidate in "" -1 not-a-descriptor 0/../1; do
+    if reapable_lock_fd_is_open "$candidate"; then
+      printf 'fd-lifetime control: accepted malformed descriptor <%s>\n' \
+        "$candidate" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ]
 }
 
 # reapable_parent_lock_shared <parent-dir> <lock-name> <fd-variable>
@@ -499,7 +531,13 @@ subject_dir() {
 # fails, and the loser returns its own staging copy -- the pre-fgdb-1j16
 # behaviour, for one run, rather than reading bytes another process is mid-write.
 subject_acquire() {
-  local root="$1" dir stage key current_key
+  local root="$1" dir stage key current_key move_cmd=mv
+  # GNU -T never treats an existing destination as a containing directory.
+  # Homebrew installs this same operation as gmv; BSD mv has no -T and was
+  # silently taking the publish-race-loser path on every macOS acquisition.
+  if command -v gmv >/dev/null 2>&1; then
+    move_cmd=gmv
+  fi
   key="$(subject_key "$root")" || return 1
   dir="$(subject_cache_dir)/subject-$key"
   if subject_cache_entry_is_valid "$dir" "$root" "$key"; then
@@ -526,7 +564,7 @@ subject_acquire() {
     printf '%s' "$stage"
     return 1
   fi
-  if mv -T "$stage" "$dir" 2>/dev/null; then
+  if "$move_cmd" -T "$stage" "$dir" 2>/dev/null; then
     printf '%s' "$dir"
   else
     printf '%s' "$stage"
@@ -803,5 +841,7 @@ subject_write_stale_probe() {
   local path="$1"
   : >"$path"
   chmod +x "$path"
-  touch -d 2020-01-01 "$path"
+  # POSIX -t works with BSD and GNU touch; GNU's -d date spelling aborts the
+  # macOS gate before the freshness assertion can execute.
+  touch -t 202001010000.00 "$path"
 }
