@@ -541,6 +541,26 @@ be a commit reachable in this repository.
 - **caught_by**: the gauntlet A/B itself, an hour after a pre-pack fgdbd had read the same databases unchanged. No law covered "an open writes nothing to a current database". Both features were reverted (`5d7c662c`, `469352c7`) and re-landed as `dabd63df`/`e65418ee` only after the fix.
 - **signature**: a content address re-derived where a stored identity should be carried. When the encoder's output format changes, re-encoding a stored record silently changes its identity, and any code that compares or publishes the re-derived address now names an object that does not exist. The repair carries the stored manifest identity (`SelectedCheckpoint.manifest`) and refuses to create or heal a slot unless the manifest it would name resolves from the store (`ensure_slot_target_resolves`, `SlotUnrecoverable`). Laws: `pre_pack_open_laws::opening_a_pre_v3_database_leaves_its_root_slot_byte_identical` (`2b5bf8a5`) and, for the user-facing half, `manifest_format_open_laws::a_manifest_in_a_format_this_build_does_not_read_is_refused_by_name` (`64ffb9fa`, fgdb-eslqh), so a format this build cannot read is refused by name with every file left byte-identical instead of reading as damage.
 
+### NE-0048 — A Linux-only process probe declared live macOS lease holders dead
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-rc1017-bridge-wvze5
+- **repair**: 8de0276dd5f33f040cb89d87663892f29beeb44a
+- **claimed**: token and landing-lease reclamation requires evidence that the recorded process is gone, independently of age or UID
+- **actual**: both readers treated an absent `/proc/<pid>` directory as proof of death. macOS has no procfs, so every live holder was classified as dead. The frozen `4a061899` whole-chain run also failed two tree-stability fixtures before their live-holder assertions because `_ll_starttime` could not read a macOS process. Those failures were real missing coverage, not permission to skip the controls.
+- **caught_by**: `g0_tree_stability_e2e.sh` reported 22 passing and two failing assertions; inspection of the shared publication and reading paths exposed the more serious false-death classification.
+- **signature**: an unavailable platform mechanism interpreted as negative evidence. The repair shares one kernel birth probe: Linux start ticks or macOS `PROC_PIDTBSDINFO` microseconds. Only kernel-proven absence or a comparable changed birth identity permits reclamation. Permission errors, missing tools, unsupported platforms and legacy/incompatible recordings retain the hold as indeterminate. The original binding/export and mutation controls remain; six added identity controls execute on macOS. These controls are bounded verification, not a passing whole-project landing proof.
+
+### NE-0049 — A private aggregate repair changed implicit grouping to satisfy an output oracle
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-rc1017-bridge-wvze5
+- **repair**: 79d7812e41f6e8399c980404f75740e2508979ea
+- **claimed**: independent parameter/literal return programs could move after aggregation without changing the query contract
+- **actual**: `6b7ea764`/`122dafb7` removed those nonaggregating return items from implicit grouping keys. On empty input that creates a zero-count row where keyed aggregation yields no groups. The candidate was not qualified by a passing test run or landing proof; its semantics were nevertheless described too confidently during implementation. A concurrent fast-forward placed the candidate on shared `main` before qualification completed.
+- **caught_by**: review against the primary Cypher grouping contract and planner conversion, before claiming external conformance or a green aggregate target. The existing output-mask tests intended key-free post-group values but had not expressed that distinction.
+- **signature**: broadening semantics to fit a test's intended route. The repair retains implicit whole-expression keys, adds explicit `GROUP BY ()` for the actual global aggregate, and tests both empty-input behaviors plus explicit constant aliases and rejection of row-dependent ungrouped output. The output-mask oracles now request their intended grouping while preserving their masks, historic cuts, exact checkpoint prefixes and refusal checks. Source correction alone does not qualify the implementation; current runtime and whole-chain verdicts remain separate.
+
 ---
 
 ## Reverts
