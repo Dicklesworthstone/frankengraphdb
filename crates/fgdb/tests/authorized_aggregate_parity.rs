@@ -855,7 +855,7 @@ mod aggregate_output_properties {
             // rather than to the aggregate's last binding or admitted table.
             let filtered = prepare_output(
                 "MATCH (n) WHERE n.p = 3 RETURN COUNT(*) AS n, \
-                    [item IN $elements | item.p] AS values",
+                    [item IN $elements | item.p] AS values GROUP BY ()",
                 &args,
             )
             .bind_parameters(&args)
@@ -1006,12 +1006,12 @@ mod aggregate_output_properties {
                 ),
                 (COUNT_OUTPUT, &open, Some(GraphCountSource::Vertices)),
                 (
-                    "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values",
+                    "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values GROUP BY ()",
                     &open,
                     Some(GraphCountSource::Relation(RelationId(1))),
                 ),
                 (
-                    "MATCH (n) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values LIMIT 0",
+                    "MATCH (n) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values GROUP BY () LIMIT 0",
                     &open,
                     Some(GraphCountSource::Vertices),
                 ),
