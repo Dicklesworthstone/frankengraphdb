@@ -119,6 +119,10 @@ impl<'a> Parser<'a> {
         // already lowers every composite template, so no new evaluator exists.
         let composite = self.is_punct(b'[')
             || self.is_punct(b'{')
+            // Temporal constructors and the other shared value operands do
+            // not belong to the integer/path-function parser. Keep their
+            // typed value program and the enclosing parser's pinned artifacts.
+            || self.starts_let_operand()?
             || ((self.is_word("KEYS") || self.is_word("PROPERTIES"))
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
             || (matches!(self.current.kind, TokenKind::Word(_))
