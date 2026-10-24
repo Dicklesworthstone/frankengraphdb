@@ -279,8 +279,10 @@ fn invalid_source_definition_refuses_before_reading_and_uint64_never_wraps() {
     ));
     // The chain schema retains a shared parameter's first occurrence count;
     // a later clause reading the source parameter must still refuse.
+    // (A MERGE property map takes no function call, so the later read sits
+    // in a WITH item.)
     let reused = PreparedGraphWriteChainText::prepare_with_parameter_types(
-        "UNWIND $rows AS row MERGE (a:N {id:row.src}) MERGE (b:N {id:size($rows)})",
+        "UNWIND $rows AS row MERGE (a:N {id:row.src}) WITH a, size($rows) AS k MERGE (b:N {id:k})",
         RelationId(1),
         &[("rows", GqlParameterType::List)],
         symbols,
