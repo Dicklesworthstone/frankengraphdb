@@ -1217,7 +1217,6 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
         "MATCH (n) WITH n RETURN n.p AS v, __fg_boundary_0",
         "MATCH (n) WITH n ORDER BY __fg_boundary_0 RETURN n.p",
         "MATCH (n) WITH n RETURN n.p, n.p",
-        "MATCH (n) WITH n UNWIND [1] AS x RETURN n.p",
         // A later WITH that renames or drops the element ends its scope.
         "MATCH (n) WITH n WITH n AS m RETURN n.p",
         "MATCH (n) WITH n WITH n.p AS q RETURN n.p",
@@ -1231,6 +1230,23 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
             "{text}"
         );
     }
+    // An UNWIND keeps the element in scope but ends the boundary's hidden
+    // columns: the host's element reader reads `n.p` there, as for any
+    // element value, and a host without one keeps the typed refusal.
+    let past = PreparedGraphSetText::prepare(
+        "MATCH (n) WITH n UNWIND [1] AS x RETURN n.p AS v ORDER BY v",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(
+        run_reading(&past, &values, wide(), &mut || Ok(()), true)
+            .unwrap()
+            .value,
+        rows("MATCH (n) RETURN n.p AS v ORDER BY v")
+    );
+    assert!(run(&past, &values, wide(), &mut || Ok(())).is_err());
     // fgdb-dhcfo: a RETURN-only carried read uses the host's pinned element
     // reader and does not add a graph binding merely to read a property.
     // The pattern-only adapter cannot perform that read: its documented
