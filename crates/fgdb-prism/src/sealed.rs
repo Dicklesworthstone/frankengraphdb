@@ -474,6 +474,47 @@ impl SealedGraphView {
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes
     }
+
+    /// The opposite directed face of this exact admitted projection. The
+    /// source image, selected vertices, historical cut, masks and reduction
+    /// laws are preserved; only direction changes. No edge or property column
+    /// is decoded into a second graph.
+    ///
+    /// This is temporary kernel workspace, not a new authorization boundary.
+    /// Its directory and any compressed incoming index, including construction
+    /// peak, must fit the remaining kernel allowance. The same live guard
+    /// reaches every construction and raw-pull checkpoint. Undirected kernels
+    /// already have both faces and do not need this auxiliary projection.
+    pub(crate) fn reverse_projection_controlled(
+        &self,
+        cx: &Control<'_>,
+        max_workspace_bytes: usize,
+    ) -> Result<Self, SealedProjectionError> {
+        let mut config = self.0.config;
+        config.projection.directedness = match config.projection.directedness {
+            Directedness::Directed => Directedness::Reversed,
+            Directedness::Reversed => Directedness::Directed,
+            Directedness::Undirected => {
+                return Err(SealedProjectionError::UnsupportedDirectedness(
+                    Directedness::Undirected,
+                ));
+            }
+        };
+        Self::build_controlled(
+            cx,
+            &self.0.partition,
+            &self.0.vertices,
+            config,
+            self.0.mask,
+            ProjectionLimits {
+                max_vertices: self.node_count(),
+                max_input_edges: self.scan_incidence_bound(),
+                max_adjacency_entries: self.adjacency_entry_count(),
+                max_workspace_bytes,
+            },
+        )
+    }
+
     /// Conservative retained-incidence bound, not the reduced simple-edge count.
     pub fn scan_incidence_bound(&self) -> usize {
         self.0.scan_bound

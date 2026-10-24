@@ -138,6 +138,202 @@ const CC: &str = "CALL fnx.connected_components() YIELD vertex,component";
 const WCC: &str = "CALL fnx.weakly_connected_components() YIELD vertex,component";
 const SCC: &str = "CALL fnx.strongly_connected_components() YIELD vertex,component";
 
+fn exact_sealed_limits(
+    procedure: &FnxCallSpec,
+    query: &QueryCx,
+    graph: &SealedGraphView,
+    limits: FnxExecutionLimits,
+    expected: &FnxResult,
+) {
+    let result_bytes = procedure.outputs().len() * size_of::<String>()
+        + procedure
+            .outputs()
+            .iter()
+            .map(|column| column.name.len())
+            .sum::<usize>()
+        + expected.rows.len()
+            * (size_of::<Vec<FnxValue>>() + procedure.outputs().len() * size_of::<FnxValue>());
+    let exact = FnxExecutionLimits {
+        max_estimated_work: expected.certificate.estimated_work,
+        max_result_rows: expected.rows.len(),
+        ..limits
+    };
+    let memory = FnxMemoryLimits {
+        max_kernel_workspace_bytes: expected.certificate.kernel_workspace_bytes,
+        max_result_bytes: result_bytes,
+    };
+    assert_eq!(
+        procedure
+            .execute_sealed(query, graph, exact, memory)
+            .unwrap(),
+        *expected
+    );
+    for (limits, memory) in [
+        (
+            FnxExecutionLimits {
+                max_estimated_work: exact.max_estimated_work - 1,
+                ..exact
+            },
+            memory,
+        ),
+        (
+            FnxExecutionLimits {
+                max_result_rows: exact.max_result_rows - 1,
+                ..exact
+            },
+            memory,
+        ),
+        (
+            exact,
+            FnxMemoryLimits {
+                max_kernel_workspace_bytes: memory.max_kernel_workspace_bytes - 1,
+                ..memory
+            },
+        ),
+        (
+            exact,
+            FnxMemoryLimits {
+                max_result_bytes: memory.max_result_bytes - 1,
+                ..memory
+            },
+        ),
+    ] {
+        assert!(
+            procedure
+                .execute_sealed(query, graph, limits, memory)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn sealed_cdlp_matches_decoded_calls_across_history_directions_and_reductions() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.add_edge(EId(3000), VId(1), VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))]);
+        let current = db.write(&commit, update).await.unwrap();
+        let view = db.read_session().unwrap();
+        for at in [original, current] {
+            for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+                for reduction in [ParallelEdgePolicy::Sum, ParallelEdgePolicy::Minimum,
+                    ParallelEdgePolicy::Maximum, ParallelEdgePolicy::CollapseUnit] {
+                    let mut opt = options(direction);
+                    opt.as_of = Some(at);
+                    opt.projection.parallel_edges = reduction;
+                    opt.projection.self_loops = SelfLoopPolicy::Drop;
+                    let graph = project(&db, &query, opt).await;
+                    for iterations in [0, 1, 2, 5] {
+                        let text = format!("CALL fnx.cdlp(max_iter => {iterations}) YIELD component AS community,vertex AS node");
+                        let procedure = call(&text);
+                        assert!(procedure.supports_sealed_execution());
+                        let expected = view.execute_fnx(&query, &procedure, opt).unwrap();
+                        let actual = procedure.execute_sealed(&query, &graph, opt.execution_limits, memory()).unwrap();
+                        assert_eq!(actual.columns, expected.analytics.columns);
+                        assert_eq!(actual.rows, expected.analytics.rows,
+                            "{at:?} {direction:?} {reduction:?} {iterations}");
+                        assert_eq!(actual.certificate.result_digest, expected.analytics.certificate.result_digest);
+                        assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+                        assert_eq!(actual.certificate.snapshot, graph.binding());
+                        assert_eq!(actual.rows.len(), graph.node_count());
+                        if iterations == 0 {
+                            for row in &actual.rows {
+                                assert_eq!(row[0], row[1], "zero rounds retain each stable VId");
+                            }
+                        }
+                        exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+                        if iterations == 2 && reduction == ParallelEdgePolicy::Sum {
+                            let hosted = db.call_fnx_sealed(&query, &text, &FnxParameters::new(),
+                                opt, memory(), SealedLimits::default()).await.unwrap();
+                            assert_eq!(hosted.analytics, actual);
+                        }
+                    }
+                }
+                let opt = options(direction);
+                let graph = project(&db, &query, opt).await;
+                // The registered loop refusal applies even with zero rounds.
+                for iterations in [0, 2] {
+                    assert!(matches!(FnxCallSpec::cdlp(iterations).execute_sealed(
+                        &query, &graph, opt.execution_limits, memory()),
+                        Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))));
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn sealed_cdlp_auxiliary_face_and_output_guards_preserve_the_source_after_refusal() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let mut opt = options(Directedness::Directed);
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        let graph = project(&db, &query, opt).await;
+        let procedure = FnxCallSpec::cdlp(2);
+        let before = graph.digest();
+        let steps = std::cell::Cell::new(0usize);
+        let expected = procedure
+            .execute_sealed_with_checkpoint(&query, &graph, opt.execution_limits, memory(), || {
+                steps.set(steps.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        let total = steps.get();
+        assert!(total > graph.input_edge_count());
+        // Every boundary includes incoming-index build, parallel-edge reduction,
+        // iteration and final public-row encoding. A refusal publishes no rows.
+        for stop in 1..=total {
+            steps.set(0);
+            assert!(
+                procedure
+                    .execute_sealed_with_checkpoint(
+                        &query,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        || {
+                            steps.set(steps.get() + 1);
+                            if steps.get() == stop {
+                                Err(SealedProjectionError::UnknownOrdinal(usize::MAX))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    )
+                    .is_err(),
+                "guard at {stop}/{total} must prevent publication"
+            );
+            assert_eq!(steps.get(), stop);
+            assert_eq!(graph.digest(), before);
+        }
+        assert_eq!(
+            procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 #[test]
 fn all_directions_reductions_loops_and_full_width_seeks_match_decoded_rows() {
     let runtime = RuntimeBuilder::new().build().unwrap();

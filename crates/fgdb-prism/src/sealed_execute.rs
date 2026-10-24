@@ -21,6 +21,8 @@ use std::cell::RefCell;
 use std::convert::Infallible;
 use std::mem::size_of;
 
+#[path = "sealed_cdlp.rs"]
+mod cdlp;
 #[path = "sealed_clustering.rs"]
 mod clustering;
 #[path = "sealed_components.rs"]
@@ -537,6 +539,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Cdlp { .. }
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::Foundation(
@@ -569,7 +572,8 @@ impl FnxCallSpec {
     }
 
     /// Execute registered ranks, distances, components and local triangles or
-    /// clustering, centralities and core numbers from authenticated compressed rows.
+    /// clustering, CDLP communities, centralities and core numbers from
+    /// authenticated compressed rows.
     /// Degree centrality uses the admitted degree directory without opening
     /// rows; core peeling opens each row once with O(|V|) integer workspace.
     /// Eigenvector iteration keeps two score vectors and canonical reductions.
@@ -618,6 +622,9 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
+        if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
+            return cdlp::execute(self, cx, graph, limits, memory, &admission);
+        }
         if matches!(
             self.algorithm(),
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
@@ -1016,6 +1023,7 @@ fn source_digest() -> Digest {
             include_str!("sealed_eigenvector.rs"),
             include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
+            include_str!("sealed_cdlp.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
             include_str!("shortest_path.rs"),
