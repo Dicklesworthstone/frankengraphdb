@@ -218,12 +218,14 @@ pub(super) struct HoistGuard<'g, 'a> {
 }
 
 /// Whether a hoistable expression may start at a token (hoist_comprehension
-/// decides): `[` of a pattern comprehension, or `COUNT` of a count subquery,
-/// never a property key after `.`.
+/// decides): `[` of a pattern comprehension, or `COUNT` or `EXISTS` of a
+/// pattern count, never a property key after `.`.
 pub(super) fn hoist_candidate(token: TokenKind<'_>, after_dot: bool) -> bool {
     match token {
         TokenKind::Punct(b'[') => true,
-        TokenKind::Word(word) => !after_dot && word.eq_ignore_ascii_case("COUNT"),
+        TokenKind::Word(word) => {
+            !after_dot && (word.eq_ignore_ascii_case("COUNT") || word.eq_ignore_ascii_case("EXISTS"))
+        }
         _ => false,
     }
 }
@@ -548,6 +550,13 @@ impl<'a> Parser<'a> {
                 && binds_local(window[2], lexer.clone().next()?.kind)
             {
                 locals.push(word);
+            }
+            // An existence predicate of the WHERE is already its hidden
+            // Boolean column (hoist_existence_reads).
+            if let Some(&(_, end, _)) = existence.iter().find(|&&(start, _, _)| start == token.at) {
+                skip_until = end;
+                window = [window[1], window[2], Some(TokenKind::Punct(b')'))];
+                continue;
             }
             if hoist_candidate(token.kind, after_dot)
                 && carried.is_none()

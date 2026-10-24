@@ -3229,30 +3229,54 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// Whether a pattern count starts here: `COUNT {`, a count subquery.
-    /// `size((n)-->())`, the openCypher 9 pattern expression inside size(),
-    /// stays refused: the openCypher TCK requires a SyntaxError for it
-    /// (List6 [6]). Only lexical lookahead: nothing is consumed.
+    /// Whether a pattern count starts here: `COUNT {`, a count subquery, or
+    /// an existence test read as a value, `EXISTS {` or `exists(` and a
+    /// pattern (`RETURN exists((n)-->()) AS out`). `size((n)-->())`, the
+    /// openCypher 9 pattern expression inside size(), stays refused: the
+    /// openCypher TCK requires a SyntaxError for it (List6 [6]). Only lexical
+    /// lookahead: nothing is consumed.
     pub(in crate::graph_text) fn starts_pattern_count(
         &self,
     ) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("COUNT")
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')))
+        let mut lexer = self.lexer.clone();
+        if self.is_word("COUNT") {
+            return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')));
+        }
+        if !self.is_word("EXISTS") {
+            return Ok(false);
+        }
+        match lexer.next()?.kind {
+            TokenKind::Punct(b'{') => Ok(true),
+            TokenKind::Punct(b'(') => {
+                let first = lexer.next()?;
+                crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// A pattern count over the MATCH bindings of a graph projection: the
     /// pattern is a Collect scope, as an existence predicate's is
     /// (existence_body), and the count is the size of its witness list, one
-    /// entry per witness. It takes either form EXISTS takes.
+    /// entry per witness. It takes either form EXISTS takes. An existence
+    /// test is that size being positive.
     fn pattern_count(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
         let scope = self.syntax.scopes.len();
-        self.word("COUNT")?;
-        self.punct(b'{', "{")?;
-        self.scope(ScopeKind::Collect, ScopeForm::Clause)?;
+        let exists = self.take_word("EXISTS")?;
+        if !exists {
+            self.word("COUNT")?;
+        }
+        if exists && self.take(b'(')? {
+            self.scope(ScopeKind::Collect, ScopeForm::Pattern)?;
+            self.punct(b')', ")")?;
+        } else {
+            self.punct(b'{', "{")?;
+            self.scope(ScopeKind::Collect, ScopeForm::Clause)?;
+        }
         // A list comprehension, quantifier or reduce local varies within the
         // row, and the count is gathered once per row (pattern_comprehension).
         let body = &self.syntax.scopes[scope].body;
@@ -3279,9 +3303,18 @@ impl<'a> Parser<'a> {
                 collect: Some(scope),
             },
         )?;
-        Ok(ReadValueTemplate::Size(Box::new(
-            ReadValueTemplate::Column(column),
-        )))
+        let size = ReadValueTemplate::Size(Box::new(ReadValueTemplate::Column(column)));
+        Ok(if exists {
+            let zero =
+                GqlScalarParameter::new(CanonicalScalar::Int(0)).expect("zero is a bounded scalar");
+            ReadValueTemplate::Ordered {
+                comparison: crate::algebra::IntegerComparison::Greater,
+                left: Box::new(size),
+                right: Box::new(ReadValueTemplate::Literal(zero)),
+            }
+        } else {
+            size
+        })
     }
 
     /// The local of Collect scope `scope` that the projection after `|`

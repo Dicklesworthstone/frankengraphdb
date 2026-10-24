@@ -1628,3 +1628,84 @@ fn a_carried_element_reads_its_properties_past_an_unwind() {
     // The boundary's own RETURN keeps its hidden column.
     assert_eq!(sorted(execute("MATCH (n) WITH n RETURN n.p AS p")), every);
 }
+
+/// An existence test read as a value, `exists((n)-->())` or `EXISTS { ... }`:
+/// the size of the pattern's witness list being positive, as `COUNT { ... }`
+/// reads its size. It answers in a RETURN, a WITH item, a CASE condition,
+/// under NOT, as a grouping key and as an ORDER BY key; a WHERE keeps
+/// reading it as its existence predicate.
+#[test]
+fn existence_tests_read_as_values() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let out = |n: u128| EDGES.iter().any(|&(from, _, _)| from == VId(n));
+    let into = |n: u128| EDGES.iter().any(|&(_, _, to)| to == VId(n));
+    let high = |n: u128| {
+        EDGES
+            .iter()
+            .any(|&(from, _, to)| from == VId(n) && p(to.0) > 2)
+    };
+    let bool_value = |b: bool| GraphValue::Scalar(CanonicalScalar::Bool(b));
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let per_vertex = |value: &dyn Fn(u128) -> GraphValue| -> Vec<GraphValueRow> {
+        sorted(
+            (1..=4)
+                .map(|n| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), value(n)]))
+                .collect(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN n, exists((n)-->()) AS b",
+            per_vertex(&|n| bool_value(out(n))),
+        ),
+        (
+            "MATCH (n) RETURN n, EXISTS { (n)<--() } AS b",
+            per_vertex(&|n| bool_value(into(n))),
+        ),
+        (
+            "MATCH (n) RETURN n, NOT exists((n)-->()) AS b",
+            per_vertex(&|n| bool_value(!out(n))),
+        ),
+        (
+            "MATCH (n) RETURN n, EXISTS { MATCH (n)-->(m) WHERE m.p > 2 } AS b",
+            per_vertex(&|n| bool_value(high(n))),
+        ),
+        (
+            "MATCH (n) WITH n, exists((n)-->()) AS o RETURN n, o AS b",
+            per_vertex(&|n| bool_value(out(n))),
+        ),
+        (
+            "MATCH (n) RETURN n, CASE WHEN exists((n)<--()) THEN 1 ELSE 0 END AS b",
+            per_vertex(&|n| int(i64::from(into(n)))),
+        ),
+    ] {
+        assert_eq!(sorted(execute(text)), expected, "{text}");
+    }
+    let members = |b: bool| (1..=4).filter(|&n| out(n) == b).count() as i64;
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH exists((n)-->()) AS o, collect(n) AS ns RETURN o, size(ns) AS k"
+        )),
+        sorted(
+            [false, true]
+                .map(|b| GraphValueRow::from_owned_values(vec![bool_value(b), int(members(b))]))
+                .into_iter()
+                .filter(|row| row.values()[1] != int(0))
+                .collect()
+        )
+    );
+    let mut ordered: Vec<u128> = (1..=4).collect();
+    ordered.sort_by_key(|&n| (out(n), n));
+    assert_eq!(
+        execute("MATCH (n) RETURN n ORDER BY exists((n)-->()), n"),
+        ordered.iter().map(|&n| vertices(&[n])).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        sorted(execute("MATCH (n) WITH n WHERE exists((n)-->()) RETURN n")),
+        sorted((1..=4).filter(|&n| out(n)).map(|n| vertices(&[n])).collect())
+    );
+}

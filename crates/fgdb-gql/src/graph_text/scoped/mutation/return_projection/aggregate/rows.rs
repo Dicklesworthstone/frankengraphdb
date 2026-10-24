@@ -49,19 +49,23 @@ fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> 
             {
                 break Ok(comprehension && aggregate);
             }
-            // `COUNT { ... }` is a pattern count, which the head gathers as it
-            // gathers a comprehension; `COUNT(` is the aggregate.
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT") => {
+            // `COUNT { ... }` and `EXISTS { ... }` are pattern counts, which
+            // the head gathers as it gathers a comprehension; `COUNT(` is the
+            // aggregate.
+            TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("COUNT") || word.eq_ignore_ascii_case("EXISTS") =>
+            {
                 parser.lexer = lexer.clone();
                 parser.current = token;
                 match parser.starts_pattern_count() {
                     Ok(starts) => comprehension |= starts,
                     Err(error) => break Err(error.into()),
                 }
-                aggregate |= matches!(
-                    lexer.clone().next().map(|next| next.kind),
-                    Ok(TokenKind::Punct(b'('))
-                );
+                aggregate |= word.eq_ignore_ascii_case("COUNT")
+                    && matches!(
+                        lexer.clone().next().map(|next| next.kind),
+                        Ok(TokenKind::Punct(b'('))
+                    );
             }
             TokenKind::Word(word)
                 if AGGREGATES
