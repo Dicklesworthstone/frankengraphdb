@@ -16,8 +16,8 @@ pub(super) enum Head<'a> {
 }
 
 /// Whether the RETURN at the current token has both a pattern comprehension
-/// or pattern count and an aggregate call among its items (`MATCH (n)
-/// RETURN count([p = (n)-->() | p])`, TCK Pattern2 [6]; `sum(size((n)-->()))`).
+/// or count subquery and an aggregate call among its items (`MATCH (n)
+/// RETURN count([p = (n)-->() | p])`, TCK Pattern2 [6]; `sum(COUNT { ... })`).
 /// The graph aggregate facade reads neither, so such a RETURN reads its MATCH
 /// through an implicit `WITH *`, whose head gathers it (hoist_boundary_reads).
 fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> {
@@ -52,19 +52,17 @@ fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> 
             {
                 break Ok(comprehension && aggregate);
             }
-            // `size((n)-->())` and `COUNT { ... }` are pattern counts, which
-            // the head gathers as it gathers a comprehension.
-            TokenKind::Word(word)
-                if word.eq_ignore_ascii_case("SIZE") || word.eq_ignore_ascii_case("COUNT") =>
-            {
+            // `COUNT { ... }` is a pattern count, which the head gathers as it
+            // gathers a comprehension; `COUNT(` is the aggregate.
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT") => {
                 parser.lexer = lexer.clone();
                 parser.current = token;
                 match parser.starts_pattern_count() {
                     Ok(starts) => comprehension |= starts,
                     Err(error) => break Err(error.into()),
                 }
-                aggregate |= word.eq_ignore_ascii_case("COUNT")
-                    && matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'(')));
+                aggregate |=
+                    matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'(')));
             }
             TokenKind::Word(word)
                 if AGGREGATES

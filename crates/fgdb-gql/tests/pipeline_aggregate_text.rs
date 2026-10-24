@@ -1333,8 +1333,8 @@ fn an_aggregate_output_indexes_compact_vertex_and_edge_lists() {
     assert_eq!(list(2), [null.clone(), null]);
 }
 
-/// A terminal aggregate RETURN over pattern counts, `size((n)-->())` and
-/// `COUNT { ... }`: as with a comprehension, the RETURN reads its MATCH
+/// A terminal aggregate RETURN over count subqueries, `COUNT { ... }`: as
+/// with a comprehension, the RETURN reads its MATCH
 /// through an implicit `WITH *` whose head gathers the count. Vertex 0 has
 /// two parallel edges to vertex 1, vertex 1 one edge to vertex 2.
 #[test]
@@ -1363,7 +1363,7 @@ fn a_terminal_aggregate_return_reads_pattern_counts() {
         rows.sort();
         rows
     };
-    let total = rows("MATCH (n) RETURN sum(size((n)-->())) AS s");
+    let total = rows("MATCH (n) RETURN sum(COUNT { (n)-->() }) AS s");
     assert_eq!(total.len(), 1);
     assert_eq!(total[0].values()[0].as_integer(), Some(3));
     let total = rows("MATCH (n) RETURN sum(COUNT { MATCH (n)-->(m) WHERE m.p > 10 }) AS s");

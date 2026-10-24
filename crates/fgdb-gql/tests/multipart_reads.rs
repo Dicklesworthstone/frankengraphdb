@@ -1177,13 +1177,13 @@ fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
     }
 }
 
-/// openCypher pattern counts: `size((n)-->())`, the length of a pattern
-/// expression's list, and `COUNT { ... }`, a count subquery in either form
-/// EXISTS takes. Each is the size of a Collect scope's witness list, one
-/// entry per witness: read in place by a RETURN's head, and gathered by a
-/// WITH head for its WHERE, pages and RETURN, by a grouping WITH for its
-/// items, and by the implicit `WITH *` of a MATCH WHERE. The parallel
-/// 1 -R-> 2 edges are two witnesses.
+/// `COUNT { ... }`, a count subquery in either form EXISTS takes, is the
+/// size of a Collect scope's witness list, one entry per witness: read in
+/// place by a RETURN's head, and gathered by a WITH head for its WHERE, pages
+/// and RETURN, by a grouping WITH for its items, and by the implicit `WITH *`
+/// of a MATCH WHERE. The parallel 1 -R-> 2 edges are two witnesses.
+/// `size((n)-->())` stays refused, as the openCypher TCK requires (List6
+/// [6]).
 #[test]
 fn pattern_counts_read_witness_list_sizes() {
     let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
@@ -1205,18 +1205,17 @@ fn pattern_counts_read_witness_list_sizes() {
             .collect()
     };
     for (text, expected) in [
-        ("MATCH (n) RETURN n, size((n)-->()) AS d", per_vertex(&out)),
         ("MATCH (n) RETURN n, COUNT { (n)-->() } AS d", per_vertex(&out)),
         (
             "MATCH (n) RETURN n, COUNT { MATCH (n)-->(m) WHERE m.p > 2 } AS d",
             per_vertex(&into_high),
         ),
         (
-            "MATCH (n) RETURN n, size((n)-->()) + 1 AS d",
+            "MATCH (n) RETURN n, COUNT { (n)-->() } + 1 AS d",
             per_vertex(&|n| out(n) + 1),
         ),
         (
-            "MATCH (n) WITH n RETURN n, size((n)-->()) * 2 AS d",
+            "MATCH (n) WITH n RETURN n, COUNT { (n)-->() } * 2 AS d",
             per_vertex(&|n| out(n) * 2),
         ),
     ] {
@@ -1229,7 +1228,7 @@ fn pattern_counts_read_witness_list_sizes() {
             .collect()
     };
     assert_eq!(
-        sorted(execute("MATCH (n) WHERE size((n)-->()) > 1 RETURN n")),
+        sorted(execute("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n")),
         with_degree(&|degree| degree > 1)
     );
     assert_eq!(
@@ -1262,8 +1261,11 @@ fn pattern_counts_read_witness_list_sizes() {
     );
     for text in [
         // An enclosing element local, and a binding the row renames.
-        "MATCH (n) WITH n RETURN [x IN [n] | size((x)-->())] AS l",
+        "MATCH (n) WITH n RETURN [x IN [n] | COUNT { (x)-->() }] AS l",
         "MATCH (n)-->(k) WITH n AS k RETURN COUNT { (k)-->() } AS l",
+        // A pattern expression inside size() (openCypher TCK List6 [6]).
+        "MATCH (n) RETURN n, size((n)-->()) AS d",
+        "MATCH (n) WHERE size((n)-->()) > 1 RETURN n",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),
