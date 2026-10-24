@@ -9,14 +9,14 @@ use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphSymbol, GraphSymbolKind, GraphVertexMergePolicy, GraphVertexUpsertError,
+    GlaLimitDimension, GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphVertexMergePolicy, GraphVertexUpsertError,
     GraphVertexUpsertPolicy, GraphVertexUpsertStats, PreparedGraphVertexUpsertQuery,
     PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
-    VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
+    PurposeContexts, VId,
 };
 use fgdb_warden::{
     Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights,
@@ -451,6 +451,378 @@ fn vertex_query_late_refusals_rollback_and_limit_zero_does_not_skip_actions() {
                 rows.value[0].values()[2],
                 GraphValue::Scalar(CanonicalScalar::Int(9))
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_vertex_merge_outputs_use_post_action_values_and_mask_hidden_keys() {
+    let (_, report) = run_async_under_lab(0xb183, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let (authority, token) = authority();
+        for (plural, count) in [(false, 0), (false, 1), (true, 0), (true, 2)] {
+            for (tail, grouped, aggregate) in [
+                (
+                    "RETURN [v IN [n] | v.q] AS values, [v IN [n] | v.secret] AS hidden",
+                    false,
+                    false,
+                ),
+                (
+                    "RETURN sum([v IN [n] | v.q][0]) AS total, \
+                     [v IN collect(n) | v.secret] AS hidden",
+                    true,
+                    true,
+                ),
+                (
+                    "WITH collect(n) AS ns \
+                     RETURN [v IN ns | v.q] AS values, [v IN ns | v.secret] AS hidden",
+                    true,
+                    false,
+                ),
+            ] {
+                let mut db = vertex_database(&commit, count, 31).await;
+                let query = vertex_query(&format!(
+                    "MERGE (n:Visible {{p:7}}) ON CREATE SET n.q=n.p+1 \
+                     ON MATCH SET n.q=n.p+1 SET n.q=n.q+1 {tail}"
+                ));
+                let (_, rows, _) = vertex_execute(
+                    &mut db,
+                    &contexts,
+                    &authority,
+                    &token,
+                    plural,
+                    &query,
+                    vertex_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+                let occurrences = count.max(1) as usize;
+                let width = if grouped { occurrences } else { 1 };
+                let values = if aggregate {
+                    GraphValue::Scalar(CanonicalScalar::Int(9 * occurrences as i64))
+                } else {
+                    GraphValue::List(
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(9)); width].into_boxed_slice(),
+                    )
+                };
+                let hidden = GraphValue::List(
+                    vec![GraphValue::Scalar(CanonicalScalar::Null); width].into_boxed_slice(),
+                );
+                assert_eq!(rows.value.len(), if grouped { 1 } else { occurrences });
+                for row in rows.value {
+                    assert_eq!(row.values(), &[values.clone(), hidden.clone()], "{tail}");
+                }
+                for vertex in db.vertices().unwrap() {
+                    assert!(vertex.props.contains(&(Q, CanonicalScalar::Int(9).into())));
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_merge_output_masks_parameter_ids_relations_and_both_edge_endpoints() {
+    let (_, report) = run_async_under_lab(0xb184, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let (authority, token) = authority();
+        let mut db = vertex_database(&commit, 1, 1).await;
+        let mut batch = WriteBatch::new(R);
+        batch.set_vertex_property(VId(1), Q, Some(CanonicalScalar::Int(9)));
+        batch.create_vertex(
+            VId(2),
+            vec![L],
+            vec![(P, CanonicalScalar::Int(8)), (Q, CanonicalScalar::Int(22))],
+        );
+        batch.create_vertex(
+            VId(3),
+            vec![LabelId(2)],
+            vec![(P, CanonicalScalar::Int(8)), (Q, CanonicalScalar::Int(43))],
+        );
+        for (id, source, target, value) in [(11, 1, 2, 7), (12, 1, 3, 44), (13, 3, 1, 45)] {
+            batch.add_edge(
+                EId(id),
+                VId(source),
+                VId(target),
+                vec![(Q, CanonicalScalar::Int(value))],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let mut hidden_relation = WriteBatch::new(RelationId(2));
+        hidden_relation.add_edge(EId(14), VId(1), VId(2), vec![(Q, CanonicalScalar::Int(46))]);
+        db.write(&commit, hidden_relation).await.unwrap();
+        let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+            "MERGE (n:Visible {p:7}) ON MATCH SET n.q=9 \
+             RETURN [v IN $refs | v.q] AS values, [v IN $refs | v.secret] AS hidden",
+            R,
+            &[("refs", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        for plural in [false, true] {
+            let mut hidden_stats = [None, None];
+            for (identity, value) in [
+                (GraphValue::Vertex(VId(2)), Some(22)),
+                (GraphValue::Edge(EId(11)), Some(7)),
+                (GraphValue::Vertex(VId(3)), None),
+                (GraphValue::Edge(EId(12)), None),
+                (GraphValue::Edge(EId(13)), None),
+                (GraphValue::Edge(EId(14)), None),
+                (GraphValue::Vertex(VId(999)), None),
+                (GraphValue::Edge(EId(999)), None),
+            ] {
+                let parameters = GqlParameters::new()
+                    .with_list("refs", vec![identity.clone()])
+                    .unwrap();
+                let query = template.bind_parameters(&parameters).unwrap();
+                let (stats, rows, _) = vertex_execute(
+                    &mut db,
+                    &contexts,
+                    &authority,
+                    &token,
+                    plural,
+                    &query,
+                    vertex_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+                let expected =
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int));
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[
+                        GraphValue::List(vec![expected].into_boxed_slice()),
+                        GraphValue::List(
+                            vec![GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice(),
+                        ),
+                    ],
+                    "plural={plural}, identity={identity:?}"
+                );
+                if value.is_none() {
+                    let kind = usize::from(matches!(&identity, GraphValue::Edge(_)));
+                    let observed = (stats, rows.rows, rows.evaluator);
+                    match hidden_stats[kind] {
+                        Some(previous) => assert_eq!(observed, previous, "{identity:?}"),
+                        None => hidden_stats[kind] = Some(observed),
+                    }
+                }
+                let write_only = token.attenuate(Restriction::Rights(Rights::Write)).unwrap();
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let error = vertex_execute(
+                    &mut db,
+                    &contexts,
+                    &authority,
+                    &write_only,
+                    plural,
+                    &query,
+                    vertex_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_merge_tail_refusals_never_publish_partial_actions() {
+    let (_, report) = run_async_under_lab(0xb185, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let (authority, token) = authority();
+        for (plural, count) in [(false, 1), (true, 2)] {
+            let prefix = "MERGE (n:Visible {p:7}) ON MATCH SET n.q=8 SET n.q=n.q+1 \
+                          WITH collect(n) AS ns";
+            let query = vertex_query(&format!("{prefix} RETURN [v IN ns | v.q] AS values"));
+            let bad = vertex_query(&format!(
+                "{prefix} RETURN [v IN ns | 1/(v.q-9)] AS bad LIMIT 0"
+            ));
+            let mut probe = vertex_database(&commit, count, 1).await;
+            let calls = AtomicU64::new(0);
+            let (_, baseline, _) = vertex_execute(
+                &mut probe,
+                &contexts,
+                &authority,
+                &token,
+                plural,
+                &query,
+                vertex_policy(),
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    NOW
+                },
+            )
+            .await
+            .unwrap();
+            let last_check = calls.load(Ordering::Relaxed) - 1;
+            assert!(last_check > 1);
+            let no_rows = token.attenuate(Restriction::MaxRows(0)).unwrap();
+            for case in 0..4 {
+                let mut db = vertex_database(&commit, count, 1).await;
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let mut policy = vertex_policy();
+                if case == 2 {
+                    policy.merge.query.evaluator.max_work_units = baseline.evaluator.work_units - 1;
+                }
+                calls.store(0, Ordering::Relaxed);
+                let error = vertex_execute(
+                    &mut db,
+                    &contexts,
+                    &authority,
+                    if case == 1 { &no_rows } else { &token },
+                    plural,
+                    if case == 0 { &bad } else { &query },
+                    policy,
+                    || {
+                        if case == 3 && calls.fetch_add(1, Ordering::Relaxed) >= last_check {
+                            EXPIRES
+                        } else {
+                            NOW
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
+                match case {
+                    0 => assert!(matches!(
+                        error,
+                        GqlQueryError::Source(GraphVertexUpsertError::Returning(_))
+                    )),
+                    1 => assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows))
+                    ),
+                    2 => vertex_work_refusal(&error, false),
+                    3 => assert_eq!(authorization(&error), Some(Error::Expired)),
+                    _ => unreachable!(),
+                }
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn standalone_authorized_edge_hosts_read_computed_final_values_and_mask_hidden_keys() {
+    let (_, report) = run_async_under_lab(0xb186, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let (authority, token) = authority();
+        let query = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+            "MATCH (a:Visible {p:7}),(b:Visible {p:8}) MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.p=5 ON MATCH SET r.p=r.p+1 SET r.p=r.p*2 \
+             WITH collect(r) AS edges \
+             RETURN [e IN edges | e.p] AS values, [e IN edges | e.secret] AS hidden",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let policy = fgdb_gql::GraphEdgeUpsertPolicy::new(
+            fgdb_gql::GraphEdgeMergePolicy::new(vertex_policy().merge.query),
+            100,
+        );
+        for plural in [false, true] {
+            for existing in [false, true] {
+                let mut db = vertex_database(&commit, 1, 1).await;
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(8))]);
+                if existing {
+                    for offset in 0..if plural { 2 } else { 1 } {
+                        seed.add_edge(
+                            EId(11 + offset),
+                            VId(1),
+                            VId(2),
+                            vec![
+                                (P, CanonicalScalar::Int(5 + offset as i64)),
+                                (SECRET, CanonicalScalar::Int(99)),
+                            ],
+                        );
+                    }
+                }
+                db.write(&commit, seed).await.unwrap();
+                let rows = if plural {
+                    db.execute_graph_edge_upserts_query_authorized(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy,
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .1
+                } else {
+                    db.execute_graph_edge_upsert_query_authorized(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &query,
+                        policy,
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                    .2
+                };
+                let values = if !existing {
+                    vec![10]
+                } else if plural {
+                    vec![12, 14]
+                } else {
+                    vec![12]
+                };
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[
+                        GraphValue::List(
+                            values
+                                .iter()
+                                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(*value)))
+                                .collect(),
+                        ),
+                        GraphValue::List(
+                            vec![GraphValue::Scalar(CanonicalScalar::Null); values.len()]
+                                .into_boxed_slice(),
+                        ),
+                    ],
+                    "plural={plural}, existing={existing}"
+                );
+                let stored: Vec<_> = db
+                    .edges()
+                    .unwrap()
+                    .into_iter()
+                    .map(|edge| edge.props.into_iter().find(|(key, _)| *key == P).unwrap().1)
+                    .collect();
+                assert_eq!(
+                    stored,
+                    values
+                        .into_iter()
+                        .map(|value| CanonicalScalar::Int(value).into())
+                        .collect::<Vec<fgdb_types::CanonicalPropertyValue>>()
+                );
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -263,11 +263,22 @@ impl<V: Vfs + Clone> Database<V> {
                         })
                     })?;
                     query
-                        .finish_governed(
+                        .finish_governed_reading(
                             rows,
                             stats.match_selection,
                             stats.evaluator,
                             policy.query,
+                            |element, key| {
+                                selection::returning_element_property(
+                                    transaction,
+                                    self,
+                                    query_cx,
+                                    element,
+                                    key,
+                                    verified.predicates(),
+                                    &controls,
+                                )
+                            },
                             checkpoint,
                         )
                         .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))

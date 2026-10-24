@@ -1,6 +1,8 @@
 //! RETURN observes the exact relationship selected by MERGE after every clause.
 //! The real Chronicle/Strata transaction owns effects, witnesses and rollback.
 
+#![recursion_limit = "256"]
+
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
@@ -431,5 +433,138 @@ fn native_no_action_merge_return_counts_no_input_without_creating_an_edge() {
         );
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(db.frontier().unwrap(), frontier);
+    });
+}
+
+#[test]
+fn computed_edge_outputs_read_the_complete_upsert_bag_in_every_output_phase() {
+    run(async |commit, cx, txcx| {
+        for plural in [false, true] {
+            for (tail, aggregate, collected) in [
+                ("RETURN [e IN [r] | e.p] AS values", false, false),
+                ("RETURN sum([e IN [r] | e.p][0]) AS total", true, false),
+                (
+                    "WITH collect(r) AS edges RETURN [e IN edges | e.p] AS values",
+                    false,
+                    true,
+                ),
+            ] {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                seed(&mut db, commit, true).await;
+                let query = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+                    &format!("{UPSERT} {tail}"),
+                    S,
+                    symbols,
+                )
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+                let mut transaction = db.begin(txcx).unwrap();
+                let occurrences = if plural { 2 } else { 1 };
+                for expected in if plural { [30, 126] } else { [14, 30] } {
+                    let output = if plural {
+                        transaction
+                            .execute_graph_edge_upserts_query_engine_governed(
+                                &mut db,
+                                cx,
+                                &query,
+                                policy(if aggregate || collected { 1 } else { 2 }),
+                            )
+                            .unwrap()
+                            .1
+                    } else {
+                        transaction
+                            .execute_graph_edge_upsert_query_engine_governed(
+                                &mut db,
+                                cx,
+                                &query,
+                                policy(1),
+                            )
+                            .unwrap()
+                            .2
+                    };
+                    let expected_rows = if aggregate {
+                        vec![GraphValueRow::from_owned_values(vec![int(
+                            expected * occurrences
+                        )])]
+                    } else if collected {
+                        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+                            vec![int(expected); occurrences as usize].into_boxed_slice(),
+                        )])]
+                    } else {
+                        vec![
+                            GraphValueRow::from_owned_values(vec![GraphValue::List(
+                                vec![int(expected)].into_boxed_slice(),
+                            )]);
+                            occurrences as usize
+                        ]
+                    };
+                    assert_eq!(output.value, expected_rows, "plural={plural}: {tail}");
+                }
+                transaction.finish(&mut db, commit).await.unwrap();
+                assert_eq!(
+                    read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.p AS p"),
+                    vec![vec![int(if plural { 126 } else { 30 })]]
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn computed_edge_output_errors_beyond_limit_zero_restore_the_outer_prefix() {
+    run(async |commit, cx, txcx| {
+        for plural in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            seed(&mut db, commit, true).await;
+            let final_value = if plural { 30 } else { 14 };
+            let query = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+                &format!(
+                    "{UPSERT} WITH collect(r) AS edges \
+                     RETURN [e IN edges | 1 / (e.p - {final_value})] AS bad LIMIT 0"
+                ),
+                S,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let mut transaction = db.begin(txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(80), vec![ITEM], vec![(P, CanonicalScalar::Int(80))]);
+            transaction.write(&mut db, prefix).unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                transaction.staged_effect_digest().unwrap(),
+            );
+            let refused = if plural {
+                transaction
+                    .execute_graph_edge_upserts_query_engine_governed(
+                        &mut db,
+                        cx,
+                        &query,
+                        policy(0),
+                    )
+                    .is_err()
+            } else {
+                transaction
+                    .execute_graph_edge_upsert_query_engine_governed(&mut db, cx, &query, policy(0))
+                    .is_err()
+            };
+            assert!(refused, "plural={plural}");
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    transaction.staged_effect_digest().unwrap(),
+                ),
+                before
+            );
+            transaction.finish(&mut db, commit).await.unwrap();
+            assert!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r").is_empty());
+            assert_eq!(
+                read(&db, cx, "MATCH (a:Item {p:80}) RETURN a.p AS p"),
+                vec![vec![int(80)]]
+            );
+        }
     });
 }

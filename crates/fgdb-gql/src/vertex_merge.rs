@@ -928,8 +928,58 @@ impl PreparedGraphVertexMergeRowsQuery {
         &self,
         rows: Vec<Vec<crate::algebra::GraphValue>>,
         selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<crate::GraphSetExecutionError<E>, C>,
+    > {
+        self.finish_final(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |_, _| None,
+            checkpoint,
+        )
+    }
+
+    /// Finish computed RETURN values against the complete post-MERGE overlay.
+    /// The trusted reader retains point witnesses and checks authority before
+    /// observing a carried or computed identity, under the host's rollback guard.
+    pub fn finish_governed_reading<E, C>(
+        &self,
+        rows: Vec<Vec<crate::algebra::GraphValue>>,
+        selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<crate::GraphSetExecutionError<E>, C>,
+    > {
+        self.finish_final(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |element, key| Some(elements(element, key)),
+            checkpoint,
+        )
+    }
+
+    fn finish_final<E, C>(
+        &self,
+        rows: Vec<Vec<crate::algebra::GraphValue>>,
+        selection: GqlExecutionStats,
         mut evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<
         crate::GqlQueryExecution<GraphValueRow>,
@@ -979,20 +1029,22 @@ impl PreparedGraphVertexMergeRowsQuery {
             evaluator,
         };
         if let Some(grouping) = &self.grouping {
-            returning = crate::set_ops::finish_owned_aggregate(
+            returning = crate::set_ops::finish_owned_aggregate_reading(
                 returning,
                 policy,
                 grouping,
+                elements,
                 &mut checkpoint,
             )?;
         }
-        crate::set_ops::finish_owned_projection(
+        crate::set_ops::finish_owned_projection_reading(
             returning,
             policy,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
+            elements,
             checkpoint,
         )
     }

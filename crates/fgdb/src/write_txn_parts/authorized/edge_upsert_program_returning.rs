@@ -223,8 +223,10 @@ impl<V: Vfs + Clone> Database<V> {
                     .ok_or_else(overflow)?;
                 let result_rows = u64::try_from(rows.len()).map_err(|_| overflow())?;
                 let result = query_cx.with_restriction(|| {
+                    let transaction = &*workspace.transaction();
+                    let controls = RefCell::new(&mut execution);
                     query
-                        .project_rows_governed(
+                        .project_rows_governed_reading(
                             rows,
                             GqlExecutionStats {
                                 snapshot_records,
@@ -232,9 +234,20 @@ impl<V: Vfs + Clone> Database<V> {
                             },
                             evaluator,
                             policy.merge.query,
+                            |element, key| {
+                                selection::returning_element_property(
+                                    transaction,
+                                    self,
+                                    query_cx,
+                                    element,
+                                    key,
+                                    verified.predicates(),
+                                    &controls,
+                                )
+                            },
                             || {
                                 query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                                execution.checkpoint()
+                                controls.borrow_mut().checkpoint()
                             },
                         )
                         .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))

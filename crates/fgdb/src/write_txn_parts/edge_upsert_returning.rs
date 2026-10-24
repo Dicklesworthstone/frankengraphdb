@@ -35,6 +35,10 @@ fn edge_upsert_returning<E, A, C>(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<CanonicalScalar, E, A, C>,
+    elements: impl FnMut(
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
 ) -> Result<
     fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
     fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeUpsertQueryError<E, A>, C>,
@@ -100,11 +104,12 @@ fn edge_upsert_returning<E, A, C>(
     })()
     .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
     query
-        .project_governed(
+        .project_governed_reading(
             row,
             stats.merge.match_selection,
             evaluator,
             policy.merge.query,
+            elements,
             checkpoint,
         )
         .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))
@@ -128,7 +133,7 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeUpsertPolicy,
         allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> EdgeUpsertQueryResult<A> {
-        use fgdb_gql::GraphEdgeUpsertQueryError;
+        use fgdb_gql::{GqlQueryError, GraphEdgeUpsertQueryError};
         let workspace = MutationProgramWorkspace::new(self);
         let (stats, outcome) = workspace
             .txn
@@ -141,16 +146,29 @@ impl WriteTxn {
             )
             .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
         let rows = cx.with_restriction(|| {
-            edge_upsert_returning(
+            let failure = std::cell::RefCell::new(None);
+            let result = edge_upsert_returning(
                 query,
                 stats,
                 outcome,
                 policy,
-                || cx.checkpoint(),
+                || match failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
                 |edge, key, control| {
                     edge_upsert_property(&*workspace.txn, &*database, edge, key, control)
                 },
-            )
+                |element, key| {
+                    workspace
+                        .txn
+                        .element_property_with_checkpoint(database, cx, &failure, element, key)
+                },
+            );
+            match failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => result,
+            }
         })?;
         workspace.accept();
         Ok((stats, outcome, rows))

@@ -1,6 +1,8 @@
 //! fgdb-cpny9: a relationship MERGE's native WITH tail is inside the same
 //! durable statement and rollback boundary, never a second MATCH or commit.
 
+#![recursion_limit = "256"]
+
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
@@ -179,5 +181,67 @@ fn a_late_tail_failure_rolls_back_creation_even_with_limit_zero() {
             rows.is_empty(),
             "failed statement leaked a created relationship"
         );
+    });
+}
+
+#[test]
+fn computed_relationship_merge_heads_and_tails_preserve_occurrences() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    let cx = contexts.query();
+    let txcx = contexts.txn();
+    runtime.block_on(async {
+        for (tail, expected) in [
+            (
+                "RETURN [e IN collect(r) | e.p] AS values",
+                vec![GraphValue::List(vec![int(7); 3].into_boxed_slice())],
+            ),
+            (
+                "WITH collect(r) AS edges RETURN [e IN edges | e.p] AS values",
+                vec![GraphValue::List(vec![int(7); 3].into_boxed_slice())],
+            ),
+            (
+                "WITH [r][0] AS edge RETURN sum(edge.p) AS total",
+                vec![int(21)],
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=3 {
+                batch.create_vertex(VId(id as u128), vec![], vec![(P, CanonicalScalar::Int(id))]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            let query = PreparedGraphEdgeMergeQueryText::prepare(
+                &format!(
+                    "MATCH (a {{p:1}}),(b {{p:2}}),(duplicate) \
+                     MERGE (a)-[r:R {{p:7}}]->(b) {tail}"
+                ),
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let mut allocated = 0;
+            let (_, output, _) = db
+                .execute_graph_edge_merge_query_autocommit_governed(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &query,
+                    GraphEdgeMergePolicy::new(GqlQueryPolicy::new(100, 1, 100_000, 100_000)),
+                    |_| {
+                        allocated += 1;
+                        Ok::<_, ()>(ElementId::Edge(EId((1_u128 << 100) + 1)))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(allocated, 1);
+            assert_eq!(output.value.len(), 1);
+            assert_eq!(output.value[0].values(), expected.as_slice(), "{tail}");
+        }
     });
 }

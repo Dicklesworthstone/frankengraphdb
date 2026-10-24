@@ -1203,6 +1203,123 @@ fn computed_create_output_and_private_with_read_the_admitted_staged_bag() {
 }
 
 #[test]
+fn computed_merge_continuations_match_native_bags_and_rollback_late_failures() {
+    lab(0xc4a1_2017, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let mut scope = grant(Rights::ReadWrite, 3);
+        scope.properties = Scope::only([P, SECRET]);
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        for (prefix, returned, edge_count) in [
+            (
+                "UNWIND [1,2,3] AS i MERGE (a:Visible {secret:1}) \
+                 ON CREATE SET a.p=0 ON MATCH SET a.p=a.p+1 \
+                 WITH a,[v IN [a] | v.p] AS prior \
+                 MERGE (b:Visible {secret:2}) ON CREATE SET b.p=7",
+                "b",
+                0,
+            ),
+            (
+                "CREATE (a:Visible {p:1}),(b:Visible {p:2}) \
+                 WITH a,b UNWIND [1,2,3] AS i \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET r.p=0 ON MATCH SET r.p=r.p+1 \
+                 WITH a,b,r,[e IN [r] | e.p] AS prior \
+                 MERGE (a)-[s:S {p:7}]->(b)",
+                "s",
+                2,
+            ),
+            (
+                "CREATE (a:Visible {p:1}),(b:Visible {p:2}) \
+                 WITH a,b UNWIND [1,2,3] AS i \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET r.p=0 ON MATCH SET r.p=r.p+1 \
+                 WITH a,b,r,[e IN [r] | e.p] AS prior \
+                 MERGE (a)-[s:S]->(b) ON CREATE SET s.p=7",
+                "s",
+                2,
+            ),
+        ] {
+            for fail_output in [false, true] {
+                let expression = if fail_output { "1/(v.p-7)" } else { "v.p" };
+                let text = format!(
+                    "{prefix} RETURN prior,[v IN [{returned}] | {expression}] AS next {}",
+                    if fail_output { "LIMIT 0" } else { "" },
+                );
+                let program = chain(&text);
+                for authorized in [false, true] {
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let frontier = db.frontier().unwrap();
+                    let output = if authorized {
+                        let result = db
+                            .execute_graph_write_chain_authorized(
+                                &txn,
+                                &query,
+                                &commit,
+                                &issuer,
+                                &token,
+                                "main",
+                                &program,
+                                policy(if fail_output { 0 } else { 3 }),
+                                || NOW,
+                            )
+                            .await;
+                        if fail_output {
+                            assert!(result.is_err(), "authorized: {text}");
+                            None
+                        } else {
+                            Some(result.unwrap().1)
+                        }
+                    } else {
+                        let mut transaction = db.begin(&txn).unwrap();
+                        let result = transaction.execute_graph_write_chain_engine_governed(
+                            &mut db,
+                            &query,
+                            &program,
+                            policy(if fail_output { 0 } else { 3 }),
+                        );
+                        if fail_output {
+                            assert!(result.is_err(), "native: {text}");
+                            transaction.abort();
+                            None
+                        } else {
+                            let output = result.unwrap().1;
+                            transaction.finish(&mut db, &commit).await.unwrap();
+                            Some(output)
+                        }
+                    };
+                    if let Some(output) = output {
+                        assert_eq!(output.value.len(), 3, "{text}");
+                        for row in output.value {
+                            assert_eq!(
+                                row.values(),
+                                &[
+                                    GraphValue::List(
+                                        vec![GraphValue::Scalar(CanonicalScalar::Int(2))]
+                                            .into_boxed_slice(),
+                                    ),
+                                    GraphValue::List(
+                                        vec![GraphValue::Scalar(CanonicalScalar::Int(7))]
+                                            .into_boxed_slice(),
+                                    ),
+                                ],
+                                "authorized={authorized}: {text}"
+                            );
+                        }
+                        assert_eq!(db.vertices().unwrap().len(), 2);
+                        assert_eq!(db.edges().unwrap().len(), edge_count);
+                        assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
+                    } else {
+                        assert!(db.vertices().unwrap().is_empty());
+                        assert!(db.edges().unwrap().is_empty());
+                        assert_eq!(db.frontier().unwrap(), frontier);
+                    }
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn computed_create_output_masks_untrusted_identities_and_refuses_hidden_fields() {
     lab(0xc4a1_2015, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());

@@ -427,6 +427,16 @@ impl PreparedGraphEdgeUpsertText {
         let syntax = parser.syntax;
         let at = syntax.return_at;
 
+        // Direct relationship-upsert preparation bypasses the read resolver.
+        // Its computed output still needs the final catalog-bound field keys.
+        for (key, slot) in &syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());

@@ -1042,6 +1042,17 @@ impl PreparedGraphVertexUpsertText {
             )?;
         }
         let syntax = parser.syntax;
+        // This standalone MERGE constructs its pattern directly, bypassing
+        // the read relation's key-binding pass. Computed RETURN/WITH reads
+        // still bind their property slots through the same catalog now.
+        for (key, slot) in &syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -2542,6 +2553,19 @@ impl PreparedGraphVertexMergeRowsText {
             .transpose()?;
         let parameters = parser.syntax.parameters.clone();
         let parameter_offsets = parser.syntax.parameter_offsets.clone();
+        // Owned, unit and row-only inputs construct their bound relation
+        // directly. Graph-backed inputs below resolve the same slots through
+        // their normal read preparation instead.
+        if owned.is_some() || leading.is_some() || matched.is_none() && unwound_match.is_none() {
+            for (key, slot) in &parser.syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+        }
         let input = match (owned, leading, matched) {
             (Some(types), _, _) => VertexMergeRowsTextInput::Owned(types),
             (None, Some((leading, pipeline)), _) => {

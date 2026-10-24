@@ -282,6 +282,16 @@ impl PreparedGraphEdgeMergeText {
         let syntax = parser.syntax;
         let at = syntax.return_at;
 
+        // This direct MATCH builder does not use the read relation's binding
+        // pass. Resolve computed output keys before preparing its projection.
+        for (key, slot) in &syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -465,6 +475,16 @@ impl PreparedGraphEdgeMergeText {
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
         let continuation =
             Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
+        // An owned continuation has no read-source resolver to bind keys
+        // introduced by this MERGE's computed RETURN or WITH head.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let input = BoundSetTextInput {
             selection: None,
             parameters: parser.syntax.parameters.clone(),
