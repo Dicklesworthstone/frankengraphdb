@@ -954,8 +954,12 @@ impl<'a> Parser<'a> {
                 .position(|(name, _)| name.text == word)
             && match schema[column].1 {
                 crate::GraphSetColumnType::Any => true,
+                // While the boundary's scope lasts, its hidden column holds
+                // the read (row_operand takes it). Past that scope, after an
+                // UNWIND or a later WITH, the element read does, as for any
+                // element value (fgdb-xnd7x).
                 crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge => {
-                    self.call_element_reads
+                    self.call_element_reads || !self.boundary_carries(schema.len(), word)?
                 }
                 crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Stored => {
                     self.temporal_field_follows()?
