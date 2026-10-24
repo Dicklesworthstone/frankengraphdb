@@ -294,6 +294,7 @@ impl PreparedGraphPipelineAggregateText {
         fn stages(operators: &mut Vec<&'static str>, stages: &[ReadStageTemplate]) {
             for stage in stages {
                 operators.push(match stage {
+                    ReadStageTemplate::Arguments { .. } => "Arguments",
                     ReadStageTemplate::Aggregate { .. } => "Aggregate",
                     ReadStageTemplate::InputRows { .. } => "InputRows",
                     ReadStageTemplate::Unwind { .. } => "Unwind",
@@ -313,49 +314,64 @@ impl PreparedGraphPipelineAggregateText {
                 }
             }
         }
-        let mut operators = Vec::new();
-        stages(&mut operators, &self.input.first.leading);
-        if let Some(selection) = &self.input.first.selection {
-            operators.push("ScanGraphText");
-            operators.extend(selection.template_operators());
-            if !self.input.first.leading.is_empty() || self.input.first.singleton {
-                operators.push("CrossJoin");
-                if !self.input.first.correlations.is_empty() {
-                    operators.push("Select");
+        fn input_operators(
+            operators: &mut Vec<&'static str>,
+            input: &crate::set_text::multipart::BoundReadInput,
+        ) {
+            use crate::set_text::multipart::BoundContinuationOperation;
+            stages(operators, &input.first.leading);
+            if let Some(selection) = &input.first.selection {
+                operators.push("ScanGraphText");
+                operators.extend(selection.template_operators());
+                if !input.first.leading.is_empty() || input.first.singleton {
+                    operators.push("CrossJoin");
+                    if !input.first.correlations.is_empty() {
+                        operators.push("Select");
+                    }
                 }
             }
-        }
-        if self.input.first.projection.is_some() {
-            operators.push("ProjectValues");
-            if self.input.first.quantifier == crate::GraphSetQuantifier::Distinct {
-                operators.push("Distinct");
-            }
-        }
-        stages(&mut operators, &self.input.first.pipeline);
-        for part in &self.input.continuations {
-            let selection = part
-                .input
-                .selection
-                .as_ref()
-                .expect("continuation graph source");
-            operators.push("ScanGraphText");
-            operators.extend(selection.template_operators());
-            operators.push(match part.join.kind() {
-                crate::row_join::RowJoinKind::Inner => "InnerJoin",
-                crate::row_join::RowJoinKind::Left => "LeftJoin",
-                crate::row_join::RowJoinKind::Right => "RightJoin",
-                crate::row_join::RowJoinKind::Full => "FullJoin",
-                crate::row_join::RowJoinKind::Semi => "SemiJoin",
-                crate::row_join::RowJoinKind::Anti => "AntiJoin",
-            });
-            if part.input.projection.is_some() {
+            if input.first.projection.is_some() {
                 operators.push("ProjectValues");
-                if part.input.quantifier == crate::GraphSetQuantifier::Distinct {
+                if input.first.quantifier == crate::GraphSetQuantifier::Distinct {
                     operators.push("Distinct");
                 }
             }
-            stages(&mut operators, &part.input.pipeline);
+            stages(operators, &input.first.pipeline);
+            for part in &input.continuations {
+                match &part.operation {
+                    BoundContinuationOperation::Apply { body, .. } => {
+                        input_operators(operators, body);
+                        operators.push("Apply");
+                    }
+                    BoundContinuationOperation::Match(join) => {
+                        let selection = part
+                            .input
+                            .selection
+                            .as_ref()
+                            .expect("continuation graph source");
+                        operators.push("ScanGraphText");
+                        operators.extend(selection.template_operators());
+                        operators.push(match join.kind() {
+                            crate::row_join::RowJoinKind::Inner => "InnerJoin",
+                            crate::row_join::RowJoinKind::Left => "LeftJoin",
+                            crate::row_join::RowJoinKind::Right => "RightJoin",
+                            crate::row_join::RowJoinKind::Full => "FullJoin",
+                            crate::row_join::RowJoinKind::Semi => "SemiJoin",
+                            crate::row_join::RowJoinKind::Anti => "AntiJoin",
+                        });
+                    }
+                }
+                if part.input.projection.is_some() {
+                    operators.push("ProjectValues");
+                    if part.input.quantifier == crate::GraphSetQuantifier::Distinct {
+                        operators.push("Distinct");
+                    }
+                }
+                stages(operators, &part.input.pipeline);
+            }
         }
+        let mut operators = Vec::new();
+        input_operators(&mut operators, &self.input);
         operators.push("Aggregate");
         if !self.having.is_empty() {
             operators.push("SelectHaving");

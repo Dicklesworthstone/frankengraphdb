@@ -25,6 +25,40 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000)
 }
+
+#[test]
+fn inline_call_aggregate_keeps_its_one_source_relational() {
+    let template = PreparedGraphPipelineAggregateText::prepare(
+        "CALL { MATCH (n) RETURN n } RETURN count(n) AS total",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.graph_source_count(), 1);
+    assert!(template.requires_relational_input());
+    let operators = template.template_operators();
+    assert!(operators.contains(&"Apply"));
+    let query = template
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
+    let result = query
+        .execute_governed(
+            wide(),
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_properties(
+                    3,
+                    [VId(1), VId(2), VId(3)],
+                    [],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(result.value[0].values()[0].as_count(), Some(3));
+}
 fn query(text: &str) -> PreparedGraphAggregate {
     PreparedGraphPipelineAggregateText::prepare(text, symbols)
         .unwrap()

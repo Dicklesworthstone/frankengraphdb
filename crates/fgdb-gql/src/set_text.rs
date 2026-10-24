@@ -23,6 +23,7 @@ pub struct GraphSetTextError {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetTextErrorKind {
+    CallBodyWrite,
     Expected(&'static str),
     Pattern(GraphPatternTextErrorKind),
     SetBuild(GraphSetBuildError),
@@ -43,6 +44,7 @@ pub enum GraphSetTextErrorKind {
 impl core::fmt::Display for GraphSetTextErrorKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::CallBodyWrite => f.write_str("writes inside inline CALL are not supported"),
             Self::Expected(item) => crate::graph_text::write_expected(f, item),
             Self::Pattern(kind) => kind.fmt(f),
             Self::SetBuild(error) => error.fmt(f),
@@ -69,6 +71,7 @@ impl GraphSetTextErrorKind {
     pub fn class(&self) -> crate::GqlRefusalClass {
         use crate::GqlRefusalClass as C;
         match self {
+            Self::CallBodyWrite => C::Unsupported,
             Self::Expected(_) | Self::IntegerOperand => C::Syntax,
             Self::Pattern(kind) => kind.class(),
             Self::SetBuild(_)
@@ -605,6 +608,7 @@ impl ReadStageTemplate {
     /// Count the physical relational nodes produced by native binding.
     pub(crate) fn depth(&self) -> usize {
         match self {
+            Self::Arguments { .. } => 0,
             Self::Page { computed, .. } => usize::from(computed.is_some()) * 2,
             Self::Aggregate { .. } => 3,
             _ => 1,
@@ -613,6 +617,16 @@ impl ReadStageTemplate {
 
     pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
         match self {
+            Self::Arguments { columns, types } => {
+                bytes.push(9);
+                bytes.extend_from_slice(b"fgdb:gql:call-arguments:v1\0");
+                bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
+                for (name, kind) in columns.iter().zip(types) {
+                    bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(name.as_bytes());
+                    bytes.push(set_column_type_tag(*kind));
+                }
+            }
             Self::Aggregate { stage, .. } => {
                 bytes.push(4);
                 stage.append_template_transcript(bytes);
@@ -860,6 +874,12 @@ pub(crate) enum ReadFilterOp {
 }
 #[derive(Clone)]
 pub(crate) enum ReadStageTemplate {
+    /// A CALL body's typed lexical imports. Binding replaces its unit root
+    /// with the nearest Apply frame; it never reads a write's owned rows.
+    Arguments {
+        columns: Vec<String>,
+        types: Vec<GraphSetColumnType>,
+    },
     Aggregate {
         at: usize,
         stage: aggregate::ReadAggregateStage,

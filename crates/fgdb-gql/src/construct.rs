@@ -31,8 +31,6 @@ pub enum GqlUnsupportedConstructKind {
     DropBranch,
     /// `AT BRANCH`, reported only for a host without a branch catalog.
     BranchSelector,
-    /// `CALL {` or `CALL (`: an inline subquery, not a named procedure.
-    CallSubquery,
 }
 
 impl core::fmt::Display for GqlUnsupportedConstructKind {
@@ -44,7 +42,6 @@ impl core::fmt::Display for GqlUnsupportedConstructKind {
             Self::MergeBranch => "MERGE BRANCH is not supported yet (branch DDL)",
             Self::DropBranch => "DROP BRANCH is not supported yet (branch DDL)",
             Self::BranchSelector => "AT BRANCH is not supported here: there is no branch catalog",
-            Self::CallSubquery => "CALL {...} subqueries are not supported yet",
         })
     }
 }
@@ -99,10 +96,6 @@ impl GqlUnsupportedConstruct {
                 GqlUnsupportedConstructKind::MergeBranch
             } else if word.eq_ignore_ascii_case("AT") && is(0, "BRANCH") && !branches {
                 GqlUnsupportedConstructKind::BranchSelector
-            } else if word.eq_ignore_ascii_case("CALL")
-                && matches!(next(0), Some(Token::Punct(b'{' | b'(')))
-            {
-                GqlUnsupportedConstructKind::CallSubquery
             } else {
                 return None;
             };
@@ -198,14 +191,6 @@ mod tests {
                 "MATCH (p) AT BRANCH what_if RETURN p",
                 (10, K::BranchSelector),
             ),
-            (
-                "CALL { MATCH (p) RETURN p } RETURN count(p)",
-                (0, K::CallSubquery),
-            ),
-            (
-                "MATCH (p) CALL (p) { RETURN 1 AS x } RETURN x",
-                (10, K::CallSubquery),
-            ),
             ("INSERT (:A); CREATE GRAPH g", (13, K::CreateGraph)),
         ] {
             assert_eq!(found(text), Some(expected), "{text}");
@@ -222,6 +207,8 @@ mod tests {
             "MATCH (n) WHERE n.call = 1 RETURN n /* CALL { } */",
             "MATCH (n:CREATE) RETURN n.graph // DROP GRAPH g",
             "CALL fnx.pagerank() YIELD node, score RETURN node, score",
+            "CALL { MATCH (p) RETURN p } RETURN count(p)",
+            "MATCH (p) CALL (p) { RETURN 1 AS x } RETURN x",
             "MATCH (n) RETURN n.create, `CREATE GRAPH`",
             "MATCH (n) WHERE n.x = $call RETURN n",
             "MATCH (n) RETURN [x IN [1, 2] | x] AS xs",

@@ -1997,7 +1997,8 @@ fn refusals_carry_a_stable_code_and_a_readable_message() {
     );
     let corpus: &[Case] = &[
         // The 2026-10-20 reality check's table (R12). Pattern comprehension and
-        // a list-valued SET now run, so three of its five still refuse.
+        // a list-valued SET and read CALL bodies now run. A write CALL body
+        // remains an explicit unsupported case, beside graph and branch DDL.
         (
             "write",
             &[],
@@ -2010,11 +2011,11 @@ fn refusals_carry_a_stable_code_and_a_readable_message() {
         (
             "query",
             &[],
-            "CALL { MATCH (p:Person) RETURN p } RETURN count(p)",
+            "CALL { CREATE (p:Person) RETURN p } RETURN p",
             3,
             "unsupported",
-            Some(0),
-            Some("byte 0: CALL {...} subqueries are not supported yet"),
+            Some(7),
+            Some("byte 7: writes inside inline CALL are not supported"),
         ),
         (
             "write",

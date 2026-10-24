@@ -1904,13 +1904,14 @@ impl<'a> Parser<'a> {
         // A named value's subscript reads through the same let slot as an
         // element subscript: `items[0] + 1` must not leave `+ 1` unread.
         let subscript = self.named_subscript_follows()?;
+        let entry = self.call_element_reads && self.property_dot_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
-        if !subscript && !size && !self.starts_let_operand()? {
+        if !subscript && !entry && !size && !self.starts_let_operand()? {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
-        if !self.is_punct(b'[') {
+        if !entry && !self.is_punct(b'[') {
             lexer.next()?;
             // A dotted temporal call: step over `.name` to its `(`.
             if matches!(self.temporal_call()?, Some((_, true))) {
@@ -1918,7 +1919,9 @@ impl<'a> Parser<'a> {
                 lexer.next()?;
             }
         }
-        skip_group(&mut lexer)?;
+        if !entry {
+            skip_group(&mut lexer)?;
+        }
         Ok(match after_postfix(&mut lexer)?.kind {
             TokenKind::Punct(byte) => b"=<>!+-*/%^".contains(&byte),
             TokenKind::Word(word) => ["AND", "OR", "XOR", "IS", "IN", "STARTS", "ENDS", "CONTAINS"]
@@ -2253,8 +2256,30 @@ impl<'a> Parser<'a> {
                         && (self.syntax.variables.iter().any(|name| name.text == word)
                             || self.syntax.names_path(word)
                             || self.syntax.visible_edge(word).is_some())));
+        let imported_element = if self.call_element_reads
+            && inputs.is_none()
+            && resolve.is_none()
+            && let TokenKind::Word(word) = self.current.kind
+            && !self.elements.contains(&word)
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+        {
+            schema[..self.visible_width(schema)]
+                .iter()
+                .position(|(name, kind)| {
+                    name.text == word
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                })
+        } else {
+            None
+        };
         let mut value = if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
+        } else if let Some(column) = imported_element {
+            // Preserve whole stored lists/maps as well as scalars. Arithmetic
+            // above uses the same element entry through a governed let slot.
+            self.advance()?;
+            graph_map = true;
+            ReadValueTemplate::Column(column)
         } else if subscript_base {
             if let TokenKind::Word(word) = self.current.kind
                 && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
@@ -3544,6 +3569,14 @@ pub(super) fn bind_stages(
 ) -> Result<PreparedGraphSet, GraphSetTextError> {
     for stage in stages {
         input = match stage {
+            ReadStageTemplate::Arguments { columns, types } => {
+                PreparedGraphSet::arguments(columns.clone(), types.clone()).map_err(|kind| {
+                    GraphSetTextError {
+                        offset: 0,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    }
+                })?
+            }
             ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
             // Only the CSV chain binder constructs this validated first
             // stage. It retains the same one-column schema and source order

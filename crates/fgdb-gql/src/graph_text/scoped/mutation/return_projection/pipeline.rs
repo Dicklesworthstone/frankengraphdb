@@ -2,7 +2,7 @@
 //! Runtime receives only native row operators in PreparedGraphSet. There
 //! are no graph-slot aliases, synthetic MATCH text, or source calls here.
 
-mod multipart;
+pub(in crate::graph_text) mod multipart;
 mod ordering;
 mod selection;
 
@@ -389,6 +389,7 @@ fn append_stage(
     depth: &mut usize,
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
+        ReadStageTemplate::Arguments { .. } => (0, 0),
         ReadStageTemplate::InputRows { .. } => (0, 1),
         ReadStageTemplate::Aggregate { at, .. } => (*at, 3),
         ReadStageTemplate::Project { at, .. }

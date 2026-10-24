@@ -898,6 +898,9 @@ struct Parser<'a> {
     /// write RETURN never does, except for an imported map's own leaf: its
     /// other leaves are post-write values that an element read would miss.
     resolved_entries: bool,
+    /// Inline read bodies and their returning row scopes may dereference
+    /// visible graph identities. Ordinary WITH keeps its hidden-read boundary.
+    call_element_reads: bool,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
@@ -1050,6 +1053,7 @@ impl<'a> Parser<'a> {
             resolved_row: None,
             boundary_reads: None,
             resolved_entries: false,
+            call_element_reads: false,
             elements: Vec::new(),
             lets: None,
             let_base: 0,

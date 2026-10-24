@@ -8,11 +8,21 @@
 use super::*;
 use crate::row_join::{RowJoinKind, RowJoinSpec};
 use crate::set_text::TextToken;
-use crate::set_text::multipart::{BoundContinuation, BoundReadInput, has_continuation};
+use crate::set_text::multipart::{
+    BoundContinuation, BoundContinuationOperation, BoundReadInput, has_continuation,
+};
 
 struct UnresolvedContinuation<'a> {
     input: UnresolvedGraphText<'a>,
-    join: RowJoinSpec,
+    operation: UnresolvedContinuationOperation<'a>,
+}
+
+enum UnresolvedContinuationOperation<'a> {
+    Match(RowJoinSpec),
+    Apply {
+        body: Box<UnresolvedReadInput<'a>>,
+        imports: Vec<usize>,
+    },
 }
 
 pub(crate) struct UnresolvedReadInput<'a> {
@@ -21,6 +31,38 @@ pub(crate) struct UnresolvedReadInput<'a> {
 }
 
 impl UnresolvedReadInput<'_> {
+    pub(in crate::graph_text) fn from_first(
+        first: UnresolvedGraphText<'_>,
+    ) -> UnresolvedReadInput<'_> {
+        UnresolvedReadInput {
+            first,
+            continuations: Vec::new(),
+        }
+    }
+
+    pub(in crate::graph_text) fn append_stages(&mut self, stages: Vec<ReadStageTemplate>) {
+        self.continuations
+            .last_mut()
+            .map_or(&mut self.first, |part| &mut part.input)
+            .pipeline
+            .extend(stages);
+    }
+
+    pub(in crate::graph_text) fn share_parameters(
+        &mut self,
+        parameters: &[GqlParameterSpec],
+        offsets: &[usize],
+    ) {
+        self.first.syntax.parameters = parameters.to_vec();
+        self.first.syntax.parameter_offsets = offsets.to_vec();
+        for part in &mut self.continuations {
+            part.input.syntax.parameters = parameters.to_vec();
+            part.input.syntax.parameter_offsets = offsets.to_vec();
+            if let UnresolvedContinuationOperation::Apply { body, .. } = &mut part.operation {
+                body.share_parameters(parameters, offsets);
+            }
+        }
+    }
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<GraphSetColumnType>) {
         self.continuations
             .last()
@@ -36,7 +78,12 @@ impl UnresolvedReadInput<'_> {
                 .continuations
                 .iter()
                 .map(|part| {
-                    1 + usize::from(part.input.projection.is_some())
+                    let source_depth = match &part.operation {
+                        UnresolvedContinuationOperation::Match(_) => 1,
+                        UnresolvedContinuationOperation::Apply { body, .. } => 1 + body.depth(),
+                    };
+                    source_depth
+                        + usize::from(part.input.projection.is_some())
                         + 2 * usize::from(!part.input.row_fields.is_empty())
                         + part
                             .input
@@ -49,7 +96,15 @@ impl UnresolvedReadInput<'_> {
     }
 
     pub(crate) fn operand_count(&self) -> usize {
-        usize::from(!self.first.singleton) + self.continuations.len()
+        usize::from(!self.first.singleton)
+            + self
+                .continuations
+                .iter()
+                .map(|part| match &part.operation {
+                    UnresolvedContinuationOperation::Match(_) => 1,
+                    UnresolvedContinuationOperation::Apply { body, .. } => body.operand_count(),
+                })
+                .sum::<usize>()
     }
 
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
@@ -75,7 +130,17 @@ impl UnresolvedReadInput<'_> {
                 input: part
                     .input
                     .resolve(crate::graph_text::LentResolver(resolve))?,
-                join: part.join,
+                operation: match part.operation {
+                    UnresolvedContinuationOperation::Match(join) => {
+                        BoundContinuationOperation::Match(join)
+                    }
+                    UnresolvedContinuationOperation::Apply { body, imports } => {
+                        BoundContinuationOperation::Apply {
+                            body: Box::new(body.resolve(resolve)?),
+                            imports,
+                        }
+                    }
+                },
             });
         }
         Ok(BoundReadInput {
@@ -303,26 +368,7 @@ impl<'a> Parser<'a> {
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
         let (mut result, _) = self.multipart_parts(statement, false)?;
         self.end()?;
-        result
-            .first
-            .syntax
-            .parameters
-            .clone_from(&self.syntax.parameters);
-        result
-            .first
-            .syntax
-            .parameter_offsets
-            .clone_from(&self.syntax.parameter_offsets);
-        for part in &mut result.continuations {
-            part.input
-                .syntax
-                .parameters
-                .clone_from(&self.syntax.parameters);
-            part.input
-                .syntax
-                .parameter_offsets
-                .clone_from(&self.syntax.parameter_offsets);
-        }
+        result.share_parameters(&self.syntax.parameters, &self.syntax.parameter_offsets);
         Ok(result)
     }
 
@@ -334,27 +380,10 @@ impl<'a> Parser<'a> {
     pub(in crate::graph_text) fn multipart_aggregate_prefix(
         &mut self,
         statement: &'a str,
-    ) -> Result<
-        (
-            UnresolvedGraphText<'a>,
-            Vec<(UnresolvedGraphText<'a>, RowJoinSpec)>,
-            RowSchema<'a>,
-            usize,
-        ),
-        GraphSetTextError,
-    > {
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>, usize), GraphSetTextError> {
         let (result, schema) = self.multipart_parts(statement, true)?;
         let depth = result.depth();
-        Ok((
-            result.first,
-            result
-                .continuations
-                .into_iter()
-                .map(|part| (part.input, part.join))
-                .collect(),
-            schema,
-            depth,
-        ))
+        Ok((result, schema, depth))
     }
 
     fn multipart_parts(
@@ -362,24 +391,49 @@ impl<'a> Parser<'a> {
         statement: &'a str,
         aggregate: bool,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
-        let mut incoming = Vec::new();
-        let first = if self.is_word("MATCH") {
+        self.multipart_parts_from(statement, aggregate, Vec::new(), 0)
+    }
+
+    fn multipart_parts_from(
+        &mut self,
+        statement: &'a str,
+        aggregate: bool,
+        mut incoming: RowSchema<'a>,
+        call_depth: usize,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
+        self.refuse_call_write(call_depth)?;
+        let mut terminal = false;
+        let first = if self.is_word("MATCH") && incoming.is_empty() {
             let (input, next, terminal, _) =
-                self.multipart_graph_part(statement, &incoming, None, aggregate)?;
+                self.multipart_graph_part(statement, &incoming, None, aggregate, call_depth)?;
             if terminal {
-                return Err(expected(self.current.at, "WITH before the next MATCH"));
+                return Ok((UnresolvedReadInput::from_first(input), next));
             }
             incoming = next;
             input
         } else {
             // A values-only leading pipeline is a unit relation followed by
             // the existing row stages, not a manufactured graph carrier.
-            let (pipeline, next, _) = self.row_pipeline_prefix(Vec::new())?;
+            let arguments = (!incoming.is_empty()).then(|| ReadStageTemplate::Arguments {
+                columns: incoming
+                    .iter()
+                    .map(|(name, _)| name.text.to_owned())
+                    .collect(),
+                types: incoming.iter().map(|(_, kind)| *kind).collect(),
+            });
+            let (mut pipeline, next, done) = self.multipart_row_tail(incoming, aggregate)?;
+            self.refuse_call_write(call_depth)?;
+            if let Some(arguments) = arguments {
+                pipeline.insert(0, arguments);
+            }
             incoming = next;
-            if !(self.is_word("MATCH") || self.is_word("OPTIONAL")) {
+            terminal = done;
+            if !terminal
+                && !(self.is_word("MATCH") || self.is_word("OPTIONAL") || self.inline_call()?)
+            {
                 return Err(expected(
                     self.current.at,
-                    "MATCH or OPTIONAL MATCH after row stages",
+                    "MATCH, OPTIONAL MATCH or inline CALL after row stages",
                 ));
             }
             let syntax = self.take_part_syntax()?;
@@ -399,39 +453,276 @@ impl<'a> Parser<'a> {
             first,
             continuations: Vec::new(),
         };
-        loop {
-            let kind = if self.take_word("OPTIONAL")? {
-                RowJoinKind::Left
+        while !terminal {
+            self.refuse_call_write(call_depth)?;
+            if self.inline_call()? {
+                let (part, next, done) =
+                    self.multipart_call_part(statement, &incoming, aggregate, call_depth)?;
+                result.continuations.push(part);
+                incoming = next;
+                terminal = done;
             } else {
-                RowJoinKind::Inner
-            };
-            if !self.is_word("MATCH") {
-                return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
-            }
-            let (input, next, terminal, join) =
-                self.multipart_graph_part(statement, &incoming, Some(kind), aggregate)?;
-            result.continuations.push(UnresolvedContinuation {
-                input,
-                join: join.expect("a continuation has an incoming relation"),
-            });
-            if result.depth() > crate::MAX_GRAPH_SET_DEPTH {
-                return Err(GraphSetTextError {
-                    offset: self.current.at,
-                    kind: GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::TooDeep {
-                        limit: crate::MAX_GRAPH_SET_DEPTH,
-                        observed: result.depth(),
-                    }),
+                let kind = if self.take_word("OPTIONAL")? {
+                    RowJoinKind::Left
+                } else {
+                    RowJoinKind::Inner
+                };
+                if !self.is_word("MATCH") {
+                    return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
+                }
+                let (input, next, done, join) = self.multipart_graph_part(
+                    statement,
+                    &incoming,
+                    Some(kind),
+                    aggregate,
+                    call_depth,
+                )?;
+                result.continuations.push(UnresolvedContinuation {
+                    input,
+                    operation: UnresolvedContinuationOperation::Match(
+                        join.expect("a continuation has an incoming relation"),
+                    ),
                 });
+                incoming = next;
+                terminal = done;
             }
-            if result.operand_count() > crate::MAX_GRAPH_SET_OPERANDS {
-                return Err(expected(self.current.at, "bounded graph-source count"));
-            }
-            incoming = next;
-            if terminal {
-                break;
-            }
+            self.admit_multipart_size(&result)?;
         }
         Ok((result, incoming))
+    }
+
+    fn admit_multipart_size(
+        &self,
+        result: &UnresolvedReadInput<'_>,
+    ) -> Result<(), GraphSetTextError> {
+        if result.depth() > crate::MAX_GRAPH_SET_DEPTH {
+            return Err(GraphSetTextError {
+                offset: self.current.at,
+                kind: GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::TooDeep {
+                    limit: crate::MAX_GRAPH_SET_DEPTH,
+                    observed: result.depth(),
+                }),
+            });
+        }
+        if result.operand_count() > crate::MAX_GRAPH_SET_OPERANDS {
+            return Err(expected(self.current.at, "bounded graph-source count"));
+        }
+        Ok(())
+    }
+
+    fn inline_call(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("CALL")
+            && matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'{' | b'(')
+            ))
+    }
+
+    fn refuse_call_write(&self, call_depth: usize) -> Result<(), GraphSetTextError> {
+        if call_depth != 0
+            && [
+                "CREATE", "INSERT", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+            ]
+            .iter()
+            .any(|clause| self.is_word(clause))
+        {
+            return Err(GraphSetTextError {
+                offset: self.current.at,
+                kind: GraphSetTextErrorKind::CallBodyWrite,
+            });
+        }
+        Ok(())
+    }
+
+    fn multipart_row_tail(
+        &mut self,
+        schema: RowSchema<'a>,
+        aggregate: bool,
+    ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, bool), GraphSetTextError> {
+        let (mut stages, mut schema, _) = self.row_pipeline_prefix(schema)?;
+        if !self.is_word("RETURN") {
+            return Ok((stages, schema, false));
+        }
+        if !aggregate {
+            let at = self.current.at;
+            self.advance()?;
+            let distinct = self.take_word("DISTINCT")?;
+            if !distinct {
+                self.take_all_quantifier()?;
+            }
+            let (mut projection, next) = self.row_projection(&schema, true)?;
+            let page = self.return_expression_page(&schema, &mut projection, distinct)?;
+            self.boundary_reads = None;
+            stages.push(ReadStageTemplate::Project {
+                at,
+                projection,
+                quantifier: if distinct {
+                    GraphSetQuantifier::Distinct
+                } else {
+                    GraphSetQuantifier::All
+                },
+            });
+            stages.extend(page);
+            schema = next;
+        }
+        Ok((stages, schema, true))
+    }
+
+    fn multipart_call_part(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        aggregate: bool,
+        call_depth: usize,
+    ) -> Result<(UnresolvedContinuation<'a>, RowSchema<'a>, bool), GraphSetTextError> {
+        let at = self.current.at;
+        // Admission precedes recursive descent and catalog access. This is a
+        // parser stack bound, in addition to the whole relational depth bound.
+        if call_depth >= 8 {
+            return Err(expected(at, "at most eight nested inline CALL bodies"));
+        }
+        self.word("CALL")?;
+        let mut imports = Vec::new();
+        let mut schema = Vec::new();
+        let scoped = self.take(b'(')?;
+        if scoped && !self.take(b')')? {
+            loop {
+                let name = self.name()?;
+                let Some(column) = incoming
+                    .iter()
+                    .position(|(binding, _)| binding.text == name.text)
+                else {
+                    return Err(expected(name.at, "an existing CALL import"));
+                };
+                if imports.contains(&column) {
+                    return Err(expected(name.at, "unique CALL imports"));
+                }
+                self.capacity(
+                    imports.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                imports.push(column);
+                schema.push((name, incoming[column].1));
+                if !self.take(b',')? {
+                    break;
+                }
+            }
+            self.punct(b')', ")")?;
+        }
+        self.punct(b'{', "{")?;
+        if !scoped && let Some((columns, names)) = self.legacy_call_imports(incoming)? {
+            imports = columns;
+            schema = names;
+        }
+        self.read_row_bindings.clear();
+        self.boundary_reads = None;
+        self.projected_sources = None;
+        let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
+        let body = self.multipart_parts_from(statement, false, schema, call_depth + 1);
+        self.call_element_reads = previous_reads;
+        let (body, exports) = body?;
+        self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
+        self.read_row_bindings.clear();
+        self.boundary_reads = None;
+        self.projected_sources = None;
+        let mut combined = incoming.clone();
+        for &(name, kind) in &exports {
+            if combined
+                .iter()
+                .any(|(binding, _)| binding.text == name.text)
+            {
+                return Err(expected(
+                    name.at,
+                    "a CALL export distinct from outer bindings",
+                ));
+            }
+            self.capacity(
+                combined.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            combined.push((name, kind));
+        }
+        let projection = combined
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            })
+            .collect();
+        let types = combined.iter().map(|(_, kind)| *kind).collect();
+        // A returning CALL exports real typed identities, not graph slots.
+        // Its caller's WHERE/RETURN/aggregate reads them through the same
+        // governed element reader as the body; dropped names remain absent.
+        self.call_element_reads = true;
+        let (pipeline, next, terminal) = self.multipart_row_tail(combined, aggregate)?;
+        let mut syntax = self.take_part_syntax()?;
+        syntax.return_at = at;
+        Ok((
+            UnresolvedContinuation {
+                input: UnresolvedGraphText {
+                    statement,
+                    syntax,
+                    projection: Some(projection),
+                    pipeline,
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: types,
+                    correlations: Vec::new(),
+                    row_fields: Vec::new(),
+                },
+                operation: UnresolvedContinuationOperation::Apply {
+                    body: Box::new(body),
+                    imports,
+                },
+            },
+            next,
+            terminal,
+        ))
+    }
+
+    /// The legacy importing WITH accepts only a list of outer names. Inspect
+    /// the same lexer without consuming it: the ordinary WITH owner still
+    /// builds its projection. Expressions remain ordinary local row stages;
+    /// they cannot acquire an unlisted outer binding.
+    fn legacy_call_imports(
+        &self,
+        incoming: &RowSchema<'a>,
+    ) -> Result<Option<(Vec<usize>, RowSchema<'a>)>, GraphSetTextError> {
+        if !self.is_word("WITH") {
+            return Ok(None);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut imports = Vec::new();
+        let mut schema = Vec::new();
+        loop {
+            let token = lexer.next()?;
+            let TokenKind::Word(text) = token.kind else {
+                return Ok(None);
+            };
+            let Some(column) = incoming.iter().position(|(name, _)| name.text == text) else {
+                return Ok(None);
+            };
+            if imports.contains(&column) {
+                return Err(expected(token.at, "unique CALL imports"));
+            }
+            self.capacity(
+                imports.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            imports.push(column);
+            schema.push((Name { text, at: token.at }, incoming[column].1));
+            let next = lexer.next()?;
+            if matches!(next.kind, TokenKind::Punct(b',')) {
+                continue;
+            }
+            return Ok(matches!(next.kind, TokenKind::Word(word)
+                if ["RETURN", "MATCH", "OPTIONAL", "WITH", "UNWIND", "CALL"].iter().any(|clause| word.eq_ignore_ascii_case(clause)))
+                .then_some((imports, schema)));
+        }
     }
 
     /// Carried vertices whose properties the part starting at this MATCH
@@ -532,6 +823,7 @@ impl<'a> Parser<'a> {
         incoming: &RowSchema<'a>,
         kind: Option<RowJoinKind>,
         aggregate: bool,
+        call_depth: usize,
     ) -> Result<
         (
             UnresolvedGraphText<'a>,
@@ -576,6 +868,7 @@ impl<'a> Parser<'a> {
         let row_fields = core::mem::take(&mut self.read_row_fields);
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
         parsed?;
+        self.refuse_call_write(call_depth)?;
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
         // positive pattern; another WITH may begin the next required/optional
@@ -675,13 +968,15 @@ impl<'a> Parser<'a> {
         // first part still needs its explicit boundary before the next MATCH.
         // An UNWIND directly after a continuation reads that same row (TCK
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
+        let before_call = self.inline_call()?;
         let implicit_star = kind.is_some()
             && deferred.is_none()
-            && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND"));
+            && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND") || before_call);
         if aggregate
             && !implicit_star
             && deferred.is_none()
             && !self.is_word("WITH")
+            && !before_call
             && !(kind.is_none() && self.is_word("UNWIND"))
             && !self.implicit_withs.contains(&self.current.at)
         {
@@ -709,7 +1004,11 @@ impl<'a> Parser<'a> {
             self.current = at_where;
             head
         } else if kind.is_none() {
-            self.graph_projection_head()?
+            if before_call {
+                self.implicit_with_head()?
+            } else {
+                self.graph_projection_head()?
+            }
         } else if implicit_star {
             // The same graph-to-row aggregate head owns carried properties
             // in WITH and in an implicit WITH * before aggregate RETURN.
@@ -1032,6 +1331,28 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
+            if let BoundContinuationOperation::Apply { body, imports } = &part.operation {
+                input = input
+                    .apply(body.bind_values(values)?, imports.clone())
+                    .map_err(|kind| GraphSetTextError {
+                        offset: source.return_at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?;
+                if let Some(projection) = &source.projection {
+                    input = super::super::bind_projection(
+                        input,
+                        projection,
+                        source.quantifier,
+                        values,
+                        source.return_at,
+                    )?;
+                }
+                input = super::super::bind_stages(input, &source.pipeline, values)?;
+                continue;
+            }
+            let BoundContinuationOperation::Match(join) = &part.operation else {
+                unreachable!("Apply handled above")
+            };
             let imported_width = input.column_types().len();
             input = source.bind_row_fields(input, values)?;
             let left_width = input.column_types().len();
@@ -1041,7 +1362,7 @@ impl BoundReadInput {
                 .expect("continuations are graph sources")
                 .bind_values(values)?;
             input = input
-                .join(right.into(), part.join.clone())
+                .join(right.into(), join.clone())
                 .map_err(|kind| GraphSetTextError {
                     offset: source.return_at,
                     kind: GraphSetTextErrorKind::SetBuild(kind),

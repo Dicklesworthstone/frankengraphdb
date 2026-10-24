@@ -954,6 +954,9 @@ impl<'a> Parser<'a> {
                 .position(|(name, _)| name.text == word)
             && match schema[column].1 {
                 crate::GraphSetColumnType::Any => true,
+                crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge => {
+                    self.call_element_reads
+                }
                 crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Stored => {
                     self.temporal_field_follows()?
                 }

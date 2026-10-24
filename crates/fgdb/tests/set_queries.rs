@@ -209,6 +209,21 @@ fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
                 )
                 .unwrap();
         let graph = left.apply(graph_body, vec![0]).unwrap();
+        let echo_text = "MATCH (n:Left) WITH n.n AS original \
+            CALL (original) { RETURN original AS echo } RETURN original,echo";
+        let graph_text = "MATCH (n:Left) WITH n.n AS original \
+            CALL (original) { MATCH (m:Left {n:original}) RETURN m.n AS matched } \
+            RETURN original,matched";
+        let from_text = |text| {
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+        };
+        let textual_echo = from_text(echo_text);
+        let textual_graph = from_text(graph_text);
+        let textual_identity =
+            from_text("CALL { MATCH (n:Left) RETURN n } RETURN n.n AS original,n.n AS echo");
         let issuer = fgdb_warden::Authority::new(
             asupersync::security::key::AuthKey::from_seed(0xa991),
             DatabaseSecurityNamespaceId([0xd2; 32]),
@@ -229,7 +244,13 @@ fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
         grant.labels = fgdb_warden::Scope::only([L]);
         grant.properties = fgdb_warden::Scope::only([N]);
         let token = issuer.issue_at(&grant, 100).unwrap();
-        for query in [&echo, &graph] {
+        for query in [
+            &echo,
+            &graph,
+            &textual_echo,
+            &textual_graph,
+            &textual_identity,
+        ] {
             assert_eq!(
                 db.execute_graph_set_authorized(
                     &cx,
@@ -311,7 +332,13 @@ fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(&txn_cx).unwrap();
         txn.write(&mut db, changes()).unwrap();
-        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+        for (query, correlated_graph) in [
+            (&echo, false),
+            (&graph, true),
+            (&textual_echo, false),
+            (&textual_graph, true),
+            (&textual_identity, false),
+        ] {
             let old = expected(&db.vertices().unwrap(), correlated_graph);
             let staged = expected(&txn.vertices(&db).unwrap(), correlated_graph);
             assert_ne!(old, staged);
@@ -345,7 +372,13 @@ fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
         let old_rows = db.vertices().unwrap();
         let staged_rows = txn.vertices(&db).unwrap();
         txn.commit(&mut db, &commit).await.unwrap();
-        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+        for (query, correlated_graph) in [
+            (&echo, false),
+            (&graph, true),
+            (&textual_echo, false),
+            (&textual_graph, true),
+            (&textual_identity, false),
+        ] {
             let old = expected(&old_rows, correlated_graph);
             let staged = expected(&staged_rows, correlated_graph);
             assert_eq!(
@@ -367,7 +400,13 @@ fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
         let db = Database::open_with_vfs(&commit, vfs, &path, keys())
             .await
             .unwrap();
-        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+        for (query, correlated_graph) in [
+            (&echo, false),
+            (&graph, true),
+            (&textual_echo, false),
+            (&textual_graph, true),
+            (&textual_identity, false),
+        ] {
             let old = expected(&old_rows, correlated_graph);
             let staged = expected(&staged_rows, correlated_graph);
             assert_eq!(

@@ -9,7 +9,16 @@ use crate::row_join::{RowJoinKind, RowJoinSpec};
 #[derive(Clone)]
 pub(crate) struct BoundContinuation {
     pub(crate) input: BoundSetTextInput,
-    pub(crate) join: RowJoinSpec,
+    pub(crate) operation: BoundContinuationOperation,
+}
+
+#[derive(Clone)]
+pub(crate) enum BoundContinuationOperation {
+    Match(RowJoinSpec),
+    Apply {
+        body: Box<BoundReadInput>,
+        imports: Vec<usize>,
+    },
 }
 
 #[derive(Clone)]
@@ -44,6 +53,14 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
                 let name =
                     previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS"));
+                if !name
+                    && token.word("CALL")
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.punct(b'{') || next.punct(b'('))
+                {
+                    return true;
+                }
                 if !name && token.word("MATCH") && !previous.is_some_and(|p| p.word("OPTIONAL")) {
                     matched = true;
                 }
@@ -310,6 +327,18 @@ pub(crate) fn leading_rows_then_match(tokens: &[TextToken<'_>]) -> bool {
 }
 
 impl BoundReadInput {
+    pub(crate) fn graph_source_count(&self) -> usize {
+        usize::from(self.first.selection.is_some())
+            + self
+                .continuations
+                .iter()
+                .map(|part| match &part.operation {
+                    BoundContinuationOperation::Match(_) => 1,
+                    BoundContinuationOperation::Apply { body, .. } => body.graph_source_count(),
+                })
+                .sum::<usize>()
+    }
+
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
         self.first.parameter_schema()
     }
@@ -320,12 +349,43 @@ impl BoundReadInput {
             self.first.append_template_transcript(bytes);
             return;
         }
+        if self
+            .continuations
+            .iter()
+            .any(|part| matches!(part.operation, BoundContinuationOperation::Apply { .. }))
+        {
+            bytes.push(5);
+            bytes.extend_from_slice(b"fgdb:gql:apply-continuations:v1\0");
+            bytes.extend_from_slice(&(self.continuations.len() as u64).to_be_bytes());
+            self.first.append_template_transcript(bytes);
+            for part in &self.continuations {
+                match &part.operation {
+                    BoundContinuationOperation::Match(join) => {
+                        bytes.push(0);
+                        join.append_template_transcript(bytes);
+                    }
+                    BoundContinuationOperation::Apply { body, imports } => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
+                        for &column in imports {
+                            bytes.extend_from_slice(&(column as u64).to_be_bytes());
+                        }
+                        body.append_template_transcript(bytes);
+                    }
+                }
+                part.input.append_template_transcript(bytes);
+            }
+            return;
+        }
         // Non-equality ON predicates are not derivable from the old equality
         // correlation list. Give them a separate framed input format and use
         // the ordinary relational join transcript, including exact operands.
         // Equality-only definitions (including Any-domain ON) keep their bytes.
         let theta = self.continuations.iter().any(|part| {
-            part.join.predicate().is_some_and(|code| {
+            let BoundContinuationOperation::Match(join) = &part.operation else {
+                unreachable!("Apply has its own transcript")
+            };
+            join.predicate().is_some_and(|code| {
                 code.iter().any(|op| {
                     matches!(op, crate::GraphSetPredicateOp::Compare { comparison, .. }
                         if *comparison != IntegerComparison::Equal)
@@ -338,7 +398,10 @@ impl BoundReadInput {
             bytes.extend_from_slice(&(self.continuations.len() as u64).to_be_bytes());
             self.first.append_template_transcript(bytes);
             for part in &self.continuations {
-                part.join.append_template_transcript(bytes);
+                let BoundContinuationOperation::Match(join) = &part.operation else {
+                    unreachable!("Apply has its own transcript")
+                };
+                join.append_template_transcript(bytes);
                 part.input.append_template_transcript(bytes);
             }
             return;
@@ -350,7 +413,10 @@ impl BoundReadInput {
         bytes.extend_from_slice(&(self.continuations.len() as u64).to_be_bytes());
         self.first.append_template_transcript(bytes);
         for part in &self.continuations {
-            bytes.push(match part.join.kind() {
+            let BoundContinuationOperation::Match(join) = &part.operation else {
+                unreachable!("Apply has its own transcript")
+            };
+            bytes.push(match join.kind() {
                 RowJoinKind::Inner => 0,
                 RowJoinKind::Left => 1,
                 RowJoinKind::Right => 2,
@@ -362,7 +428,7 @@ impl BoundReadInput {
             // columns and all projections. The private join is derived solely
             // from those correlations and these frozen input domains; it
             // cannot contain an arbitrary ON predicate or a caller callback.
-            for types in [part.join.left_types(), part.join.right_types()] {
+            for types in [join.left_types(), join.right_types()] {
                 bytes.extend_from_slice(&(types.len() as u64).to_be_bytes());
                 for kind in types {
                     bytes.push(set_column_type_tag(*kind));

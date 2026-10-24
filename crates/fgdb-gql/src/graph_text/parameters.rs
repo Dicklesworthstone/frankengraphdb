@@ -149,6 +149,14 @@ impl UnresolvedGraphText<'_> {
                     .unzip()
             };
         for stage in &self.pipeline {
+            if let ReadStageTemplate::Arguments {
+                columns,
+                types: arguments,
+            } = stage
+            {
+                names.clone_from(columns);
+                types.clone_from(arguments);
+            }
             if let ReadStageTemplate::Aggregate { stage, .. } = stage {
                 (names, types) = stage.column_schema();
             }

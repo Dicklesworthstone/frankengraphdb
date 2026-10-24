@@ -134,6 +134,82 @@ fn cli_native_unwind_updates_and_reopens_without_rows_flag() {
 }
 
 #[test]
+fn cli_inline_call_reads_imports_staged_rows_and_reopened_storage() {
+    let fixture = Fixture::new();
+    successful(fixture.run(
+        "write",
+        &["UNWIND [1,2] AS p CREATE (n:Person {p:p,q:p*10})"],
+    ));
+    let query = "CALL { MATCH (n:Person) RETURN n } RETURN n.p AS p,n.q+1 AS q ORDER BY p";
+    let read = successful(fixture.run("query", &[query]));
+    assert_eq!(read.matches("\"event\":\"row\"").count(), 2, "{read}");
+    assert!(has_pair(&read, 1, 11), "{read}");
+    assert!(has_pair(&read, 2, 21), "{read}");
+    let bag = successful(fixture.run(
+        "query",
+        &["UNWIND [2,2,null] AS p CALL (p) { RETURN p AS q } RETURN p,q"],
+    ));
+    assert_eq!(bag.matches("\"event\":\"row\"").count(), 3, "{bag}");
+    assert_eq!(
+        bag.lines().filter(|line| has_pair(line, 2, 2)).count(),
+        2,
+        "{bag}"
+    );
+    let aggregate = successful(fixture.run(
+        "query",
+        &["CALL { MATCH (n:Person) RETURN n } RETURN count(n) AS total"],
+    ));
+    assert_eq!(
+        aggregate.matches("\"event\":\"row\"").count(),
+        1,
+        "{aggregate}"
+    );
+    assert!(
+        aggregate.contains("\"type\":\"count\",\"value\":\"2\""),
+        "{aggregate}"
+    );
+    let write = "CREATE (n:Person {p:3,q:30})";
+    let rollback = successful(fixture.run(
+        "transaction",
+        &["--write", write, "--query", query, "--rollback"],
+    ));
+    assert!(rollback.contains("\"kind\":\"rolled_back\""), "{rollback}");
+    assert!(!rollback.contains("\"event\":\"row\""), "{rollback}");
+    assert_eq!(
+        successful(fixture.run("query", &[query]))
+            .matches("\"event\":\"row\"")
+            .count(),
+        2
+    );
+    let committed = successful(fixture.run("transaction", &["--write", write, "--query", query]));
+    assert!(has_pair(&committed, 3, 31), "{committed}");
+    let reopened = successful(fixture.run("query", &[query]));
+    assert_eq!(
+        reopened.matches("\"event\":\"row\"").count(),
+        3,
+        "{reopened}"
+    );
+    assert!(has_pair(&reopened, 3, 31), "{reopened}");
+    let refused = failed(
+        fixture.run(
+            "query",
+            &["CALL { CREATE (n:Person {p:9,q:90}) RETURN n } RETURN n"],
+        ),
+        3,
+    );
+    assert!(
+        refused.contains("writes inside inline CALL are not supported"),
+        "{refused}"
+    );
+    assert_eq!(
+        successful(fixture.run("query", &[query]))
+            .matches("\"event\":\"row\"")
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn cli_late_failure_has_input_coordinate_and_no_durable_prefix() {
     let fixture = Fixture::new();
     successful(fixture.run("write", &["CREATE (n:Person {p:9, q:9223372036854775807})"]));

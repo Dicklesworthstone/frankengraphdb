@@ -7,7 +7,10 @@ use fgdb::{
     WriteError, WriteMismatchPolicy, WriteTxnError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSetText,
+    PreparedGraphText,
+};
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
     EmbeddedTxnState, PurposeContexts, VId,
@@ -126,7 +129,7 @@ fn read_close_checks_point_absence_and_discarded_query_observations_without_repa
         let cx = contexts.commit();
         let query_cx = contexts.query();
         let txcx = contexts.txn();
-        for mode in 0..6 {
+        for mode in 0..11 {
             let mut database = seeded(&cx).await;
             let mut transaction = database.begin(&txcx).unwrap();
             match mode {
@@ -135,6 +138,51 @@ fn read_close_checks_point_absence_and_discarded_query_observations_without_repa
                 }
                 1 => {
                     assert!(transaction.vertex(&database, VId(99)).unwrap().is_none());
+                }
+                6..=10 => {
+                    let rollback = matches!(mode, 8 | 9);
+                    if rollback {
+                        transaction.savepoint(&database, "before-call").unwrap();
+                    }
+                    let text = match mode {
+                        7 | 9 => {
+                            "MATCH (n:L) WITH n.p AS p CALL (p) { RETURN p/(p-p) AS x } RETURN x"
+                        }
+                        10 => "CALL { MATCH (n:L) RETURN n } RETURN n LIMIT 0",
+                        _ => "CALL { MATCH (n:L) WHERE n.p > 100 RETURN n } RETURN n",
+                    };
+                    let query = PreparedGraphSetText::prepare(text, symbols)
+                        .unwrap()
+                        .bind_parameters(&GqlParameters::new())
+                        .unwrap();
+                    let result = transaction.execute_graph_set_governed(
+                        &database,
+                        &query_cx,
+                        &query,
+                        GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                    );
+                    if matches!(mode, 7 | 9) {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(fgdb_gql::GqlQueryError::Source(
+                                    fgdb_gql::GraphSetExecutionError::Projection { .. }
+                                ))
+                            ),
+                            "CALL case {mode}: {result:?}"
+                        );
+                    } else {
+                        assert!(result.unwrap().value.is_empty(), "CALL case {mode}");
+                    }
+                    if rollback {
+                        transaction
+                            .rollback_to_savepoint(&database, "before-call")
+                            .unwrap();
+                    }
+                    eprintln!(
+                        "CALL observation case={mode} seed=0xf1710003 basis={} authority=embedded operator=Apply rollback={rollback} budget=100/100/100000/100000",
+                        transaction.basis().0
+                    );
                 }
                 _ => {
                     let text = match mode {
@@ -161,7 +209,7 @@ fn read_close_checks_point_absence_and_discarded_query_observations_without_repa
                 }
             }
             let mut winner = WriteBatch::new(R);
-            if mode == 1 || mode == 5 {
+            if matches!(mode, 1 | 5 | 8 | 10) {
                 winner.create_vertex(VId(99), vec![L], vec![(P, CanonicalScalar::Int(200))]);
             } else {
                 winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(200)));

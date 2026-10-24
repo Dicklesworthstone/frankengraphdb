@@ -107,6 +107,185 @@ fn scalar_vertex(value: i64, vid: u128) -> GraphValueRow {
 }
 
 #[test]
+fn inline_call_imports_preserve_bags_nulls_and_local_pages() {
+    let row = |cells: &[Option<i64>]| {
+        GraphValueRow::from_owned_values(
+            cells
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        )
+    };
+    assert_eq!(
+        execute("CALL { RETURN 1 AS a } RETURN a"),
+        vec![row(&[Some(1)])]
+    );
+    assert_eq!(
+        execute("WITH 2 AS x,3 AS z CALL (z,x) { RETURN z-x AS y } RETURN x,z,y"),
+        vec![row(&[Some(2), Some(3), Some(1)])]
+    );
+    assert_eq!(
+        execute("WITH 2 AS x CALL { WITH x RETURN x+1 AS y } RETURN x,y"),
+        vec![row(&[Some(2), Some(3)])]
+    );
+    let expected: Vec<_> = [Some(2), Some(2), None]
+        .into_iter()
+        .map(|value| row(&[value, value]))
+        .collect();
+    assert_eq!(
+        execute("UNWIND [2,2,null] AS x CALL (x) { RETURN x AS y } RETURN x,y"),
+        expected
+    );
+    assert_eq!(
+        execute(
+            "WITH 2 AS x CALL (x) { UNWIND [x,x+1] AS y RETURN y ORDER BY y DESC LIMIT 1 } RETURN x,y"
+        ),
+        vec![row(&[Some(2), Some(3)])]
+    );
+    assert!(execute("WITH 1 AS x CALL (x) { UNWIND [] AS y RETURN y } RETURN x,y").is_empty());
+    assert_eq!(
+        execute("WITH 3 AS x CALL (x) { CALL (x) { RETURN x*2 AS z } RETURN z+1 AS y } RETURN x,y"),
+        vec![row(&[Some(3), Some(7)])]
+    );
+}
+
+#[test]
+fn inline_call_correlates_actual_graph_sources_before_export() {
+    let expected: Vec<_> = EDGES
+        .iter()
+        .map(|(left, _, right)| vertices(&[left.0, right.0]))
+        .collect();
+    assert_eq!(
+        execute("MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN m } RETURN n,m ORDER BY n,m"),
+        expected
+    );
+    let expected: Vec<_> = (1..=4)
+        .map(|id| scalar_vertex([1, 2, 2, 3][id - 1], id as u128))
+        .collect();
+    assert_eq!(
+        execute("MATCH (n) CALL (n) { RETURN n.p AS p } RETURN p,n ORDER BY n"),
+        expected
+    );
+    assert_eq!(
+        execute("CALL { MATCH (n) RETURN n } RETURN n.p AS p,n ORDER BY n"),
+        expected
+    );
+    assert_eq!(
+        execute("MATCH (n) CALL (n) { RETURN n.p+1 AS p } RETURN p,n ORDER BY n"),
+        (1..=4)
+            .map(|id| scalar_vertex([2, 3, 3, 4][id - 1], id as u128))
+            .collect::<Vec<_>>()
+    );
+    let query = prepare("MATCH (n) CALL (n) { RETURN n.p AS p } RETURN p");
+    assert!(run_reading(&query, wide(), &mut || Ok(()), true).is_err());
+}
+
+#[test]
+fn inline_call_parameters_governance_and_scope_bounds_span_the_whole_definition() {
+    let text = "WITH $outer AS x CALL (x) { RETURN x+$inner AS y } RETURN y+$tail AS total";
+    let template = PreparedGraphSetText::prepare(text, |_, _: &str| {
+        panic!("source-free CALL must not resolve a symbol")
+    })
+    .unwrap();
+    let before = template.canonical_template_bytes();
+    let arguments = GqlParameters::new()
+        .with_int64("outer", 2)
+        .unwrap()
+        .with_int64("inner", 3)
+        .unwrap()
+        .with_int64("tail", 4)
+        .unwrap();
+    let query = template.bind_parameters(&arguments).unwrap();
+    let expected = vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+        CanonicalScalar::Int(9),
+    )])];
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    assert_eq!(before, template.canonical_template_bytes());
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    assert!(
+        template
+            .bind_parameters(&arguments.with_int64("extra", 0).unwrap())
+            .is_err()
+    );
+    assert!(
+        run(
+            &query,
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, 0, u64::MAX),
+            &mut || Ok(())
+        )
+        .is_err()
+    );
+    let mut checkpoints = 0;
+    run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert!(checkpoints > 0);
+    for stop in 0..checkpoints {
+        let mut seen = 0;
+        let result = run(&query, wide(), &mut || {
+            let current = seen;
+            seen += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(
+            matches!(result,Err(GqlQueryError::Interrupted(at)) if at==stop),
+            "{stop}: {result:?}"
+        );
+    }
+    for text in [
+        "WITH 0 AS x CALL (x) { WITH 1/x AS y RETURN y LIMIT 0 } RETURN y",
+        "WITH 0 AS x CALL (x) { RETURN 1/x AS y } RETURN y LIMIT 0",
+    ] {
+        assert!(
+            run(&prepare(text), wide(), &mut || Ok(())).is_err(),
+            "{text}"
+        );
+    }
+    let nested = |count| {
+        (0..count).fold("RETURN 1 AS x".to_owned(), |body, _| {
+            format!("CALL {{ {body} }} RETURN x")
+        })
+    };
+    assert_eq!(execute(&nested(8)).len(), 1);
+    assert!(
+        PreparedGraphSetText::prepare(&nested(9), |_, _: &str| panic!(
+            "depth must refuse before catalog"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn inline_call_refuses_escaping_names_collisions_and_effects_before_catalog() {
+    for text in [
+        "WITH 1 AS x CALL (missing) { RETURN 2 AS y } RETURN y",
+        "WITH 1 AS x CALL (x,x) { RETURN 2 AS y } RETURN y",
+        "WITH 1 AS x CALL { RETURN x AS y } RETURN y",
+        "WITH 1 AS x CALL (x) { RETURN x } RETURN x",
+        "CALL { WITH 2 AS hidden RETURN 1 AS y } RETURN hidden",
+        "CALL { MATCH (n) RETURN n } WITH 1 AS x RETURN n.p",
+        "CALL { CREATE (n) RETURN n } RETURN n",
+        "CALL { MATCH (n) DELETE n RETURN 1 AS y } RETURN y",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(
+            calls.get(),
+            0,
+            "refusal must precede catalog access: {text}"
+        );
+    }
+}
+
+#[test]
 fn required_continuation_preserves_parallel_edges_and_applies_input_page_first() {
     // This exact form used to be on with_pipelines' refusal list. Independent
     // edge enumeration determines its positive result, including parallel edges.

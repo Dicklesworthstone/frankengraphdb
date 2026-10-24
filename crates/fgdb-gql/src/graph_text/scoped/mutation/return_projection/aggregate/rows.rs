@@ -4,15 +4,12 @@
 
 use super::*;
 use crate::PreparedGraphSetAggregate;
-use crate::row_join::RowJoinSpec;
-use crate::set_text::multipart::{BoundContinuation, BoundReadInput};
+use crate::set_text::multipart::BoundReadInput;
+use pipeline::multipart::UnresolvedReadInput;
 
 pub(super) enum Head<'a> {
     Single(Option<GraphProjectionHead<'a>>),
-    Multipart {
-        first: Box<UnresolvedGraphText<'a>>,
-        continuations: Vec<(UnresolvedGraphText<'a>, RowJoinSpec)>,
-    },
+    Multipart(Box<UnresolvedReadInput<'a>>),
 }
 
 /// Whether the RETURN at the current token has both a pattern comprehension
@@ -110,26 +107,15 @@ pub(super) fn prefix<'a>(
     Error,
 > {
     if multipart {
-        let (first, continuations, schema, depth) = parser.multipart_aggregate_prefix(statement)?;
-        return Ok((
-            Head::Multipart {
-                first: Box::new(first),
-                continuations,
-            },
-            Vec::new(),
-            schema,
-            depth,
-        ));
+        let (input, schema, depth) = parser.multipart_aggregate_prefix(statement)?;
+        return Ok((Head::Multipart(Box::new(input)), Vec::new(), schema, depth));
     }
     // `UNWIND ... MATCH ... WITH ...`: the leading pipeline's graph part, the
     // CrossJoin a read builds for it, as the one source of the aggregate.
     if leading_match {
         let (first, schema, depth) = parser.leading_aggregate_prefix(statement)?;
         return Ok((
-            Head::Multipart {
-                first: Box::new(first),
-                continuations: Vec::new(),
-            },
+            Head::Multipart(Box::new(UnresolvedReadInput::from_first(first))),
             Vec::new(),
             schema,
             depth,
@@ -217,7 +203,7 @@ pub(super) fn finish<'a>(
     stages: Vec<ReadStageTemplate>,
     mut resolve: impl GraphSymbolResolver,
 ) -> Result<BoundReadInput, GraphSetTextError> {
-    let (first, continuations) = match head {
+    let mut input = match head {
         Head::Single(head) => {
             let first = match head {
                 Some(head) => parser.finish_graph_projection(statement, head, stages)?,
@@ -239,56 +225,22 @@ pub(super) fn finish<'a>(
                 continuations: Vec::new(),
             });
         }
-        Head::Multipart {
-            mut first,
-            mut continuations,
-        } => {
+        Head::Multipart(mut input) => {
             // Terminal argument/key expressions are evaluated on the COMPLETE
             // joined row, after every original input filter, DISTINCT and page.
             // Never attach them to a graph leaf before optional null extension.
-            if let Some((last, _)) = continuations.last_mut() {
-                last.pipeline.extend(stages);
-            } else {
-                first.pipeline.extend(stages);
-            }
-            first
-                .syntax
-                .parameters
-                .clone_from(&parser.syntax.parameters);
-            first
-                .syntax
-                .parameter_offsets
-                .clone_from(&parser.syntax.parameter_offsets);
-            for (part, _) in &mut continuations {
-                part.syntax.parameters.clone_from(&parser.syntax.parameters);
-                part.syntax
-                    .parameter_offsets
-                    .clone_from(&parser.syntax.parameter_offsets);
-            }
-            (*first, continuations)
+            input.append_stages(stages);
+            input
         }
     };
+    input.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
     // All syntax, aliases, argument types and total depth were admitted before
     // touching the catalog. Every graph source shares this domain-aware cache.
     let mut cache = std::collections::BTreeMap::new();
-    let first = first.resolve(Cached {
+    Ok(input.resolve(&mut Cached {
         inner: &mut resolve,
         cache: &mut cache,
-    })?;
-    let mut bound = Vec::new();
-    for (input, join) in continuations {
-        bound.push(BoundContinuation {
-            input: input.resolve(Cached {
-                inner: &mut resolve,
-                cache: &mut cache,
-            })?,
-            join,
-        });
-    }
-    Ok(BoundReadInput {
-        first,
-        continuations: bound,
-    })
+    })?)
 }
 
 impl PreparedGraphPipelineAggregateText {
@@ -303,14 +255,14 @@ impl PreparedGraphPipelineAggregateText {
     /// Number of actual graph leaves; singleton row inputs do not count.
     #[must_use]
     pub fn graph_source_count(&self) -> usize {
-        usize::from(self.input.first.selection.is_some()) + self.input.continuations.len()
+        self.input.graph_source_count()
     }
 
-    /// Hosts must use the source-aware relation executor for zero/multiple
-    /// graph leaves. Do not mistake a nonempty source count for exactly one.
+    /// Hosts must preserve every continuation, including an Apply whose body
+    /// owns the sole graph leaf. A source count is not an execution shape.
     #[must_use]
     pub fn requires_relational_input(&self) -> bool {
-        self.graph_source_count() != 1
+        self.input.first.selection.is_none() || !self.input.continuations.is_empty()
     }
 
     /// Bind the entire relational pipeline, including zero-source WITH/UNWIND
