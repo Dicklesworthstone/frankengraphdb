@@ -452,6 +452,18 @@ fn property_chunks_cross_the_existing_255_row_boundary_without_locator_loss() {
 fn empty_image_is_canonical_and_resource_limits_remain_explicit() {
     let empty = seal(&[], &[], 0);
     let encoded = bytes(&empty);
+    // FGSI v1 empty frame: four zero counts, raw empty dictionary, and the
+    // single CSR offset 0 encoded as one unary-high word. Streaming changes
+    // neither this existing framing nor the fingerprint domain.
+    let golden = [
+        b'F', b'G', b'S', b'I', 1, 0, // magic/version
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // counts
+        0, 0, 0, 0, 0, 0, 0, 0, 0, // raw dictionary tag/count/length
+        0, 0, 0, 0, 0, 0, 0, 0, // offset maximum
+        8, 0, 0, 0, // offset payload length
+        1, 0, 0, 0, 0, 0, 0, 0, // unary-high payload
+    ];
+    assert_eq!(encoded, golden);
     let reloaded = SealedPartition::reload_inner(
         empty.anchor,
         &encoded,
@@ -513,6 +525,150 @@ fn interrupted_decode_and_scan_do_not_report_a_successful_prefix() {
     );
     assert!(cursor.finished);
     assert_eq!(cursor.scan.as_ref().unwrap().position, 0);
+}
+
+#[test]
+fn streamed_image_fingerprint_is_exact_bounded_and_interruptible() {
+    let entries: Vec<_> = (0..4097)
+        .map(|index| entry(1, index / 3, index + 1, 1, (index % 2 == 0).then_some(8)))
+        .collect();
+    let mut blocks: Vec<_> = entries.chunks(120).map(<[_]>::to_vec).collect();
+    blocks.push(vec![entry(2, 3, 5000, 1, None)]);
+    let properties = vec![None; blocks.len()];
+    let partition = seal(&blocks, &properties, 1);
+    let encoded = bytes(&partition);
+    assert!(encoded.len() > 4096 * 3);
+    assert_eq!(partition.incidence_count(), entries.len() + 1);
+
+    // Compare streaming construction with a direct, single-update BLAKE3
+    // over the complete canonical frame and the unchanged domain separator.
+    let mut expected = fgdb_crypto::Hasher::new();
+    expected.update(b"fgdb.strata.sealed-adjacency-image.v1");
+    expected.update(&encoded);
+    let expected = expected.finalize().0;
+    assert_eq!(partition.anchor.fingerprint, expected);
+    assert_eq!(partition.anchor.encoded_bytes, encoded.len());
+    let mut polls = 0;
+    let mut emitted = 0;
+    let mut streaming = fingerprint_hasher();
+    let length = wire::encode_to(
+        &partition.image,
+        SealedLimits::default(),
+        &mut || {
+            polls += 1;
+            Ok(())
+        },
+        |part| {
+            assert!(!part.is_empty() && part.len() <= 4096);
+            streaming.update(part);
+            emitted += part.len();
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(length, encoded.len());
+    assert_eq!(emitted, encoded.len());
+    assert_eq!(streaming.finalize().0, expected);
+    assert!(polls >= encoded.len().div_ceil(4096));
+
+    for stop in 1..=polls {
+        let mut reached = 0;
+        assert!(matches!(
+            wire::fingerprint(&partition.image, SealedLimits::default(), &mut || {
+                reached += 1;
+                if reached == stop {
+                    Err(SealedError::InvalidFloor)
+                } else {
+                    Ok(())
+                }
+            },),
+            Err(SealedError::InvalidFloor)
+        ));
+        assert_eq!(reached, stop);
+    }
+    assert_eq!(
+        wire::fingerprint(&partition.image, SealedLimits::default(), &mut || Ok(())).unwrap(),
+        (expected, encoded.len())
+    );
+
+    let exact = SealedLimits {
+        max_image_bytes: encoded.len(),
+        ..SealedLimits::default()
+    };
+    assert_eq!(
+        wire::fingerprint(&partition.image, exact, &mut || Ok(())).unwrap(),
+        (expected, encoded.len())
+    );
+    for (limits, resource) in [
+        (
+            SealedLimits {
+                max_image_bytes: encoded.len() - 1,
+                ..exact
+            },
+            "image bytes",
+        ),
+        (
+            SealedLimits {
+                max_rows: 1,
+                ..exact
+            },
+            "descriptors",
+        ),
+        (
+            SealedLimits {
+                max_incidences: entries.len(),
+                ..exact
+            },
+            "incidences",
+        ),
+    ] {
+        assert!(
+            matches!(wire::fingerprint(&partition.image, limits, &mut || Ok(())),
+            Err(SealedError::Limit { resource: actual, .. }) if actual == resource)
+        );
+    }
+}
+
+#[test]
+fn reload_hash_checks_live_control_before_decoding_any_untrusted_frame() {
+    let entries: Vec<_> = (0..4097).map(|i| entry(1, i, i + 1, 1, None)).collect();
+    let blocks: Vec<_> = entries.chunks(120).map(<[_]>::to_vec).collect();
+    let partition = seal(&blocks, &vec![None; blocks.len()], 1);
+    let mut damaged = bytes(&partition);
+    assert!(damaged.len() > 4096 * 2);
+    damaged[..4].copy_from_slice(b"BAD!");
+    let hash_polls = damaged.len().div_ceil(4096);
+    for stop in 1..=hash_polls + 1 {
+        let mut reached = 0;
+        assert!(matches!(
+            SealedPartition::reload_inner(
+                partition.anchor(),
+                &damaged,
+                SealedLimits::default(),
+                None,
+                &mut || {
+                    reached += 1;
+                    if reached == stop {
+                        Err(SealedError::InvalidFloor)
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Err(SealedError::InvalidFloor)
+        ));
+        assert_eq!(reached, stop);
+    }
+    assert!(matches!(
+        SealedPartition::reload_inner(
+            partition.anchor(),
+            &damaged,
+            SealedLimits::default(),
+            None,
+            &mut || Ok(()),
+        ),
+        Err(SealedError::ImageMismatch)
+    ));
 }
 
 /// Manual in-memory physical-access comparison. Both paths run against the

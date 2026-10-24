@@ -127,6 +127,18 @@ impl core::fmt::Display for SealedError {
 
 impl std::error::Error for SealedError {}
 
+impl From<IdentityColumnError> for SealedError {
+    fn from(error: IdentityColumnError) -> Self {
+        Self::Identity(error)
+    }
+}
+
+impl From<EfPayloadError> for SealedError {
+    fn from(error: EfPayloadError) -> Self {
+        Self::Payload(error)
+    }
+}
+
 /// Coordinates proven by the source store, not parsed from image bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedScope {
@@ -225,11 +237,22 @@ impl core::fmt::Debug for SealedPartition {
     }
 }
 
-fn fingerprint(bytes: &[u8]) -> [u8; 32] {
+fn fingerprint_hasher() -> fgdb_crypto::Hasher {
     let mut hash = fgdb_crypto::Hasher::new();
     hash.update(b"fgdb.strata.sealed-adjacency-image.v1");
-    hash.update(bytes);
-    hash.finalize().0
+    hash
+}
+
+fn fingerprint(
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<[u8; 32], SealedError> {
+    let mut hash = fingerprint_hasher();
+    for chunk in bytes.chunks(4096) {
+        checkpoint()?;
+        hash.update(chunk);
+    }
+    Ok(hash.finalize().0)
 }
 
 fn check_limit(resource: &'static str, requested: usize, limit: usize) -> Result<(), SealedError> {
@@ -451,12 +474,12 @@ impl SealedPartition {
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Self, SealedError> {
         image.validate(scope, limits, checkpoint)?;
-        let bytes = wire::encode(&image, limits, checkpoint)?;
+        let (fingerprint, encoded_bytes) = wire::fingerprint(&image, limits, checkpoint)?;
         let anchor = SealedAnchor {
             scope,
             relation,
-            fingerprint: fingerprint(&bytes),
-            encoded_bytes: bytes.len(),
+            fingerprint,
+            encoded_bytes,
         };
         Self::check_image_scope(anchor, &image, checkpoint)?;
         let retained_bytes = image.retained_bytes(checkpoint)?;
@@ -496,6 +519,12 @@ impl SealedPartition {
     /// Shared clones name the same charge, not additional image allocations.
     pub fn charged_resident_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    /// Retained raw incidences, including historical versions. This is stored
+    /// image metadata and does not scan descriptors or decode adjacency.
+    pub fn incidence_count(&self) -> usize {
+        self.image.incidences
     }
 
     pub fn stats(&self) -> SealedStats {
@@ -552,7 +581,9 @@ impl SealedPartition {
     ) -> Result<Self, SealedError> {
         checkpoint()?;
         check_limit("image bytes", bytes.len(), limits.max_image_bytes)?;
-        if bytes.len() != anchor.encoded_bytes || fingerprint(bytes) != anchor.fingerprint {
+        if bytes.len() != anchor.encoded_bytes
+            || fingerprint(bytes, checkpoint)? != anchor.fingerprint
+        {
             return Err(SealedError::ImageMismatch);
         }
         let image = wire::decode(bytes, limits, resolver, checkpoint)?;

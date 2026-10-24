@@ -9,30 +9,61 @@ use crate::edge_props::{self, MAX_PROPERTY_PATCH_ROWS};
 use crate::{DescriptorKey, Direction, VisibilityInterval};
 use fgdb_codec::ef_payload::{self, EfPayloadLimits};
 use fgdb_codec::elias_fano::EliasFano;
-use fgdb_codec::identity::{ElementIdentity, IdentityColumn, IdentityColumnDescriptor};
+use fgdb_codec::identity::{
+    ElementIdentity, IdentityColumn, IdentityColumnDescriptor, IdentityColumnError,
+};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CanonicalScalarResolver, CommitSeq, EId, VId};
 
 const MAGIC: &[u8; 4] = b"FGSI";
 const VERSION: u16 = 1;
 
-struct Output {
-    bytes: Vec<u8>,
+const OUTPUT_CHUNK_BYTES: usize = 4096;
+
+struct Output<'a, C, S> {
+    checkpoint: &'a mut C,
+    sink: S,
+    bytes: usize,
     limit: usize,
+    pending: [u8; OUTPUT_CHUNK_BYTES],
+    used: usize,
 }
 
-impl Output {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), SealedError> {
+impl<C, S> Output<'_, C, S>
+where
+    C: FnMut() -> Result<(), SealedError>,
+    S: FnMut(&[u8]) -> Result<(), SealedError>,
+{
+    fn check_append(&self, count: usize) -> Result<usize, SealedError> {
         let wanted = self
             .bytes
-            .len()
-            .checked_add(bytes.len())
+            .checked_add(count)
             .ok_or(SealedError::SizeOverflow)?;
         check_limit("image bytes", wanted, self.limit)?;
-        self.bytes
-            .try_reserve(bytes.len())
-            .map_err(|_| SealedError::AllocationFailed)?;
-        self.bytes.extend_from_slice(bytes);
+        Ok(wanted)
+    }
+
+    fn flush(&mut self) -> Result<(), SealedError> {
+        if self.used != 0 {
+            (self.checkpoint)()?;
+            (self.sink)(&self.pending[..self.used])?;
+            self.used = 0;
+        }
+        Ok(())
+    }
+
+    fn put(&mut self, mut bytes: &[u8]) -> Result<(), SealedError> {
+        let wanted = self.check_append(bytes.len())?;
+        while !bytes.is_empty() {
+            let take = bytes.len().min(self.pending.len() - self.used);
+            self.pending[self.used..self.used + take].copy_from_slice(&bytes[..take]);
+            self.used += take;
+            bytes = &bytes[take..];
+            if self.used == self.pending.len() {
+                self.flush()?;
+            }
+        }
+        self.bytes = wanted;
         Ok(())
     }
 
@@ -49,27 +80,34 @@ impl Output {
         column: &IdentityColumn<T>,
     ) -> Result<(), SealedError> {
         let descriptor = column.descriptor();
-        let payload = column
-            .try_scalar_payload(self.limit)
-            .map_err(SealedError::Identity)?;
+        let length = column.encoded_payload_len();
+        if length > self.limit {
+            return Err(SealedError::Identity(
+                IdentityColumnError::PayloadLimitExceeded {
+                    representation: descriptor.representation(),
+                    required: length,
+                    limit: self.limit,
+                },
+            ));
+        }
         self.put(&[crate::representation_tag(descriptor.representation())])?;
         self.count(descriptor.prefixes())?;
-        self.count(payload.len())?;
-        self.put(&payload)
+        self.count(length)?;
+        self.check_append(length)?;
+        column.try_write_scalar_payload(self.limit, |part| self.put(part))
     }
 
     fn ef(&mut self, column: &EliasFano) -> Result<(), SealedError> {
-        let payload = ef_payload::encode(
-            column,
-            EfPayloadLimits {
-                max_entries: column.len(),
-                max_bytes: self.limit,
-            },
-        )
-        .map_err(SealedError::Payload)?;
+        let limits = EfPayloadLimits {
+            max_entries: column.len(),
+            max_bytes: self.limit,
+        };
+        let length = ef_payload::encoded_len(column.len(), column.max_value().unwrap_or(0), limits)
+            .map_err(SealedError::Payload)?;
         self.put(&column.max_value().unwrap_or(0).to_le_bytes())?;
-        self.count(payload.len())?;
-        self.put(&payload)
+        self.count(length)?;
+        self.check_append(length)?;
+        ef_payload::encode_to(column, limits, |part| self.put(part))
     }
 }
 
@@ -78,12 +116,51 @@ pub(super) fn encode(
     limits: SealedLimits,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<Vec<u8>, SealedError> {
+    let mut bytes = Vec::new();
+    encode_to(image, limits, checkpoint, |part| {
+        bytes
+            .try_reserve(part.len())
+            .map_err(|_| SealedError::AllocationFailed)?;
+        bytes.extend_from_slice(part);
+        Ok(())
+    })?;
+    Ok(bytes)
+}
+
+/// Authenticate a newly constructed image without materializing its complete
+/// wire frame or identity/EF payloads. Canonical property patches retain their
+/// existing bounded-row encoder and remain separate construction scratch.
+pub(super) fn fingerprint(
+    image: &Image,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<([u8; 32], usize), SealedError> {
+    let mut hash = super::fingerprint_hasher();
+    let bytes = encode_to(image, limits, checkpoint, |part| {
+        hash.update(part);
+        Ok(())
+    })?;
+    Ok((hash.finalize().0, bytes))
+}
+
+/// One framing implementation feeds materialized bytes and the streaming
+/// fingerprint. The sink sees at most 4096 bytes between live checkpoints.
+pub(super) fn encode_to(
+    image: &Image,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    sink: impl FnMut(&[u8]) -> Result<(), SealedError>,
+) -> Result<usize, SealedError> {
     checkpoint()?;
     check_limit("descriptors", image.rows.len(), limits.max_rows)?;
     check_limit("incidences", image.incidences, limits.max_incidences)?;
     let mut output = Output {
-        bytes: Vec::new(),
+        checkpoint,
+        sink,
+        bytes: 0,
         limit: limits.max_image_bytes,
+        pending: [0; OUTPUT_CHUNK_BYTES],
+        used: 0,
     };
     output.put(MAGIC)?;
     output.put(&VERSION.to_le_bytes())?;
@@ -94,7 +171,7 @@ pub(super) fn encode(
     output.identity(&image.dictionary)?;
     output.ef(&image.offsets)?;
     for row in &image.rows {
-        checkpoint()?;
+        (output.checkpoint)()?;
         match row.storage {
             Storage::Inline(index) => {
                 let mut payload = [0; MAX_INLINE_PAYLOAD_BYTES];
@@ -121,7 +198,7 @@ pub(super) fn encode(
                 }
                 for (at, locator) in run.locators.iter().enumerate() {
                     if at % 256 == 0 {
-                        checkpoint()?;
+                        (output.checkpoint)()?;
                     }
                     output.put(&locator.to_le_bytes())?;
                 }
@@ -130,7 +207,7 @@ pub(super) fn encode(
     }
     let mut property_bytes = 0usize;
     for chunk in image.properties.chunks(MAX_PROPERTY_PATCH_ROWS as usize) {
-        checkpoint()?;
+        (output.checkpoint)()?;
         // One existing, canonical FGSP patch per chunk. Never introduce a
         // second scalar encoder or exceed its 255-row format ceiling.
         let payload = edge_props::encode_property_patch(chunk).map_err(SealedError::Property)?;
@@ -146,7 +223,8 @@ pub(super) fn encode(
         output.count(payload.len())?;
         output.put(&payload)?;
     }
-    checkpoint()?;
+    output.flush()?;
+    (output.checkpoint)()?;
     Ok(output.bytes)
 }
 

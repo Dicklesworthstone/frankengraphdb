@@ -126,11 +126,6 @@ fn word(bytes: &[u8], index: usize) -> u64 {
     )
 }
 
-fn or_word(bytes: &mut [u8], index: usize, value: u64) {
-    let combined = word(bytes, index) | value;
-    bytes[index * 8..index * 8 + 8].copy_from_slice(&combined.to_le_bytes());
-}
-
 fn mask(width: u32) -> u64 {
     if width == 0 { 0 } else { (1u64 << width) - 1 }
 }
@@ -143,31 +138,47 @@ pub fn encode(encoded: &EliasFano, limits: EfPayloadLimits) -> Result<Vec<u8>, E
     bytes
         .try_reserve_exact(plan.bytes)
         .map_err(|_| EfPayloadError::AllocationFailed)?;
-    bytes.resize(plan.bytes, 0);
-    for index in 0..encoded.len() {
-        let value = encoded
-            .select(index)
-            .expect("scalar EF retains all entries");
-        if plan.width != 0 {
-            let offset = index * plan.width as usize;
-            let shift = offset % 64;
-            let low = value & mask(plan.width);
-            or_word(&mut bytes, offset / 64, low << shift);
-            if shift + plan.width as usize > 64 {
-                or_word(&mut bytes, offset / 64 + 1, low >> (64 - shift));
-            }
-        }
-        let position = usize::try_from(value >> plan.width)
-            .map_err(|_| EfPayloadError::SizeOverflow)?
-            .checked_add(index)
-            .ok_or(EfPayloadError::SizeOverflow)?;
-        or_word(
-            &mut bytes,
-            plan.low_words + position / 64,
-            1u64 << (position % 64),
-        );
-    }
+    encode_to(encoded, limits, |part| {
+        bytes.extend_from_slice(part);
+        Ok::<_, EfPayloadError>(())
+    })?;
     Ok(bytes)
+}
+
+/// Emit the same canonical payload as [`encode`] without allocating a payload
+/// buffer or decoding the immutable column. Admission precedes the first
+/// callback; each borrowed chunk contains at most 4096 bytes. A callback
+/// failure stops emission immediately, allowing owners to enforce live
+/// cancellation while hashing or writing large columns.
+pub fn encode_to<E: From<EfPayloadError>>(
+    encoded: &EliasFano,
+    limits: EfPayloadLimits,
+    mut emit: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let plan = layout(encoded.len(), encoded.max_value().unwrap_or(0), limits)?;
+    let (low, high) = encoded.payload_words();
+    let found = low
+        .len()
+        .checked_add(high.len())
+        .and_then(|words| words.checked_mul(8))
+        .ok_or(EfPayloadError::SizeOverflow)?;
+    if low.len() != plan.low_words || high.len() != plan.high_words {
+        return Err(EfPayloadError::Length {
+            expected: plan.bytes,
+            found,
+        }
+        .into());
+    }
+    let mut bytes = [0u8; 4096];
+    for words in [low, high] {
+        for chunk in words.chunks(bytes.len() / 8) {
+            for (word, target) in chunk.iter().zip(bytes.as_chunks_mut::<8>().0) {
+                target.copy_from_slice(&word.to_le_bytes());
+            }
+            emit(&bytes[..chunk.len() * 8])?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_padding(
@@ -369,6 +380,94 @@ mod tests {
                 decode(&bytes, count, values.last().copied().unwrap_or(0), limits()).unwrap(),
                 scalar
             );
+        }
+    }
+
+    #[test]
+    fn streaming_words_match_an_independent_bitwise_payload_oracle() {
+        // Build the specified bit vectors directly from logical values. This
+        // oracle does not inspect scalar storage, call select, or use layout.
+        fn expected(values: &[u64]) -> Vec<u8> {
+            if values.is_empty() {
+                return Vec::new();
+            }
+            let maximum = *values.last().unwrap();
+            let ratio = maximum / values.len() as u64;
+            let width = if ratio == 0 {
+                0
+            } else {
+                ratio.ilog2() as usize
+            };
+            let low_bytes = (values.len() * width).div_ceil(64) * 8;
+            let high_bits = (maximum >> width) as usize + values.len();
+            let mut bytes = vec![0; low_bytes + high_bits.div_ceil(64) * 8];
+            for (index, value) in values.iter().copied().enumerate() {
+                for bit in 0..width {
+                    if value & (1 << bit) != 0 {
+                        let at = index * width + bit;
+                        bytes[at / 8] |= 1 << (at % 8);
+                    }
+                }
+                let at = (value >> width) as usize + index;
+                bytes[low_bytes + at / 8] |= 1 << (at % 8);
+            }
+            bytes
+        }
+        let mut cases = vec![vec![], vec![0], vec![u64::MAX], vec![0, u64::MAX]];
+        for count in [1, 63, 64, 65, 1025, 8193] {
+            cases.push(vec![42; count]);
+            cases.push((0..count).map(|index| (index as u64) << 40).collect());
+        }
+        for values in cases {
+            let scalar = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            let mut payload = Vec::new();
+            encode_to(&scalar, limits(), |part| {
+                assert!(!part.is_empty() && part.len() <= 4096);
+                payload.extend_from_slice(part);
+                Ok::<_, EfPayloadError>(())
+            })
+            .unwrap();
+            assert_eq!(payload, expected(&values));
+            assert_eq!(encode(&scalar, limits()).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn streaming_payload_admits_before_output_and_stops_at_sink_failure() {
+        let values: Vec<_> = (0..8193).map(|index| (index as u64) << 40).collect();
+        let scalar = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        let required = encoded_len(values.len(), *values.last().unwrap(), limits()).unwrap();
+        for denied in [
+            EfPayloadLimits {
+                max_entries: values.len() - 1,
+                ..limits()
+            },
+            EfPayloadLimits {
+                max_bytes: required - 1,
+                ..limits()
+            },
+        ] {
+            assert!(
+                encode_to(&scalar, denied, |_| -> Result<(), EfPayloadError> {
+                    panic!("a refused payload must not emit bytes")
+                })
+                .is_err()
+            );
+        }
+        for stop in [1, 2, 3] {
+            let mut calls = 0;
+            assert_eq!(
+                encode_to(&scalar, limits(), |_| {
+                    calls += 1;
+                    if calls == stop {
+                        Err(EfPayloadError::InvalidHighBits)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(EfPayloadError::InvalidHighBits)
+            );
+            assert_eq!(calls, stop);
         }
     }
 }

@@ -1381,10 +1381,46 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 target: AllocationTarget::EncodedPayload,
                 requested: self.encoded_payload_len,
             })?;
+        self.try_write_scalar_payload(max_output_bytes, |part| {
+            output.extend_from_slice(part);
+            Ok::<_, IdentityColumnError>(())
+        })?;
+        Ok(output)
+    }
+
+    /// Emit the exact scalar payload without allocating a second column.
+    ///
+    /// The byte limit is checked before the first callback. Chunks contain at
+    /// most 4096 bytes, in the same order as [`Self::try_scalar_payload`]. A
+    /// callback failure is terminal; callers can interrupt large columns and
+    /// stream them into an admitted writer or incremental hash. As with the
+    /// materialized form, framing and authentication belong to the owner.
+    pub fn try_write_scalar_payload<E: From<IdentityColumnError>>(
+        &self,
+        max_output_bytes: usize,
+        mut emit: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.encoded_payload_len > max_output_bytes {
+            return Err(IdentityColumnError::PayloadLimitExceeded {
+                representation: self.representation(),
+                required: self.encoded_payload_len,
+                limit: max_output_bytes,
+            }
+            .into());
+        }
+        let mut emitted = 0usize;
+        let mut put = |bytes: &[u8]| -> Result<(), E> {
+            emitted = emitted.checked_add(bytes.len()).ok_or(
+                IdentityColumnError::ConstructionInvariantViolation {
+                    invariant: IdentityConstructionInvariant::EncodedPayloadLength,
+                },
+            )?;
+            emit(bytes)
+        };
         match &self.storage {
             IdentityStorage::Raw128(rows) => {
                 for row in rows {
-                    output.extend_from_slice(&row.to_be_bytes());
+                    put(&row.to_be_bytes())?;
                 }
             }
             IdentityStorage::SharedPrefixFixed {
@@ -1392,9 +1428,9 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 indexes,
                 slots,
             } => {
-                append_prefixes_and_indexes(&mut output, prefixes, indexes);
+                write_prefixes_and_indexes(&mut put, prefixes, indexes)?;
                 for slot in slots {
-                    output.extend_from_slice(slot);
+                    put(slot)?;
                 }
             }
             IdentityStorage::SharedPrefixFor {
@@ -1402,30 +1438,35 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 indexes,
                 slots,
             } => {
-                append_prefixes_and_indexes(&mut output, prefixes, indexes);
-                output.extend_from_slice(&slot_be_bytes(slots.base));
-                output.push(slots.width);
-                output.extend_from_slice(&slots.packed_deltas);
+                write_prefixes_and_indexes(&mut put, prefixes, indexes)?;
+                put(&slot_be_bytes(slots.base))?;
+                put(&[slots.width])?;
+                for chunk in slots.packed_deltas.chunks(4096) {
+                    put(chunk)?;
+                }
             }
             IdentityStorage::SharedPrefixDeltaFor {
                 prefixes,
                 indexes,
                 slots,
             } => {
-                append_prefixes_and_indexes(&mut output, prefixes, indexes);
+                write_prefixes_and_indexes(&mut put, prefixes, indexes)?;
                 for base in &slots.bases {
-                    output.extend_from_slice(base);
+                    put(base)?;
                 }
-                output.push(slots.width);
-                output.extend_from_slice(&slots.packed_deltas);
+                put(&[slots.width])?;
+                for chunk in slots.packed_deltas.chunks(4096) {
+                    put(chunk)?;
+                }
             }
         }
-        if output.len() != self.encoded_payload_len {
+        if emitted != self.encoded_payload_len {
             return Err(IdentityColumnError::ConstructionInvariantViolation {
                 invariant: IdentityConstructionInvariant::EncodedPayloadLength,
-            });
+            }
+            .into());
         }
-        Ok(output)
+        Ok(())
     }
 
     /// Decodes one exact registry-independent scalar payload.
@@ -2698,28 +2739,33 @@ fn push_index(indexes: &mut PrefixIndexes, index: usize) -> Result<(), IdentityC
     Ok(())
 }
 
-fn append_prefixes_and_indexes(
-    output: &mut Vec<u8>,
+fn write_prefixes_and_indexes<E>(
+    output: &mut impl FnMut(&[u8]) -> Result<(), E>,
     prefixes: &[IdentityPrefix],
     indexes: &PrefixIndexes,
-) {
+) -> Result<(), E> {
     for prefix in prefixes {
-        output.extend_from_slice(&prefix.bytes);
+        output(&prefix.bytes)?;
     }
     match indexes {
         PrefixIndexes::Zero => {}
-        PrefixIndexes::U8(values) => output.extend_from_slice(values),
+        PrefixIndexes::U8(values) => {
+            for chunk in values.chunks(4096) {
+                output(chunk)?;
+            }
+        }
         PrefixIndexes::U16(values) => {
             for value in values {
-                output.extend_from_slice(&value.to_le_bytes());
+                output(&value.to_le_bytes())?;
             }
         }
         PrefixIndexes::U32(values) => {
             for value in values {
-                output.extend_from_slice(&value.to_le_bytes());
+                output(&value.to_le_bytes())?;
             }
         }
     }
+    Ok(())
 }
 
 fn packed_value_at(input: &[u8], row: usize, width: u8) -> Option<u64> {
@@ -3432,6 +3478,62 @@ mod tests {
             &first[..PREFIX_BYTES],
             &shared.prefix_dictionary().unwrap()[0].bytes
         );
+    }
+
+    #[test]
+    fn streaming_scalar_payload_keeps_identity_order_limits_and_terminal_errors() {
+        let values = vids_with_prefix_count(8193, 257);
+        let bounds = limits(values.len(), 257);
+        let column = IdentityColumn::try_new(&values, bounds).unwrap();
+        assert_eq!(
+            column.representation(),
+            IdentityRepresentation::SharedPrefixFixed
+        );
+        let mut bytes = Vec::new();
+        let mut calls = 0;
+        column
+            .try_write_scalar_payload(column.encoded_payload_len(), |part| {
+                assert!(!part.is_empty() && part.len() <= 4096);
+                bytes.extend_from_slice(part);
+                calls += 1;
+                Ok::<_, IdentityColumnError>(())
+            })
+            .unwrap();
+        assert_eq!(bytes.len(), column.encoded_payload_len());
+        let decoded =
+            IdentityColumn::<VId>::try_from_scalar_payload(&bytes, column.descriptor(), bounds)
+                .unwrap();
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), values);
+        assert!(calls > 3);
+        assert!(matches!(
+            column.try_write_scalar_payload(
+                bytes.len() - 1,
+                |_| -> Result<(), IdentityColumnError> { panic!("admission must precede output") }
+            ),
+            Err(IdentityColumnError::PayloadLimitExceeded { .. })
+        ));
+        for stop in [1, 3, calls] {
+            let mut reached = 0;
+            let result = column.try_write_scalar_payload(bytes.len(), |_| {
+                reached += 1;
+                if reached == stop {
+                    Err(IdentityColumnError::PayloadLengthMismatch {
+                        expected: 7,
+                        actual: 3,
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(
+                result,
+                Err(IdentityColumnError::PayloadLengthMismatch {
+                    expected: 7,
+                    actual: 3
+                })
+            );
+            assert_eq!(reached, stop);
+        }
     }
 
     #[test]

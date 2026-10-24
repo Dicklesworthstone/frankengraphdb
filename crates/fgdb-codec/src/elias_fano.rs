@@ -305,6 +305,13 @@ impl EliasFano {
         self.low_bits
     }
 
+    /// Canonical packed words, excluding the derived select directory. The
+    /// payload codec emits these as little-endian words; constructors keep
+    /// unused tail bits zero, so serialization need not decode every value.
+    pub(crate) fn payload_words(&self) -> (&[u64], &[u64]) {
+        (&self.low_words, &self.high_words)
+    }
+
     /// Total logical payload in equivalent 64-bit words, including the
     /// high-word rank directory rounded up from its `u32` entries.
     ///
