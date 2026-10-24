@@ -180,12 +180,10 @@ fn mutation_edge_topology<V: Vfs + Clone>(
                     DeltaRow::DeleteVertex {
                         sorted_retired_incident_edges,
                         ..
-                    } => {
-                        if point_find(sorted_retired_incident_edges, edge, |id| *id, &mut control)?
-                            .is_some()
-                        {
-                            topology = None;
-                        }
+                    } if point_find(sorted_retired_incident_edges, edge, |id| *id, &mut control)?
+                        .is_some() =>
+                    {
+                        topology = None;
                     }
                     _ => {}
                 }

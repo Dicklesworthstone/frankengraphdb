@@ -47,6 +47,9 @@ impl PreparedGraphWriteChainText {
         // first clause is a MATCH. An UNWIND of a `$param` before MERGE is
         // the parameter batch writer's (unwind_write).
         let (mut written, mut merged, mut headed) = (false, false, false);
+        // Whether that MERGE was a vertex MERGE: only one returns rows as a
+        // chain; a relationship MERGE stays the batch writer's.
+        let mut merged_vertex = false;
         let (mut unwound, mut matched) = (false, false);
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
@@ -149,10 +152,11 @@ impl PreparedGraphWriteChainText {
                             // leading MATCH: a chain once another write
                             // follows.
                             merged = vertex || matched || parameter_matched;
+                            merged_vertex = vertex;
                         }
                     } else if clause
                         && parameter_unwound
-                        && merged
+                        && merged_vertex
                         && word.eq_ignore_ascii_case("RETURN")
                     {
                         // The batch writer has no RETURN: a vertex MERGE over
