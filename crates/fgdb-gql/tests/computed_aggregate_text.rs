@@ -1106,17 +1106,24 @@ fn computed_keys_work_as_hidden_grouping_and_direct_clause_references() {
 }
 
 #[test]
-fn row_independent_outputs_run_after_global_aggregation_even_on_empty_input() {
+fn explicit_empty_grouping_keeps_independent_outputs_without_changing_implicit_keys() {
     use fgdb_gql::GraphCountSource;
     use fgdb_gql::algebra::GraphValue;
 
-    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+    let implicit = PreparedGraphAggregateText::prepare_with_parameter_types(
         "MATCH (n) RETURN COUNT(*) AS count, [x IN $values | x+1] AS values",
         &[("values", GqlParameterType::List)],
         symbols,
     )
     .unwrap();
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        "MATCH (n) RETURN COUNT(*) AS count, [x IN $values | x+1] AS values GROUP BY ()",
+        &[("values", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
     assert_eq!(template.parameter_schema()[0].occurrences, 1);
+    assert_eq!(implicit.parameter_schema()[0].occurrences, 1);
     for numbers in [vec![1, 1, 3], vec![]] {
         let args = GqlParameters::new()
             .with_list(
@@ -1128,6 +1135,25 @@ fn row_independent_outputs_run_after_global_aggregation_even_on_empty_input() {
             )
             .unwrap();
         let plan = template.bind_parameters(&args).unwrap();
+        let implicitly_grouped = implicit.bind_parameters(&args).unwrap();
+        assert!(implicitly_grouped.count_summary_source().is_none());
+        assert!(
+            run(&implicitly_grouped, &[], &[], &Props::new())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        let implicit_rows = run(
+            &implicitly_grouped,
+            &[VId(1), VId(2), VId(3)],
+            &[],
+            &Props::new(),
+        )
+        .unwrap()
+        .value;
+        assert_eq!(implicit_rows.len(), 1);
+        assert_eq!(implicit_rows[0].get(0).unwrap().as_count(), Some(3));
+        assert_eq!(implicit_rows[0].keys().len(), 1);
         assert_eq!(
             plan.count_summary_source(),
             Some(GraphCountSource::Vertices)
@@ -1186,6 +1212,21 @@ fn row_independent_outputs_run_after_global_aggregation_even_on_empty_input() {
         prepare("MATCH (n) RETURN COUNT(*) AS count, [n.p] AS values")
             .count_summary_source()
             .is_none()
+    );
+    assert!(
+        PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN COUNT(*) AS count, [n.p] AS values GROUP BY ()",
+            symbols,
+        )
+        .is_err()
+    );
+    let constant_key = prepare("MATCH (n) RETURN COUNT(*) AS count, 1 AS key GROUP BY key");
+    assert!(constant_key.count_summary_source().is_none());
+    assert!(
+        run(&constant_key, &[], &[], &Props::new())
+            .unwrap()
+            .value
+            .is_empty()
     );
 }
 
