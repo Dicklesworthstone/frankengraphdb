@@ -334,6 +334,298 @@ fn sealed_cdlp_auxiliary_face_and_output_guards_preserve_the_source_after_refusa
     });
 }
 
+const DIRECTED_LCC: &str =
+    "CALL fnx.directed_clustering_coefficient() YIELD score AS coefficient,vertex AS node";
+
+#[test]
+fn sealed_directed_clustering_matches_decoded_history_reductions_and_exact_limits() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.set_edge_property(EId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(4)));
+        update.add_edge(
+            EId(3000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let view = db.read_session().unwrap();
+        let procedure = call(DIRECTED_LCC);
+        assert!(procedure.supports_sealed_execution());
+        for at in [original, current] {
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                for reduction in [
+                    ParallelEdgePolicy::Sum,
+                    ParallelEdgePolicy::Minimum,
+                    ParallelEdgePolicy::Maximum,
+                    ParallelEdgePolicy::CollapseUnit,
+                ] {
+                    for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                        let mut opt = options(direction);
+                        opt.as_of = Some(at);
+                        opt.projection.parallel_edges = reduction;
+                        opt.projection.self_loops = loops;
+                        let graph = project(&db, &query, opt).await;
+                        assert!(graph.scan_incidence_bound() > 8);
+                        let expected = view.execute_fnx(&query, &procedure, opt).unwrap();
+                        let actual = procedure
+                            .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                            .unwrap();
+                        assert_eq!(actual.columns, expected.analytics.columns);
+                        assert_eq!(
+                            actual.rows, expected.analytics.rows,
+                            "{at:?} {direction:?} {reduction:?} {loops:?}"
+                        );
+                        assert_eq!(
+                            actual.certificate.result_digest,
+                            expected.analytics.certificate.result_digest
+                        );
+                        assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+                        assert_eq!(actual.certificate.snapshot, graph.binding());
+                        assert_eq!(actual.certificate.snapshot.as_of, at);
+                        assert_eq!(
+                            actual.certificate.execution_kernel,
+                            "fgdb-prism/sealed-directed-clustering-retained-cost-v1"
+                        );
+                        assert_eq!(actual.rows.len(), graph.node_count());
+                        if at == current {
+                            assert!(
+                                actual.rows.contains(&vec![
+                                    FnxValue::Score(0.0),
+                                    FnxValue::Vertex(VId(40)),
+                                ])
+                            );
+                        }
+                        exact_sealed_limits(
+                            &procedure,
+                            &query,
+                            &graph,
+                            opt.execution_limits,
+                            &actual,
+                        );
+                        if reduction == ParallelEdgePolicy::Sum {
+                            let hosted = db
+                                .call_fnx_sealed(
+                                    &query,
+                                    DIRECTED_LCC,
+                                    &FnxParameters::new(),
+                                    opt,
+                                    memory(),
+                                    SealedLimits::default(),
+                                )
+                                .await
+                                .unwrap();
+                            assert_eq!(hosted.analytics, actual);
+                        }
+                    }
+                }
+            }
+        }
+
+        // A missing relation retains the selected population as isolates.
+        // It is distinct from an empty vertex selection, which has no rows.
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let mut opt = options(direction);
+            opt.selection.relation = Some(RelationId(999));
+            let graph = project(&db, &query, opt).await;
+            assert_eq!(graph.scan_incidence_bound(), 0);
+            assert_eq!(graph.node_count(), 6);
+            let expected = view.execute_fnx(&query, &procedure, opt).unwrap();
+            let isolated = procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(isolated.rows, expected.analytics.rows);
+            assert_eq!(
+                isolated.certificate.result_digest,
+                expected.analytics.certificate.result_digest
+            );
+            assert!(
+                isolated
+                    .rows
+                    .iter()
+                    .all(|row| row[0] == FnxValue::Score(0.0))
+            );
+            exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &isolated);
+
+            opt.selection.relation = Some(RelationId(1));
+            opt.selection.vertex_label = Some(LabelId(999));
+            opt.execution_limits.max_estimated_work = 0;
+            opt.execution_limits.max_result_rows = 0;
+            let graph = project(&db, &query, opt).await;
+            assert_eq!(graph.node_count(), 0);
+            assert!(graph.scan_incidence_bound() > 8);
+            let result_bytes = procedure.outputs().len() * size_of::<String>()
+                + procedure
+                    .outputs()
+                    .iter()
+                    .map(|column| column.name.len())
+                    .sum::<usize>();
+            let empty_memory = FnxMemoryLimits {
+                max_kernel_workspace_bytes: 0,
+                max_result_bytes: result_bytes,
+            };
+            // Retained source history must not trigger an auxiliary incoming
+            // index or a copied vertex directory when no vertex is selected.
+            let empty = procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, empty_memory)
+                .unwrap();
+            assert!(empty.rows.is_empty());
+            assert_eq!(empty.certificate.snapshot, graph.binding());
+            assert_eq!(empty.certificate.estimated_work, 0);
+            assert_eq!(empty.certificate.kernel_workspace_bytes, 0);
+            assert_eq!(empty.certificate.witness.nodes_touched, 0);
+            assert_eq!(empty.certificate.witness.edges_scanned, 0);
+            assert!(matches!(
+                procedure.execute_sealed(
+                    &query,
+                    &graph,
+                    opt.execution_limits,
+                    FnxMemoryLimits {
+                        max_result_bytes: result_bytes - 1,
+                        ..empty_memory
+                    },
+                ),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "result bytes",
+                        ..
+                    }
+                ))
+            ));
+            let hosted = db
+                .call_fnx_sealed(
+                    &query,
+                    DIRECTED_LCC,
+                    &FnxParameters::new(),
+                    opt,
+                    empty_memory,
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(hosted.analytics, empty);
+        }
+
+        let mut invalid = options(Directedness::Undirected);
+        let graph = project(&db, &query, invalid).await;
+        invalid.source_limits.max_work_units = 0;
+        invalid.projection_limits.max_workspace_bytes = 0;
+        invalid.execution_limits.max_estimated_work = 0;
+        invalid.execution_limits.max_result_rows = 0;
+        let no_memory = FnxMemoryLimits {
+            max_kernel_workspace_bytes: 0,
+            max_result_bytes: 0,
+        };
+        assert!(matches!(
+            procedure.execute_sealed(&query, &graph, invalid.execution_limits, no_memory),
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Directed
+                }
+            ))
+        ));
+        assert!(matches!(
+            db.call_fnx_sealed(
+                &query,
+                DIRECTED_LCC,
+                &FnxParameters::new(),
+                invalid,
+                no_memory,
+                SealedLimits::default(),
+            )
+            .await,
+            Err(FnxSealedReadError::Execution(
+                FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Directed
+                })
+            ))
+        ));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn sealed_directed_clustering_live_guards_preserve_both_faces_after_every_refusal() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let procedure = call(DIRECTED_LCC);
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let opt = options(direction);
+            let graph = project(&db, &query, opt).await;
+            let before = graph.digest();
+            let binding = graph.binding();
+            let steps = std::cell::Cell::new(0usize);
+            let expected = procedure
+                .execute_sealed_with_checkpoint(
+                    &query,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    || {
+                        steps.set(steps.get() + 1);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let total = steps.get();
+            assert!(total > graph.scan_incidence_bound());
+            // Interrupt each auxiliary-projection, raw-cursor, scalar-count,
+            // and final row-encoding boundary, with no public result prefix.
+            for stop in 1..=total {
+                steps.set(0);
+                assert!(
+                    procedure
+                        .execute_sealed_with_checkpoint(
+                            &query,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            || {
+                                steps.set(steps.get() + 1);
+                                if steps.get() == stop {
+                                    Err(SealedProjectionError::UnknownOrdinal(usize::MAX))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                        )
+                        .is_err(),
+                    "{direction:?}: guard at {stop}/{total} must prevent publication"
+                );
+                assert_eq!(steps.get(), stop);
+                assert_eq!(graph.digest(), before);
+                assert_eq!(graph.binding(), binding);
+            }
+            assert_eq!(
+                procedure
+                    .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 #[test]
 fn all_directions_reductions_loops_and_full_width_seeks_match_decoded_rows() {
     let runtime = RuntimeBuilder::new().build().unwrap();

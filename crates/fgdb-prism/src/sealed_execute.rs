@@ -31,6 +31,8 @@ mod components;
 mod cooperative;
 #[path = "sealed_core.rs"]
 mod core_number;
+#[path = "sealed_directed_clustering.rs"]
+mod directed_clustering;
 #[path = "sealed_distance.rs"]
 mod distance;
 #[path = "sealed_eigenvector.rs"]
@@ -542,6 +544,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Cdlp { .. }
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::DirectedClusteringCoefficient
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -624,6 +627,12 @@ impl FnxCallSpec {
         let admission = ResultAdmission::new(self, limits, memory)?;
         if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
             return cdlp::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::DirectedClusteringCoefficient
+        ) {
+            return directed_clustering::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1023,6 +1032,7 @@ fn source_digest() -> Digest {
             include_str!("sealed_eigenvector.rs"),
             include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
+            include_str!("sealed_directed_clustering.rs"),
             include_str!("sealed_cdlp.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
