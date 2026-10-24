@@ -687,12 +687,15 @@ mod tests {
     }
 
     #[test]
-    fn single_posting_and_numeric_range_attribute_the_owner_closure_budget_delta() {
+    fn single_posting_and_numeric_range_attribute_part_of_the_owner_closure_cost() {
         // The six owner-closure fixtures all start at the sole p=0 vertex.
         // Compare BOTH live production routes in this invocation: the range
         // fallback used before 9e85981d, and its borrowed equality posting.
         // Only the candidate selector differs; visibility, residual checks
         // and admitted rows run through the same implementation and meter.
+        // This comparison explains THREE work events and one scratch entry.
+        // The public closure pins differ by four work events: their remaining
+        // event is not attributed here, and those pins remain unchanged.
         let snapshot = compound_snapshot(vec![
             (0..6)
                 .map(|id| VertexRow {
@@ -743,7 +746,7 @@ mod tests {
         assert_eq!(range_ids, vec![VId(0)]);
         assert_eq!(posting_ids, range_ids);
         assert_eq!((range_candidates, posting_candidates), (1, 1));
-        assert_eq!(range, [posting[0] + 4, posting[1] + 1, posting[2]]);
+        assert_eq!(range, [posting[0] + 3, posting[1] + 1, posting[2]]);
         assert_eq!(posting[2], 1);
     }
 
