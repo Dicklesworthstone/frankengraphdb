@@ -959,7 +959,8 @@ impl<'a> Parser<'a> {
                 // UNWIND or a later WITH, the element read does, as for any
                 // element value (fgdb-xnd7x).
                 crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge => {
-                    self.call_element_reads || !self.boundary_carries(schema.len(), word)?
+                    self.call_element_reads
+                        || (self.read_elements && !self.boundary_carries(schema.len(), word)?)
                 }
                 crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Stored => {
                     self.temporal_field_follows()?

@@ -85,6 +85,7 @@ impl PreparedGraphText {
         let mut parser =
             Parser::new_with_parameter_types(statement, declarations)?.with_zones(zones.cloned());
         parser.deferred_wheres = deferred.to_vec();
+        parser.read_elements = true;
         parser.parse_return_for_composition(statement)
     }
 }

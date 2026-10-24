@@ -1617,9 +1617,14 @@ fn a_carried_element_reads_its_properties_past_an_unwind() {
         )),
         high
     );
-    // The boundary's own RETURN keeps its hidden column.
+    // A later stage after a grouping keeps the grouped key a vertex value.
+    let every = sorted((1..=4).map(|n| row(vec![int(p(n))])).collect());
     assert_eq!(
-        sorted(execute("MATCH (n) WITH n RETURN n.p AS p")),
-        sorted((1..=4).map(|n| row(vec![int(p(n))])).collect())
+        sorted(execute(
+            "MATCH (n) WITH n, count(*) AS c WITH n, c RETURN n.p AS p"
+        )),
+        every
     );
+    // The boundary's own RETURN keeps its hidden column.
+    assert_eq!(sorted(execute("MATCH (n) WITH n RETURN n.p AS p")), every);
 }

@@ -177,6 +177,7 @@ impl PreparedGraphText {
                 .with_zones(zones.cloned());
             parser.deferred_wheres = deferred.to_vec();
             parser.implicit_withs = implicit.to_vec();
+            parser.read_elements = true;
             parser.multipart_read(statement)
         };
         let error = match read(&[], &[]) {

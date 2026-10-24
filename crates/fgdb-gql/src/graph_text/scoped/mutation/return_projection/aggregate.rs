@@ -312,6 +312,7 @@ impl PreparedGraphPipelineAggregateText {
                 .with_zones(zones.clone());
             parser.deferred_wheres = deferred.to_vec();
             parser.implicit_withs = implicit.to_vec();
+            parser.read_elements = true;
             // An implicit `WITH *` makes the statement multipart.
             let multipart = multipart || !implicit.is_empty();
             let leading = leading_match && implicit.is_empty();

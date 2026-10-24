@@ -901,6 +901,12 @@ struct Parser<'a> {
     /// Inline read bodies and their returning row scopes may dereference
     /// visible graph identities. Ordinary WITH keeps its hidden-read boundary.
     call_element_reads: bool,
+    /// A read statement's host reads element values at the statement's cut,
+    /// so a carried vertex's `n.p` past its boundary's scope (after an UNWIND
+    /// or a later WITH) reads through that element reader (fgdb-xnd7x). A
+    /// write tail never sets it: its fields are post-write values, which an
+    /// element read at the cut would miss.
+    read_elements: bool,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
@@ -1054,6 +1060,7 @@ impl<'a> Parser<'a> {
             boundary_reads: None,
             resolved_entries: false,
             call_element_reads: false,
+            read_elements: false,
             elements: Vec::new(),
             lets: None,
             let_base: 0,

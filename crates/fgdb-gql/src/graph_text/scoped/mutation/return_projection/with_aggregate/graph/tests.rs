@@ -248,8 +248,6 @@ fn only_a_kept_binding_in_the_grouping_scope_reads_through_the_grouped_row() {
         // Aggregated, or only a computed value that reuses the binding's name.
         "MATCH (n) WITH count(n) AS c RETURN n.q",
         "MATCH (n) WITH n.p AS n, count(*) AS c RETURN n.q",
-        // A later stage sees the grouped row, not the graph.
-        "MATCH (n) WITH n, count(*) AS c WITH n, c RETURN n.q",
         // The hidden key never resolves by its private name.
         "MATCH (n) WITH n, count(*) AS c WHERE n.q > 0 RETURN __fg_group_0",
     ] {
@@ -261,6 +259,16 @@ fn only_a_kept_binding_in_the_grouping_scope_reads_through_the_grouped_row() {
     )
     .unwrap();
     assert_eq!(query.columns(), &["n", "c"]);
+    // A later stage sees the grouped row, where the kept key is a vertex
+    // value: its `n.q` reads through the host's element reader, as for any
+    // element value (multipart_reads
+    // a_carried_element_reads_its_properties_past_an_unwind checks values).
+    let later = PreparedGraphSetText::prepare(
+        "MATCH (n) WITH n, count(*) AS c WITH n, c RETURN n.q",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(later.columns(), &["n.q"]);
 }
 
 #[test]
