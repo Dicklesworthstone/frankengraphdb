@@ -206,9 +206,10 @@ impl Brandes {
                 source,
                 remaining: self.queue.len(),
             },
-            Phase::Dependencies { source, remaining } if remaining == 0 => {
-                Phase::Reduce { source, at: 0 }
-            }
+            Phase::Dependencies {
+                source,
+                remaining: 0,
+            } => Phase::Reduce { source, at: 0 },
             Phase::Dependencies { source, remaining }
                 if self.distance[self.queue[remaining - 1]] <= 1 =>
             {

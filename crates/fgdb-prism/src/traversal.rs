@@ -8,19 +8,27 @@ use crate::{
 };
 
 /// One completed pull level under [`BfsDecisionCard`]'s deterministic policy.
-/// Bounds and observations count graph visits, not CPU instructions or time.
+/// Bounds and observations follow the card's versioned operation model, not
+/// CPU instructions or elapsed time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BfsPullDecision {
     pub depth: usize,
     pub frontier_vertices: usize,
+    /// Projected arcs that a complete push of this frontier would visit.
     pub frontier_arcs: usize,
+    /// Version 1: projected incoming arcs of unseen vertices. Version 2:
+    /// retained raw incidences of unseen vertices, including invisible history
+    /// and excluded endpoints in both compressed faces.
     pub unseen_incoming_arcs: usize,
     pub vertices: usize,
-    /// Guaranteed visits avoided compared with scanning this frontier's arcs.
+    /// Conservative saving in the policy's operation model. Version 2 prices
+    /// candidate steps, compressed row opens, retained incidences and lookups;
+    /// it does not assert an observed instruction count or timing improvement.
     pub benefit_lower: usize,
-    /// Maximum visits avoided: even an empty pull scans all vertex candidates.
+    /// Maximum model saving: even an empty pull scans all vertex candidates.
     pub benefit_upper: usize,
     pub candidate_visits: usize,
+    /// Actual projected probes, in either version; not a raw-incidence count.
     pub incoming_visits: usize,
 }
 
@@ -31,6 +39,19 @@ pub struct BfsPullDecision {
 /// digest, projection, source/cutoff, and this formula reconstruct the omitted
 /// push levels. There is no clock, randomness, learned estimate, or mutable
 /// policy state. A choice lasts exactly one level; conversion needs no bitmap.
+///
+/// Version 2 is the undirected compressed policy. With `b(x)` the bit length
+/// of x, H the retained source incidence bound and V the projected population,
+/// row-open cost is `16 + 4*b(H)` and raw-incidence cost is
+/// `32 + 4*b(H) + 2*b(V)`. Pull is selected only when `frontier_arcs / 2` exceeds
+/// `V + 16 + unseen_vertices*row_open + unseen_incoming_arcs*incidence`.
+/// The source projection and previous decisions reconstruct unseen_vertices.
+/// The same full-result-allowance rule applies, and optional planning/evidence
+/// scratch must fit the work and memory allowances. Later pull frontiers lie
+/// inside earlier unseen populations, so their arc counts more than halve;
+/// at most `usize::BITS` records are retained. Sparse graphs, queries capped
+/// at one hop, and isolated sources keep the queue fallback without a
+/// population planning pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BfsDecisionCard {
     pub policy_version: u16,

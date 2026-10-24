@@ -2,7 +2,7 @@
 //! graph constructed solely for the adapter. Every assertion uses public APIs.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, ReadCacheLimits, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::*;
 use fgdb_types::{
@@ -436,6 +436,126 @@ fn property_successors_and_retirements_resolve_at_the_selected_cut() {
         assert_eq!(current.projected_weight(0, 1), Some(10.0));
         assert_eq!(current.input_edge_count(), 2);
         assert_ne!(historical.digest(), current.digest());
+    });
+}
+
+#[test]
+fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut oracle = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        for database in [&mut db, &mut oracle] {
+            database.write(&commit, fixture()).await.unwrap();
+            database
+                .set_read_cache_limits(
+                    &query,
+                    ReadCacheLimits {
+                        projection_bytes: 0,
+                        ..ReadCacheLimits::default()
+                    },
+                )
+                .unwrap();
+        }
+        // Same vertices, many unrelated edges: their properties would fail
+        // numeric binding if the target relation were not selected first.
+        let mut other = WriteBatch::new(RelationId(2));
+        for id in 1000..1512 {
+            other.add_edge(
+                EId(id),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+            );
+        }
+        db.write(&commit, other).await.unwrap();
+        let old = [db.frontier().unwrap(), oracle.frontier().unwrap()];
+        for database in [&mut db, &mut oracle] {
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.set_edge_property(EId(10), PropertyKeyId(1), Some(CanonicalScalar::Int(10)));
+            changes.delete_edge(EId(11));
+            database.write(&commit, changes).await.unwrap();
+        }
+        let now = [db.frontier().unwrap(), oracle.frontier().unwrap()];
+        let calls = [
+            (call(), Directedness::Directed),
+            (
+                FnxCallSpec::single_source_shortest_path_length(VId(1), None),
+                Directedness::Directed,
+            ),
+            (
+                FnxCallSpec::bind(
+                    "CALL fnx.single_source_dijkstra_path_length(1)",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                Directedness::Directed,
+            ),
+            (
+                FnxCallSpec::bind("CALL fnx.connected_components()", &FnxParameters::new())
+                    .unwrap(),
+                Directedness::Undirected,
+            ),
+        ];
+        for cuts in [old, now] {
+            for (call, direction) in &calls {
+                let mut selected = options();
+                selected.as_of = Some(cuts[0]);
+                selected.projection.directedness = *direction;
+                // Four selected EIds and the small vertex-merge heap fit;
+                // the old all-relation merge needed 512 additional winners.
+                selected.source_limits.max_scratch_entries = 32;
+                let actual = db.execute_fnx(&query, call, selected).unwrap();
+                let expected = oracle
+                    .execute_fnx(
+                        &query,
+                        call,
+                        FnxReadOptions {
+                            as_of: Some(cuts[1]),
+                            ..selected
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(actual.analytics.rows, expected.analytics.rows);
+                assert_eq!(
+                    actual.analytics.certificate.result_digest,
+                    expected.analytics.certificate.result_digest
+                );
+            }
+            let mut limited = options();
+            limited.as_of = Some(cuts[0]);
+            limited.source_limits.max_scratch_entries = 32;
+            limited.selection.relation = None;
+            assert!(matches!(
+                db.execute_fnx(&query, &call(), limited),
+                Err(FnxReadError::SourceLimit {
+                    resource: "scratch entries",
+                    ..
+                })
+            ));
+            limited.selection.relation = Some(RelationId(1));
+            limited.source_limits.max_work_units = 128;
+            assert!(matches!(
+                db.execute_fnx(&query, &call(), limited),
+                Err(FnxReadError::SourceLimit {
+                    resource: "work units",
+                    ..
+                })
+            ));
+            // The physically smaller oracle does fit this raw-source budget.
+            limited.as_of = Some(cuts[1]);
+            oracle.execute_fnx(&query, &call(), limited).unwrap();
+        }
+        assert_eq!(db.read_cache_status(&query).unwrap().projections.entries, 0);
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
 

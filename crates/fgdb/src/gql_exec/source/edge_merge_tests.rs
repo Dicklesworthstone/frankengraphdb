@@ -4,7 +4,7 @@
 //! same order, visit the same winners at the same coordinates, and stop at
 //! the same event with the same partial effects when a control call refuses.
 
-use super::{SourceEvent, visit_edge_coordinates};
+use super::{SourceEvent, visit_edge_coordinates, visit_edge_coordinates_in_relation};
 use fgdb_delta_types::RelationId;
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{CommitSeq, EId, VId};
@@ -235,4 +235,140 @@ fn the_hashed_merge_survives_growth_and_a_full_collision_cluster() {
         };
         assert_eq!(visited, expected, "cut {as_of}");
     }
+}
+
+fn run_selected(
+    blocks: &[Vec<AdjacencyEntry>],
+    as_of: CommitSeq,
+    relation: Option<RelationId>,
+    stop: usize,
+) -> (Vec<Step>, Result<(), usize>) {
+    let log = RefCell::new(Vec::new());
+    let calls = Cell::new(0);
+    let result = visit_edge_coordinates_in_relation(
+        blocks,
+        as_of,
+        relation,
+        &mut |event| {
+            calls.set(calls.get() + 1);
+            log.borrow_mut().push(Step::Control(event));
+            if calls.get() == stop {
+                Err(stop)
+            } else {
+                Ok(())
+            }
+        },
+        |entry, block, row, control| {
+            log.borrow_mut()
+                .push(Step::Visit(entry.eid, entry.created_at, block, row));
+            control(SourceEvent::SnapshotRecord)
+        },
+    );
+    (log.into_inner(), result)
+}
+
+#[test]
+fn relation_selection_preserves_the_full_merge_winners_and_refusal_prefixes() {
+    let mut state = 0x61b1_ed6e_5eed_0003;
+    for _ in 0..500 {
+        let pool = 1 + next(&mut state) % 24;
+        let colliding = next(&mut state).is_multiple_of(3);
+        let blocks: Vec<Vec<AdjacencyEntry>> = (0..1 + next(&mut state) % 5)
+            .map(|_| {
+                (0..next(&mut state) % 14)
+                    .map(|_| {
+                        let raw = next(&mut state) % pool;
+                        let created = next(&mut state) % 8;
+                        let retired = next(&mut state)
+                            .is_multiple_of(3)
+                            .then(|| created + 1 + next(&mut state) % 3);
+                        let mut entry = statement(eid(raw, colliding), created, retired);
+                        // The source invariant used by the optimization:
+                        // every statement of an EId has the same relation.
+                        entry.relation = RelationId(1 + raw % 3);
+                        entry
+                    })
+                    .collect()
+            })
+            .collect();
+        let as_of = CommitSeq(next(&mut state) % 10);
+        let (full, verdict) = run(false, &blocks, as_of, 0);
+        assert_eq!(verdict, Ok(()));
+        assert_eq!(
+            run_selected(&blocks, as_of, None, 0),
+            (full.clone(), Ok(()))
+        );
+        for relation in [RelationId(1), RelationId(2), RelationId(3), RelationId(4)] {
+            let expected: Vec<_> = full
+                .iter()
+                .filter(|step| match **step {
+                    Step::Visit(_, _, block, row) => blocks[block][row].relation == relation,
+                    Step::Control(_) => false,
+                })
+                .copied()
+                .collect();
+            let (actual, verdict) = run_selected(&blocks, as_of, Some(relation), 0);
+            assert_eq!(verdict, Ok(()));
+            assert_eq!(
+                actual
+                    .iter()
+                    .filter(|step| matches!(step, Step::Visit(..)))
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected,
+                "relation {relation:?} at {as_of:?}"
+            );
+            let mut calls = 0;
+            for (at, step) in actual.iter().enumerate() {
+                if matches!(step, Step::Control(_)) {
+                    calls += 1;
+                    // A control refusal returns at that exact event, with
+                    // no subsequently visited row or observed property.
+                    assert_eq!(
+                        run_selected(&blocks, as_of, Some(relation), calls),
+                        (actual[..=at].to_vec(), Err(calls))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn relation_selection_retains_only_selected_scratch_and_charges_every_raw_row() {
+    let mut unrelated: Vec<_> = (1..=4096).map(|id| statement(EId(id), 1, None)).collect();
+    for entry in &mut unrelated {
+        entry.relation = RelationId(2);
+    }
+    let selected = vec![
+        statement(EId(0), 1, None),
+        statement(EId(u128::MAX), 1, None),
+    ];
+    let successors = vec![
+        statement(EId(0), 1, Some(3)),
+        statement(EId(0), 3, None),
+        statement(EId(u128::MAX), 1, Some(2)),
+        statement(EId(4097), 5, None),
+    ];
+    let blocks = vec![unrelated, selected, successors];
+    let as_of = CommitSeq(4);
+    let raw_work = blocks.len() + blocks.iter().map(Vec::len).sum::<usize>();
+    let (full, full_result) = run(false, &blocks, as_of, 0);
+    let (selected, selected_result) = run_selected(&blocks, as_of, Some(RelationId(1)), 0);
+    assert_eq!((full_result, selected_result), (Ok(()), Ok(())));
+    let count = |steps: &[Step], event| {
+        steps
+            .iter()
+            .filter(|&&step| step == Step::Control(event))
+            .count()
+    };
+    assert_eq!(count(&full, SourceEvent::ScratchEntry), 4098);
+    assert_eq!(count(&selected, SourceEvent::ScratchEntry), 2);
+    assert_eq!(count(&selected, SourceEvent::Work), raw_work + 2);
+    assert_eq!(count(&selected, SourceEvent::SnapshotRecord), 1);
+    let (absent, absent_result) = run_selected(&blocks, as_of, Some(RelationId(3)), 0);
+    assert_eq!(absent_result, Ok(()));
+    assert_eq!(count(&absent, SourceEvent::Work), raw_work);
+    assert_eq!(count(&absent, SourceEvent::ScratchEntry), 0);
+    assert_eq!(count(&absent, SourceEvent::SnapshotRecord), 0);
 }
