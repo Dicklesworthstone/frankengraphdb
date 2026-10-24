@@ -1705,6 +1705,24 @@ impl<'a> Parser<'a> {
     fn parameter<T>(&mut self) -> Result<NumericOperand<T>, ParseError> {
         let start = self.offset;
         self.offset += 1;
+        // openCypher also names a parameter by a decimal integer: `$1`, but
+        // never `$9bad`.
+        let digits = self.source[self.offset..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let glued = self.source[self.offset + digits..]
+            .chars()
+            .next()
+            .is_some_and(is_identifier_start);
+        if digits > 0 && !glued {
+            let name = self.source[self.offset..self.offset + digits].to_owned();
+            self.offset += digits;
+            return Ok(NumericOperand::Parameter {
+                name,
+                span: start..self.offset,
+            });
+        }
         if !self.source[self.offset..]
             .chars()
             .next()

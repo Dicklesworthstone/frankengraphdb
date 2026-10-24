@@ -600,6 +600,29 @@ impl<'a> Lexer<'a> {
                 at,
             });
         }
+        // openCypher also names a parameter by a decimal integer: `$1`, but
+        // never `$9bad`.
+        if parameter && bytes.get(start).is_some_and(u8::is_ascii_digit) {
+            while bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+                self.at += 1;
+            }
+            if bytes
+                .get(self.at)
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("parameter name immediately after $"),
+                ));
+            }
+            if self.at - start > MAX_PATTERN_NAME_BYTES {
+                return Err(error(at, GraphPatternTextErrorKind::NameTooLong));
+            }
+            return Ok(Token {
+                kind: TokenKind::Parameter(&self.text[start..self.at]),
+                at,
+            });
+        }
         if parameter {
             return Err(error(
                 at,

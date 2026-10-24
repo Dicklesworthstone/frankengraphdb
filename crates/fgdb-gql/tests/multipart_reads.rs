@@ -1355,3 +1355,31 @@ fn a_return_page_orders_by_pattern_counts() {
         );
     }
 }
+
+/// openCypher names a parameter by a decimal integer as well as by an
+/// identifier (`$1`, TCK MatchWhere2 [2], WithWhere2 [2]): the statement
+/// lexer reads `$1` as the parameter `1`, and the argument `1` binds it.
+#[test]
+fn a_parameter_may_be_named_by_a_decimal_integer() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (n) WHERE n.p = $1 OR n.p = $2 RETURN n ORDER BY n",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_int64("1", 1)
+            .unwrap()
+            .with_int64("2", 3)
+            .unwrap(),
+    )
+    .unwrap();
+    let expected: Vec<GraphValueRow> = (1..=4)
+        .filter(|&n| [1, 3].contains(&p(n)))
+        .map(|n| vertices(&[n]))
+        .collect();
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    // A name still never carries its `$`.
+    assert!(GqlParameters::new().with_int64("$1", 1).is_err());
+}

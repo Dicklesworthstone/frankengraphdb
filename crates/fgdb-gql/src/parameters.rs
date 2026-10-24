@@ -848,11 +848,14 @@ fn identifier_start(byte: u8) -> bool {
 fn identifier_continue(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphanumeric()
 }
+/// An identifier, or a decimal integer as openCypher allows (`$1`).
 fn valid_name(name: &str) -> bool {
-    name.as_bytes()
+    let identifier = name
+        .as_bytes()
         .first()
         .is_some_and(|byte| identifier_start(*byte))
-        && name.bytes().all(identifier_continue)
+        && name.bytes().all(identifier_continue);
+    identifier || (!name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Serialization for existing concrete-query evidence only. The executable
