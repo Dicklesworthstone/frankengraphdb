@@ -367,8 +367,9 @@ fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property emb=3 \
 #  refuses any decimal and any value f32 cannot hold exactly)
 
 # Graph-only neighborhood: seeds and an explicit hop bound are a complete request
-# (docs/cli_graph_only_search.md); inside GQL, hybrid.search's
-# graph_access => 'demand' reads only the probed histories, with no index build
+# (docs/cli_graph_only_search.md); immutable graph-only hybrid.search calls
+# default to demand access: only probed histories, with no directory/index build.
+# Explicit graph_access => 'indexed' retains complete-directory admission.
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --expand-from 101,205 --max-hops 2 --k 20
 # (hybrid.search rows are in canonical vertex order unless the query orders them:
 #  ORDER BY score DESC returns them in rank order)

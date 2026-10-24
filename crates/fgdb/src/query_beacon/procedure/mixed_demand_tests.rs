@@ -816,3 +816,373 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn graph_call(extra: &str) -> String {
+    format!(
+        "CALL hybrid.search({extra} label => 'Doc', seeds => [0], relation => 'R', \
+         max_hops => 2, eligible => $eligible, graph_candidates => 1, k => 1) \
+         YIELD node, graph_hops, graph_rank, text_rank, vector_rank \
+         RETURN node, graph_hops, graph_rank, text_rank, vector_rank"
+    )
+}
+
+#[test]
+fn graph_only_default_admits_the_reached_population_and_keeps_explicit_profiles() {
+    let ((), report) = run_async_under_lab(0xbeac_5510, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = fixture(&c.commit(), 1_024, false).await;
+        let pin = db.read_session().unwrap();
+        for accept in [false, true] {
+            let args = parameters(accept);
+            let default = prepare(&graph_call(""), &args);
+            let expected = db
+                .execute_graph_set_governed(&cx, &default, policy())
+                .unwrap();
+            assert_eq!(expected.rows.snapshot_records, 3);
+            assert_eq!(expected.value.len(), usize::from(accept));
+            if accept {
+                assert_eq!(
+                    expected.value[0].values(),
+                    [
+                        GraphValue::Vertex(HIGH),
+                        GraphValue::Scalar(CanonicalScalar::Int(2)),
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                    ]
+                );
+            }
+            let tight = GqlQueryPolicy::new(3, 100, 10_000_000, 1_000_000);
+            for extra in ["", "graph_access => NULL,", "graph_access => 'demand',"] {
+                let plan = prepare(&graph_call(extra), &args);
+                assert_eq!(
+                    db.execute_graph_set_governed(&cx, &plan, tight).unwrap(),
+                    expected,
+                );
+                assert_eq!(
+                    pin.execute_graph_set_governed(&cx, &plan, tight).unwrap(),
+                    expected,
+                );
+            }
+            for extra in [
+                "graph_access => 'indexed',",
+                "graph_access => 'materialized',",
+            ] {
+                let plan = prepare(&graph_call(extra), &args);
+                let directory = db.execute_graph_set_governed(&cx, &plan, policy()).unwrap();
+                assert_eq!(directory.value, expected.value);
+                assert_eq!(directory.rows.snapshot_records, 1_028);
+                assert!(expected.evaluator.work_units < directory.evaluator.work_units);
+                assert!(
+                    db.execute_graph_set_governed(&cx, &plan, tight).is_err(),
+                    "explicit complete-directory admission must retain its source ceiling"
+                );
+            }
+        }
+        // A text/vector lane still requires its complete corpus. Defaulting
+        // these to demand would either refuse without a registered index or
+        // incorrectly discard documents outside the graph neighborhood.
+        let args = parameters(true);
+        for extra in [
+            "text => 'graph', text_property => 'body',",
+            "vector => [0], vector_properties => ['x'],",
+            "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],",
+        ] {
+            let ordinary = prepare(&graph_call(extra), &args);
+            let indexed = prepare(
+                &graph_call(&format!("graph_access => 'indexed', {extra}")),
+                &args,
+            );
+            let expected = db
+                .execute_graph_set_governed(&cx, &indexed, policy())
+                .unwrap();
+            assert_eq!(expected.rows.snapshot_records, 1_028);
+            assert_eq!(
+                db.execute_graph_set_governed(&cx, &ordinary, policy())
+                    .unwrap(),
+                expected,
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn default_demand_keeps_historical_pins_and_the_staged_materialized_default() {
+    let ((), report) = run_async_under_lab(0xbeac_5511, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db = fixture(&c.commit(), 32, false).await;
+        let args = parameters(true);
+        let ordinary = prepare(&graph_call(""), &args);
+        let indexed = prepare(&graph_call("graph_access => 'indexed',"), &args);
+        let materialized = prepare(&graph_call("graph_access => 'materialized',"), &args);
+        let pin = db.read_session().unwrap();
+        let at = pin.frontier();
+        let original = pin
+            .execute_graph_set_governed(&cx, &ordinary, policy())
+            .unwrap();
+        assert_eq!(
+            original.value[0].values()[1],
+            GraphValue::Scalar(CanonicalScalar::Int(2))
+        );
+        let mut edits = WriteBatch::new(R);
+        edits.delete_edge(EId(2));
+        edits.add_edge(EId(20), VId(0), HIGH, vec![]);
+        db.write(&c.commit(), edits).await.unwrap();
+        let current = db
+            .execute_graph_set_governed(&cx, &ordinary, policy())
+            .unwrap();
+        assert_eq!(
+            current.value[0].values()[1],
+            GraphValue::Scalar(CanonicalScalar::Int(1))
+        );
+        assert_eq!(
+            current.value,
+            db.execute_graph_set_governed(&cx, &indexed, policy())
+                .unwrap()
+                .value,
+        );
+        for plan in [&ordinary, &indexed] {
+            assert_eq!(
+                db.execute_graph_set_governed_at(&cx, plan, at, policy())
+                    .unwrap()
+                    .value,
+                original.value,
+            );
+        }
+        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut edits = WriteBatch::new(R);
+        edits.delete_edge(EId(20));
+        edits.add_edge(EId(21), VId(2), HIGH, vec![]);
+        txn.write(&mut db, edits).unwrap();
+        // Native read witnesses allocate on first observation. Warm them
+        // before comparing the default and explicit profile's full receipts.
+        txn.execute_graph_set_governed(&db, &cx, &ordinary, policy())
+            .unwrap();
+        let staged = txn
+            .execute_graph_set_governed(&db, &cx, &ordinary, policy())
+            .unwrap();
+        assert_eq!(staged.value, original.value);
+        assert_eq!(
+            staged,
+            txn.execute_graph_set_governed(&db, &cx, &materialized, policy())
+                .unwrap(),
+            "the transaction default still prepares its canonical staged source"
+        );
+        assert!(
+            txn.execute_graph_set_governed(
+                &db,
+                &cx,
+                &ordinary,
+                GqlQueryPolicy::new(3, 100, 10_000_000, 1_000_000),
+            )
+            .is_err()
+        );
+        txn.abort();
+        db.compact(&c.commit()).await.unwrap();
+        drop(db);
+        assert_eq!(
+            pin.execute_graph_set_governed(&cx, &ordinary, policy())
+                .unwrap(),
+            original
+        );
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn default_demand_checks_authority_before_membership_and_preserves_visible_limits() {
+    let ((), report) = run_async_under_lab(0xbeac_5512, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let clean = fixture(&c.commit(), 128, false).await;
+        let mut full = fixture(&c.commit(), 128, true).await;
+        let mut hidden = WriteBatch::new(RelationId(99));
+        hidden.add_edge(EId(92), VId(0), HIGH, vec![]);
+        full.write(&c.commit(), hidden).await.unwrap();
+        let args = parameters(true);
+        let statement = graph_call("")
+            .replace("label => 'Doc', ", "")
+            .replace("relation => 'R', ", "");
+        let plan = prepare(&statement, &args);
+        let expected = clean
+            .execute_graph_set_governed(&cx, &plan, policy())
+            .unwrap()
+            .value;
+        assert_ne!(
+            full.execute_graph_set_governed(&cx, &plan, policy())
+                .unwrap()
+                .value,
+            expected,
+            "the forbidden relation supplies a real one-hop shortcut"
+        );
+        let authority = Authority::new(
+            AuthKey::from_seed(5512),
+            NS,
+            "default-demand",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 3,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([DOC]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        for db in [&clean, &full] {
+            let tight = GqlQueryPolicy::new(3, 100, 10_000_000, 1_000_000);
+            assert_eq!(
+                db.execute_graph_set_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    &plan,
+                    tight,
+                    || 100,
+                )
+                .unwrap(),
+                expected
+            );
+            let indexed = statement.replace(
+                "hybrid.search(",
+                "hybrid.search(graph_access => 'indexed', ",
+            );
+            assert!(
+                db.execute_graph_set_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepare(&indexed, &args),
+                    policy(),
+                    || 100,
+                )
+                .is_err(),
+                "the indexed control must spend the complete visible source allowance"
+            );
+        }
+        // Hidden history may add poll-only traversal, never signed work or
+        // node admissions. Refusal shape and successful rows agree at every
+        // sampled holder-attenuable work ceiling, including an empty budget.
+        for max_work in [0, 1, 32, 128, 512, 1_024, 10_000_000] {
+            let mut limited = grant.clone();
+            limited.limits.max_work = max_work;
+            let token = authority.issue_at(&limited, 100).unwrap();
+            let run = |db: &Database<MemVfs>| {
+                db.execute_graph_set_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    &plan,
+                    policy(),
+                    || 100,
+                )
+                .map_err(|error| format!("{error:?}"))
+            };
+            assert_eq!(run(&clean), run(&full), "signed work={max_work}");
+        }
+        grant.limits.max_nodes = 2;
+        let token = authority.issue_at(&grant, 100).unwrap();
+        for db in [&clean, &full] {
+            assert!(
+                db.execute_graph_set_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    &plan,
+                    policy(),
+                    || 100,
+                )
+                .is_err(),
+                "three reached vertices cannot fit two signed nodes"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn default_demand_preserves_parent_allowances_and_every_live_refusal() {
+    let ((), report) = run_async_under_lab(0xbeac_5513, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = fixture(&c.commit(), 8, false).await;
+        for accept in [false, true] {
+            let plan = prepare(&graph_call(""), &parameters(accept));
+            let expected = db.execute_graph_set_governed(&cx, &plan, policy()).unwrap();
+            assert_eq!(expected.rows.snapshot_records, 3);
+            assert_eq!(expected.rows.result_rows, u64::from(accept));
+            let exact = GqlQueryPolicy::new(
+                expected.rows.snapshot_records,
+                expected.rows.result_rows,
+                expected.evaluator.work_units,
+                expected.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                db.execute_graph_set_governed(&cx, &plan, exact).unwrap(),
+                expected
+            );
+            for dimension in 0..3 {
+                let short = GqlQueryPolicy::new(
+                    expected.rows.snapshot_records - u64::from(dimension == 0),
+                    expected.rows.result_rows,
+                    expected.evaluator.work_units - u64::from(dimension == 1),
+                    expected.evaluator.scratch_entries - u64::from(dimension == 2),
+                );
+                assert!(
+                    db.execute_graph_set_governed(&cx, &plan, short).is_err(),
+                    "accept={accept}, dimension={dimension}"
+                );
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let successful = db
+                .execute_graph_set_governed(
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    &plan,
+                    policy(),
+                )
+                .unwrap();
+            let checkpoints = probe.calls();
+            assert!(checkpoints > 2);
+            for stop in 1..=checkpoints {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                assert!(
+                    matches!(
+                        db.execute_graph_set_governed(
+                            &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                            &plan,
+                            policy(),
+                        ),
+                        Err(GqlQueryError::Interrupted(_))
+                    ),
+                    "accept={accept}, checkpoint={stop}"
+                );
+                assert_eq!(
+                    probe.calls(),
+                    stop,
+                    "work continued after a refused live gate"
+                );
+            }
+            assert_eq!(
+                db.execute_graph_set_governed(&cx, &plan, policy()).unwrap(),
+                successful
+            );
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

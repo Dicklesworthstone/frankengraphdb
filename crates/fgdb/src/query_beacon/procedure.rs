@@ -37,12 +37,16 @@
 //! own rank and score are separate outputs, null where that lane did not
 //! return the vertex. Rows arrive best first, ties by ascending vertex.
 //!
-//! Immutable reads default to seed-directed historical adjacency: only reached
-//! vertices below max_hops open incidence cursors. Graph limits count admitted
-//! incidence visits (parallel edges separately, undirected edges at each
-//! expanded endpoint), not the whole edge population. There is no full-graph
-//! retry on refusal. The selected vertex directory is still prepared once.
-//! `graph_access => 'indexed'` selects this profile explicitly;
+//! Immutable graph-only reads default to demand-driven membership and
+//! historical adjacency: only probed vertex histories and reached incidences
+//! are admitted. Unreached vertices do not consume the source/node allowance,
+//! and no complete vertex directory or search index is prepared. Reads with
+//! text/vector lanes retain the indexed default, which prepares the selected
+//! vertex directory and opens incidences only below max_hops. Graph limits
+//! count admitted incidence visits (parallel edges separately, undirected
+//! edges at each expanded endpoint), not the whole edge population. There is
+//! no full-graph retry on refusal. `graph_access => 'indexed'` selects the
+//! complete-directory profile explicitly;
 //! `graph_access => 'materialized'` selects the whole-edge preparation profile.
 //! Both execute the same graph/ranking semantics, with distinct source limits.
 //! Transaction overlays retain the materialized default. Explicit indexed
@@ -63,8 +67,8 @@
 //! demand over canonical staged membership and the native/staged incidence
 //! merge, with negative and edge-scan dependencies. Capability-scoped demand
 //! retains graph-only execution; a global corpus is never an authority grant.
-//! Existing defaults and indexed/materialized accounting are unchanged. Storage
-//! itself remains resident; this does not claim spill or physical timing isolation.
+//! Explicit indexed/materialized accounting is unchanged. Storage itself
+//! remains resident; this does not claim spill or physical timing isolation.
 //!
 //! Privileged text/vector calls reuse a compatible healthy maintained
 //! generation at the database or read view's exact cut with fresh accounting.
@@ -260,8 +264,9 @@ impl HybridSearch {
         Self::bind_arguments(call, arguments, at, remaining, false)
     }
 
-    /// Immutable hosts can honor either explicit source profile. This is the
-    /// same binder as transaction execution, not a second procedure grammar.
+    /// Immutable graph-only hosts default to demand-driven membership; mixed
+    /// retrieval retains its indexed default. Explicit profiles use the same
+    /// binder as transaction execution, not a second procedure grammar.
     pub(crate) fn bind_snapshot_filtered<'a>(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
@@ -281,7 +286,7 @@ impl HybridSearch {
         arguments: &'a [GraphValue],
         at: CommitSeq,
         remaining: GqlQueryPolicy,
-        indexed_default: bool,
+        immutable: bool,
     ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
         if call.name() != "search" {
             return Err(HybridCallError::UnknownProcedure(call.name().to_owned()));
@@ -558,14 +563,16 @@ impl HybridSearch {
         if graph_access.is_some() && !graph {
             return Err(HybridCallError::Combination("graph_access requires seeds"));
         }
-        let graph_access = graph_access.unwrap_or(if indexed_default {
-            GraphAccess::Indexed
+        let graph_access = graph_access.unwrap_or(if immutable {
+            if graph && text.is_none() && vector.is_none() {
+                GraphAccess::Demand
+            } else {
+                GraphAccess::Indexed
+            }
         } else {
             GraphAccess::Materialized
         });
-        if graph_access == GraphAccess::Demand
-            && !indexed_default
-            && (text.is_some() || vector.is_some())
+        if graph_access == GraphAccess::Demand && !immutable && (text.is_some() || vector.is_some())
         {
             return Err(HybridCallError::Combination(
                 "demand graph access requires a graph-only read",
@@ -686,7 +693,7 @@ impl HybridSearch {
                 // search legitimately reports zero snapshot records. Its live
                 // observer separately admits every actual record and scratch
                 // entry. Existing directory/immutable profiles are unchanged.
-                max_staging_rows: if graph_access == GraphAccess::Demand && !indexed_default {
+                max_staging_rows: if graph_access == GraphAccess::Demand && !immutable {
                     default.max_staging_rows
                 } else {
                     default.max_staging_rows.min(records)
