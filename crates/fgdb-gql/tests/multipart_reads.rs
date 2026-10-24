@@ -1568,3 +1568,58 @@ fn a_parameter_may_be_named_by_a_decimal_integer() {
     // A name still never carries its `$`.
     assert!(GqlParameters::new().with_int64("$1", 1).is_err());
 }
+
+/// A carried vertex read past its boundary's scope, after an UNWIND or a
+/// later WITH (`MATCH (a)-->(b) WITH a, collect(b) AS bs UNWIND bs AS x
+/// RETURN a.p, x.p`): no hidden boundary column holds `a.p` there, so the
+/// element reader reads it, as it reads `x.p` of any element value. Inside
+/// the boundary's own scope the hidden column still serves.
+#[test]
+fn a_carried_element_reads_its_properties_past_an_unwind() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let row = |cells: Vec<GraphValue>| GraphValueRow::from_owned_values(cells);
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let unwound = sorted(
+        (1..=4)
+            .flat_map(|n| [1, 2].map(|i| row(vec![int(p(n)), int(i)])))
+            .collect(),
+    );
+    assert_eq!(
+        sorted(execute("MATCH (n) WITH n UNWIND [1, 2] AS i RETURN n.p AS p, i")),
+        unwound
+    );
+    let pairs = sorted(
+        EDGES
+            .iter()
+            .map(|&(a, _, b)| row(vec![int(p(a.0)), int(p(b.0))]))
+            .collect(),
+    );
+    for text in [
+        "MATCH (a)-[:R]->(b) WITH a, collect(b) AS bs UNWIND bs AS x RETURN a.p AS ap, x.p AS xp",
+        "MATCH (a)-[:R]->(b) WITH a, collect(b) AS bs UNWIND bs AS x WITH a, x \
+         RETURN a.p AS ap, x.p AS xp",
+    ] {
+        assert_eq!(sorted(execute(text)), pairs, "{text}");
+    }
+    let high = sorted(
+        (1..=4)
+            .filter(|&n| p(n) > 1)
+            .map(|n| row(vec![int(p(n))]))
+            .collect(),
+    );
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n UNWIND [1] AS i WITH n, i WHERE n.p > 1 RETURN n.p AS p"
+        )),
+        high
+    );
+    // The boundary's own RETURN keeps its hidden column.
+    assert_eq!(
+        sorted(execute("MATCH (n) WITH n RETURN n.p AS p")),
+        sorted((1..=4).map(|n| row(vec![int(p(n))])).collect())
+    );
+}
