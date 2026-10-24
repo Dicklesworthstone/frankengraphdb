@@ -649,6 +649,20 @@ fn late_second_endpoint_failure_and_signed_work_refusal_publish_no_changes() {
                 scoped.destination.stats().published_runs > 0,
                 "the first endpoint must have finished privately"
             );
+            assert!(scoped.scratch.is_poisoned() || scoped.destination.is_poisoned());
+            // Dropping an incomplete generic-file append burns its extent
+            // and poisons that owner. Credential validity does not authorize
+            // another operation to race or reuse it.
+            assert!(matches!(
+                collect(&mut scoped, &cx, &prepared, &params, cuts[0], cuts[0]).await,
+                Err(NativeSpoolError::Spill(
+                    fgdb_strata::tiered::memory::SpillError::PoisonedFile
+                ))
+            ));
+            drop(scoped);
+            let (mut scoped, _, _) =
+                session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
+            let prepared = scoped.prepare(&cx, &text, &params).unwrap();
             assert!(
                 collect(&mut scoped, &cx, &prepared, &params, cuts[0], cuts[0])
                     .await

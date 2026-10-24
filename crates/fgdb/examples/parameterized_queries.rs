@@ -92,16 +92,18 @@ pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // edges of VId(1).
         assert_eq!(governed.rows.snapshot_records, 1);
         // Since commit e104b59a, governed queries dispatch through the FreeJoin
-        // physical engine (charging index/trie work: 45 work units, 11 scratch entries),
+        // physical engine (charging index/trie work: 46 work units, 11 scratch entries),
         // whereas the ungoverned `limited` API stays on the legacy evaluator (12, 4).
         // The bound `b.age >= $min_age` seeks the age index (fgdb-2n2a2), and
         // each candidate's seek charges every identity-tree node it visits
         // (fddf91d0, fgdb-bwxsi). The seek grows with log V and its candidates,
         // where testing every vertex grew with V.
+        // 9e85981d added one equality-eligibility event before the range
+        // fallback: this shape has one range predicate and no equality key.
         assert_eq!(
             governed.evaluator,
             fgdb_gql::GlaExecutionStats {
-                work_units: 45,
+                work_units: 46,
                 scratch_entries: 11,
             }
         );
@@ -112,6 +114,28 @@ pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 scratch_entries: 4,
             }
         );
+        let exact = db.execute_prepared_query_governed(
+            &query_cx,
+            &older,
+            GqlQueryPolicy::new(1, 1, 46, 11),
+        )?;
+        assert_eq!(exact.value, governed.value);
+        assert_eq!(exact.rows, governed.rows);
+        assert_eq!(exact.evaluator, governed.evaluator);
+        for (work, scratch, dimension, limit) in [
+            (45, 11, fgdb_gql::GlaLimitDimension::WorkUnits, 45),
+            (46, 10, fgdb_gql::GlaLimitDimension::ScratchEntries, 10),
+        ] {
+            assert!(matches!(
+                db.execute_prepared_query_governed(
+                    &query_cx,
+                    &older,
+                    GqlQueryPolicy::new(1, 1, work, scratch),
+                ),
+                Err(GqlQueryError::Evaluator(error)) if error.dimension == dimension
+                    && error.limit == limit && error.observed == u128::from(limit) + 1
+            ));
+        }
         println!(
             "age >= 40: {:?}; governed counters: {:?}",
             governed.value, governed

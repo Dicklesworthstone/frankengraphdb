@@ -358,14 +358,23 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
             if edge_limit == 2 || record_limit == 4 {
                 if record_limit == 4 {
                     // One indexed mutation candidate leaves three records;
-                    // the four-vertex overlay must refuse without effects.
-                    assert!(matches!(result,
-                        Err(GraphWriteProgramError::Insert {
-                            statement: 2,
-                            source: GqlQueryError::Rows(error),
-                        }) if error.dimension == GqlBudgetDimension::SnapshotRecords
-                            && error.limit == 3 && error.observed == 4
-                    ));
+                    // the four-vertex overlay refuses. The program restores
+                    // the public whole-program limit and observed count.
+                    assert!(
+                        matches!(
+                            &result,
+                            Err(GraphWriteProgramError::Program(
+                                fgdb_gql::GraphMutationProgramError::Budget {
+                                    statement: 2,
+                                    dimension:
+                                        fgdb_gql::GraphMutationProgramDimension::SnapshotRecords,
+                                    limit: 4,
+                                    observed: 5,
+                                }
+                            ))
+                        ),
+                        "whole-program record refusal: {result:?}"
+                    );
                 } else {
                     assert!(matches!(
                         result,
