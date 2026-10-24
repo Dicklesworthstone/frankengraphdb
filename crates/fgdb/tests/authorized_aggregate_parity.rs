@@ -576,7 +576,7 @@ mod aggregate_output_properties {
 
     const COUNT_OUTPUT: &str = "MATCH (n) RETURN COUNT(*) AS n, \
         [item IN $elements | item.p] AS values, \
-        [item IN $elements | item.hidden] AS denied";
+        [item IN $elements | item.hidden] AS denied GROUP BY ()";
 
     fn values(items: &[Option<i64>]) -> GraphAggregateValue {
         GraphAggregateValue::Value(GraphValue::List(

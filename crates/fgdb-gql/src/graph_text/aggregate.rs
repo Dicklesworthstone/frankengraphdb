@@ -87,9 +87,11 @@ impl Summary {
 
 /// Parse-once grouped text definition. Binding returns the existing aggregate
 /// with one shared governed source at execution time. Without GROUP BY, each
-/// distinct row-dependent nonaggregate RETURN expression is a grouping key, in first-use
-/// order. An explicit GROUP BY remains authoritative: every nonaggregate
-/// RETURN expression must occur in it, but its keys may be omitted from RETURN.
+/// distinct nonaggregate RETURN expression is a grouping key, in first-use
+/// order. An explicit GROUP BY remains authoritative: row-dependent nonaggregate
+/// RETURN expressions must occur in it, but its keys may be omitted from RETURN.
+/// GROUP BY () declares a global aggregate; row-independent returned values
+/// are then evaluated after grouping, including for an empty input.
 /// Projected aliases resolve to the original expression, not a new key.
 /// Operands occurring only inside aggregate output expressions never create
 /// implicit grouping keys. The bounded profile still requires an aggregate
@@ -210,25 +212,18 @@ impl PreparedGraphAggregateText {
         }
         let mut groups = Vec::new();
         let explicit_groups = parser.take_word("GROUP")?;
-        if !explicit_groups {
-            // Parameters, literals and their local value programs are output
-            // expressions, not implicit keys. They must still run once for a
-            // global aggregate over an empty graph. Reuse parsed templates;
-            // do not register parameters or catalog reads twice. Explicit
-            // GROUP BY retains its declared key and alias semantics.
-            for item in &mut returned {
-                if item.function.is_none()
-                    && let Some(index) = item.expression.and_then(|expression| expression.computed)
-                    && computed.operands[index].row_independent()
-                {
-                    item.expression = None;
-                    item.output = Some(computed.operands[index].clone());
-                }
-            }
-        }
         if explicit_groups {
             parser.word("BY")?;
+            let empty_grouping = matches!(parser.current.kind, TokenKind::Punct(b'('))
+                && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b')'));
+            if empty_grouping {
+                parser.advance()?;
+                parser.advance()?;
+            }
             loop {
+                if empty_grouping {
+                    break;
+                }
                 parser.capacity(
                     groups.len(),
                     MAX_PATTERN_VERTICES,
@@ -273,6 +268,24 @@ impl PreparedGraphAggregateText {
                     if !groups.iter().any(|group| group.same(expression)) {
                         groups.push(expression);
                     }
+                }
+            }
+        }
+        if explicit_groups {
+            // Explicit keys decide the groups. Independent values that were
+            // not themselves named as keys belong to the post-group output.
+            // Reuse the parsed program so parameter occurrences and catalog
+            // reads are not registered twice. Implicit grouping deliberately
+            // retains these expressions as keys, even on an empty input.
+            for item in &mut returned {
+                if item.function.is_none()
+                    && let Some(expression) = item.expression
+                    && !groups.iter().any(|group| group.same(expression))
+                    && let Some(index) = expression.computed
+                    && computed.operands[index].row_independent()
+                {
+                    item.expression = None;
+                    item.output = Some(computed.operands[index].clone());
                 }
             }
         }
