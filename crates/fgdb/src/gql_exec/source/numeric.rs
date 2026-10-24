@@ -687,6 +687,67 @@ mod tests {
     }
 
     #[test]
+    fn single_posting_and_numeric_range_attribute_the_owner_closure_budget_delta() {
+        // The six owner-closure fixtures all start at the sole p=0 vertex.
+        // Compare BOTH live production routes in this invocation: the range
+        // fallback used before 9e85981d, and its borrowed equality posting.
+        // Only the candidate selector differs; visibility, residual checks
+        // and admitted rows run through the same implementation and meter.
+        let snapshot = compound_snapshot(vec![
+            (0..6)
+                .map(|id| VertexRow {
+                    vid: VId(id),
+                    birth_ordinal: id as u64,
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                    labels: vec![],
+                    props: vec![(KEY, CanonicalScalar::Int(id as i64).into())],
+                })
+                .collect(),
+        ]);
+        let predicates = [equal(KEY, CanonicalScalar::Int(0))];
+        let no_equality_keys: [VertexPredicate; 0] = [];
+        let run = |select_equality| {
+            let mut events = [0_u64; 3];
+            let mut control = |event| {
+                events[match event {
+                    SourceEvent::Work => 0,
+                    SourceEvent::ScratchEntry => 1,
+                    SourceEvent::SnapshotRecord => 2,
+                }] += 1;
+                Ok::<_, ()>(())
+            };
+            let (rows, candidates) = bound_rows_with_equalities(
+                &snapshot,
+                || predicates.iter(),
+                || {
+                    if select_equality {
+                        predicates.iter()
+                    } else {
+                        no_equality_keys.iter()
+                    }
+                },
+                CommitSeq(3),
+                &mut control,
+            )
+            .unwrap()
+            .unwrap();
+            (
+                rows.iter().map(|row| row.vid).collect::<Vec<_>>(),
+                candidates,
+                events,
+            )
+        };
+        let (range_ids, range_candidates, range) = run(false);
+        let (posting_ids, posting_candidates, posting) = run(true);
+        assert_eq!(range_ids, vec![VId(0)]);
+        assert_eq!(posting_ids, range_ids);
+        assert_eq!((range_candidates, posting_candidates), (1, 1));
+        assert_eq!(range, [posting[0] + 4, posting[1] + 1, posting[2]]);
+        assert_eq!(posting[2], 1);
+    }
+
+    #[test]
     fn compound_equalities_visit_the_selective_key_in_either_order_and_scalar_domain() {
         for count in [32_u128, 1024] {
             for text_tenant in [false, true] {
