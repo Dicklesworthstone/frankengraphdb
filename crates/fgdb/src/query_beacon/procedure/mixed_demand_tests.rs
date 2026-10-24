@@ -856,13 +856,18 @@ fn graph_only_default_admits_the_reached_population_and_keeps_explicit_profiles(
             let tight = GqlQueryPolicy::new(3, 100, 10_000_000, 1_000_000);
             for extra in ["", "graph_access => NULL,", "graph_access => 'demand',"] {
                 let plan = prepare(&graph_call(extra), &args);
+                let baseline = db.execute_graph_set_governed(&cx, &plan, policy()).unwrap();
+                assert_eq!(baseline.value, expected.value);
+                assert_eq!(baseline.rows, expected.rows);
+                // Explicit arguments spend parent work/scratch even when
+                // they select the same source profile as the default.
                 assert_eq!(
                     db.execute_graph_set_governed(&cx, &plan, tight).unwrap(),
-                    expected,
+                    baseline,
                 );
                 assert_eq!(
                     pin.execute_graph_set_governed(&cx, &plan, tight).unwrap(),
-                    expected,
+                    baseline,
                 );
             }
             for extra in [
@@ -898,11 +903,11 @@ fn graph_only_default_admits_the_reached_population_and_keeps_explicit_profiles(
                 .execute_graph_set_governed(&cx, &indexed, policy())
                 .unwrap();
             assert_eq!(expected.rows.snapshot_records, 1_028);
-            assert_eq!(
-                db.execute_graph_set_governed(&cx, &ordinary, policy())
-                    .unwrap(),
-                expected,
-            );
+            let actual = db
+                .execute_graph_set_governed(&cx, &ordinary, policy())
+                .unwrap();
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.rows, expected.rows);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -958,19 +963,21 @@ fn default_demand_keeps_historical_pins_and_the_staged_materialized_default() {
         edits.add_edge(EId(21), VId(2), HIGH, vec![]);
         txn.write(&mut db, edits).unwrap();
         // Native read witnesses allocate on first observation. Warm them
-        // before comparing the default and explicit profile's full receipts.
+        // before comparing the default and explicit profile's source receipts.
         txn.execute_graph_set_governed(&db, &cx, &ordinary, policy())
             .unwrap();
         let staged = txn
             .execute_graph_set_governed(&db, &cx, &ordinary, policy())
             .unwrap();
         assert_eq!(staged.value, original.value);
+        let explicit = txn
+            .execute_graph_set_governed(&db, &cx, &materialized, policy())
+            .unwrap();
         assert_eq!(
-            staged,
-            txn.execute_graph_set_governed(&db, &cx, &materialized, policy())
-                .unwrap(),
+            staged.value, explicit.value,
             "the transaction default still prepares its canonical staged source"
         );
+        assert_eq!(staged.rows, explicit.rows);
         assert!(
             txn.execute_graph_set_governed(
                 &db,

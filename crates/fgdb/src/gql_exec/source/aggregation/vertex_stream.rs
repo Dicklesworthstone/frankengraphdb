@@ -1,6 +1,6 @@
 //! Actual pull scans over a pinned, already decoded database generation.
 //!
-//! Persistent property candidates or the history index supply ordered successors.
+//! Persistent property candidates or a bounded history spine supply ordered roots.
 //! Equality keeps at most two roots. Numeric ranges merge at most 64 value-bucket
 //! heads; wider ranges test historical membership one identity at a time. Neither
 //! path collects all candidate IDs or resolves unrequested MVCC winners.
@@ -9,7 +9,7 @@
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
 
-use crate::gql_exec::source::{IndexMap, SourceEvent, numeric};
+use crate::gql_exec::source::{IndexMap, SourceEvent, VertexHistoryScanCursor, numeric};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertyKeyId;
@@ -41,7 +41,7 @@ struct RootEquality {
 }
 
 enum RootCandidates {
-    Histories,
+    Histories(VertexHistoryScanCursor),
     // Resolve keys on first demand, never while opening a cursor. Numeric
     // equality has at most one exact key per canonical numeric domain.
     Pending {
@@ -87,7 +87,7 @@ impl SnapshotVertexSource<'_> {
         prefix: Option<(PropertyKeyId, &str)>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
-        if matches!(self.candidates, RootCandidates::Histories)
+        if matches!(self.candidates, RootCandidates::Histories(_))
             && let Some((key, prefix)) = prefix
             && allows_property(key)
             && let Some(prefix) = prefix::PrefixCandidates::new(key, prefix)
@@ -209,9 +209,10 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                     }
                     // Move the selected predicate only after every controlled
                     // lookup succeeds. A refusal leaves the source unadvanced.
-                    let RootCandidates::Pending { equality, .. } =
-                        core::mem::replace(&mut self.candidates, RootCandidates::Histories)
-                    else {
+                    let RootCandidates::Pending { equality, .. } = core::mem::replace(
+                        &mut self.candidates,
+                        RootCandidates::Histories(VertexHistoryScanCursor::default()),
+                    ) else {
                         unreachable!("candidate roots resolved from pending keys")
                     };
                     self.candidates = RootCandidates::Indexed { roots, equality };
@@ -226,10 +227,16 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         }
                         successor
                     }
-                    RootCandidates::Histories => index_successor(
+                    RootCandidates::Histories(scan) => scan.next(
                         &self.view.snapshot.property_index().histories,
-                        self.after,
-                        control,
+                        &mut |event| {
+                            control(match event {
+                                SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                                    VertexScanEvent::Work
+                                }
+                                SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                            })
+                        },
                     )?,
                     RootCandidates::Range(range) => {
                         return range.next(
@@ -265,7 +272,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
         let key = match &self.candidates {
-            RootCandidates::Histories => return Ok(true),
+            RootCandidates::Histories(_) => return Ok(true),
             RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
                 equality.key
             }
@@ -297,7 +304,9 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         RootCandidates::Prefix(prefix) => {
                             value.is_some_and(|value| prefix.accepts(value))
                         }
-                        RootCandidates::Histories => unreachable!("history roots admit every row"),
+                        RootCandidates::Histories(_) => {
+                            unreachable!("history roots admit every row")
+                        }
                     });
                 }
             }
@@ -321,16 +330,28 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         self.cx.with_restriction(|| {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let snapshot = &self.view.snapshot;
+            let history = match &self.candidates {
+                RootCandidates::Histories(scan) => scan.history(vid),
+                _ => None,
+            };
             snapshot
                 .property_index()
-                .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
-                    control(match event {
-                        // The cursor charges one candidate history BEFORE this
-                        // lookup. Version work is not a second candidate record.
-                        SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
-                        SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
-                    })
-                })
+                .visible_row_with_history(
+                    &snapshot.patches,
+                    vid,
+                    self.as_of,
+                    history,
+                    &mut |event| {
+                        control(match event {
+                            // The cursor charges one candidate history BEFORE this
+                            // lookup. Version work is not a second candidate record.
+                            SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                                VertexScanEvent::Work
+                            }
+                            SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                        })
+                    },
+                )
                 .map(|row| {
                     row.map(|row| VertexScanRow {
                         labels: &row.labels,
@@ -447,7 +468,7 @@ fn open<'q, Row: VertexScanOutput>(
         cx,
         as_of,
         after: None,
-        candidates: RootCandidates::Histories,
+        candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
     }
     .with_root_equality(&plan, |_| true);
     Ok(VertexScanCursor::new(source, plan, policy, move || {
@@ -605,7 +626,7 @@ impl EmbeddedReadView {
             cx,
             as_of,
             after: None,
-            candidates: RootCandidates::Histories,
+            candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
         })
     }
 

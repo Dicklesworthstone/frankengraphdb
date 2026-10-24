@@ -597,6 +597,14 @@ fn historical_winners_are_scoped_before_streaming_and_future_zero_pages_refuse()
                 cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
                 expected
             );
+            drop(cursor);
+            let mut send = session
+                .stream_send(&cx, &prepared, &GqlParameters::new())
+                .unwrap();
+            assert_eq!(
+                send.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected
+            );
         }
         let future = db.frontier().unwrap().0 + 1;
         let prepared = session
