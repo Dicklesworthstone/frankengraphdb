@@ -690,19 +690,24 @@ fn map_rows_drive_create_properties() {
         wanted_widened.sort();
         assert_eq!(widened, wanted_widened);
         // fgdb-bqri3: a pattern WHERE whose scalar program meets a stored List
-        // raises, as the same expression in RETURN does. It never reads the
-        // row as UNKNOWN, which silently dropped every listed vertex (count 0
-        // for size(n.name) > 1). After WITH the value language reads the list.
+        // raises. It never reads the row as UNKNOWN, which silently dropped
+        // every listed vertex (count 0 for size(n.name) > 1). In RETURN and
+        // after WITH the value language reads the list.
         for statement in [
             "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN count(*) AS c",
             "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN n.name AS name",
-            "MATCH (n:Listed) RETURN size(n.name) > 1 AS longer",
         ] {
             assert!(
                 db.query(&cx, statement, &empty, symbols, policy()).is_err(),
                 "{statement}"
             );
         }
+        let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        let mut longer = query(&db, "MATCH (n:Listed) RETURN size(n.name) > 1 AS longer");
+        longer.sort();
+        let mut wanted_longer = vec![vec![boolean(true)], vec![boolean(false)]];
+        wanted_longer.sort();
+        assert_eq!(longer, wanted_longer);
         assert_eq!(
             query(
                 &db,
@@ -1128,6 +1133,83 @@ fn values_of_different_domains_are_unequal_through_database_queries() {
                 truth(true),
             ]],
             "{statement}"
+        );
+    });
+}
+
+/// A stored List grows in every write row and sizes inside arithmetic
+/// (fgdb-c4i0d, fgdb-k3nub). SET over a WITH row or an UNWIND row appends
+/// with `+` whichever operand leads, reading row values inside the list, as
+/// MATCH ... SET already did; coalesce with a list default starts an absent
+/// List; size()
+/// of a stored List counts its elements inside arithmetic, as size() of a
+/// text counts its characters. Expected values are enumerated by hand.
+#[test]
+fn stored_lists_grow_in_write_rows_and_size_in_arithmetic() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let empty = GqlParameters::new();
+        let query = |db: &Database<fgdb::MemVfs>, text: &str| {
+            let mut rows = cells(db.query(&cx, text, &empty, symbols, policy()).expect(text));
+            rows.sort();
+            rows
+        };
+        let first = "MATCH (n:Person) RETURN n.name AS name, n.first AS first";
+        for statement in [
+            "MATCH (n:Person) WITH n SET n.first = coalesce(n.first, []) + [n.p]",
+            "UNWIND [10, 20] AS v MATCH (n:Person {p: v}) SET n.first = n.first + [v * 2]",
+            "MATCH (n:Person {name: 'c'}) WITH n SET n.first = [0] + n.first",
+            "CREATE (n:Person {name: 'd', first: [1]})",
+            "MATCH (n:Person {name: 'd'}) WITH n, 3 AS last SET n.first = n.first + [2, last]",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        assert_eq!(
+            query(&db, first),
+            vec![
+                vec![text("a"), list([int(10), int(20)])],
+                vec![text("b"), list([int(20), int(40)])],
+                vec![text("c"), list([int(0), int(30)])],
+                vec![text("d"), list([int(1), int(2), int(3)])],
+            ]
+        );
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Person) \
+                 RETURN n.name AS name, size(n.first) + 1 AS s, size(n.name) * 2 AS c"
+            ),
+            vec![
+                vec![text("a"), int(3), int(2)],
+                vec![text("b"), int(3), int(2)],
+                vec![text("c"), int(3), int(2)],
+                vec![text("d"), int(4), int(2)],
+            ]
+        );
+        write(
+            &mut db,
+            cxs,
+            "MATCH (n:Person) WITH n SET n.p = size(n.first) * 100",
+            &empty,
+        )
+        .await
+        .expect("size() of a stored List inside a row SET");
+        assert_eq!(
+            query(&db, "MATCH (n:Person) RETURN n.name AS name, n.p AS p"),
+            vec![
+                vec![text("a"), int(200)],
+                vec![text("b"), int(200)],
+                vec![text("c"), int(200)],
+                vec![text("d"), int(300)],
+            ]
         );
     });
 }

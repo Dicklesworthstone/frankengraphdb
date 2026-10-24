@@ -281,3 +281,40 @@ fn rebinding_and_filtering_use_final_fields_without_limiting_mutation_effects() 
         assert_eq!(batch.mutation().stats().effects, 3);
     }
 }
+
+/// A SET value over a WITH row reads composite operands through the row, as
+/// MATCH ... SET already does (fgdb-c4i0d): a list literal on either side of
+/// a `+` chain, and a list function inside arithmetic. SET is simultaneous,
+/// so every value reads p before the clause. Over p = 1, 2, 3 the written
+/// values are enumerated by hand.
+#[test]
+fn row_set_values_read_composite_operands_through_the_row() {
+    let list = |values: &[i64]| GraphValue::List(values.iter().map(|&v| int(v)).collect());
+    let query = prepare(
+        "MATCH (n) WITH n AS row \
+         SET row.q = [row.p] + [0], row.p = row.p + size([1, 2]) \
+         WITH row RETURN row.p AS p, row.q AS q ORDER BY p",
+    );
+    let batch = execute(&query, policy(3), || Ok(())).unwrap();
+    assert_eq!(
+        rows(&batch),
+        vec![
+            vec![int(3), list(&[1, 0])],
+            vec![int(4), list(&[2, 0])],
+            vec![int(5), list(&[3, 0])],
+        ]
+    );
+    let query = prepare(
+        "MATCH (n) WITH n AS row SET row.q = [0] + [row.p] + [row.p * 10] \
+         WITH row RETURN row.p AS p, row.q AS q ORDER BY p",
+    );
+    let batch = execute(&query, policy(3), || Ok(())).unwrap();
+    assert_eq!(
+        rows(&batch),
+        vec![
+            vec![int(1), list(&[0, 1, 10])],
+            vec![int(2), list(&[0, 2, 20])],
+            vec![int(3), list(&[0, 3, 30])],
+        ]
+    );
+}

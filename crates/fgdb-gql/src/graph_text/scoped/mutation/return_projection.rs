@@ -1789,6 +1789,26 @@ impl<'a> Parser<'a> {
         self.scalar_let_value(operand, slots, at)
     }
 
+    /// A scalar expression over a resolved scope's leaves: the whole value,
+    /// or, for an operand-only resolver, one concatenation-level operand.
+    /// Its composite operands read through the same leaves.
+    fn resolved_scalar_value(
+        &mut self,
+        resolve: &mut ValueResolver<'_, 'a>,
+        depth: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let base = core::mem::replace(&mut self.let_base, depth);
+        let parsed = if resolve.whole() {
+            self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
+        } else {
+            self.resolved_expression(&mut |parser| resolve.leaf(parser))
+        };
+        self.let_base = base;
+        let (operand, slots) = parsed.map_err(expression_error)?;
+        self.scalar_let_value(operand, slots, at)
+    }
+
     /// A parsed scalar operand and the let slots its composites took, as one
     /// value: the body inside a Let when there are slots.
     pub(super) fn scalar_let_value(
@@ -1860,6 +1880,11 @@ impl<'a> Parser<'a> {
         if self.temporal_call()?.is_some() {
             return Ok(true);
         }
+        // A coalesce with a list or map argument (`coalesce(n.tags, [])`)
+        // is the value language's, so it can stand in a list sum.
+        if self.composite_coalesce(&[], false)? {
+            return Ok(true);
+        }
         let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
         if !call || !(self.is_word("KEYS") || self.is_word("SIZE")) {
             return Ok(false);
@@ -1868,15 +1893,14 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         // A literal keeps the scalar SIZE too, with its preparation-time
-        // refusal of a non-text literal.
+        // refusal of a non-text literal. A property may hold a stored List
+        // (fgdb-k3nub), so `size(n.tags) + 1` reads it in the value language,
+        // whose Size counts a text's characters as the scalar SIZE does.
         let argument = lexer.next()?;
         Ok(match argument.kind {
-            TokenKind::Word(word) => {
-                !["TRUE", "FALSE", "NULL"]
-                    .iter()
-                    .any(|literal| word.eq_ignore_ascii_case(literal))
-                    && !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
-            }
+            TokenKind::Word(word) => !["TRUE", "FALSE", "NULL"]
+                .iter()
+                .any(|literal| word.eq_ignore_ascii_case(literal)),
             TokenKind::Punct(b'[') | TokenKind::Parameter(_) => true,
             _ => false,
         })
@@ -2231,9 +2255,10 @@ impl<'a> Parser<'a> {
         }
         let mut graph_map = false;
         // A composite that is an operator's left operand is one operand of
-        // the scalar expression, not the whole value. The aggregate scope
-        // keeps its operand-only grammar.
-        let scalar = operators && resolve.is_none() && self.composite_operand_continues()?;
+        // the scalar expression, not the whole value: `size(l) > 0`, `[0] +
+        // n.tags`. A resolved scope compiles it over its own leaves, so
+        // `size(collect(x)) + 1` reads its aggregate (composite_value).
+        let scalar = operators && self.composite_operand_continues()?;
         let comprehension = self.is_punct(b'[') && {
             let mut lexer = self.lexer.clone();
             matches!(lexer.next()?.kind, TokenKind::Word(_))
@@ -2272,7 +2297,9 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let mut value = if scalar {
+        let mut value = if scalar && let Some(resolve) = resolve.as_mut() {
+            self.resolved_scalar_value(resolve, depth, at)?
+        } else if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
         } else if let Some(column) = imported_element {
             // Preserve whole stored lists/maps as well as scalars. Arithmetic
@@ -2681,15 +2708,7 @@ impl<'a> Parser<'a> {
             // Element and map entries (`x.p` of a comprehension element over
             // COLLECT, an imported `row.key`) take let slots, as the element
             // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
-            let base = core::mem::replace(&mut self.let_base, depth);
-            let parsed = if resolve.whole() {
-                self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
-            } else {
-                self.resolved_expression(&mut |parser| resolve.leaf(parser))
-            };
-            self.let_base = base;
-            let (operand, slots) = parsed.map_err(expression_error)?;
-            self.scalar_let_value(operand, slots, at)?
+            self.resolved_scalar_value(resolve, depth, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             // `n IS NULL` is a scalar predicate over the element, which the
             // scalar compiler reads (element_null_operand).

@@ -1544,3 +1544,48 @@ fn predicate_items_compare_aggregates_and_group_by_their_boolean_value() {
         );
     }
 }
+
+/// A composite aggregate result is an operand of arithmetic and of list
+/// concatenation inside a RETURN item (fgdb-c4i0d): `size(collect(x)) + 1`,
+/// `collect(x) + [9]` and `[0] + collect(x)` read the aggregate through the
+/// same leaves as a lone `collect(x)`. Over p = -2, 2, 2, 5 in scan order.
+#[test]
+fn composite_aggregate_results_are_arithmetic_and_concatenation_operands() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values: &[i64]| GraphValue::List(values.iter().copied().map(integer).collect());
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN size(collect(n.p)) + 1 AS value",
+            integer(5),
+        ),
+        (
+            "MATCH (n) RETURN size(collect(DISTINCT n.p)) * 10 AS value",
+            integer(30),
+        ),
+        (
+            "MATCH (n) RETURN collect(n.p) + [9] AS value",
+            list(&[-2, 2, 2, 5, 9]),
+        ),
+        (
+            "MATCH (n) RETURN [0] + collect(n.p) AS value",
+            list(&[0, -2, 2, 2, 5]),
+        ),
+        (
+            "MATCH (n) RETURN [count(*)] + collect(n.q) AS value",
+            list(&[4, -2, 2, 3, 1]),
+        ),
+    ] {
+        let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphAggregateValue::Value(expected)],
+            "{text}"
+        );
+    }
+}

@@ -352,23 +352,21 @@ impl<'a> Parser<'a> {
     }
 
     /// One composite operand read in the value language, as a let slot
-    /// carries it (fgdb-o5o9t).
+    /// carries it (fgdb-o5o9t). A resolved scope reads it through its own
+    /// leaves: `n.tags + ['x']` over a write row, `size(collect(x)) + 1` over
+    /// aggregate results.
     fn composite_value(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
         nesting: usize,
-        at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
         Ok(match columns {
             ExpressionColumns::Graph(columns) => {
                 self.read_composite_operand(Some(&mut **columns), &[], nesting)?
             }
             ExpressionColumns::Row(schema) => self.read_composite_operand(None, schema, nesting)?,
-            ExpressionColumns::Resolved(resolve) if self.named_subscript_follows()? => {
+            ExpressionColumns::Resolved(resolve) => {
                 self.read_resolved_composite_operand(&mut **resolve, nesting)?
-            }
-            ExpressionColumns::Resolved(_) => {
-                return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
             }
         })
     }
@@ -388,7 +386,7 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphMutationTextError> {
         let nesting = self.let_base + depth + 1;
-        let value = self.composite_value(columns, nesting, at)?;
+        let value = self.composite_value(columns, nesting)?;
         self.let_slot(program, value, at)
     }
 
@@ -548,7 +546,7 @@ impl<'a> Parser<'a> {
             };
             return Ok(ReadValueTemplate::parameter(index, at, kind));
         }
-        self.composite_value(columns, nesting, at)
+        self.composite_value(columns, nesting)
     }
 
     /// The list operand of `IN`. openCypher binds IN tighter than comparisons,
@@ -574,7 +572,7 @@ impl<'a> Parser<'a> {
         // Only the value read that starts here is bounded: it takes the flag
         // on entry, so nothing nested inside the operand inherits it.
         self.membership_list = true;
-        let list = self.composite_value(columns, nesting, at);
+        let list = self.composite_value(columns, nesting);
         self.membership_list = false;
         list
     }
