@@ -41,9 +41,21 @@ pub(crate) fn estimated_work(
     let step = n.checked_add(arcs)?;
     match algorithm {
         FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber => Some(step),
-        FoundationAlgorithm::ClosenessCentrality
-        | FoundationAlgorithm::HarmonicCentrality
-        | FoundationAlgorithm::BetweennessCentrality => n.checked_mul(step),
+        FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality => {
+            n.checked_mul(step)
+        }
+        FoundationAlgorithm::BetweennessCentrality => {
+            // Every source visits only its undirected connected component.
+            // Reached-only resets and sparse source-ordered reduction avoid
+            // a V-wide pass per source. A component of c vertices requires
+            // at least c-1 edges; no vertex/arc is visited by more than C
+            // sources, where C <= min(V,E+1). Price the component-discovery
+            // pass as well: (C+1)*(V+arcs). The pinned witness still describes
+            // the Brandes source traversals, excluding this preparation pass.
+            n.min((arcs / 2).checked_add(1)?)
+                .checked_add(1)?
+                .checked_mul(step)
+        }
         FoundationAlgorithm::EigenvectorCentrality => {
             step.checked_mul(EIGENVECTOR_MAX_ITERATIONS + 1)
         }

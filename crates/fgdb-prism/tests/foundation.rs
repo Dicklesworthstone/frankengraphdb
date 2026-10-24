@@ -186,7 +186,7 @@ fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() 
     let certificate = &result.certificate;
     assert_eq!(
         certificate.execution_kernel,
-        "fgdb-prism/brandes-csr-source-order-v2"
+        "fgdb-prism/brandes-csr-source-order-v3"
     );
     assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
     assert_eq!(certificate.vertices, 4);
@@ -201,24 +201,93 @@ fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() 
 }
 
 #[test]
+fn native_betweenness_admits_sparse_reachable_work_and_keeps_exact_zero_scores() {
+    let n = 4097usize;
+    let vertices: Vec<_> = (0..n)
+        .map(|at| (1u128 << 100) + ((at as u128) << 64) + 17)
+        .collect();
+    for edges in [
+        Vec::new(),
+        vec![
+            (vertices[0], vertices[n / 2]),
+            (vertices[n / 2], vertices[n - 1]),
+        ],
+    ] {
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        // A loop-free component with c vertices needs c-1 edges. Reached-only
+        // work can use this conservative structural bound instead of V².
+        let work = (n.min(edges.len() + 1) + 1) * (n + 2 * edges.len());
+        assert!(work < n * n);
+        let limits = FnxExecutionLimits {
+            max_iterations: 0,
+            max_result_rows: n,
+            max_estimated_work: work,
+        };
+        let mut control = NativeControl::default();
+        let result = call("betweenness_centrality")
+            .execute(&graph, limits, &mut control)
+            .unwrap();
+        assert_eq!(result.rows.len(), n);
+        assert_eq!(result.certificate.estimated_work, work);
+        assert_eq!(control.units, 4 * n + 5);
+        assert_eq!(
+            result.certificate.witness.nodes_touched,
+            if edges.is_empty() { n } else { n + 6 }
+        );
+        assert_eq!(
+            result.certificate.witness.edges_scanned,
+            if edges.is_empty() { 0 } else { 12 }
+        );
+        let expected_middle = if edges.is_empty() {
+            0.0
+        } else {
+            2.0 * (1.0 / ((n - 1) * (n - 2)) as f64)
+        };
+        for (at, row) in result.rows.iter().enumerate() {
+            let expected = if at == n / 2 { expected_middle } else { 0.0 };
+            let [FnxValue::Vertex(vertex), FnxValue::Score(score)] = row.as_slice() else {
+                panic!("expected canonical vertex and exact score");
+            };
+            assert_eq!(vertex.0, vertices[at]);
+            assert_eq!(score.to_bits(), expected.to_bits(), "vertex {at}");
+        }
+        assert!(matches!(
+            call("betweenness_centrality").execute(
+                &graph,
+                FnxExecutionLimits {
+                    max_estimated_work: work - 1,
+                    ..limits
+                },
+                &mut NativeControl::default(),
+            ),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "estimated work",
+                requested,
+                limit,
+            }) if requested == work && limit == work - 1
+        ));
+    }
+}
+
+#[test]
 fn admission_refuses_before_the_foundation_runs() {
-    // Betweenness admits n * (n + arcs) = 4 * (4 + 6) = 40 units on the path.
+    // The component pass plus source traversals admit (n+1)*(n+arcs) = 50.
     let refused =
-        call("betweenness_centrality").execute(&path(), limits(39), || Ok::<(), Infallible>(()));
+        call("betweenness_centrality").execute(&path(), limits(49), || Ok::<(), Infallible>(()));
     assert!(
         matches!(
             refused,
             Err(FnxExecutionError::LimitExceeded {
                 resource: "estimated work",
-                limit: 39,
-                requested: 40,
+                limit: 49,
+                requested: 50,
             })
         ),
         "{refused:?}"
     );
     assert!(
         call("betweenness_centrality")
-            .execute(&path(), limits(40), || Ok::<(), Infallible>(()))
+            .execute(&path(), limits(50), || Ok::<(), Infallible>(()))
             .is_ok()
     );
     // A directed projection is refused for these undirected-law procedures.

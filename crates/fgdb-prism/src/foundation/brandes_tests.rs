@@ -77,6 +77,30 @@ fn bits(output: &KernelOutput) -> Vec<u64> {
     scores.iter().map(|score| score.to_bits()).collect()
 }
 
+fn largest_component(graph: &SnapshotGraphView) -> usize {
+    let mut unseen = vec![true; graph.node_count()];
+    let mut largest = 0;
+    for source in 0..graph.node_count() {
+        if !unseen[source] {
+            continue;
+        }
+        unseen[source] = false;
+        let mut queue = std::collections::VecDeque::from([source]);
+        let mut reached = 0;
+        while let Some(vertex) = queue.pop_front() {
+            reached += 1;
+            for &neighbor in graph.neighbors_indices(vertex).unwrap() {
+                if unseen[neighbor] {
+                    unseen[neighbor] = false;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        largest = largest.max(reached);
+    }
+    largest
+}
+
 fn assert_reference(graph: &SnapshotGraphView, schedules: &[(usize, usize)]) {
     let expected = reference(graph);
     let expected_bits: Vec<_> = expected
@@ -97,15 +121,17 @@ fn assert_reference(graph: &SnapshotGraphView, schedules: &[(usize, usize)]) {
         let n = graph.node_count();
         let window = window.clamp(1, n.max(1));
         let logical_workers = window.min(MAX_GATHER_THREADS);
-        // Count each retained allocation independently: output, descriptors,
-        // sigma/distance/queue per logical worker, then exactly window deltas.
+        // Count each retained allocation independently: output, the four
+        // shared component directory vectors, descriptors, sigma/distance/
+        // queue per worker, and component-sized scalar result windows.
         let expected_workspace = if n == 0 {
             0
         } else {
             n * size_of::<f64>()
+                + (4 * n + 1) * size_of::<usize>()
                 + logical_workers
                     * (size_of::<Worker>() + n * (size_of::<f64>() + 2 * size_of::<usize>()))
-                + window * n * size_of::<f64>()
+                + window * largest_component(graph) * size_of::<f64>()
         };
         assert_eq!(workspace, expected_workspace);
     }
@@ -230,17 +256,119 @@ fn csr_predecessors_match_each_source_before_any_score_reduction() {
         }
     }
     let graph = graph(n, &edges);
-    let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+    let components = Components::new(&graph, &mut Unstoppable).unwrap();
+    let mut worker = Worker::new(n, 1, components.largest, &mut Unstoppable).unwrap();
     for source in 0..n {
         worker.first_source = source;
         worker.sources = 1;
-        worker.run(&graph, &mut || true).unwrap();
+        worker.run(&graph, &components, &mut || true).unwrap();
         let actual: Vec<_> = worker.deltas.iter().map(|score| score.to_bits()).collect();
         let expected: Vec<_> = source_delta(&graph, source)
             .iter()
             .map(|score| score.to_bits())
             .collect();
         assert_eq!(actual, expected, "source {source}");
+    }
+}
+
+#[test]
+fn sparse_windows_preserve_source_order_across_disconnected_components_and_reuse() {
+    // Components are interleaved in canonical vertex order. Reusing the same
+    // worker across windows therefore switches repeatedly between two paths,
+    // an isolated edge and isolated vertices instead of hiding stale state in
+    // a component-contiguous source schedule.
+    let n = 41;
+    let graph = graph(n, &[(0, 7), (7, 14), (2, 9), (9, 16), (16, 23), (1, 8)]);
+    let components = Components::new(&graph, &mut Unstoppable).unwrap();
+    assert_eq!(components.largest, 4);
+    assert!(!components.connected());
+    let mut worker = Worker::new(n, 3, components.largest, &mut Unstoppable).unwrap();
+    let capacity = worker.deltas.capacity();
+    assert_eq!(capacity, 12);
+    for first_source in (0..n).step_by(3) {
+        worker.first_source = first_source;
+        worker.sources = (n - first_source).min(3);
+        worker.run(&graph, &components, &mut || true).unwrap();
+        let mut actual = vec![0.0; n];
+        let mut consumed = 0;
+        for source in first_source..first_source + worker.sources {
+            let component = components.range(source).unwrap();
+            let end = consumed + component.len();
+            for (&vertex, &value) in components.vertices[component]
+                .iter()
+                .zip(&worker.deltas[consumed..end])
+            {
+                actual[vertex] += value;
+            }
+            consumed = end;
+        }
+        assert_eq!(consumed, worker.deltas.len());
+        let mut expected = vec![0.0; n];
+        for source in first_source..first_source + worker.sources {
+            for (score, dependency) in expected.iter_mut().zip(source_delta(&graph, source)) {
+                *score += dependency;
+            }
+        }
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "window begins at source {first_source}"
+        );
+        assert_eq!(worker.deltas.capacity(), capacity);
+    }
+    assert_reference(&graph, &[(1, 1), (1, 3), (2, 7), (8, n)]);
+}
+
+#[test]
+fn isolates_and_small_components_do_not_clear_or_reduce_the_full_population_per_source() {
+    let n = 8193;
+    let pairs: Vec<_> = (0..n - 2)
+        .step_by(3)
+        .flat_map(|source| [(source, source + 1), (source + 1, source + 2)])
+        .collect();
+    for edges in [Vec::new(), pairs] {
+        let graph = graph(n, &edges);
+        let components = Components::new(&graph, &mut Unstoppable).unwrap();
+        let expected_component = if edges.is_empty() { 1 } else { 3 };
+        assert_eq!(components.largest, expected_component);
+        assert_eq!(
+            components.bytes::<Infallible>().unwrap(),
+            (4 * n + 1) * size_of::<usize>()
+        );
+        let mut worker = Worker::new(n, 37, components.largest, &mut Unstoppable).unwrap();
+        assert_eq!(worker.deltas.capacity(), 37 * expected_component);
+        let mut nodes = 0;
+        let mut scans = 0;
+        let mut scalar_slots = 0;
+        for first_source in (0..n).step_by(37) {
+            worker.first_source = first_source;
+            worker.sources = (n - first_source).min(37);
+            let mut polls = 0;
+            worker
+                .run(&graph, &components, &mut || {
+                    polls += 1;
+                    true
+                })
+                .unwrap();
+            // At most three reached vertices per source: initialization,
+            // BFS, dependencies, reached-only reset and compact result capture
+            // all fit in the same bounded arithmetic run for this window.
+            // Three full V clears per source exceeded 200 polls per window.
+            assert_eq!(polls, 2, "source {first_source}");
+            nodes += worker.nodes_touched;
+            scans += worker.edges_scanned;
+            assert_eq!(worker.deltas.len(), worker.sources * expected_component);
+            scalar_slots += worker.deltas.len();
+        }
+        if edges.is_empty() {
+            assert_eq!(nodes, n);
+            assert_eq!(scans, 0);
+            assert_eq!(scalar_slots, n);
+        } else {
+            assert_eq!(nodes, 3 * n);
+            assert_eq!(scans, 4 * n);
+            assert_eq!(scalar_slots, 3 * n);
+        }
     }
 }
 
@@ -260,9 +388,10 @@ fn non_associative_path_counts_keep_fnx_sigma_and_dependency_bits() {
         }
     }
     let graph = graph(n, &edges);
-    let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+    let components = Components::new(&graph, &mut Unstoppable).unwrap();
+    let mut worker = Worker::new(n, 1, components.largest, &mut Unstoppable).unwrap();
     worker.sources = 1;
-    worker.run(&graph, &mut || true).unwrap();
+    worker.run(&graph, &components, &mut || true).unwrap();
     assert!(
         worker
             .sigma
@@ -289,7 +418,8 @@ fn non_associative_path_counts_keep_fnx_sigma_and_dependency_bits() {
 fn cancellation_inside_a_hub_stops_at_the_admitted_scalar_edge_prefix() {
     let n = 8194;
     let graph = graph(n, &(1..n).map(|target| (0, target)).collect::<Vec<_>>());
-    let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+    let components = Components::new(&graph, &mut Unstoppable).unwrap();
+    let mut worker = Worker::new(n, 1, components.largest, &mut Unstoppable).unwrap();
     worker.sources = 1;
     // Three n-entry resets, one source setup and one FIFO pop precede the
     // first hub edge. Refuse the next live window after entering that row.
@@ -299,7 +429,7 @@ fn cancellation_inside_a_hub_stops_at_the_admitted_scalar_edge_prefix() {
     assert!(edges > 0 && edges < n - 1);
     let stop = accepted / ARITHMETIC_RUN + 1;
     let mut polls = 0;
-    let result = worker.run(&graph, &mut || {
+    let result = worker.run(&graph, &components, &mut || {
         polls += 1;
         polls != stop
     });
@@ -319,9 +449,10 @@ fn parallel_brandes_joins_after_live_refusal_with_a_non_send_host_error() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let n = 8194;
     let graph = graph(n, &(1..n).map(|target| (0, target)).collect::<Vec<_>>());
+    let components = Components::new(&graph, &mut Unstoppable).unwrap();
     let mut workers: Vec<_> = (0..2)
         .map(|source| {
-            let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+            let mut worker = Worker::new(n, 1, components.largest, &mut Unstoppable).unwrap();
             worker.first_source = source;
             worker.sources = 1;
             worker
@@ -361,7 +492,7 @@ fn parallel_brandes_joins_after_live_refusal_with_a_non_send_host_error() {
         |low, group, poll| {
             for (offset, worker) in group.iter_mut().enumerate() {
                 worker.error = worker
-                    .run(&graph, &mut || {
+                    .run(&graph, &components, &mut || {
                         requests[low + offset].fetch_add(1, Ordering::Release);
                         poll()
                     })
@@ -394,10 +525,11 @@ fn overflowing_shortest_path_counts_keep_the_finite_result_refusal() {
             }
         }
         let graph = graph(n, &edges);
-        let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+        let components = Components::new(&graph, &mut Unstoppable).unwrap();
+        let mut worker = Worker::new(n, 1, components.largest, &mut Unstoppable).unwrap();
         worker.sources = 1;
         if layers == 1024 {
-            worker.run(&graph, &mut || true).unwrap();
+            worker.run(&graph, &components, &mut || true).unwrap();
             assert!(worker.sigma.iter().all(|count| count.is_finite()));
             assert_eq!(worker.sigma[n - 1].to_bits(), 2.0f64.powi(1023).to_bits());
             assert_eq!(worker.deltas[0].to_bits(), 0.0f64.to_bits());
@@ -413,7 +545,7 @@ fn overflowing_shortest_path_counts_keep_the_finite_result_refusal() {
         }
 
         assert_eq!(
-            worker.run(&graph, &mut || true),
+            worker.run(&graph, &components, &mut || true),
             Err(WorkerError::InvalidNumericResult)
         );
         if layers == 1025 {
@@ -433,7 +565,7 @@ fn overflowing_shortest_path_counts_keep_the_finite_result_refusal() {
                     FnxExecutionLimits {
                         max_iterations: 0,
                         max_result_rows: n,
-                        max_estimated_work: n * (n + 2 * edges.len()),
+                        max_estimated_work: (n + 1) * (n + 2 * edges.len()),
                     },
                     || Ok::<(), Infallible>(()),
                 ),

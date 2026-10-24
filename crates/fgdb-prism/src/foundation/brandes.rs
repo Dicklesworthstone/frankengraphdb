@@ -4,8 +4,11 @@
 //! second adjacency structure: they are the neighbors one level nearer the
 //! source. Their order within a row updates distinct accumulators; each
 //! accumulator still receives contributions in the pinned reverse BFS order.
-//! Parallel sources own disjoint scratch and deltas, then the caller reduces
-//! those deltas in source order. Live control stays on the calling thread.
+//! Parallel sources own disjoint scratch and source-ordered component deltas,
+//! then the caller reduces those deltas in source order. Component membership
+//! is shared across sources. Only reached vertices are reset: disconnected
+//! graphs never pay a whole-population clear or reduction per isolated source.
+//! Live control stays on the calling thread.
 //! Logical workers and result windows depend only on the graph and this
 //! versioned policy. Physical CPU availability changes how those workers are
 //! grouped, never their retained allocations or the certified workspace.
@@ -16,7 +19,7 @@ use crate::execute::{
 use crate::{FnxExecutionError, SnapshotGraphView};
 use fnx_algorithms::{ComplexityWitness, GraphView};
 
-use super::native::vector_bytes;
+use super::native::{Arithmetic, vector_bytes};
 
 const PARALLEL_SOURCES: usize = 500;
 const DELTA_WINDOW_BYTES: usize = 64 * 1024 * 1024;
@@ -113,20 +116,121 @@ fn filled<T: Copy, C>(
     Ok(values)
 }
 
+/// One membership directory, shared by every source and worker. This is an
+/// exact decomposition, not a sampled policy choice. A source's nonzero
+/// dependencies cannot leave its undirected component, so its retained row
+/// needs only that component's scalar slots; no target ID is copied per source.
+struct Components {
+    ordinals: Vec<usize>,
+    component_of: Vec<usize>,
+    vertices: Vec<usize>,
+    offsets: Vec<usize>,
+    largest: usize,
+}
+
+impl Components {
+    fn new<C>(
+        graph: &SnapshotGraphView,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<Self, FnxExecutionError<C>> {
+        let n = graph.node_count();
+        let mut ordinals = filled(n, usize::MAX, checkpoint)?;
+        let mut component_of = filled(n, 0usize, checkpoint)?;
+        checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+        let mut vertices = reserve(n)?;
+        checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+        let mut offsets = reserve(n.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?)?;
+        offsets.push(0);
+        let mut largest = 0;
+        let mut arithmetic = Arithmetic::new(checkpoint);
+        for source in 0..n {
+            arithmetic.step()?;
+            if ordinals[source] != usize::MAX {
+                continue;
+            }
+            let start = vertices.len();
+            let component = offsets.len() - 1;
+            ordinals[source] = start;
+            component_of[source] = component;
+            vertices.push(source);
+            let mut head = start;
+            while head < vertices.len() {
+                arithmetic.step()?;
+                let vertex = vertices[head];
+                head += 1;
+                for &neighbor in graph
+                    .neighbors_indices(vertex)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                {
+                    arithmetic.step()?;
+                    let ordinal = ordinals
+                        .get_mut(neighbor)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                    if *ordinal == usize::MAX {
+                        *ordinal = vertices.len();
+                        component_of[neighbor] = component;
+                        vertices.push(neighbor);
+                    }
+                }
+            }
+            largest = largest.max(vertices.len() - start);
+            offsets.push(vertices.len());
+        }
+        arithmetic.finish()?;
+        Ok(Self {
+            ordinals,
+            component_of,
+            vertices,
+            offsets,
+            largest,
+        })
+    }
+
+    fn connected(&self) -> bool {
+        self.offsets.len() == 2
+    }
+
+    fn range(&self, source: usize) -> Option<std::ops::Range<usize>> {
+        let component = *self.component_of.get(source)?;
+        Some(*self.offsets.get(component)?..*self.offsets.get(component + 1)?)
+    }
+
+    fn bytes<C>(&self) -> Result<usize, FnxExecutionError<C>> {
+        vector_bytes(&self.ordinals)?
+            .checked_add(vector_bytes(&self.component_of)?)
+            .and_then(|bytes| {
+                bytes.checked_add(self.vertices.capacity().checked_mul(size_of::<usize>())?)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(self.offsets.capacity().checked_mul(size_of::<usize>())?)
+            })
+            .ok_or(FnxExecutionError::SizeOverflow)
+    }
+}
+
 impl Worker {
     fn new<C>(
         n: usize,
         max_sources: usize,
+        largest_component: usize,
         checkpoint: &mut impl FnxMeter<C>,
     ) -> Result<Self, FnxExecutionError<C>> {
-        let delta_len = n
+        let delta_limit = largest_component
             .checked_mul(max_sources)
             .ok_or(FnxExecutionError::SizeOverflow)?;
         let sigma = filled(n, 0.0, checkpoint)?;
         let distance = filled(n, usize::MAX, checkpoint)?;
         checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
         let queue = reserve(n)?;
-        let deltas = filled(delta_len, 0.0, checkpoint)?;
+        checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+        // Connected sources use the incumbent's contiguous dense fills.
+        // Disconnected sources initialize only their current component rows
+        // during real work, not this reusable window's full upper bound.
+        let deltas = if largest_component == n {
+            filled(delta_limit, 0.0, checkpoint)?
+        } else {
+            reserve(delta_limit)?
+        };
         Ok(Self {
             max_sources,
             first_source: 0,
@@ -157,19 +261,91 @@ impl Worker {
     fn run(
         &mut self,
         graph: &SnapshotGraphView,
+        components: &Components,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<(), WorkerError> {
+        // Connected inputs use the original identity-indexed dense rows.
+        // Specialization removes a directory lookup from every dependency
+        // update on that common path; this does not change arithmetic order.
+        if components.connected() {
+            self.run_components::<true>(graph, components, poll)
+        } else {
+            self.run_components::<false>(graph, components, poll)
+        }
+    }
+
+    fn run_components<const CONNECTED: bool>(
+        &mut self,
+        graph: &SnapshotGraphView,
+        components: &Components,
         poll: &mut dyn FnMut() -> bool,
     ) -> Result<(), WorkerError> {
         let n = graph.node_count();
+        if self.sources > self.max_sources
+            || self
+                .first_source
+                .checked_add(self.sources)
+                .is_none_or(|end| end > n)
+        {
+            return Err(WorkerError::InvalidProjection);
+        }
         let mut live = Live::new(poll);
         self.nodes_touched = 0;
         self.edges_scanned = 0;
         self.queue_peak = 0;
+        if !CONNECTED {
+            self.deltas.clear();
+        }
         for at in 0..self.sources {
             let source = self.first_source + at;
-            let delta = &mut self.deltas[at * n..(at + 1) * n];
-            fill(&mut self.sigma, 0.0, &mut live)?;
-            fill(&mut self.distance, usize::MAX, &mut live)?;
-            fill(delta, 0.0, &mut live)?;
+            let component = if CONNECTED {
+                0..n
+            } else {
+                components
+                    .range(source)
+                    .ok_or(WorkerError::InvalidProjection)?
+            };
+            let start = if CONNECTED {
+                at.checked_mul(n).ok_or(WorkerError::SizeOverflow)?
+            } else {
+                self.deltas.len()
+            };
+            let end = start
+                .checked_add(component.len())
+                .ok_or(WorkerError::SizeOverflow)?;
+            if end > self.deltas.capacity() {
+                return Err(WorkerError::InvalidProjection);
+            }
+            if !CONNECTED {
+                while self.deltas.len() < end {
+                    let count = live.take(end - self.deltas.len())?;
+                    self.deltas.resize(self.deltas.len() + count, 0.0);
+                }
+            }
+            let delta = &mut self.deltas[start..end];
+            let delta_index = |vertex| {
+                if CONNECTED {
+                    vertex
+                } else {
+                    components.ordinals[vertex] - component.start
+                }
+            };
+            if CONNECTED {
+                // Every vertex is reachable. Preserve the incumbent's streaming
+                // initialization and keep these stores out of the BFS hot loop.
+                fill(&mut self.sigma, 0.0, &mut live)?;
+                fill(&mut self.distance, usize::MAX, &mut live)?;
+                fill(delta, 0.0, &mut live)?;
+            } else {
+                // The previous BFS queue is exactly the set whose distances
+                // need resetting, including across result windows. Counts are
+                // overwritten on discovery; the dependency row was initialized
+                // above and cannot retain a prior component's values.
+                for &vertex in &self.queue {
+                    live.step()?;
+                    self.distance[vertex] = usize::MAX;
+                }
+            }
             live.step()?;
             self.queue.clear();
             self.sigma[source] = 1.0;
@@ -193,6 +369,9 @@ impl Worker {
                     for &neighbor in admitted {
                         if self.distance[neighbor] == usize::MAX {
                             self.distance[neighbor] = next_distance;
+                            if !CONNECTED {
+                                self.sigma[neighbor] = 0.0;
+                            }
                             self.queue.push(neighbor);
                             self.queue_peak = self.queue_peak.max(self.queue.len() - head);
                         }
@@ -227,12 +406,12 @@ impl Worker {
                     // dependency is excluded and never propagates further.
                     // Keep the level-one vertex's own dependency untouched.
                     if vertex == source {
-                        delta[vertex] = 0.0;
+                        delta[delta_index(vertex)] = 0.0;
                     }
                     continue;
                 }
                 let sigma_vertex = self.sigma[vertex];
-                let delta_vertex = delta[vertex];
+                let delta_vertex = delta[delta_index(vertex)];
                 if sigma_vertex > 0.0 {
                     let previous_distance = self.distance[vertex] - 1;
                     let mut row = graph
@@ -245,7 +424,7 @@ impl Worker {
                             if self.distance[predecessor] == previous_distance {
                                 // Preserve division then multiplication. A
                                 // hoisted reciprocal changes canonical bits.
-                                delta[predecessor] +=
+                                delta[delta_index(predecessor)] +=
                                     (self.sigma[predecessor] / sigma_vertex) * (1.0 + delta_vertex);
                             }
                         }
@@ -320,10 +499,12 @@ fn run_with_schedule<C>(
         ));
     }
 
+    let components = Components::new(graph, checkpoint)?;
     let window = window.clamp(1, n);
     // Retain the same logical layout even when one CPU executes every source.
-    // The window contains useful result slots only: small graphs do not pad
-    // their deltas to 64 MiB. Physical scheduling never changes this capacity.
+    // Source rows share component target IDs and hold only scalar values.
+    // The existing n-wide window bound therefore remains conservative, and
+    // small components shrink the reserved backing without changing scheduling.
     let logical_workers = window.min(MAX_GATHER_THREADS);
     let threads = threads.clamp(1, MAX_GATHER_THREADS).min(logical_workers);
     checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
@@ -332,10 +513,12 @@ fn run_with_schedule<C>(
         // Divide the bounded result window exactly: rounding every worker's
         // allotment upward would exceed the advertised aggregate delta bound.
         let sources = window / logical_workers + usize::from(worker < window % logical_workers);
-        workers.push(Worker::new(n, sources, checkpoint)?);
+        workers.push(Worker::new(n, sources, components.largest, checkpoint)?);
     }
+    let component_bytes = components.bytes::<C>()?;
     let mut workspace = vector_bytes(&scores)?
         .checked_add(vector_bytes(&workers)?)
+        .and_then(|bytes| bytes.checked_add(component_bytes))
         .ok_or(FnxExecutionError::SizeOverflow)?;
     for worker in &workers {
         workspace = workspace
@@ -364,7 +547,7 @@ fn run_with_schedule<C>(
             checkpoint,
             |_, workers, poll| {
                 for worker in workers {
-                    worker.error = worker.run(graph, poll).err();
+                    worker.error = worker.run(graph, &components, poll).err();
                     if worker.error.is_some() {
                         break;
                     }
@@ -373,8 +556,10 @@ fn run_with_schedule<C>(
         )?;
 
         // Both within and across windows, this is exactly source 0..n.
-        // Independent targets may vectorize; each target's source additions
-        // must retain their order. Poll at most 4096 additions apart.
+        // Each target's source additions retain their order. The shared member
+        // directory may visit distinct targets in discovery order, but never
+        // reorders any target's additions. Connected graphs keep contiguous
+        // identity-indexed rows. Poll at most 4096 additions apart.
         let mut remaining = 0;
         for worker in &workers[..active] {
             if let Some(error) = worker.error {
@@ -386,22 +571,50 @@ fn run_with_schedule<C>(
                     }
                 });
             }
-            for delta in worker.deltas[..worker.sources * n].chunks_exact(n) {
+            let mut consumed = 0usize;
+            for source in worker.first_source..worker.first_source + worker.sources {
+                let component = if components.connected() {
+                    0..n
+                } else {
+                    components
+                        .range(source)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                };
+                let end = consumed
+                    .checked_add(component.len())
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                let delta = worker
+                    .deltas
+                    .get(consumed..end)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
                 let mut low = 0;
-                while low < n {
+                while low < delta.len() {
                     if remaining == 0 {
                         checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
                         remaining = ARITHMETIC_RUN;
                     }
-                    let count = remaining.min(n - low);
+                    let count = remaining.min(delta.len() - low);
                     let high = low + count;
-                    for (score, contribution) in scores[low..high].iter_mut().zip(&delta[low..high])
-                    {
-                        *score += *contribution;
+                    if components.connected() {
+                        for (score, contribution) in
+                            scores[low..high].iter_mut().zip(&delta[low..high])
+                        {
+                            *score += *contribution;
+                        }
+                    } else {
+                        let vertices =
+                            &components.vertices[component.start + low..component.start + high];
+                        for (&vertex, &contribution) in vertices.iter().zip(&delta[low..high]) {
+                            scores[vertex] += contribution;
+                        }
                     }
                     remaining -= count;
                     low = high;
                 }
+                consumed = end;
+            }
+            if !components.connected() && consumed != worker.deltas.len() {
+                return Err(FnxExecutionError::InvalidUpstreamResult);
             }
             witness.nodes_touched = witness
                 .nodes_touched
