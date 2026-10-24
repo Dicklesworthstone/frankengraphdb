@@ -3377,13 +3377,16 @@ impl<V: Vfs + Clone> Database<V> {
     /// A post-D2 publication failure leaves the retained writer and snapshot
     /// deliberately fenced, while an interrupted D2 leaves the coordinator
     /// unable to decide whether its marker committed. Both cases need the
-    /// ordinary open path: it re-reads Chronicle, authenticates or repairs the
-    /// published root, and constructs a fresh derived snapshot. Consuming
+    /// full-fold open path: it re-reads every capsule in the retained Chronicle
+    /// chain and constructs a fresh derived snapshot. A selected materialized
+    /// root alone cannot discharge a recovery obligation raised by scrub:
+    /// its rows may still be intact while a retained source capsule is lost.
+    /// Consuming
     /// `self` is load-bearing because dropping its coordinator releases the
     /// exclusive writer lease before [`Database::open`] acquires a new one.
     ///
     /// A healthy handle is returned unchanged. Recovery failure consumes the
-    /// old handle and returns the exact [`OpenError`] from authoritative open;
+    /// old handle and returns the exact [`OpenError`] from full-fold open;
     /// it never falls back to the fenced snapshot or claims rollback.
     pub async fn recover_authoritatively(self, cx: &CommitCx) -> Result<Self, OpenError> {
         match self.state {
@@ -3395,7 +3398,8 @@ impl<V: Vfs + Clone> Database<V> {
                 let vfs = self.vfs.clone();
                 let read_caches = Arc::clone(&self.snapshot.read_caches);
                 drop(self);
-                let mut recovered = Self::open_with_vfs(cx, vfs, path, keys).await?;
+                require_database_dir(cx, &vfs, &path).await?;
+                let mut recovered = Self::bind_with_vfs(cx, vfs, &path, keys, true).await?;
                 // The served/embedded owner keeps its explicit retention
                 // policy across recovery. Entries still require the exact
                 // snapshot allocation, so none can serve the rebuilt source.

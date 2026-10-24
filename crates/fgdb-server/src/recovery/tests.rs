@@ -471,10 +471,14 @@ fn host_scrub_loss_fences_pinned_readers_and_uses_authoritative_recovery() {
             ))
         ));
         drop(admitted);
-        assert!(matches!(
-            settled(db).await,
-            DatabaseStatus::Fenced { generation: 2, .. }
-        ));
+        let recovered_status = settled(db).await;
+        assert!(
+            matches!(
+                recovered_status,
+                DatabaseStatus::Fenced { generation: 2, .. }
+            ),
+            "lost retained capsule must prevent serving the intact materialized root: {recovered_status:?}"
+        );
         std::fs::write(capsule, intact).unwrap();
         assert!(matches!(
             server.scrub_database(&root, "test").await,
