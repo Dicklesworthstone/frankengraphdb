@@ -365,7 +365,7 @@ Twelve tasks were created only through `br`, as children of the existing bridge:
 | `.31` | Current delta V3/vertex V4/property V3 field/version registry and decoder-floor crosswalk | Related existing FGPK task `.11` |
 | `.32` | Preserved-byte, hostile-reader, crash/rebuild/compaction compatibility proof | Blocks on `.31` |
 | `.33` | P0: retain and qualify the landed ctutils 0.4.5 repair on its existing path | Policy now passes; remaining full acceptance, no new edge or exemption |
-| `.34` | P0: independently verify all-feature dependency and protected crypto-consumer acceptance | Blocks on `.33` |
+| `.34` | P0: independently verify all-feature dependency and protected crypto-consumer acceptance | Related to `.33`; landed patch makes remaining verification actionable now |
 
 The existing parent and `.13`, `.16`, `.17`, `.19`, `.20`, `.21`, `.22` were refined
 with current evidence and corrected acceptance boundaries. No issue was closed.
