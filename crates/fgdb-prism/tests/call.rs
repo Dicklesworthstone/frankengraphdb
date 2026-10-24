@@ -61,7 +61,7 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 13);
+    assert_eq!(FnxSignatureRegistry::version(), 14);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 16);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -145,18 +145,15 @@ fn cdlp_binds_required_nonnegative_iterations_without_losing_call_identity() {
             FnxCallSpec::bind("CALL fnx.cdlp(max_iter => $steps)", &parameters).unwrap(),
             call
         );
-        assert!(!call.supports_sealed_execution());
+        // The sealed CDLP executor is covered by the independent identity
+        // oracle, pinned Graphalytics outputs and public history/refusal laws.
+        assert!(call.supports_sealed_execution());
         for direction in [
             Directedness::Directed,
             Directedness::Reversed,
             Directedness::Undirected,
         ] {
-            assert!(matches!(
-                call.validate_sealed_projection(direction),
-                Err(FnxSealedExecutionError::UnsupportedAlgorithm(
-                    FnxAlgorithm::Cdlp { .. }
-                ))
-            ));
+            assert!(call.validate_sealed_projection(direction).is_ok());
         }
     }
     assert_ne!(FnxCallSpec::cdlp(0).digest(), FnxCallSpec::cdlp(1).digest());

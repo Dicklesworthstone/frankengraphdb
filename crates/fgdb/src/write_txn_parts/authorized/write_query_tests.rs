@@ -322,7 +322,12 @@ fn original_native_record_row_work_and_scratch_ceilings_cover_both_phases() {
             .unwrap();
         let records = write.selection.snapshot_records + read.rows.snapshot_records;
         let rows = write.selection.result_rows + read.rows.result_rows;
-        assert_eq!((records, rows), (4, 3)); // independent two-source/one-update witness
+        // The equality index admits only the one p=10 mutation candidate;
+        // the staged read still admits both visible vertices. The tighter
+        // three-record boundary below must cover their cumulative usage.
+        assert_eq!(write.selection.snapshot_records, 1);
+        assert_eq!(read.rows.snapshot_records, 2);
+        assert_eq!((records, rows), (3, 3));
         let work = write.evaluator.work_units + read.evaluator.work_units;
         let scratch = write.evaluator.scratch_entries + read.evaluator.scratch_entries;
         for dimension in 0..4 {

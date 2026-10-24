@@ -619,6 +619,21 @@ fn late_second_endpoint_failure_and_signed_work_refusal_publish_no_changes() {
                 session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
             let text = format!("MATCH (n) RETURN 100 / (n.p - 9) AS x{suffix}");
             let prepared = scoped.prepare(&cx, &text, &params).unwrap();
+            // A property-only source cannot keep eager source-row ordinals
+            // in an identity-ordered pull. Preserve its early typed refusal.
+            assert!(matches!(
+                scoped.visit_difference(&cx, &prepared, &params, cuts[0], cuts[1], |_, _| ready(Ok(()))),
+                Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::StreamingUnsupported { .. })
+            ));
+            assert_eq!(scoped.scratch.stats().published_runs, 0);
+            assert_eq!(scoped.destination.stats().published_runs, 0);
+            assert!(!scoped.is_closed());
+            // Leading identity makes the source's canonical order exactly
+            // the pull order. The second endpoint must reach its real late
+            // arithmetic failure, even when the public page is empty.
+            let text = format!("MATCH (n) RETURN n AS id, 100 / (n.p - 9) AS x{suffix}");
+            let prepared = scoped.prepare(&cx, &text, &params).unwrap();
             let calls = AtomicU64::new(0);
             let outcome = scoped
                 .visit_difference(&cx, &prepared, &params, cuts[0], cuts[1], |_, _| {

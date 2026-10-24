@@ -329,7 +329,7 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
             bound(&[(1, 20, 7), (20, 9, 8), (1, 2, 9)]).into(),
         ])
         .unwrap();
-        for edge_limit in [2, 3] {
+        for (edge_limit, record_limit) in [(2, 5), (3, 4), (3, 5)] {
             let mut db = fixture(&commit, true).await;
             let before = (
                 db.frontier().unwrap(),
@@ -337,7 +337,7 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
                 db.edges().unwrap(),
             );
             let policy = GraphWriteProgramPolicy::new(
-                GqlQueryPolicy::new(7, 100, 1_000_000, 100_000),
+                GqlQueryPolicy::new(record_limit, 100, 1_000_000, 100_000),
                 1,
                 1,
                 edge_limit,
@@ -355,16 +355,28 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
                     || NOW,
                 )
                 .await;
-            if edge_limit == 2 {
-                assert!(matches!(
-                    result,
-                    Err(GraphWriteProgramError::CreationBudget {
-                        statement: 2,
-                        dimension: GraphInsertLimitDimension::Edges,
-                        limit: 2,
-                        observed: 3,
-                    })
-                ));
+            if edge_limit == 2 || record_limit == 4 {
+                if record_limit == 4 {
+                    // One indexed mutation candidate leaves three records;
+                    // the four-vertex overlay must refuse without effects.
+                    assert!(matches!(result,
+                        Err(GraphWriteProgramError::Insert {
+                            statement: 2,
+                            source: GqlQueryError::Rows(error),
+                        }) if error.dimension == GqlBudgetDimension::SnapshotRecords
+                            && error.limit == 3 && error.observed == 4
+                    ));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(GraphWriteProgramError::CreationBudget {
+                            statement: 2,
+                            dimension: GraphInsertLimitDimension::Edges,
+                            limit: 2,
+                            observed: 3,
+                        })
+                    ));
+                }
                 assert_eq!(
                     (
                         db.frontier().unwrap(),
@@ -386,8 +398,8 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
                     (1, 1, 3)
                 );
                 assert_eq!(
-                    stats.selection.snapshot_records, 7,
-                    "three basis vertices then four overlay vertices, each admitted once"
+                    stats.selection.snapshot_records, 5,
+                    "one indexed mutation candidate then four overlay vertices, each admitted once"
                 );
                 let created = receipt.steps()[1].created_vertices().unwrap()[0];
                 assert_eq!(
