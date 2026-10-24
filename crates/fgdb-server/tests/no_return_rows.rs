@@ -206,13 +206,9 @@ fn weighted_relationship_action_imports_and_updates_keep_zero_row_wire_contract(
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
         let initial = state(cx, &mut observer).await;
         assert!(initial.0.rows.is_empty() && initial.1.rows.is_empty());
-        assert_eq!(
-            initial.0.outcome,
-            Outcome::ReadClosed {
-                seq: 0,
-                statements: 1
-            }
-        );
+        // state() issues an ordinary read. An empty answer still has the
+        // Rows outcome; ReadClosed belongs to no-effect write completion.
+        assert_eq!(initial.0.outcome, Outcome::Rows { seq: 0 });
         let statement = "UNWIND $rows AS row MERGE (a:Person {name:row.s}) \
             MERGE (b:Person {name:row.d}) MERGE (a)-[r:KNOWS]->(b) \
             ON CREATE SET r.age=row.w ON MATCH SET r.age=row.w";

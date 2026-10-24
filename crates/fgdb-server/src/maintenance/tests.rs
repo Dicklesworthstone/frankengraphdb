@@ -4,7 +4,9 @@ use super::*;
 use crate::recovery::tests::{WakeCounter, served, vertex};
 use crate::{DatabaseStatus, ServerLimits};
 use asupersync::Budget;
-use asupersync::lab::run_async_under_lab;
+use asupersync::lab::{
+    AutoAdvanceTermination, LabConfig, LabRunReport, LabRuntime, lab_test_config_from_env,
+};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::CancelKind;
@@ -12,6 +14,55 @@ use fgdb_types::{CommitSeq, PurposeContexts, VId};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
+
+// The pinned run_async_under_lab helper drives run_until_quiescent, which
+// never advances virtual time. Timed cases use the foundation's actual
+// auto-advance driver, with the same replay overrides and complete verdict.
+fn run_timed_under_lab<F, Fut>(seed: u64, task: F) -> LabRunReport
+where
+    F: FnOnce(asupersync::Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let config = lab_test_config_from_env(LabConfig::new(seed).with_auto_advance());
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (id, mut handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            task(asupersync::Cx::current().expect("lab task has its current Cx")).await;
+        })
+        .expect("timed lab task spawns");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(id, Budget::INFINITE.priority);
+    let timed = runtime.run_with_auto_advance();
+    let report = runtime.report();
+    let output = handle.try_join();
+    if !matches!(timed.termination, AutoAdvanceTermination::Quiescent)
+        || !report.lab_test_passed()
+        || !matches!(output, Ok(Some(())))
+    {
+        let detail = format!("timed lab failed: {timed:?}; root={output:?}; {report:?}");
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("timed maintenance")
+            .to_owned();
+        let artifact = runtime.write_auto_crashpack_for_panic(&name, &report, &detail);
+        panic!("{detail}; crashpack={artifact:?}");
+    }
+    report
+}
+
+#[test]
+fn timed_lab_driver_refuses_a_root_that_never_finishes() {
+    assert!(
+        std::panic::catch_unwind(|| {
+            run_timed_under_lab(0x79a0_0022, |_| core::future::pending());
+        })
+        .is_err()
+    );
+}
 
 #[test]
 fn intervals_and_absolute_deadlines_refuse_zero_and_overflow() {
@@ -106,7 +157,7 @@ fn idle_wait_is_woken_by_drain_or_direct_context_cancellation() {
 
 #[test]
 fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
-    let ((), report) = run_async_under_lab(0x79a0_0020, |root| async move {
+    let report = run_timed_under_lab(0x79a0_0020, |root| async move {
         let (server, token, path) = served(&root, "periodic-maintenance").await;
         let database = &server.databases["test"];
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -206,7 +257,7 @@ fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
 
 #[test]
 fn drain_finishes_an_admitted_operation_and_starts_no_second_operation() {
-    let ((), report) = run_async_under_lab(0x79a0_0021, |root| async move {
+    let report = run_timed_under_lab(0x79a0_0021, |root| async move {
         let (server, _, _) = served(&root, "periodic-maintenance-drain").await;
         let database = &server.databases["test"];
         let held = database.db.write(&root).await.unwrap();
