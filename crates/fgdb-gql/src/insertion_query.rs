@@ -140,6 +140,97 @@ impl GraphInsertQueryBatch {
     }
 }
 
+/// An admitted CREATE occurrence bag whose result expressions have not run.
+/// The insertion and output remain private to the host's rollback workspace.
+/// Stage the complete insertion before evaluating `output` with a reader over
+/// that workspace; never publish either part until the statement succeeds.
+#[derive(Debug)]
+pub struct GraphInsertQueryCollection<'query> {
+    insertion: GraphInsertBatch,
+    output: GraphInsertQueryOutput<'query>,
+}
+
+impl<'query> GraphInsertQueryCollection<'query> {
+    #[must_use]
+    pub fn into_parts(self) -> (GraphInsertBatch, GraphInsertQueryOutput<'query>) {
+        (self.insertion, self.output)
+    }
+}
+
+/// The output phase is bound to its original prepared query, occurrence bag
+/// and cumulative allowance. It cannot be reused with another definition or
+/// reset the creation prefix. Its element reader must observe the complete
+/// CREATE staged privately over the same frozen input snapshot.
+#[derive(Debug)]
+pub struct GraphInsertQueryOutput<'query> {
+    query: &'query PreparedGraphInsertQuery,
+    policy: GqlQueryPolicy,
+    input: GqlQueryExecution<GraphValueRow>,
+}
+
+impl GraphInsertQueryOutput<'_> {
+    /// Evaluate the complete RETURN/WITH head, grouping and row tail after
+    /// private staging. The trusted host owns point-read dependencies,
+    /// authorization and rollback if any output expression or budget fails.
+    /// Result paging cannot suppress expression evaluation or creation.
+    pub fn finish_governed_reading<E, C>(
+        self,
+        mut elements: impl FnMut(
+            ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.finish(
+            &mut |element, key| Some(elements(element, key)),
+            &mut checkpoint,
+        )
+    }
+
+    fn finish<E, C>(
+        self,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
+        mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        let query = self.query;
+        let mut returning = self.input;
+        if let Some(grouping) = &query.grouping {
+            returning = crate::set_ops::finish_owned_aggregate_reading(
+                returning,
+                self.policy,
+                grouping,
+                elements,
+                &mut checkpoint,
+            )?;
+        }
+        let head = if query.tail.is_some() {
+            crate::set_ops::owned_head_policy(self.policy)
+        } else {
+            self.policy
+        };
+        let returning = crate::set_ops::finish_owned_projection_reading(
+            returning,
+            head,
+            &query.projection,
+            query.quantifier,
+            &query.order,
+            (query.offset, query.count),
+            elements,
+            &mut checkpoint,
+        )?;
+        match &query.tail {
+            None => Ok(returning),
+            Some(tail) => crate::set_ops::finish_owned_tail_reading(
+                returning,
+                tail,
+                self.policy,
+                elements,
+                checkpoint,
+            ),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphInsertQuery {
     insertion: PreparedGraphInsert,
@@ -427,6 +518,34 @@ impl PreparedGraphInsertQuery {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        let collection =
+            self.collect_governed_over(rows, policy, source, allocate, &mut checkpoint)?;
+        let (insertion, output) = collection.into_parts();
+        // A pure proposal has not staged its created identities. Preserve a
+        // typed refusal for graph point reads instead of reading them as
+        // missing from the pre-CREATE source and inventing NULL results.
+        let returning = output
+            .finish(&mut crate::set_ops::no_element_reads, &mut checkpoint)
+            .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+        Ok(GraphInsertQueryBatch {
+            insertion,
+            returning,
+        })
+    }
+
+    /// Freeze selection and creation payloads, admit the whole creation bag,
+    /// then allocate its identities. The returned output retains this query
+    /// and the spent allowance. Hosts stage the original intents atomically
+    /// in a private rollback workspace before finishing computed output reads;
+    /// no later occurrence may affect this phase's source selection.
+    pub fn collect_governed_over<E, A, C>(
+        &self,
+        rows: Option<Vec<GraphValueRow>>,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertQueryCollection<'_>, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
         // Every engine below (creation, aggregate, ordering, tail) sees one
         // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
         let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
@@ -450,46 +569,18 @@ impl PreparedGraphInsertQuery {
             )
             .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
         let prefix = insertion.stats();
-        let mut returning = GqlQueryExecution {
+        let input = GqlQueryExecution {
             value,
             rows: prefix.selection,
             evaluator: prefix.evaluator,
         };
-        if let Some(grouping) = &self.grouping {
-            returning = crate::set_ops::finish_owned_aggregate(
-                returning,
-                policy.query,
-                grouping,
-                &mut checkpoint,
-            )
-            .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
-        }
-        // A WITH head's rows are private input to its tail.
-        let head = if self.tail.is_some() {
-            crate::set_ops::owned_head_policy(policy.query)
-        } else {
-            policy.query
-        };
-        let returning = crate::set_ops::finish_owned_projection(
-            returning,
-            head,
-            &self.projection,
-            self.quantifier,
-            &self.order,
-            (self.offset, self.count),
-            &mut checkpoint,
-        )
-        .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
-        let returning = match &self.tail {
-            None => returning,
-            Some(tail) => {
-                crate::set_ops::finish_owned_tail(returning, tail, policy.query, checkpoint)
-                    .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?
-            }
-        };
-        Ok(GraphInsertQueryBatch {
+        Ok(GraphInsertQueryCollection {
             insertion,
-            returning,
+            output: GraphInsertQueryOutput {
+                query: self,
+                policy: policy.query,
+                input,
+            },
         })
     }
 

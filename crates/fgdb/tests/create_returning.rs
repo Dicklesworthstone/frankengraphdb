@@ -1,5 +1,7 @@
-//! CREATE RETURN is one ordinary write operation: admit the complete result,
-//! stage once, and expose autocommit rows only after durable completion.
+//! CREATE RETURN stages its complete occurrence bag privately before computed
+//! output reads, and exposes autocommit rows only after durable completion.
+
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, IdentityPermutation, MemVfs, WriteBatch, WriteTxnError};
@@ -7,8 +9,8 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphInsertQueryError, GraphSymbol,
-    GraphSymbolKind, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphInsertQueryError,
+    GraphSymbol, GraphSymbolKind, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
@@ -303,6 +305,44 @@ fn a_with_after_create_filters_pages_and_aggregates_the_created_rows() {
                 4,
                 0,
             ),
+            (
+                "UNWIND [3,1,3] AS x CREATE (n:Copy {p:x}) \
+                 RETURN DISTINCT [v IN [n] | v.p][0] AS p ORDER BY p",
+                vec![vec![int(1)], vec![int(3)]],
+                3,
+                0,
+            ),
+            (
+                "CREATE (a:Copy {p:4})-[e:R {p:9}]->(b:Copy {p:5}) \
+                 RETURN [v IN [a,b] | v.p][1] AS p, [r IN [e] | r.p][0] AS ep",
+                vec![vec![int(5), int(9)]],
+                2,
+                1,
+            ),
+            (
+                "UNWIND [2,3,4] AS x CREATE (n:Copy {p:x}) \
+                 RETURN sum([v IN [n] | v.p][0]) AS total",
+                vec![vec![int(9)]],
+                3,
+                0,
+            ),
+            (
+                "UNWIND [1,2,3] AS x CREATE (n:Copy {p:x}) \
+                 WITH collect(n) AS ns RETURN [v IN ns | v.p] AS values",
+                vec![vec![GraphValue::List(
+                    vec![int(1), int(2), int(3)].into_boxed_slice(),
+                )]],
+                3,
+                0,
+            ),
+            (
+                "UNWIND [1,2,3] AS x CREATE (n:Copy {p:x}) \
+                 WITH [n] AS ns WHERE [v IN ns | v.p][0] > 1 \
+                 RETURN [v IN ns | v.p][0] AS p ORDER BY p",
+                vec![vec![int(2)], vec![int(3)]],
+                3,
+                0,
+            ),
         ] {
             let (stats, rows, completion) = db
                 .execute_graph_insert_query_autocommit_engine_governed(
@@ -360,6 +400,18 @@ fn return_expression_and_final_row_budget_failures_preserve_the_outer_prefix() {
             ),
             (
                 "UNWIND [2,0] AS x CREATE (n:Copy {p:x}) RETURN 10/n.p AS q LIMIT 0",
+                0,
+                true,
+            ),
+            (
+                "UNWIND [2,0] AS x CREATE (n:Copy {p:x}) \
+                 RETURN [v IN [n] | 10/v.p][0] AS q LIMIT 0",
+                0,
+                true,
+            ),
+            (
+                "UNWIND [2,0] AS x CREATE (n:Copy {p:x}) \
+                 WITH collect(n) AS ns RETURN [v IN ns | 10/v.p] AS values LIMIT 0",
                 0,
                 true,
             ),
@@ -531,8 +583,10 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
         let txcx = contexts.txn();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let before = db.frontier().unwrap();
-        let definition =
-            query("UNWIND [2,1] AS x CREATE (n:Copy {p:x}) RETURN n.p AS p,n ORDER BY p");
+        let definition = query(
+            "UNWIND [2,1] AS x CREATE (n:Copy {p:x}) \
+             RETURN [v IN [n] | v.p][0] AS p,n ORDER BY p",
+        );
         let prefix = || {
             let mut batch = WriteBatch::new(R);
             batch.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(99))]);
@@ -595,6 +649,230 @@ fn every_query_checkpoint_before_acceptance_preserves_existing_staged_work() {
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.vertices().unwrap().len(), 3);
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_output_sees_the_complete_creation_bag_and_prior_overlay() {
+    let ((), report) = run_async_under_lab(0xc8e7_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(12))]);
+        transaction.write(&mut db, prefix).unwrap();
+        // The first occurrence reads an identity created by the *last*
+        // occurrence, as well as an earlier transaction-local creation.
+        let definition = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+            "UNWIND [7,9] AS x CREATE (n:Copy {p:x}) \
+             RETURN [v IN $refs | v.p] AS values",
+            R,
+            &[("refs", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_list(
+                    "refs",
+                    vec![GraphValue::Vertex(VId(110)), GraphValue::Vertex(VId(99))],
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let (stats, output) = transaction
+            .execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                policy(2, 2, 0),
+                allocate,
+            )
+            .unwrap();
+        let expected = GraphValueRow::from_owned_values(vec![GraphValue::List(
+            vec![int(9), int(12)].into_boxed_slice(),
+        )]);
+        assert_eq!(output.value, vec![expected.clone(), expected]);
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(output.rows.snapshot_records, 0);
+        assert!(output.evaluator.work_units > stats.evaluator.work_units);
+        assert!(db.vertices().unwrap().is_empty());
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_output_budgets_continue_creation_and_restore_the_outer_prefix() {
+    let ((), report) = run_async_under_lab(0xc8e7_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let definition = query(
+            "UNWIND [3,1,2] AS x CREATE (n:Copy {p:x}) \
+             WITH collect(n) AS ns RETURN [v IN ns | v.p] AS values",
+        );
+        let mut baseline = db.begin(&txcx).unwrap();
+        let (creation, expected) = baseline
+            .execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                policy(1, 3, 0),
+                allocate,
+            )
+            .unwrap();
+        assert!(expected.evaluator.work_units > creation.evaluator.work_units);
+        assert!(expected.evaluator.scratch_entries > creation.evaluator.scratch_entries);
+        baseline.abort();
+        for budget in [
+            GqlQueryPolicy::new(0, 1, expected.evaluator.work_units - 1, 2_000_000),
+            GqlQueryPolicy::new(0, 1, 5_000_000, expected.evaluator.scratch_entries - 1),
+        ] {
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(12))]);
+            transaction.write(&mut db, prefix).unwrap();
+            let digest = transaction.staged_effect_digest().unwrap();
+            let failure = transaction.execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                GraphInsertPolicy::new(budget, 3, 0),
+                allocate,
+            );
+            assert!(
+                matches!(failure, Err(GqlQueryError::Evaluator(_))),
+                "{failure:?}"
+            );
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+            transaction.abort();
+        }
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_output_point_dependencies_survive_success_and_statement_rollback() {
+    let ((), report) = run_async_under_lab(0xc8e7_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        for fail_output in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(12))]);
+            db.write(&commit, seed).await.unwrap();
+            let text = if fail_output {
+                "CREATE (n:Copy {p:1}) RETURN [v IN $refs | v.p][0] AS p, 1/0 AS failure"
+            } else {
+                "CREATE (n:Copy {p:1}) RETURN [v IN $refs | v.p][0] AS p"
+            };
+            let definition = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+                text,
+                R,
+                &[("refs", GqlParameterType::List)],
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_list("refs", vec![GraphValue::Vertex(VId(99))])
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(98), vec![], vec![]);
+            transaction.write(&mut db, prefix).unwrap();
+            let result = transaction.execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                policy(1, 1, 0),
+                allocate,
+            );
+            assert_eq!(result.is_err(), fail_output, "{result:?}");
+            if let Ok((_, rows)) = result {
+                assert_eq!(rows.value[0].values(), &[int(12)]);
+            }
+            let mut winner = WriteBatch::new(R);
+            winner.set_vertex_property(VId(99), P, Some(CanonicalScalar::Int(13)));
+            db.write(&commit, winner).await.unwrap();
+            assert!(matches!(
+                transaction.commit(&mut db, &commit).await,
+                Err(WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
+            assert_eq!(db.vertices().unwrap().len(), 1);
+            assert!(db.vertex(VId(98)).unwrap().is_none());
+            assert!(db.vertex(VId(100)).unwrap().is_none());
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn pure_proposal_does_not_read_created_identities_from_a_precreation_source() {
+    let definition = query("CREATE (n:Copy {p:7}) RETURN [v IN [n] | v.p][0] AS p");
+    let result = definition.execute_governed(
+        policy(1, 1, 0),
+        |_, _| -> Result<_, GqlQueryError<(), ()>> { panic!("standalone CREATE has no source") },
+        allocate,
+        || Ok(()),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(GqlQueryError::Source(GraphInsertQueryError::Returning(_)))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn computed_private_with_feeds_later_native_create_and_set_steps() {
+    let ((), report) = run_async_under_lab(0xc8e7_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        for (text, created, expected) in [
+            (
+                "CREATE (a:Copy {p:7}) WITH a, [v IN [a] | v.p][0] AS old \
+                 CREATE (b:Copy {p:old+1}) RETURN [v IN [a,b] | v.p] AS values",
+                2,
+                GraphValue::List(vec![int(7), int(8)].into_boxed_slice()),
+            ),
+            (
+                "CREATE (a:Copy {p:7}) WITH a, [a][0] AS b, [v IN [a] | v.p][0] AS old \
+                 SET a.p=b.p+old RETURN a.p AS total",
+                1,
+                int(14),
+            ),
+        ] {
+            let chain = fgdb_gql::PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .expect(text)
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let (stats, rows, _) = transaction
+                .execute_graph_write_chain_engine_governed(&mut db, &cx, &chain, policy(1, 2, 0))
+                .expect(text);
+            assert_eq!(stats.created_vertices, created);
+            assert_eq!(rows.value[0].values(), &[expected]);
+            transaction.finish(&mut db, &commit).await.unwrap();
+        }
+        assert_eq!(db.vertices().unwrap().len(), 3);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

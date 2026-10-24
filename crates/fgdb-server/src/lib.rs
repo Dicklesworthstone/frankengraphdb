@@ -180,6 +180,9 @@ pub struct DatabaseConfig {
     /// The native mutation coordinate (the CLI's `--write-relation`).
     pub write_relation: RelationId,
     pub query_policy: GqlQueryPolicy,
+    /// Retained read-acceleration budgets for this served database. Other
+    /// databases have independent owners; recovery preserves this policy.
+    pub read_cache_limits: fgdb::ReadCacheLimits,
     pub write_policy: GraphWriteProgramPolicy,
     /// Host ceiling on expanded statements per write program.
     pub max_statements: usize,
@@ -209,6 +212,7 @@ impl DatabaseConfig {
             symbols: Symbols::new(),
             write_relation: RelationId(1),
             query_policy,
+            read_cache_limits: fgdb::ReadCacheLimits::default(),
             write_policy: GraphWriteProgramPolicy::new(query_policy, 100_000, 100_000, 100_000),
             max_statements: 64,
             max_subscriptions: 64,
@@ -269,6 +273,7 @@ pub enum ServerError {
     DuplicateDatabase(String),
     InvalidDatabaseName,
     Open(fgdb::OpenError),
+    ReadCache(Box<asupersync::error::Error>),
     Issuer(fgdb_warden::Error),
     OrderedScratch(std::io::Error),
     Spawn,
@@ -283,6 +288,7 @@ impl core::fmt::Display for ServerError {
                 f.write_str("a database name must be 1..=128 bytes of [A-Za-z0-9_.-]")
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
+            Self::ReadCache(error) => write!(f, "cannot configure read-cache retention: {error}"),
             Self::Issuer(error) => write!(f, "invalid issuer: {error}"),
             Self::OrderedScratch(error) => write!(f, "cannot configure ordered scratch: {error}"),
             Self::Spawn => f.write_str("the runtime refused to spawn a connection task"),
@@ -464,6 +470,8 @@ impl Server {
         let db = Database::open(&contexts.commit(), path, config.keys)
             .await
             .map_err(ServerError::Open)?;
+        db.set_read_cache_limits(&contexts.query(), config.read_cache_limits)
+            .map_err(ServerError::ReadCache)?;
         let mut incarnation_input = b"fgdb-server:incarnation:v1".to_vec();
         incarnation_input.extend_from_slice(&namespace);
         let incarnation = fgdb_crypto::keyed_hash(&self.secret, &incarnation_input).0;
@@ -513,6 +521,21 @@ impl Server {
         self.databases
             .get(name)
             .map(|database| database.db.status())
+    }
+
+    /// Inspect retained read-cache bytes and limits beside lifecycle status.
+    /// This is a trusted-host diagnostic, never a capability-holder endpoint.
+    /// Admission pins the current served owner, including after recovery;
+    /// unknown, unavailable or cancelled admissions return `None`.
+    pub async fn database_read_cache_status(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Option<fgdb::ReadCacheStatus> {
+        let database = self.databases.get(name)?;
+        let (view, _) = database.db.read_view(cx).await.ok()?;
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        view.read_cache_status(&contexts.query()).ok()
     }
 
     /// Consolidate a served database without relinquishing its writer lease

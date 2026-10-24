@@ -602,6 +602,69 @@ impl<V: Vfs + Clone> Database<V> {
                             frozen.as_mut(),
                         )?;
                         (stats, returning, 0)
+                    } else if let GraphWriteChainStep::Query(query) = statement {
+                        let collection = query_cx
+                            .with_restriction(|| {
+                                let controls = RefCell::new(&mut execution);
+                                let database = RefCell::new(&mut *self);
+                                query.collect_governed_over(
+                                    rows.take(),
+                                    allowance,
+                                    ChainSource {
+                                        transaction: workspace.transaction(),
+                                        database: &database,
+                                        cx: query_cx,
+                                        scope,
+                                        execution: &controls,
+                                    },
+                                    |request| {
+                                        database.borrow_mut().allocate_identity(query_cx, request)
+                                    },
+                                    || {
+                                        query_cx
+                                            .checkpoint()
+                                            .map_err(WriteTxnError::Interrupted)?;
+                                        controls.borrow_mut().checkpoint()
+                                    },
+                                )
+                            })
+                            .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
+                        let (creation, output) = collection.into_parts();
+                        // The frozen-chain classifier excludes projected
+                        // CREATE. Its complete bag must be visible to output.
+                        let (stats, _, _) = insert::stage_proposal(
+                            workspace.transaction(),
+                            self,
+                            query_cx,
+                            query.insertion(),
+                            creation,
+                            &mut execution,
+                            false,
+                            None,
+                        )
+                        .map_err(|error| {
+                            error.map_source(|error| {
+                                GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(
+                                    error,
+                                ))
+                            })
+                        })?;
+                        let returning = insert::finish_output(
+                            workspace.transaction(),
+                            self,
+                            query_cx,
+                            output,
+                            scope,
+                            &mut execution,
+                        )
+                        .map_err(|error| {
+                            error.map_source(|error| {
+                                GraphWriteChainError::Insert(GraphInsertQueryError::Returning(
+                                    error,
+                                ))
+                            })
+                        })?;
+                        (stats, returning, 0)
                     } else {
                         let (proposal, mut returning) = query_cx.with_restriction(|| {
                             let controls = RefCell::new(&mut execution);
@@ -640,21 +703,6 @@ impl<V: Vfs + Clone> Database<V> {
                                 controls.borrow_mut().checkpoint()
                             };
                             match statement {
-                                GraphWriteChainStep::Query(query) => {
-                                    let proposal = query
-                                        .execute_governed_over(
-                                            rows.take(),
-                                            allowance,
-                                            graph,
-                                            allocate,
-                                            checkpoint,
-                                        )
-                                        .map_err(|error| {
-                                            error.map_source(GraphWriteChainError::Insert)
-                                        })?;
-                                    let (creation, returning) = proposal.into_parts();
-                                    Ok((Proposal::Insert(query.insertion(), creation), returning))
-                                }
                                 GraphWriteChainStep::Insert(insertion) => {
                                     let proposal = insertion
                                         .execute_governed_over(

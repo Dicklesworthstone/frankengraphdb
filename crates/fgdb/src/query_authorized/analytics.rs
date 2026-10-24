@@ -15,9 +15,7 @@ use super::tape::{Step, Tape};
 use super::{Execution, authorized_with_errors};
 use crate::gql_exec::AdmissionUsage;
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::query::prism::{
-    LiveCache, PROJECTION_CACHE_BYTES, ProjectionRequest, push_staged, source_admit,
-};
+use crate::query::prism::{LiveCache, ProjectionRequest, push_staged, source_admit};
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
 use fgdb_gql::GqlQueryPolicy;
@@ -36,12 +34,11 @@ type Error = FnxReadError<ReadError, QueryError>;
 
 /// Projections reused across authorized calls on one live snapshot
 /// allocation, each with the live calls its build made (fgdb-0tbrz).
-static REUSE: LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)> =
-    LiveCache::new(PROJECTION_CACHE_BYTES);
+pub(crate) type AuthorizedProjectionCache =
+    LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>;
 
-/// A contended or full REUSE lawfully builds. So the tests that count builds,
-/// and every test that fills REUSE through authorized calls, take turns on
-/// this one lock.
+/// Serializes tests that change shared simulation instrumentation. Production
+/// reuse belongs to each database and does not depend on this test lock.
 #[cfg(test)]
 pub(crate) fn reuse_test_turn() -> std::sync::MutexGuard<'static, ()> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -54,7 +51,7 @@ pub(crate) fn reuse_test_turn() -> std::sync::MutexGuard<'static, ()> {
 /// replay tape. A scoped key keeps the complete, exact compiled program; no
 /// principal, token spelling or digest stands in for its actual predicates.
 #[derive(PartialEq, Eq)]
-struct ProjectionKey {
+pub(crate) struct ProjectionKey {
     request: ProjectionRequest,
     predicates: Option<Vec<u8>>,
 }
@@ -77,13 +74,14 @@ impl ProjectionKey {
     }
 }
 
-fn remember_projection<Owner>(
+fn remember_projection_controlled<Owner, E>(
     cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
     owner: &Arc<Owner>,
     key: ProjectionKey,
     graph: &SnapshotGraphView,
     tape: Tape,
-) {
+    poll: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     // Retain the ordinary projection cache's source/spec checks as well as
     // the scoped key and complete-tape requirement. A failed or truncated
     // build can never seed a different request's reusable entry.
@@ -91,15 +89,16 @@ fn remember_projection<Owner>(
         || graph.spec() != key.request.projection
         || !tape.is_complete()
     {
-        return;
+        return Ok(());
     }
     if let Some(bytes) = graph
         .charged_resident_bytes()
         .checked_add(tape.bytes())
         .and_then(|bytes| bytes.checked_add(key.retained_bytes()))
     {
-        cache.remember(owner, key, (graph.clone(), Arc::new(tape)), bytes);
+        cache.remember(owner, key, (graph.clone(), Arc::new(tape)), bytes, poll)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -302,46 +301,56 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         source_limits: options.source_limits,
     };
     let key = ProjectionKey::new(request, scope);
+    let cache = &snapshot.read_caches.authorized;
     // Admission and the projection's replay or build are one phase: their
     // signed work is charged in runs.
     let graph = super::work_runs(execution, control_error, || {
-        Ok::<_, Error>(
-            match key.as_ref().and_then(|key| REUSE.lookup(snapshot, key)) {
-                Some((graph, tape)) => {
-                    replay(&tape, execution, &observe, &work, options, poll, spend)?;
-                    graph
-                }
-                None => {
-                    // A fragmented masked history may not run-length encode
-                    // compactly. Bound temporary replay metadata by both the
-                    // source staging ceiling and this cache's allowance. If
-                    // it cannot fit, the build succeeds without caching.
-                    let tape = key.as_ref().map(|key| {
-                        RefCell::new(Tape::bounded(
-                            options
-                                .source_limits
-                                .max_staging_bytes
-                                .min(PROJECTION_CACHE_BYTES)
-                                .saturating_sub(key.retained_bytes()),
-                        ))
-                    });
-                    let graph = build(
+        let retained = match key.as_ref() {
+            Some(key) => cache.lookup_controlled(snapshot, key, &mut || poll())?,
+            None => None,
+        };
+        Ok::<_, Error>(match retained {
+            Some((graph, tape)) => {
+                replay(&tape, execution, &observe, &work, options, poll, spend)?;
+                graph
+            }
+            None => {
+                // A fragmented masked history may not run-length encode
+                // compactly. Bound temporary replay metadata by both the
+                // source staging ceiling and this cache's allowance. If
+                // it cannot fit, the build succeeds without caching.
+                let tape = key.as_ref().map(|key| {
+                    RefCell::new(Tape::bounded(
+                        options
+                            .source_limits
+                            .max_staging_bytes
+                            .min(cache.max_bytes())
+                            .saturating_sub(key.retained_bytes()),
+                    ))
+                });
+                let graph = build(
+                    snapshot,
+                    binding,
+                    options,
+                    scope,
+                    tape.as_ref(),
+                    poll,
+                    spend,
+                )?;
+                if let (Some(key), Some(tape)) = (key, tape) {
+                    let tape = tape.into_inner().finish();
+                    remember_projection_controlled(
+                        cache,
                         snapshot,
-                        binding,
-                        options,
-                        scope,
-                        tape.as_ref(),
-                        poll,
-                        spend,
+                        key,
+                        &graph,
+                        tape,
+                        &mut || poll(),
                     )?;
-                    if let (Some(key), Some(tape)) = (key, tape) {
-                        let tape = tape.into_inner().finish();
-                        remember_projection(&REUSE, snapshot, key, &graph, tape);
-                    }
-                    graph
                 }
-            },
-        )
+                graph
+            }
+        })
     })?;
     let signed_rows = scope.limits().max_rows;
     let mut limits = options.execution_limits;

@@ -33,7 +33,7 @@ mod cache;
 #[path = "query_prism/projection.rs"]
 mod projection;
 pub(crate) use cache::{
-    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, Request as ProjectionRequest,
+    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
 };
 pub(crate) use projection::{bind_procedure, procedure_options};
 
@@ -922,9 +922,11 @@ impl EmbeddedReadView {
     ///
     /// Identical requests on the same live snapshot allocation may reuse one
     /// complete projection, including its original admission limits. A bounded
-    /// process-local sidecar retains at most eight projections and 64 MiB of
-    /// charged builder workspace. Full or contended caches rebuild normally;
-    /// no live entry is evicted and no weak owner pins a database generation.
+    /// per-database sidecar retains at most eight projections within the host's
+    /// [`crate::ReadCacheLimits`] resident-byte allowance. Full caches rebuild
+    /// normally; contention checks live cancellation until access is available.
+    /// Admission does not evict live entries, and weak owners do not pin a
+    /// database generation.
     /// This does not provide cross-process CLI reuse or authorize a secure view.
     pub fn prism_projection_at(
         &self,

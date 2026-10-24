@@ -42,10 +42,11 @@ impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::err
 
 impl WriteTxn {
     /// Stage CREATE/INSERT and its native RETURN rows as one atomic operation.
-    /// The prepared query evaluates its complete selection, creation payloads,
-    /// identity bindings, projection, DISTINCT, ordering and page before any
-    /// proposal reaches storage. Result expressions read the frozen creation
-    /// bindings; they never rescan the graph or observe another occurrence.
+    /// Selection and creation payloads are frozen before allocation. The whole
+    /// admitted creation bag is staged in a rollback workspace before computed
+    /// RETURN/WITH properties are read, so output sees every occurrence's
+    /// effects over the original snapshot. Direct bindings retain their checked
+    /// values; computed reads use ordinary point witnesses, never a graph scan.
     ///
     /// RETURN row limits govern the final rows independently of vertex/edge
     /// creation limits. In particular LIMIT 0 does not suppress the writes or
@@ -83,7 +84,8 @@ impl WriteTxn {
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let proposal = query.execute_governed_with_source(
+            let proposal = query.collect_governed_over(
+                None,
                 policy,
                 InsertGraphSource {
                     transaction: workspace.txn,
@@ -93,7 +95,7 @@ impl WriteTxn {
                 allocate,
                 || cx.checkpoint(),
             )?;
-            let (insertion, returning) = proposal.into_parts();
+            let (insertion, output) = proposal.into_parts();
             let (stats, _, _) = workspace
                 .txn
                 .stage_graph_insert_batch(
@@ -104,11 +106,40 @@ impl WriteTxn {
                     false,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
-            // Every result admission and cancellation check precedes the sole
-            // atomic staging boundary; nothing fallible follows acceptance.
+            let returning = workspace
+                .txn
+                .finish_graph_insert_output(database, cx, output)
+                .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+            // Output failure drops the complete private creation bag. Nothing
+            // fallible follows the statement's workspace acceptance boundary.
             workspace.accept();
             Ok((stats, returning))
         })
+    }
+
+    fn finish_graph_insert_output<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        output: fgdb_gql::GraphInsertQueryOutput<'_>,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        TxnGqlError<fgdb_gql::GraphSetExecutionError<WriteTxnError>>,
+    > {
+        let failure = std::cell::RefCell::new(None);
+        let result = output.finish_governed_reading(
+            |element, key| {
+                self.element_property_with_checkpoint(database, cx, &failure, element, key)
+            },
+            || match failure.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => cx.checkpoint(),
+            },
+        );
+        match failure.into_inner() {
+            Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+            None => result,
+        }
     }
 
     /// CREATE/INSERT RETURN with identities reserved by the owning database.
@@ -338,7 +369,7 @@ impl WriteTxn {
                     }
                     GraphWriteChainStep::Query(query) => {
                         let proposal = query
-                            .execute_governed_over(
+                            .collect_governed_over(
                                 rows.take(),
                                 allowance,
                                 // Typed: a closure behind `impl GraphSetSource`
@@ -355,7 +386,7 @@ impl WriteTxn {
                                 || cx.checkpoint(),
                             )
                             .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
-                        let (insertion_batch, returning) = proposal.into_parts();
+                        let (insertion_batch, output) = proposal.into_parts();
                         let (stats, vertices, edges) = workspace
                             .txn
                             .stage_graph_insert_batch(
@@ -366,6 +397,16 @@ impl WriteTxn {
                                 true,
                             )
                             .map_err(|error| error.map_source(insertion))?;
+                        let returning = workspace
+                            .txn
+                            .finish_graph_insert_output(database, cx, output)
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::Insert(GraphInsertQueryError::Returning(
+                                        error,
+                                    ))
+                                })
+                            })?;
                         receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
                         (stats, returning)
                     }

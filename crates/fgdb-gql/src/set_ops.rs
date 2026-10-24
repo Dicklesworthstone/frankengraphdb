@@ -12,8 +12,9 @@ mod aggregate;
 mod execute;
 pub(crate) use aggregate::{WriteReturnGroup, WriteReturnGroupSpec};
 pub(crate) use execute::{
-    finish_owned_aggregate, finish_owned_projection, finish_owned_tail, owned_head_policy,
-    sort_canonical_values,
+    finish_owned_aggregate, finish_owned_aggregate_reading, finish_owned_projection,
+    finish_owned_projection_reading, finish_owned_tail, finish_owned_tail_reading,
+    owned_head_policy, sort_canonical_values,
 };
 mod filter;
 mod incremental;
@@ -1155,14 +1156,18 @@ impl PreparedGraphSet {
 
     /// A write tail over its head's owned rows. The tail holds row stages
     /// over one `SetNode::Owned` leaf and never a graph source.
-    pub(crate) fn execute_over_owned<E, C>(
+    pub(crate) fn execute_over_owned_reading<E, C>(
         &self,
         rows: Vec<GraphValueRow>,
         policy: GqlQueryPolicy,
+        elements: &mut ElementRead<'_, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        struct OwnedRows(Option<Vec<GraphValueRow>>);
-        impl<E, C> GraphSetSource<E, C> for OwnedRows {
+        struct OwnedRows<'a, 'read, E> {
+            rows: Option<Vec<GraphValueRow>>,
+            elements: &'a mut ElementRead<'read, E>,
+        }
+        impl<E, C> GraphSetSource<E, C> for OwnedRows<'_, '_, E> {
             fn pattern(
                 &mut self,
                 _: &PreparedGraphPattern<GraphValueRow>,
@@ -1171,11 +1176,26 @@ impl PreparedGraphSet {
                 unreachable!("a write tail reads no graph source")
             }
             fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
-                self.0.take()
+                self.rows.take()
+            }
+            fn element_property(
+                &mut self,
+                element: fgdb_delta_types::ElementId,
+                key: fgdb_delta_types::PropertyKeyId,
+            ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+                (self.elements)(element, key)
             }
         }
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
-        execute::execute(self, policy, &mut OwnedRows(Some(rows)), checkpoint)
+        execute::execute(
+            self,
+            policy,
+            &mut OwnedRows {
+                rows: Some(rows),
+                elements,
+            },
+            checkpoint,
+        )
     }
 
     /// The executor over any trusted source, for relational consumers (a

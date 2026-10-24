@@ -118,6 +118,14 @@ impl asupersync::io::AsyncWrite for WireIo {
 }
 
 pub(crate) async fn served(cx: &Cx, name: &str) -> (Server, CapabilityToken, PathBuf) {
+    served_with_cache_limits(cx, name, fgdb::ReadCacheLimits::default()).await
+}
+
+async fn served_with_cache_limits(
+    cx: &Cx,
+    name: &str,
+    limits: fgdb::ReadCacheLimits,
+) -> (Server, CapabilityToken, PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "fgdb-server-recovery-{}-{name}",
         std::process::id()
@@ -134,14 +142,9 @@ pub(crate) async fn served(cx: &Cx, name: &str) -> (Server, CapabilityToken, Pat
             .unwrap(),
     );
     let mut server = Server::new(cx, ServerLimits::default()).unwrap();
-    server
-        .open_database(
-            cx,
-            &path,
-            DatabaseConfig::new("test", keys, AuthKey::from_seed(791)),
-        )
-        .await
-        .unwrap();
+    let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(791));
+    config.read_cache_limits = limits;
+    server.open_database(cx, &path, config).await.unwrap();
     let db = &server.databases["test"];
     let token = db
         .authority
@@ -206,6 +209,95 @@ pub(crate) async fn settled(db: &Served) -> DatabaseStatus {
         }
     })
     .await
+}
+
+#[test]
+fn served_cache_limits_and_retained_bytes_follow_authoritative_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_006d, |root| async move {
+        let limits = fgdb::ReadCacheLimits {
+            projection_bytes: 1 << 20,
+            admission_bytes: 1 << 18,
+            authorized_projection_bytes: 1 << 19,
+        };
+        let (server, token, _) = served_with_cache_limits(&root, "read-cache-owner", limits).await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = &server.databases["test"];
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            writer.write(&contexts.commit(), vertex(1)).await.unwrap();
+        }
+        let (mut old, _) = crate::execute::read_session(&root, db, &token)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        old.query(
+            &contexts.query(),
+            "MATCH (n) RETURN count(*) AS n",
+            &fgdb_gql::GqlParameters::new(),
+        )
+        .unwrap_or_else(|_| panic!("initial authorized count must populate the admission cache"));
+        let before = server
+            .database_read_cache_status(&root, "test")
+            .await
+            .unwrap();
+        assert_eq!(before.admissions.entries, 1);
+        assert!(before.admissions.retained_bytes > 0);
+        assert!(
+            server
+                .database_read_cache_status(&root, "unknown")
+                .await
+                .is_none()
+        );
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert!(matches!(
+                writer
+                    .write_with_publication_failure(
+                        &contexts.commit(),
+                        vertex(2),
+                        DerivedPublicationStage::PublishPartitionRoot,
+                    )
+                    .await,
+                Err(WriteError::CommittedNeedsRecovery { .. })
+            ));
+        }
+        assert_eq!(settled(db).await, DatabaseStatus::Ready { generation: 2 });
+        let (mut current, _) = crate::execute::read_session(&root, db, &token)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        current
+            .query(
+                &contexts.query(),
+                "MATCH (n) RETURN count(*) AS n",
+                &fgdb_gql::GqlParameters::new(),
+            )
+            .unwrap_or_else(|_| {
+                panic!("recovered authorized count must populate its new snapshot entry")
+            });
+        let after = server
+            .database_read_cache_status(&root, "test")
+            .await
+            .unwrap();
+        assert_eq!(after.projections.max_bytes, limits.projection_bytes);
+        assert_eq!(after.admissions.max_bytes, limits.admission_bytes);
+        assert_eq!(
+            after.authorized_projections.max_bytes,
+            limits.authorized_projection_bytes
+        );
+        assert_eq!(after.admissions.entries, 2);
+        drop(old);
+        assert_eq!(
+            server
+                .database_read_cache_status(&root, "test")
+                .await
+                .unwrap()
+                .admissions
+                .entries,
+            1
+        );
+        drop(current);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

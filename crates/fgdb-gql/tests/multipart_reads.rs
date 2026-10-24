@@ -1177,13 +1177,13 @@ fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
     }
 }
 
-/// openCypher pattern counts: `size((n)-->())`, the length of a pattern
-/// expression's list, and `COUNT { ... }`, a count subquery in either form
-/// EXISTS takes. Each is the size of a Collect scope's witness list, one
-/// entry per witness: read in place by a RETURN's head, and gathered by a
-/// WITH head for its WHERE, pages and RETURN, by a grouping WITH for its
-/// items, and by the implicit `WITH *` of a MATCH WHERE. The parallel
-/// 1 -R-> 2 edges are two witnesses.
+/// `COUNT { ... }`, a count subquery in either form EXISTS takes, is the
+/// size of a Collect scope's witness list, one entry per witness: read in
+/// place by a RETURN's head, and gathered by a WITH head for its WHERE, pages
+/// and RETURN, by a grouping WITH for its items, and by the implicit `WITH *`
+/// of a MATCH WHERE. The parallel 1 -R-> 2 edges are two witnesses.
+/// `size((n)-->())` stays refused, as the openCypher TCK requires (List6
+/// [6]).
 #[test]
 fn pattern_counts_read_witness_list_sizes() {
     let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
@@ -1205,18 +1205,17 @@ fn pattern_counts_read_witness_list_sizes() {
             .collect()
     };
     for (text, expected) in [
-        ("MATCH (n) RETURN n, size((n)-->()) AS d", per_vertex(&out)),
         ("MATCH (n) RETURN n, COUNT { (n)-->() } AS d", per_vertex(&out)),
         (
             "MATCH (n) RETURN n, COUNT { MATCH (n)-->(m) WHERE m.p > 2 } AS d",
             per_vertex(&into_high),
         ),
         (
-            "MATCH (n) RETURN n, size((n)-->()) + 1 AS d",
+            "MATCH (n) RETURN n, COUNT { (n)-->() } + 1 AS d",
             per_vertex(&|n| out(n) + 1),
         ),
         (
-            "MATCH (n) WITH n RETURN n, size((n)-->()) * 2 AS d",
+            "MATCH (n) WITH n RETURN n, COUNT { (n)-->() } * 2 AS d",
             per_vertex(&|n| out(n) * 2),
         ),
     ] {
@@ -1229,7 +1228,7 @@ fn pattern_counts_read_witness_list_sizes() {
             .collect()
     };
     assert_eq!(
-        sorted(execute("MATCH (n) WHERE size((n)-->()) > 1 RETURN n")),
+        sorted(execute("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n")),
         with_degree(&|degree| degree > 1)
     );
     assert_eq!(
@@ -1262,8 +1261,11 @@ fn pattern_counts_read_witness_list_sizes() {
     );
     for text in [
         // An enclosing element local, and a binding the row renames.
-        "MATCH (n) WITH n RETURN [x IN [n] | size((x)-->())] AS l",
+        "MATCH (n) WITH n RETURN [x IN [n] | COUNT { (x)-->() }] AS l",
         "MATCH (n)-->(k) WITH n AS k RETURN COUNT { (k)-->() } AS l",
+        // A pattern expression inside size() (openCypher TCK List6 [6]).
+        "MATCH (n) RETURN n, size((n)-->()) AS d",
+        "MATCH (n) WHERE size((n)-->()) > 1 RETURN n",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),
@@ -1320,4 +1322,64 @@ fn a_where_membership_reads_a_computed_list() {
         sorted(execute("MATCH (n) WITH n WHERE n.p IN [1, 3] RETURN n")),
         vec![vertices(&[1]), vertices(&[4])]
     );
+}
+
+/// A plain RETURN's ORDER BY over a count subquery or a pattern
+/// comprehension (`ORDER BY COUNT { (n)-->() } DESC`, top-N by degree): the
+/// RETURN's head gathers each into a private output, which the page sorts by
+/// and then projects away. Degrees are 3, 1, 1 and 0; ties fall to the next
+/// key. Under DISTINCT, and for a name an output alias shadows, it refuses.
+#[test]
+fn a_return_page_orders_by_pattern_counts() {
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count();
+    let mut by_degree: Vec<u128> = (1..=4).collect();
+    by_degree.sort_by_key(|&n| (core::cmp::Reverse(out(n)), n));
+    assert_eq!(
+        execute("MATCH (n) RETURN n ORDER BY COUNT { (n)-->() } DESC, n"),
+        by_degree.iter().map(|&n| vertices(&[n])).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute("MATCH (n) RETURN n ORDER BY size([(n)-->(m) | m]) DESC, n LIMIT 2"),
+        by_degree[..2]
+            .iter()
+            .map(|&n| vertices(&[n]))
+            .collect::<Vec<_>>()
+    );
+    for text in [
+        "MATCH (n) RETURN DISTINCT n.p AS p ORDER BY COUNT { (n)-->() }",
+        "MATCH (n), (k) RETURN k AS n ORDER BY COUNT { (n)-->() }",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// openCypher names a parameter by a decimal integer as well as by an
+/// identifier (`$1`, TCK MatchWhere2 [2], WithWhere2 [2]): the statement
+/// lexer reads `$1` as the parameter `1`, and the argument `1` binds it.
+#[test]
+fn a_parameter_may_be_named_by_a_decimal_integer() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (n) WHERE n.p = $1 OR n.p = $2 RETURN n ORDER BY n",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_int64("1", 1)
+            .unwrap()
+            .with_int64("2", 3)
+            .unwrap(),
+    )
+    .unwrap();
+    let expected: Vec<GraphValueRow> = (1..=4)
+        .filter(|&n| [1, 3].contains(&p(n)))
+        .map(|n| vertices(&[n]))
+        .collect();
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    // A name still never carries its `$`.
+    assert!(GqlParameters::new().with_int64("$1", 1).is_err());
 }

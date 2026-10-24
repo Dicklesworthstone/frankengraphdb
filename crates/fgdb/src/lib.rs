@@ -181,7 +181,8 @@ pub use query::{
     NativeResultCertificate, NativeResultSpool, NativeSpoolCursor, NativeSpoolDifference,
     NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
     PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
-    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError,
+    ReadCacheLimits, ReadCacheStatus, ReadCacheUsage, RefreshReport, ReplayRefusal, ResidentIndex,
+    ResidentIndexError, SealedProjectionOpenError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
@@ -1783,6 +1784,9 @@ pub struct EdgeRecord {
 /// vertex-row, or hosted-property payloads of its unchanged history.
 #[derive(Clone, Debug)]
 struct Snapshot {
+    /// Shared by every generation of one opened database. Entries point back
+    /// with weak snapshot identities, so this does not form an ownership cycle.
+    read_caches: Arc<query::ReadCaches>,
     blocks: Vec<Arc<[AdjacencyEntry]>>,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
     /// Built on first use, because a point read by property never touches
@@ -3389,8 +3393,14 @@ impl<V: Vfs + Clone> Database<V> {
                 let path = self.path().to_path_buf();
                 let keys = self.keys.clone();
                 let vfs = self.vfs.clone();
+                let read_caches = Arc::clone(&self.snapshot.read_caches);
                 drop(self);
-                Self::open_with_vfs(cx, vfs, path, keys).await
+                let mut recovered = Self::open_with_vfs(cx, vfs, path, keys).await?;
+                // The served/embedded owner keeps its explicit retention
+                // policy across recovery. Entries still require the exact
+                // snapshot allocation, so none can serve the rebuilt source.
+                Arc::make_mut(&mut recovered.snapshot).read_caches = read_caches;
+                Ok(recovered)
             }
         }
     }
@@ -5013,6 +5023,7 @@ impl<V: Vfs + Clone> Database<V> {
         refs.extend(new_refs);
         patch_refs.extend(new_patch_refs);
         self.snapshot = Arc::new(Snapshot {
+            read_caches: Arc::clone(&previous.read_caches),
             adjacency,
             property_index,
             blocks: decoded,
@@ -5553,6 +5564,7 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
+        snapshot.read_caches = Arc::clone(&self.snapshot.read_caches);
         let versions = VersionHeads::from_checkpoint(&snapshot);
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
@@ -6584,6 +6596,7 @@ fn current_generation(
 ) -> Snapshot {
     let published_at = root.published_at;
     Snapshot {
+        read_caches: Arc::default(),
         // Both built on first use by a reader; a commit extends each only
         // once built.
         adjacency: std::sync::OnceLock::new(),
@@ -7255,6 +7268,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
 
     Ok((
         Snapshot {
+            read_caches: Arc::default(),
             adjacency: if build_adjacency {
                 std::sync::OnceLock::from(Arc::new(gql_exec::source::AdjacencyIndex::build(
                     &decoded,

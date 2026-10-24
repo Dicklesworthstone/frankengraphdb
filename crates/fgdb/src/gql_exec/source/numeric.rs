@@ -651,6 +651,7 @@ mod tests {
 
     fn compound_snapshot(patches: Vec<Vec<VertexRow>>) -> Snapshot {
         Snapshot {
+            read_caches: Default::default(),
             blocks: vec![],
             adjacency: Default::default(),
             property_index: Default::default(),

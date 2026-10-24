@@ -4,6 +4,7 @@
 use super::{Database, Error, Execution, Vfs, WriteTxn, WriteTxnError};
 use crate::query::QueryError;
 use crate::write_txn::overlay_scan::OverlayRows;
+use crate::write_txn::point_effect_selector::{EffectKey, select as select_effects};
 use crate::write_txn::{
     PointReadField, ProjectionReadAttempt, point_find, point_payload_admission,
 };
@@ -164,31 +165,55 @@ fn mutation_edge_topology<V: Vfs + Clone>(
     if let Some(prepared) = &transaction.prepared {
         for coordinate in prepared.template.coordinate_entries() {
             control(crate::gql_exec::source::SourceEvent::Work)?;
-            for effect in &coordinate.rows {
+            let rows = &coordinate.rows;
+            for effect in select_effects(rows, EffectKey::CreateEdge(edge), &mut || {
+                control(crate::gql_exec::source::SourceEvent::Work)
+            })? {
                 control(crate::gql_exec::source::SourceEvent::Work)?;
-                match effect {
-                    DeltaRow::CreateEdge {
-                        eid,
-                        src,
-                        relation,
-                        dst,
-                        ..
-                    } if *eid == edge => {
-                        topology = Some((*src, *relation, *dst));
-                    }
-                    DeltaRow::DeleteEdge { eid, .. } if *eid == edge => topology = None,
-                    DeltaRow::DeleteVertex {
-                        sorted_retired_incident_edges,
-                        ..
-                    } => {
-                        if point_find(sorted_retired_incident_edges, edge, |id| *id, &mut control)?
+                if let DeltaRow::CreateEdge {
+                    src, relation, dst, ..
+                } = effect
+                {
+                    topology = Some((*src, *relation, *dst));
+                }
+            }
+            // Every prepared cascade is an admitted incidence image. Probe
+            // both physical endpoints in canonical vertex order, keeping the
+            // exact retired-edge membership check and the existing witness.
+            if let Some((source, _, target)) = topology {
+                let (first, last) = (source.min(target), source.max(target));
+                for vertex in [Some(first), (last != first).then_some(last)]
+                    .into_iter()
+                    .flatten()
+                {
+                    for effect in
+                        select_effects(rows, EffectKey::DeleteVertex(vertex), &mut || {
+                            control(crate::gql_exec::source::SourceEvent::Work)
+                        })?
+                    {
+                        control(crate::gql_exec::source::SourceEvent::Work)?;
+                        if let DeltaRow::DeleteVertex {
+                            sorted_retired_incident_edges,
+                            ..
+                        } = effect
+                            && point_find(
+                                sorted_retired_incident_edges,
+                                edge,
+                                |id| *id,
+                                &mut control,
+                            )?
                             .is_some()
                         {
                             topology = None;
                         }
                     }
-                    _ => {}
                 }
+            }
+            for _ in select_effects(rows, EffectKey::DeleteEdge(edge), &mut || {
+                control(crate::gql_exec::source::SourceEvent::Work)
+            })? {
+                control(crate::gql_exec::source::SourceEvent::Work)?;
+                topology = None;
             }
         }
     }

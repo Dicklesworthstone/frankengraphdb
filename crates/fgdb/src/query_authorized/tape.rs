@@ -104,7 +104,7 @@ pub(super) struct Token {
 /// Over a single-version snapshot it is a handful of runs: one per poll and
 /// admission pattern, not one per record.
 #[derive(Debug, Default)]
-pub(super) struct Tape {
+pub(crate) struct Tape {
     pub(super) runs: Vec<(Token, u32)>,
     polls: u32,
     limit: Option<usize>,

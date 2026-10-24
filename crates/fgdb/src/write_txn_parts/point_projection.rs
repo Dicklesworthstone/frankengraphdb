@@ -1,6 +1,10 @@
 // A projection of the admitted historical winner and the prepared NET effects.
 // This does not interpret PendingRow, expose metadata, or own a second overlay.
 
+mod point_effect_selector {
+    include!("point_effect_selector.rs");
+}
+
 #[derive(Default)]
 struct PointProjection<'a> {
     exists: bool,
@@ -101,6 +105,22 @@ fn point_find<'a, T, K: Ord + Copy, E>(
 }
 
 impl<'a> PointProjection<'a> {
+    fn apply_selected<E>(
+        &mut self,
+        rows: &'a [fgdb_delta_types::DeltaRow],
+        key: point_effect_selector::EffectKey,
+        element: ElementId,
+        field: PointReadField,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        use crate::gql_exec::source::SourceEvent::Work;
+        for effect in point_effect_selector::select(rows, key, &mut || control(Work))? {
+            control(Work)?;
+            self.apply(element, field, effect, control)?;
+        }
+        Ok(())
+    }
+
     fn from_fields<E>(
         field: PointReadField,
         labels: &[LabelId],
@@ -345,6 +365,7 @@ impl WriteTxn {
             .map_err(WriteTxnError::from)
             .map_err(source_error)?;
         control(SourceEvent::Work)?;
+        let mut edge_endpoints = None;
         let mut projected = match element {
             ElementId::Vertex(vid) => match find_vertex(snapshot, vid, self.basis, control)? {
                 Some(row) => {
@@ -367,6 +388,8 @@ impl WriteTxn {
                 match coordinate {
                     Some((block, row)) => {
                         control(SourceEvent::SnapshotRecord)?;
+                        let edge = &snapshot.blocks[block][row];
+                        edge_endpoints = Some((edge.src, edge.dst));
                         let properties: &[(
                             fgdb_delta_types::PropertyKeyId,
                             CanonicalPropertyValue,
@@ -388,11 +411,72 @@ impl WriteTxn {
             }
         };
         if let Some(prepared) = &self.prepared {
+            use point_effect_selector::{EffectKey, select};
             for coordinate in prepared.template.coordinate_entries() {
                 control(SourceEvent::Work)?;
-                for effect in &coordinate.rows {
-                    control(SourceEvent::Work)?;
-                    projected.apply(element, field, effect, control)?;
+                let rows = &coordinate.rows;
+                // Coordinate order and the original canonical tag order stay
+                // intact. Search only this identity's lifetime and field
+                // prefixes; never scan or clone unrelated staged payloads.
+                match element {
+                    ElementId::Vertex(vertex) => {
+                        for key in [
+                            EffectKey::CreateVertex(vertex),
+                            EffectKey::DeleteVertex(vertex),
+                        ] {
+                            projected.apply_selected(rows, key, element, field, control)?;
+                        }
+                    }
+                    ElementId::Edge(edge) => {
+                        for effect in select(rows, EffectKey::CreateEdge(edge), &mut || {
+                            control(SourceEvent::Work)
+                        })? {
+                            control(SourceEvent::Work)?;
+                            if let fgdb_delta_types::DeltaRow::CreateEdge { src, dst, .. } = effect
+                            {
+                                edge_endpoints = Some((*src, *dst));
+                            }
+                            projected.apply(element, field, effect, control)?;
+                        }
+                        // PreparedWrite admits complete, physical incidence.
+                        // Only a retirement of one of these endpoints can
+                        // contain this edge; apply still checks the exact
+                        // sorted retirement image before clearing its value.
+                        if let Some((source, target)) = edge_endpoints {
+                            let (first, last) = (source.min(target), source.max(target));
+                            for vertex in [Some(first), (last != first).then_some(last)]
+                                .into_iter()
+                                .flatten()
+                            {
+                                projected.apply_selected(
+                                    rows,
+                                    EffectKey::DeleteVertex(vertex),
+                                    element,
+                                    field,
+                                    control,
+                                )?;
+                            }
+                        }
+                        projected.apply_selected(
+                            rows,
+                            EffectKey::DeleteEdge(edge),
+                            element,
+                            field,
+                            control,
+                        )?;
+                    }
+                }
+                let key = match (element, field) {
+                    (ElementId::Vertex(vertex), PointReadField::Label(label)) => {
+                        Some(EffectKey::Label(vertex, label))
+                    }
+                    (_, PointReadField::Property(property)) => {
+                        Some(EffectKey::Property(element, property))
+                    }
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    projected.apply_selected(rows, key, element, field, control)?;
                 }
             }
         }

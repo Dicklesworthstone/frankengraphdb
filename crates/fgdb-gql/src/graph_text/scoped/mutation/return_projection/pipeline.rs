@@ -218,14 +218,12 @@ pub(super) struct HoistGuard<'g, 'a> {
 }
 
 /// Whether a hoistable expression may start at a token (hoist_comprehension
-/// decides): `[` of a pattern comprehension, or `size`/`COUNT` of a pattern
-/// count, never a property key after `.`.
+/// decides): `[` of a pattern comprehension, or `COUNT` of a count subquery,
+/// never a property key after `.`.
 pub(super) fn hoist_candidate(token: TokenKind<'_>, after_dot: bool) -> bool {
     match token {
         TokenKind::Punct(b'[') => true,
-        TokenKind::Word(word) => {
-            !after_dot && (word.eq_ignore_ascii_case("SIZE") || word.eq_ignore_ascii_case("COUNT"))
-        }
+        TokenKind::Word(word) => !after_dot && word.eq_ignore_ascii_case("COUNT"),
         _ => false,
     }
 }
@@ -1217,7 +1215,7 @@ impl<'a> Parser<'a> {
                 return Ok(None);
             }
             // The scan covers the whole expression: from `[` to its `]`, or
-            // from `size`/`COUNT` to the end of its group.
+            // from `COUNT` to the end of its braces.
             let mut scan = lexer.clone();
             let mut previous = token.kind;
             let mut depth = usize::from(!count);

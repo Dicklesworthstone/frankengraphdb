@@ -4,13 +4,14 @@
 //! weak owner prevents an entry from pinning an entire database generation;
 //! its allocation identity prevents reuse across independently opened handles,
 //! even when their root bytes agree. Live entries are never evicted to admit
-//! another request. Full, contended or poisoned caches take the ordinary build
-//! path. No lock is held while checking cancellation, visiting data or building.
+//! another request. Each opened database owns its own allowances. A full cache
+//! takes the ordinary build path; contention waits through the caller's live
+//! cancellation check, never choosing whether an entry is retained. No lock is
+//! held while checking cancellation, visiting data, building or dropping entries.
 //!
 //! An entry may carry an `Extra` beside its graph: the authorized analytics
 //! path keeps the live charge sequence its build made, which every reuse
-//! spends again (fgdb-0tbrz). That sidecar is its own static, so it has its
-//! own entries and an allowance of the same size.
+//! spends again (fgdb-0tbrz). Each sidecar has its own entries and byte allowance.
 //!
 //! `LiveCache` is the same sidecar for any key and value: authorized
 //! full-scan admission keeps its admitted records under it (fgdb-61p1n).
@@ -19,10 +20,11 @@ use super::{
     EmbeddedReadView, Error, FnxSelection, FnxSourceLimits, ProjectionLimits, ProjectionSpec,
     QueryCx, SnapshotBinding, SnapshotGraphView,
 };
-use std::borrow::Borrow;
-use std::sync::{Arc, Mutex, Weak};
+pub(crate) use crate::query::read_cache::live::LiveCache;
+use std::sync::Arc;
 
-const CACHE_ENTRIES: usize = 8;
+#[cfg(test)]
+use crate::query::read_cache::live::CACHE_ENTRIES;
 // A sum of the vectors each kept graph holds, not a process RSS claim.
 // Snapshot data, caller-held graphs, concurrent builders and allocator metadata
 // remain outside this retained-cache allowance. It is the default projection
@@ -34,7 +36,6 @@ const CACHE_ENTRIES: usize = 8;
 // so every WCC beside it rebuilt for 75 s.
 pub(crate) const CACHE_BYTES: usize =
     fgdb_prism::FnxReadOptions::DEFAULT_PROJECTION_LIMITS.max_workspace_bytes;
-static CACHE: ProjectionCache<crate::Snapshot> = ProjectionCache::new(CACHE_BYTES);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
@@ -45,108 +46,28 @@ pub(crate) struct Request {
     pub(crate) source_limits: FnxSourceLimits,
 }
 
-struct Entry<Owner, Key, Value> {
-    owner: Weak<Owner>,
-    key: Key,
-    value: Value,
-    bytes: usize,
-}
-
-/// A bounded sidecar of values derived from still-live snapshot allocations,
-/// with the weak-owner, never-evict and never-wait rules in the module docs.
-pub(crate) struct LiveCache<Owner, Key, Value> {
-    entries: Mutex<[Option<Entry<Owner, Key, Value>>; CACHE_ENTRIES]>,
-    max_bytes: usize,
-}
-
 /// Projections by request, with an optional `Extra` beside each graph.
 pub(crate) type ProjectionCache<Owner, Extra = ()> =
     LiveCache<Owner, Request, (SnapshotGraphView, Extra)>;
 
-impl<Owner, Key: PartialEq, Value: Clone> LiveCache<Owner, Key, Value> {
-    pub(crate) const fn new(max_bytes: usize) -> Self {
-        Self {
-            entries: Mutex::new([const { None }; CACHE_ENTRIES]),
-            max_bytes,
-        }
-    }
-
-    fn prune(entries: &mut [Option<Entry<Owner, Key, Value>>; CACHE_ENTRIES]) {
-        for entry in entries {
-            if entry
-                .as_ref()
-                .is_some_and(|entry| entry.owner.strong_count() == 0)
-            {
-                *entry = None;
-            }
-        }
-    }
-
-    pub(crate) fn lookup(&self, owner: &Arc<Owner>, key: impl Borrow<Key>) -> Option<Value> {
-        // Observing a cache must not wait behind another query or escape the
-        // caller's cancellation contract through a blocking cache mutex.
-        let mut entries = self.entries.try_lock().ok()?;
-        Self::prune(&mut entries);
-        let owner = Arc::downgrade(owner);
-        entries.iter().flatten().find_map(|entry| {
-            (entry.owner.ptr_eq(&owner) && &entry.key == key.borrow()).then(|| entry.value.clone())
-        })
-    }
-
-    /// `bytes` is the retained size charged for `value`.
-    pub(crate) fn remember(&self, owner: &Arc<Owner>, key: Key, value: Value, bytes: usize) {
-        if bytes > self.max_bytes {
-            return;
-        }
-        let Ok(mut entries) = self.entries.try_lock() else {
-            return;
-        };
-        Self::prune(&mut entries);
-        let owner = Arc::downgrade(owner);
-        // Two concurrent misses may both complete. Keep the first complete
-        // admission, never reserve a slot for an in-flight/failed build.
-        if entries
-            .iter()
-            .flatten()
-            .any(|entry| entry.owner.ptr_eq(&owner) && entry.key == key)
-        {
-            return;
-        }
-        let total = entries
-            .iter()
-            .flatten()
-            .try_fold(bytes, |total, entry| total.checked_add(entry.bytes));
-        if total.is_none_or(|total| total > self.max_bytes) {
-            return;
-        }
-        if let Some(slot) = entries.iter_mut().find(|entry| entry.is_none()) {
-            *slot = Some(Entry {
-                owner,
-                key,
-                value,
-                bytes,
-            });
-        }
-    }
-}
-
 impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
     /// `extra_bytes` is the retained size of `extra`, charged with the graph.
-    pub(crate) fn remember_graph(
+    pub(crate) fn remember_graph<E>(
         &self,
         owner: &Arc<Owner>,
         request: Request,
         graph: &SnapshotGraphView,
         extra: Extra,
         extra_bytes: usize,
-    ) {
+        poll: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
         if graph.binding() != request.binding || graph.spec() != request.projection {
-            return;
+            return Ok(());
         }
         let Some(bytes) = graph.charged_resident_bytes().checked_add(extra_bytes) else {
-            return;
+            return Ok(());
         };
-        self.remember(owner, request, (graph.clone(), extra), bytes);
+        self.remember(owner, request, (graph.clone(), extra), bytes, poll)
     }
 }
 
@@ -162,13 +83,13 @@ impl<Owner> ProjectionCache<Owner> {
         build: impl FnOnce() -> Result<SnapshotGraphView, E>,
     ) -> Result<(SnapshotGraphView, bool), E> {
         checkpoint()?;
-        if let Some((graph, ())) = self.lookup(owner, request) {
+        if let Some((graph, ())) = self.lookup_controlled(owner, request, &mut checkpoint)? {
             checkpoint()?;
             return Ok((graph, true));
         }
         let graph = build()?;
         checkpoint()?;
-        self.remember_graph(owner, request, &graph, (), 0);
+        self.remember_graph(owner, request, &graph, (), 0, &mut checkpoint)?;
         Ok((graph, false))
     }
 }
@@ -196,7 +117,9 @@ pub(super) fn projection(
         projection_limits,
         source_limits,
     };
-    CACHE
+    view.snapshot
+        .read_caches
+        .projections
         .get_or_build(
             &view.snapshot,
             request,
@@ -460,25 +383,73 @@ mod tests {
     }
 
     #[test]
-    fn a_contended_cache_never_waits_or_holds_a_lock_during_build() {
+    fn contention_preserves_hits_and_retention_and_checks_cancellation() {
         let cache = ProjectionCache::new(CACHE_BYTES);
         let owner = Arc::new(());
         let builds = Cell::new(0);
         let retained = acquire(&cache, &owner, request(), &builds).0;
+        let mut guard = Some(cache.entries.lock().unwrap());
+        let mut polls = 0;
+        let (reused, hit) = cache
+            .get_or_build(
+                &owner,
+                request(),
+                || {
+                    polls += 1;
+                    if polls == 2 {
+                        drop(guard.take());
+                    }
+                    Ok::<_, &'static str>(())
+                },
+                || Err("a contended hit must not rebuild"),
+            )
+            .unwrap();
+        assert!(hit);
+        assert!(retained.shares_cache_with(&reused));
+        assert_eq!(polls, 3);
+        assert_eq!(builds.get(), 1);
+
         let guard = cache.entries.lock().unwrap();
-        let (uncached, hit) = acquire(&cache, &owner, request(), &builds);
-        assert!(!hit);
-        assert!(!retained.shares_cache_with(&uncached));
-        assert_eq!(retained.digest(), uncached.digest());
+        let mut polls = 0;
+        let cancelled = cache.lookup_controlled(&owner, request(), &mut || {
+            polls += 1;
+            Err("cancelled while waiting")
+        });
+        assert_eq!(cancelled.unwrap_err(), "cancelled while waiting");
+        assert_eq!(polls, 1);
         drop(guard);
-        assert!(acquire(&cache, &owner, request(), &builds).1);
+
         let mut changed = request();
         changed.binding.as_of = CommitSeq(0);
+        let graph = graph(changed);
+        let mut guard = Some(cache.entries.lock().unwrap());
+        let mut polls = 0;
+        cache
+            .remember_graph(&owner, changed, &graph, (), 0, &mut || {
+                polls += 1;
+                drop(guard.take());
+                // The cache itself owns no guard while calling live control.
+                assert!(cache.entries.try_lock().is_ok());
+                Ok::<_, &'static str>(())
+            })
+            .unwrap();
+        assert_eq!(polls, 1);
+        assert!(acquire(&cache, &owner, changed, &builds).1);
+    }
+
+    #[test]
+    fn builders_and_checkpoints_run_without_the_cache_lock() {
+        let cache = ProjectionCache::new(CACHE_BYTES);
+        let owner = Arc::new(());
+        let changed = request();
         let (_, hit) = cache
             .get_or_build(
                 &owner,
                 changed,
-                || Ok::<_, &'static str>(()),
+                || {
+                    assert!(cache.entries.try_lock().is_ok());
+                    Ok::<_, &'static str>(())
+                },
                 || {
                     assert!(cache.entries.try_lock().is_ok());
                     Ok(graph(changed))
@@ -486,6 +457,24 @@ mod tests {
             )
             .unwrap();
         assert!(!hit);
+    }
+
+    #[test]
+    fn poisoned_metadata_recovers_without_disabling_complete_entries() {
+        let cache = ProjectionCache::new(CACHE_BYTES);
+        let owner = Arc::new(());
+        let builds = Cell::new(0);
+        let retained = acquire(&cache, &owner, request(), &builds).0;
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.entries.lock().unwrap();
+            panic!("interrupted metadata holder");
+        }));
+        assert!(poisoned.is_err());
+        let (reused, hit) = acquire(&cache, &owner, request(), &builds);
+        assert!(hit);
+        assert!(retained.shares_cache_with(&reused));
+        assert_eq!(builds.get(), 1);
+        assert!(!cache.entries.is_poisoned());
     }
 
     #[test]

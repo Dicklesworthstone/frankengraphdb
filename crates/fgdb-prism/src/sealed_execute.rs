@@ -21,6 +21,8 @@ use std::cell::RefCell;
 use std::convert::Infallible;
 use std::mem::size_of;
 
+#[path = "sealed_betweenness.rs"]
+mod betweenness;
 #[path = "sealed_cdlp.rs"]
 mod cdlp;
 #[path = "sealed_clustering.rs"]
@@ -31,6 +33,8 @@ mod components;
 mod cooperative;
 #[path = "sealed_core.rs"]
 mod core_number;
+#[path = "sealed_directed_clustering.rs"]
+mod directed_clustering;
 #[path = "sealed_distance.rs"]
 mod distance;
 #[path = "sealed_eigenvector.rs"]
@@ -542,10 +546,12 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Cdlp { .. }
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::DirectedClusteringCoefficient
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
                         | FoundationAlgorithm::HarmonicCentrality
+                        | FoundationAlgorithm::BetweennessCentrality
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
                 )
@@ -579,6 +585,8 @@ impl FnxCallSpec {
     /// Eigenvector iteration keeps two score vectors and canonical reductions.
     /// Closeness and harmonic centrality reuse one FIFO and distance vector
     /// for all sources; their retained-history work bound applies to every pass.
+    /// Betweenness keeps five vertex-sized vectors and preserves source-ordered
+    /// Brandes reductions; only reached vertices are reset between sources.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -622,8 +630,20 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
+        ) {
+            return betweenness::execute(self, cx, graph, limits, memory, &admission);
+        }
         if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
             return cdlp::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::DirectedClusteringCoefficient
+        ) {
+            return directed_clustering::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1023,7 +1043,9 @@ fn source_digest() -> Digest {
             include_str!("sealed_eigenvector.rs"),
             include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
+            include_str!("sealed_directed_clustering.rs"),
             include_str!("sealed_cdlp.rs"),
+            include_str!("sealed_betweenness.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
             include_str!("shortest_path.rs"),
