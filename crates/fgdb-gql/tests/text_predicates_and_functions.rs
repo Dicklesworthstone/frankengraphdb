@@ -403,16 +403,17 @@ fn string_construction_growth_is_charged_even_when_final_output_is_an_integer() 
 }
 
 /// fgdb-xakp1: toUpper, toLower and size() are the openCypher spellings of
-/// UPPER, LOWER and CHAR_LENGTH. Inside a scalar expression they compile to
-/// the very same program. A leading size() is the list-or-text Size node:
-/// text counts Unicode scalars exactly as CHAR_LENGTH does, a list keeps its
-/// length, NULL stays NULL, and any other scalar is a typed failure.
+/// UPPER, LOWER and CHAR_LENGTH. Inside a scalar expression toUpper and
+/// toLower compile to the very same program. size() of a property is the
+/// list-or-text Size node everywhere, since a property may hold a stored List
+/// (fgdb-k3nub): text counts Unicode scalars exactly as CHAR_LENGTH does, a
+/// list keeps its length, NULL stays NULL, and any other scalar is a typed
+/// failure, inside arithmetic too.
 #[test]
 fn opencypher_text_function_spellings_are_the_same_operations() {
     for (cypher, gql) in [
         ("toUpper(n.text)", "UPPER(n.text)"),
         ("TOLOWER(n.text)", "LOWER(n.text)"),
-        ("1 + size(n.text)", "1 + CHAR_LENGTH(n.text)"),
     ] {
         assert_eq!(
             prepare(&format!("MATCH (n) RETURN {cypher} AS value")).canonical_bytes(),
@@ -421,6 +422,25 @@ fn opencypher_text_function_spellings_are_the_same_operations() {
         );
     }
     let input = text("é🦀a\u{301}");
+    assert_eq!(scalar("1 + size(n.text)", &input), CanonicalScalar::Int(5));
+    assert_eq!(
+        scalar("1 + size(n.text)", &input),
+        scalar("1 + CHAR_LENGTH(n.text)", &input)
+    );
+    assert_eq!(
+        scalar("1 + size(n.text)", &CanonicalScalar::Null),
+        CanonicalScalar::Null
+    );
+    assert!(matches!(
+        execute(
+            &prepare("MATCH (n) RETURN 1 + size(n.text) AS value"),
+            &CanonicalScalar::Int(42),
+            policy()
+        ),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::Projection { .. }
+        ))
+    ));
     assert_eq!(scalar("toUpper(n.text)", &input), text("É🦀A\u{301}"));
     assert_eq!(scalar("size(n.text)", &input), CanonicalScalar::Int(4));
     assert_eq!(

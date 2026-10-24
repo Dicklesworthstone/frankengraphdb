@@ -914,15 +914,13 @@ fn collected_numeric_calls_refuse_scalar_lazy_scopes_before_resolution() {
                     format!(
                         "{:?}",
                         fgdb_gql::PreparedGraphPipelineAggregateText::prepare(&statement, resolve)
-                            .err()
-                            .expect("unsupported lazy collected call")
+                            .expect_err("unsupported lazy collected call")
                     )
                 } else {
                     format!(
                         "{:?}",
                         PreparedGraphAggregateText::prepare(&statement, resolve)
-                            .err()
-                            .expect("unsupported lazy collected call")
+                            .expect_err("unsupported lazy collected call")
                     )
                 };
                 assert!(
