@@ -630,9 +630,9 @@ impl PreparedGraphSet {
         })
     }
 
-    /// A registered procedure's rows as this pipeline's source (Appendix C
-    /// `ProcedureCall`). CALL starts a read pipeline, so the input must be the
-    /// zero-column singleton and the call runs exactly once. `outputs` pairs
+    /// A registered procedure's rows joined to this pipeline (Appendix C
+    /// `ProcedureCall`). Constant arguments run once per execution; an
+    /// existing input composes through the ordinary CrossJoin. `outputs` pairs
     /// each procedure output with its column alias; every column is the Any
     /// domain. Arguments are constants: literals or bound parameters.
     /// `vertices` lists, ascending, the YIELD positions the statement matches
@@ -672,7 +672,30 @@ impl PreparedGraphSet {
             || self.offset != 0
             || self.count.is_some()
         {
-            return Err(Error::ProcedureNotFirst);
+            let observed = self.columns.len().saturating_add(outputs.len());
+            if observed > crate::algebra::MAX_PATTERN_VERTICES {
+                return Err(Error::TooManyColumns {
+                    limit: crate::algebra::MAX_PATTERN_VERTICES,
+                    observed,
+                });
+            }
+            for (column, (_, alias)) in outputs.iter().enumerate() {
+                if self.columns.contains(alias) {
+                    return Err(Error::DuplicateName {
+                        column: self.columns.len() + column,
+                    });
+                }
+            }
+            let right = Self::singleton().procedure_call_with_projection(
+                namespace,
+                name,
+                arguments,
+                names,
+                outputs,
+                vertices,
+                graph_projection,
+            )?;
+            return self.cross_join(right).map_err(Error::SetBuild);
         }
         if outputs.is_empty() {
             return Err(Error::Empty);

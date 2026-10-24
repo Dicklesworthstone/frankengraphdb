@@ -90,6 +90,47 @@ fn column(rows: &[GraphValueRow], at: usize) -> Vec<GraphValue> {
     rows.iter().map(|row| row.values()[at].clone()).collect()
 }
 
+#[test]
+fn successive_constant_calls_preserve_incoming_bags_and_share_source_allowance() {
+    let query = prepare(
+        "UNWIND [1,1,null] AS copy CALL t.echo(7) YIELD value \
+         CALL t.scores() YIELD score RETURN copy, value, score",
+        &GqlParameters::new(),
+    );
+    let mut calls = Vec::new();
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                calls.push(call.name().to_owned());
+                host(call, arguments)
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    assert_eq!(calls, ["echo", "scores"]);
+    assert_eq!(result.rows.snapshot_records, 5);
+    let mut expected = Vec::new();
+    for copy in [int(1), int(1), GraphValue::Scalar(CanonicalScalar::Null)] {
+        for score in [1, 3, 2, 5] {
+            expected.push(vec![copy.clone(), int(7), int(score)]);
+        }
+    }
+    let mut actual: Vec<_> = result.value.iter().map(|row| row.values().to_vec()).collect();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert!(query
+        .execute_governed_with_procedures(
+            GqlQueryPolicy::new(4, 100, 100_000, 100_000),
+            no_graph,
+            |call, arguments, _| host(call, arguments),
+            || Ok::<_, usize>(()),
+        )
+        .is_err());
+}
+
 fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(11))),

@@ -718,8 +718,6 @@ pub enum GraphSetProjectionError {
         column: usize,
     },
     SetBuild(GraphSetBuildError),
-    /// CALL starts a read pipeline; it cannot follow another stage.
-    ProcedureNotFirst,
 }
 impl core::fmt::Display for GraphSetProjectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -765,9 +763,6 @@ impl core::fmt::Display for GraphSetProjectionError {
                 )
             }
             Self::SetBuild(error) => error.fmt(f),
-            Self::ProcedureNotFirst => {
-                f.write_str("CALL starts a read pipeline; it cannot follow another stage")
-            }
         }
     }
 }
