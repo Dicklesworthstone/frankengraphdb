@@ -61,14 +61,19 @@ fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> 
                     Ok(starts) => comprehension |= starts,
                     Err(error) => break Err(error.into()),
                 }
-                aggregate |=
-                    matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'(')));
+                aggregate |= matches!(
+                    lexer.clone().next().map(|next| next.kind),
+                    Ok(TokenKind::Punct(b'('))
+                );
             }
             TokenKind::Word(word)
                 if AGGREGATES
                     .iter()
                     .any(|name| word.eq_ignore_ascii_case(name))
-                    && matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'('))) =>
+                    && matches!(
+                        lexer.clone().next().map(|next| next.kind),
+                        Ok(TokenKind::Punct(b'('))
+                    ) =>
             {
                 aggregate = true;
             }

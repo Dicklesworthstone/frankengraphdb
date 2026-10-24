@@ -2831,7 +2831,10 @@ impl<'a> Parser<'a> {
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<crate::GraphValueFunction>, GraphPatternTextError> {
         let (function, path) = if self.is_word("NODES") {
-            (crate::GraphValueFunction::PathNodes, GraphPathFunction::Nodes)
+            (
+                crate::GraphValueFunction::PathNodes,
+                GraphPathFunction::Nodes,
+            )
         } else if self.is_word("RELATIONSHIPS") || self.is_word("EDGES") {
             (
                 crate::GraphValueFunction::PathRelationships,
@@ -2854,7 +2857,11 @@ impl<'a> Parser<'a> {
             return Ok(Some(function));
         }
         if graph
-            && (self.syntax.variables.iter().any(|variable| variable.text == name)
+            && (self
+                .syntax
+                .variables
+                .iter()
+                .any(|variable| variable.text == name)
                 || self.syntax.names_path(name)
                 || self.syntax.visible_edge(name).is_some())
         {
@@ -3201,7 +3208,9 @@ impl<'a> Parser<'a> {
     /// `size((n)-->())`, the openCypher 9 pattern expression inside size(),
     /// stays refused: the openCypher TCK requires a SyntaxError for it
     /// (List6 [6]). Only lexical lookahead: nothing is consumed.
-    pub(in crate::graph_text) fn starts_pattern_count(&self) -> Result<bool, GraphPatternTextError> {
+    pub(in crate::graph_text) fn starts_pattern_count(
+        &self,
+    ) -> Result<bool, GraphPatternTextError> {
         Ok(self.is_word("COUNT")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')))
     }
@@ -3245,9 +3254,9 @@ impl<'a> Parser<'a> {
                 collect: Some(scope),
             },
         )?;
-        Ok(ReadValueTemplate::Size(Box::new(ReadValueTemplate::Column(
-            column,
-        ))))
+        Ok(ReadValueTemplate::Size(Box::new(
+            ReadValueTemplate::Column(column),
+        )))
     }
 
     /// The local of Collect scope `scope` that the projection after `|`

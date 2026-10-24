@@ -1266,7 +1266,11 @@ fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
     let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
     let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
     assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
-    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
+    assert!(
+        grouped
+            .iter()
+            .all(|row| row.values()[0].as_count() == Some(1))
+    );
     for text in [
         "MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c",
         "MATCH (n)-->(k) WITH n AS k RETURN count([(k)-->() | 1]) AS c",
@@ -1321,7 +1325,10 @@ fn an_aggregate_output_indexes_compact_vertex_and_edge_lists() {
         values.sort();
         values
     };
-    assert_eq!(list(0), [GraphValue::Vertex(VId(0)), GraphValue::Vertex(VId(1))]);
+    assert_eq!(
+        list(0),
+        [GraphValue::Vertex(VId(0)), GraphValue::Vertex(VId(1))]
+    );
     assert_eq!(
         list(1),
         [
@@ -1372,5 +1379,9 @@ fn a_terminal_aggregate_return_reads_pattern_counts() {
     let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
     let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
     assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
-    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
+    assert!(
+        grouped
+            .iter()
+            .all(|row| row.values()[0].as_count() == Some(1))
+    );
 }

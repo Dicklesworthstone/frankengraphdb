@@ -125,18 +125,17 @@ impl<'a> Parser<'a> {
                 token.kind,
                 matches!(previous, Some(TokenKind::Punct(b'.'))),
             ) && let Some(span) = self.hoist_comprehension(
-                    &lexer,
-                    token,
-                    &mut outputs,
-                    &mut inputs,
-                    width,
-                    pipeline::HoistGuard {
-                        names: &HIDDEN_NAMES,
-                        locals: &locals,
-                        refused: &imported,
-                    },
-                )?
-            {
+                &lexer,
+                token,
+                &mut outputs,
+                &mut inputs,
+                width,
+                pipeline::HoistGuard {
+                    names: &HIDDEN_NAMES,
+                    locals: &locals,
+                    refused: &imported,
+                },
+            )? {
                 skip_until = span.1;
                 comprehensions.push(span);
                 if let Some(slot) = item.get_mut(item_len) {

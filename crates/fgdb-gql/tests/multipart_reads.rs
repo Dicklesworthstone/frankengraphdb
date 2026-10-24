@@ -1098,9 +1098,7 @@ fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
         by_degree(&|degree| degree > 1)
     );
     assert_eq!(
-        sorted(execute(
-            "MATCH (n) WHERE size([(n)-->() | 1]) = 1 RETURN n"
-        )),
+        sorted(execute("MATCH (n) WHERE size([(n)-->() | 1]) = 1 RETURN n")),
         by_degree(&|degree| degree == 1)
     );
     // A page: degrees 3, 1, 1, 0, ties broken by identity.
@@ -1201,11 +1199,16 @@ fn pattern_counts_read_witness_list_sizes() {
     };
     let per_vertex = |value: &dyn Fn(u128) -> i64| -> Vec<GraphValueRow> {
         (1..=4)
-            .map(|n| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), int(value(n))]))
+            .map(|n| {
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), int(value(n))])
+            })
             .collect()
     };
     for (text, expected) in [
-        ("MATCH (n) RETURN n, COUNT { (n)-->() } AS d", per_vertex(&out)),
+        (
+            "MATCH (n) RETURN n, COUNT { (n)-->() } AS d",
+            per_vertex(&out),
+        ),
         (
             "MATCH (n) RETURN n, COUNT { MATCH (n)-->(m) WHERE m.p > 2 } AS d",
             per_vertex(&into_high),
@@ -1336,7 +1339,10 @@ fn a_return_page_orders_by_pattern_counts() {
     by_degree.sort_by_key(|&n| (core::cmp::Reverse(out(n)), n));
     assert_eq!(
         execute("MATCH (n) RETURN n ORDER BY COUNT { (n)-->() } DESC, n"),
-        by_degree.iter().map(|&n| vertices(&[n])).collect::<Vec<_>>()
+        by_degree
+            .iter()
+            .map(|&n| vertices(&[n]))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         execute("MATCH (n) RETURN n ORDER BY size([(n)-->(m) | m]) DESC, n LIMIT 2"),

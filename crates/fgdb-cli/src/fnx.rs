@@ -380,17 +380,16 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let read = options.fnx.options(options)?;
     let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::statement)?;
     let sealed = options.fnx.sealed_limits();
-    if options.buffered.enabled() {
-        if options.budget.records.is_some()
+    if options.buffered.enabled()
+        && (options.budget.records.is_some()
             || options.budget.rows.is_some()
-            || options.budget.scratch.is_some()
-        {
-            return Err(Failure::usage(
-                "native --max-snapshot-records, --max-result-rows and --max-scratch-entries \
+            || options.budget.scratch.is_some())
+    {
+        return Err(Failure::usage(
+            "native --max-snapshot-records, --max-result-rows and --max-scratch-entries \
                  do not apply to buffered analytics; use --buffer-*, --graph-staging-bytes \
                  and --graph-workspace-bytes limits",
-            ));
-        }
+        ));
     }
     if sealed.is_some() {
         // All graph-law and scheduling checks precede either read-only open.
@@ -499,8 +498,10 @@ pub(super) async fn run_sealed(
     let (memory, sealing) = prepared
         .sealed
         .ok_or_else(|| Failure::usage("compressed analytics requires --sealed"))?;
-    let mut root_limits = RootReadLimits::default();
-    root_limits.max_incidences = prepared.source_incidences;
+    let root_limits = RootReadLimits {
+        max_incidences: prepared.source_incidences,
+        ..RootReadLimits::default()
+    };
     let graph = Database::open_prism_sealed_projection(
         open_cx,
         cx,
