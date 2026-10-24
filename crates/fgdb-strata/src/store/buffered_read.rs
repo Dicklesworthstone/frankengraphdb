@@ -1378,7 +1378,22 @@ mod tests {
                 "adjacency needs no property payload"
             );
             drop(found);
-            view.limits.max_work = 3;
+            // The point read's three payload events are followed by four
+            // affine-retention events: owner, property vector, scalar heap,
+            // and final reservation split. Every incomplete prefix refuses.
+            const POINT_WORK: usize = 3 + 4;
+            for allowance in 3..POINT_WORK {
+                view.limits.max_work = allowance;
+                assert!(matches!(
+                    view.edge_at(&query, EId(1), CommitSeq(1)).await,
+                    Err(BufferedReadError::Limit {
+                        resource: "buffered source work",
+                        requested,
+                        limit,
+                    }) if requested == allowance + 1 && limit == allowance
+                ));
+            }
+            view.limits.max_work = POINT_WORK;
             let found = view
                 .edge_at(&query, EId(1), CommitSeq(1))
                 .await
@@ -1387,6 +1402,7 @@ mod tests {
             assert_eq!(found.entry, entry);
             assert_eq!(found.props, rows[0]);
             drop(found);
+            view.limits.max_work = 3;
             let found = view
                 .adjacency_at(&query, VId(1), None, false, CommitSeq(1), 1)
                 .await

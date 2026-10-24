@@ -104,6 +104,13 @@ fn plan(text: &str) -> PreparedNativeRead {
     PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols).unwrap()
 }
 async fn cold(cx: &CommitCx, vfs: &MemVfs) -> BufferedReadView<MemVfs> {
+    cold_with_extent(cx, vfs, 4096).await
+}
+async fn cold_with_extent(
+    cx: &CommitCx,
+    vfs: &MemVfs,
+    max_extent_bytes: usize,
+) -> BufferedReadView<MemVfs> {
     Database::open_buffered_read_view_with_vfs(
         cx,
         vfs.clone(),
@@ -119,7 +126,7 @@ async fn cold(cx: &CommitCx, vfs: &MemVfs) -> BufferedReadView<MemVfs> {
             buffer: BufferLimits {
                 max_frames: 2,
                 max_ghost_entries: 4,
-                max_extent_bytes: 4096,
+                max_extent_bytes,
             },
         },
     )
@@ -727,12 +734,40 @@ fn large_duplicate_inputs_use_cold_sources_and_return_one_compressed_change() {
         let resident = Arc::downgrade(&db.snapshot);
         drop(db);
         assert!(resident.upgrade().is_none());
-        let mut view = cold(&commit, &vfs).await;
+        let prepared = plan("MATCH (n) RETURN n.q AS q");
+        let mut undersized = cold(&commit, &vfs).await;
+        let source_pool = undersized.memory_pool().clone();
+        let error = attempt(
+            &cx,
+            &prepared,
+            &mut undersized,
+            &cx,
+            before,
+            after,
+            policy(1),
+            u64::MAX,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(NativeSpoolError::BufferedExecute(error))
+                if matches!(*error, GqlQueryError::Source(ScanError::Vertex(
+                    fgdb_gql::stream::VertexScanError::Source(crate::BufferedReadError::Buffer(
+                        fgdb_strata::tiered::buffer::BufferError::ExtentTooLarge { bytes, limit: 4096 }
+                    ))
+                )) if bytes > 4096)
+        ));
+        drop(undersized);
+        assert_eq!(source_pool.used(), 0);
+        // Native sealed objects are up to 16 KiB. Fund that actual source
+        // frame while retaining the separate original 64 KiB spill pool and
+        // all 128 duplicate rows; this does not enlarge any product limit.
+        let mut view = cold_with_extent(&commit, &vfs, 16 * 1024).await;
         let pool = MemoryPool::new(65_536, 0).unwrap();
         let (mut source, _) = file(&cx, &pool).await;
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut auxiliary, _) = file(&cx, &pool).await;
-        let prepared = plan("MATCH (n) RETURN n.q AS q");
         let mut cursor = prepared
             .spool_buffered_difference_in_view(
                 &mut view,

@@ -1173,7 +1173,10 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
         let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
         let mut bounded = limits();
         // Authenticate one object and row per patch, then build the directory.
-        // The later cursor must still use exactly four source events per row.
+        // Each cursor row needs four source events (head, history, decode
+        // object, decode row) and four affine-retention events (owner,
+        // property vector, scalar heap, final split). None may be skipped.
+        let scan_work = count * (4 + 4);
         let (_, directory_work) = patch_directory_overhead(count);
         bounded.max_work = 2 * count + directory_work;
         let mut view = store
@@ -1195,7 +1198,7 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
             );
         }
         assert!(scan.next(&cx).await.unwrap().is_none());
-        assert_eq!(scan.work_used(), count * 4);
+        assert_eq!(scan.work_used(), scan_work);
         drop(scan);
         assert_eq!(view.stats().misses, count as u64);
         assert_eq!(view.stats().bypasses, count as u64);
@@ -1211,7 +1214,7 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
         let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
         // The hosted-query control applies a tighter cursor allowance without
         // lowering the already completed constructor's directory allowance.
-        let scan_limit = count * 4 - 1;
+        let scan_limit = scan_work - 1;
         let mut admitted_work = 0usize;
         let mut observe = |event| {
             if event == BufferedScanEvent::Work {
@@ -1234,7 +1237,8 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
         }
         assert!(matches!(
             scan.next_candidate_with(&cx, &mut observe).await,
-            Err(BufferedScanError::Control((128, 127)))
+            Err(BufferedScanError::Control((requested, limit)))
+                if requested == scan_work && limit == scan_limit
         ));
         assert_eq!(admitted_work, scan_limit);
         assert_eq!(scan.work_used(), scan_limit);
@@ -2256,25 +2260,37 @@ fn vertex_topology_and_complete_pulls_can_share_a_patch_without_losing_propertie
         let commit = contexts.commit();
         let cx = contexts.query();
         let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
-        let rows: Vec<_> = (1..=4)
-            .map(|vid| {
-                let mut row = scan_vertex(vid, 1, None, 0);
-                row.labels = vec![LabelId(vid as u64)];
-                row.props = vec![(
-                    PropertyKeyId(11),
-                    CanonicalPropertyValue::List(
-                        fgdb_types::CanonicalList::try_new(vec![
-                            CanonicalScalar::ucs_basic_text(&"payload".repeat(300))
-                                .unwrap()
-                                .into(),
-                            CanonicalScalar::Int(vid as i64).into(),
-                        ])
-                        .unwrap(),
-                    ),
-                )];
-                row
-            })
-            .collect();
+        let make_rows = |repetitions| {
+            (1..=4)
+                .map(|vid| {
+                    let mut row = scan_vertex(vid, 1, None, 0);
+                    row.labels = vec![LabelId(vid as u64)];
+                    row.props = vec![(
+                        PropertyKeyId(11),
+                        CanonicalPropertyValue::List(
+                            fgdb_types::CanonicalList::try_new(vec![
+                                CanonicalScalar::ucs_basic_text(&"payload".repeat(repetitions))
+                                    .unwrap()
+                                    .into(),
+                                CanonicalScalar::Int(vid as i64).into(),
+                            ])
+                            .unwrap(),
+                        ),
+                    )];
+                    row
+                })
+                .collect::<Vec<_>>()
+        };
+        // Keep the original over-capacity object as a refusal control. The
+        // sharing law below needs four rows in ONE format-admitted patch;
+        // splitting them would erase its Skip->Read->Skip reuse boundary.
+        let oversized = encode_patch(&make_rows(300)).unwrap();
+        assert!(matches!(
+            store.put_patch(&commit, &oversized).await,
+            Err(StoreError::ObjectTooLarge { limit: 16_384, observed })
+                if observed == oversized.len() as u64
+        ));
+        let rows = make_rows(240);
         let patch = store
             .put_patch(&commit, &encode_patch(&rows).unwrap())
             .await
