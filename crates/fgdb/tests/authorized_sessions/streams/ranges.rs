@@ -240,10 +240,11 @@ fn hidden_range_values_cannot_change_native_or_signed_work_thresholds() {
                 )
                 .unwrap();
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-            assert!(matches!(
-                cursor.next(),
-                Some(Err(QueryError::Stream(GqlQueryError::Data(_)))),
-            ));
+            let first = cursor.next();
+            assert!(
+                matches!(first, Some(Err(QueryError::Stream(GqlQueryError::Data(_)))),),
+                "earlier arithmetic must refuse before the later range: {first:?}"
+            );
             assert_eq!(cursor.state(), VertexScanState::Failed);
             assert!(cursor.next().is_none());
         }

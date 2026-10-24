@@ -710,73 +710,105 @@ fn every_direction_build_cursor_and_connected_call_checkpoint_is_terminal() {
         for direction in [Directedness::Reversed, Directedness::Undirected] {
             let mut opt = options();
             opt.projection.directedness = direction;
-            let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-            let graph = projected(&view, &observed, &image, opt);
-            let count = probe.calls();
-            assert!(count > 20);
-            for stop in 1..=count {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(
-                    view.prism_sealed_projection_at(
-                        &controlled,
-                        &image,
-                        view.frontier(),
-                        opt.selection,
-                        opt.projection,
-                        opt.projection_limits,
-                        opt.source_limits
-                    )
-                    .is_err()
-                );
-                assert_eq!(probe.calls(), stop);
-            }
-            let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-            cursor_row(&graph, &observed, 0, None);
-            for stop in 1..=probe.calls() {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                if let Ok(mut cursor) = graph.neighbor_cursor(&controlled, 0) {
-                    loop {
-                        match cursor.next(&controlled) {
-                            Ok(Some(_)) => {}
-                            Err(_) => break,
-                            Ok(None) => panic!("interruption became clean EOF at {stop}"),
-                        }
-                    }
+            let mut cold_count = 0;
+            // A cold build and a retained lookup have different physical
+            // checkpoints; neither route may publish after its own refusal.
+            for retained in [false, true] {
+                view.set_read_cache_limits(
+                    &query,
+                    crate::ReadCacheLimits {
+                        sealed_projection_bytes: if retained {
+                            crate::ReadCacheLimits::default().sealed_projection_bytes
+                        } else {
+                            0
+                        },
+                        ..crate::ReadCacheLimits::default()
+                    },
+                )
+                .unwrap();
+                if retained {
+                    projected(&view, &query, &image, opt);
                     assert!(
-                        cursor.next(&query).unwrap().is_none(),
-                        "a failed cursor cannot resume"
+                        view.read_cache_status(&query)
+                            .unwrap()
+                            .sealed_projections
+                            .entries
+                            > 0
                     );
                 }
-                assert_eq!(probe.calls(), stop);
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+                let graph = projected(&view, &observed, &image, opt);
+                let count = probe.calls();
+                if retained {
+                    assert!(count > 0 && count < cold_count);
+                } else {
+                    assert!(count > 20);
+                    cold_count = count;
+                }
+                for stop in 1..=count {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    assert!(
+                        view.prism_sealed_projection_at(
+                            &controlled,
+                            &image,
+                            view.frontier(),
+                            opt.selection,
+                            opt.projection,
+                            opt.projection_limits,
+                            opt.source_limits
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(probe.calls(), stop);
+                }
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+                cursor_row(&graph, &observed, 0, None);
+                for stop in 1..=probe.calls() {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    if let Ok(mut cursor) = graph.neighbor_cursor(&controlled, 0) {
+                        loop {
+                            match cursor.next(&controlled) {
+                                Ok(Some(_)) => {}
+                                Err(_) => break,
+                                Ok(None) => panic!("interruption became clean EOF at {stop}"),
+                            }
+                        }
+                        assert!(
+                            cursor.next(&query).unwrap().is_none(),
+                            "a failed cursor cannot resume"
+                        );
+                    }
+                    assert_eq!(probe.calls(), stop);
+                }
+                let call = if direction == Directedness::Undirected {
+                    FnxCallSpec::connected_components()
+                } else {
+                    FnxCallSpec::strongly_connected_components()
+                };
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+                let expected = call
+                    .execute_sealed(&observed, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                for stop in 1..=probe.calls() {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    assert!(matches!(
+                        call.execute_sealed(&controlled, &graph, opt.execution_limits, memory()),
+                        Err(FnxSealedExecutionError::Cancelled(_))
+                    ));
+                    assert_eq!(probe.calls(), stop);
+                }
+                assert_eq!(
+                    call.execute_sealed(&query, &graph, opt.execution_limits, memory())
+                        .unwrap(),
+                    expected
+                );
             }
-            let call = if direction == Directedness::Undirected {
-                FnxCallSpec::connected_components()
-            } else {
-                FnxCallSpec::strongly_connected_components()
-            };
-            let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-            let expected = call
-                .execute_sealed(&observed, &graph, opt.execution_limits, memory())
-                .unwrap();
-            for stop in 1..=probe.calls() {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(matches!(
-                    call.execute_sealed(&controlled, &graph, opt.execution_limits, memory()),
-                    Err(FnxSealedExecutionError::Cancelled(_))
-                ));
-                assert_eq!(probe.calls(), stop);
-            }
-            assert_eq!(
-                call.execute_sealed(&query, &graph, opt.execution_limits, memory())
-                    .unwrap(),
-                expected
-            );
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

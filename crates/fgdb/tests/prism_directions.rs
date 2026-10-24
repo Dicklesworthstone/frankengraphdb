@@ -1454,65 +1454,111 @@ fn every_directional_checkpoint_refuses_atomically_and_failed_row_cursors_are_fu
             } else {
                 WCC
             });
-            let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let measured = query.with_checkpoint_probe(Arc::clone(&probe));
-            let expected = db
-                .execute_fnx_sealed(
-                    &measured,
-                    &procedure,
-                    opt,
-                    memory(),
-                    SealedLimits::default(),
+            let mut cold_total = 0;
+            // Keep full cold construction coverage and separately exercise
+            // every live checkpoint on a proven retained-cache hit.
+            for retained in [false, true] {
+                db.set_read_cache_limits(
+                    &query,
+                    fgdb::ReadCacheLimits {
+                        sealed_projection_bytes: if retained {
+                            fgdb::ReadCacheLimits::default().sealed_projection_bytes
+                        } else {
+                            0
+                        },
+                        ..fgdb::ReadCacheLimits::default()
+                    },
                 )
-                .await
                 .unwrap();
-            let total = probe.calls();
-            assert!(total > 20);
-            for stop in 1..=total {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(
+                if retained {
                     db.execute_fnx_sealed(
-                        &controlled,
+                        &query,
+                        &procedure,
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        db.read_cache_status(&query)
+                            .unwrap()
+                            .sealed_projections
+                            .entries
+                            > 0
+                    );
+                }
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let measured = query.with_checkpoint_probe(Arc::clone(&probe));
+                let expected = db
+                    .execute_fnx_sealed(
+                        &measured,
+                        &procedure,
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                let total = probe.calls();
+                if retained {
+                    assert!(total > 0 && total < cold_total);
+                } else {
+                    assert!(total > 20);
+                    cold_total = total;
+                }
+                for stop in 1..=total {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    assert!(
+                        db.execute_fnx_sealed(
+                            &controlled,
+                            &procedure,
+                            opt,
+                            memory(),
+                            SealedLimits::default()
+                        )
+                        .await
+                        .is_err()
+                    );
+                    assert_eq!(probe.calls(), stop);
+                    assert_eq!(
+                        db.read_session().unwrap().partition_root(),
+                        before.partition_root()
+                    );
+                }
+                assert_eq!(
+                    db.execute_fnx_sealed(
+                        &query,
                         &procedure,
                         opt,
                         memory(),
                         SealedLimits::default()
                     )
                     .await
-                    .is_err()
-                );
-                assert_eq!(probe.calls(), stop);
-                assert_eq!(
-                    db.read_session().unwrap().partition_root(),
-                    before.partition_root()
-                );
-            }
-            assert_eq!(
-                db.execute_fnx_sealed(&query, &procedure, opt, memory(), SealedLimits::default())
-                    .await
                     .unwrap(),
-                expected
-            );
-            let graph = project(&db, &query, opt).await;
-            let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let measured = query.with_checkpoint_probe(Arc::clone(&probe));
-            let mut cursor = graph.neighbor_cursor(&query, 1).unwrap();
-            while cursor.next(&measured).unwrap().is_some() {}
-            for stop in 1..=probe.calls() {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    expected
+                );
+                let graph = project(&db, &query, opt).await;
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let measured = query.with_checkpoint_probe(Arc::clone(&probe));
                 let mut cursor = graph.neighbor_cursor(&query, 1).unwrap();
-                loop {
-                    match cursor.next(&controlled) {
-                        Ok(Some(_)) => {}
-                        Ok(None) => panic!("cancellation became EOF"),
-                        Err(SealedProjectionError::Read(SealedError::Interrupted(_))) => break,
-                        Err(error) => panic!("wrong error: {error:?}"),
+                while cursor.next(&measured).unwrap().is_some() {}
+                for stop in 1..=probe.calls() {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                    let mut cursor = graph.neighbor_cursor(&query, 1).unwrap();
+                    loop {
+                        match cursor.next(&controlled) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => panic!("cancellation became EOF"),
+                            Err(SealedProjectionError::Read(SealedError::Interrupted(_))) => break,
+                            Err(error) => panic!("wrong error: {error:?}"),
+                        }
                     }
+                    assert_eq!(probe.calls(), stop);
+                    assert!(cursor.next(&query).unwrap().is_none());
                 }
-                assert_eq!(probe.calls(), stop);
-                assert!(cursor.next(&query).unwrap().is_none());
             }
         }
         assert_eq!(contexts.outstanding_obligations(), 0);

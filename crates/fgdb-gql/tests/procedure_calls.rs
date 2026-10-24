@@ -92,6 +92,19 @@ fn column(rows: &[GraphValueRow], at: usize) -> Vec<GraphValue> {
 
 #[test]
 fn successive_constant_calls_preserve_incoming_bags_and_share_source_allowance() {
+    // This exact statement used to be in the blanket misplaced-CALL refusal
+    // corpus. It now has the ordinary one-row UNWIND crossed with four scores.
+    assert_eq!(
+        column(
+            &call(&prepare(
+                "UNWIND [1] AS x CALL t.scores() YIELD score RETURN score",
+                &GqlParameters::new(),
+            ))
+            .unwrap(),
+            0,
+        ),
+        [int(1), int(2), int(3), int(5)]
+    );
     let query = prepare(
         "UNWIND [1,1,null] AS copy CALL t.echo(7) YIELD value \
          CALL t.scores() YIELD score RETURN copy, value, score",
@@ -652,7 +665,7 @@ fn malformed_or_misplaced_calls_refuse_before_any_catalog_access() {
         "CALL t.scores YIELD score RETURN score",
         "CALL scores() YIELD score RETURN score",
         "CALL t.scores() YIELD score, score RETURN score",
-        "UNWIND [1] AS x CALL t.scores() YIELD score RETURN score",
+        "UNWIND [1] AS score CALL t.scores() YIELD score RETURN score",
         "CALL t.scores(1 YIELD score RETURN score",
     ] {
         let mut lookups = 0;

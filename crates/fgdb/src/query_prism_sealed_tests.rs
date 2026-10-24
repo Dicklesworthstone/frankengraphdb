@@ -920,80 +920,122 @@ fn cancellation_through_source_sealing_projection_kernel_and_result_never_publis
             )
             .await
             .unwrap();
-        let probe = Arc::new(SimulationCheckpointProbe::new(None));
-        let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-        let expected = view
-            .execute_fnx_sealed(&observed, &image, &dijkstra_call(), options(), memory())
-            .unwrap();
-        let count = probe.calls();
-        assert!(count > 20);
-        for stop in 1..=count {
-            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-            let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
-            assert!(matches!(
-                view.execute_fnx_sealed(&controlled, &image, &dijkstra_call(), options(), memory()),
-                Err(SealedReadError::Input(Error::Cancelled(_)))
-                    | Err(SealedReadError::Projection(SealedProjectionError::Read(
-                        SealedError::Interrupted(_)
-                    )))
-                    | Err(SealedReadError::Execution(
-                        FnxSealedExecutionError::Cancelled(_)
-                    ))
-            ));
-            assert_eq!(probe.calls(), stop);
-        }
-        let probe = Arc::new(SimulationCheckpointProbe::new(None));
-        let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-        let auto = db
-            .execute_fnx_sealed(
-                &observed,
-                &dijkstra_call(),
-                options(),
-                memory(),
-                SealedLimits::default(),
+        // Build checkpoints disappear on a retained projection. Measure and
+        // interrupt every actual boundary separately for both real routes.
+        for retained in [false, true] {
+            db.set_read_cache_limits(
+                &query,
+                crate::ReadCacheLimits {
+                    sealed_projection_bytes: if retained {
+                        crate::ReadCacheLimits::default().sealed_projection_bytes
+                    } else {
+                        0
+                    },
+                    ..crate::ReadCacheLimits::default()
+                },
             )
-            .await
             .unwrap();
-        assert_eq!(auto, expected);
-        let count = probe.calls();
-        for stop in 1..=count {
-            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-            let controlled = query.with_checkpoint_probe(probe);
-            // Storage I/O keeps its native nested error classification; no
-            // stage is allowed to convert interruption into a successful EOF.
-            assert!(
+            if retained {
+                view.execute_fnx_sealed(&query, &image, &dijkstra_call(), options(), memory())
+                    .unwrap();
                 db.execute_fnx_sealed(
-                    &controlled,
+                    &query,
+                    &dijkstra_call(),
+                    options(),
+                    memory(),
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+                assert!(
+                    db.read_cache_status(&query)
+                        .unwrap()
+                        .sealed_projections
+                        .entries
+                        >= 2
+                );
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+            let expected = view
+                .execute_fnx_sealed(&observed, &image, &dijkstra_call(), options(), memory())
+                .unwrap();
+            let count = probe.calls();
+            assert!(count > 20);
+            for stop in 1..=count {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                assert!(matches!(
+                    view.execute_fnx_sealed(
+                        &controlled,
+                        &image,
+                        &dijkstra_call(),
+                        options(),
+                        memory()
+                    ),
+                    Err(SealedReadError::Input(Error::Cancelled(_)))
+                        | Err(SealedReadError::Projection(SealedProjectionError::Read(
+                            SealedError::Interrupted(_)
+                        )))
+                        | Err(SealedReadError::Execution(
+                            FnxSealedExecutionError::Cancelled(_)
+                        ))
+                ));
+                assert_eq!(probe.calls(), stop);
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+            let auto = db
+                .execute_fnx_sealed(
+                    &observed,
+                    &dijkstra_call(),
+                    options(),
+                    memory(),
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(auto, expected);
+            let count = probe.calls();
+            for stop in 1..=count {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = query.with_checkpoint_probe(probe);
+                // Storage I/O keeps its native nested error classification; no
+                // stage is allowed to convert interruption into a successful EOF.
+                assert!(
+                    db.execute_fnx_sealed(
+                        &controlled,
+                        &dijkstra_call(),
+                        options(),
+                        memory(),
+                        SealedLimits::default()
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(
+                    db.read_session().unwrap().partition_root(),
+                    view.partition_root()
+                );
+            }
+            assert_eq!(
+                expected,
+                view.execute_fnx_sealed(&query, &image, &dijkstra_call(), options(), memory())
+                    .unwrap()
+            );
+            assert_eq!(
+                auto,
+                db.execute_fnx_sealed(
+                    &query,
                     &dijkstra_call(),
                     options(),
                     memory(),
                     SealedLimits::default()
                 )
                 .await
-                .is_err()
-            );
-            assert_eq!(
-                db.read_session().unwrap().partition_root(),
-                view.partition_root()
+                .unwrap()
             );
         }
-        assert_eq!(
-            expected,
-            view.execute_fnx_sealed(&query, &image, &dijkstra_call(), options(), memory())
-                .unwrap()
-        );
-        assert_eq!(
-            auto,
-            db.execute_fnx_sealed(
-                &query,
-                &dijkstra_call(),
-                options(),
-                memory(),
-                SealedLimits::default()
-            )
-            .await
-            .unwrap()
-        );
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
