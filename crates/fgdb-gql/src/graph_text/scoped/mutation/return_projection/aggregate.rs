@@ -4,6 +4,7 @@
 //! the existing parser; execution receives the ordinary aggregate plan.
 
 mod inputs;
+mod order;
 mod rows;
 
 use super::*;
@@ -386,6 +387,7 @@ impl PreparedGraphPipelineAggregateText {
         let mut summaries = Vec::new();
         let mut inputs = inputs::Inputs::new(schema.len());
         let mut computed: Vec<(ReadValueTemplate, Vec<Leaf>)> = Vec::new();
+        let mut order_sources = Vec::new();
         loop {
             parser.capacity(
                 returned.len(),
@@ -499,6 +501,12 @@ impl PreparedGraphPipelineAggregateText {
                 ReturnedValue::Key(inputs.read(&mut parser, &schema)?)
             };
             let end = parser.current.at;
+            if matches!(value, ReturnedValue::Key(_))
+                && parser.repeatable_item(at, end)?
+                && !statement[at..end].contains('$')
+            {
+                order_sources.push((at, end, returned.len()));
+            }
             // An unaliased item is named by its exact text, as in openCypher
             // (`count(*)`, and `n.p` for a carried `n`, never a private name).
             let name = if parser.take_word("AS")? {
@@ -596,7 +604,7 @@ impl PreparedGraphPipelineAggregateText {
         // fgdb-4avot: computed items read the evaluation row, every key and
         // then every summary. A non-aggregate leaf must be a grouping key; it
         // never becomes one implicitly, as in openCypher.
-        let output = if computed.is_empty() {
+        let mut output = if computed.is_empty() {
             None
         } else {
             let key_of = |input: usize, at: usize, item: &'static str| {
@@ -648,7 +656,7 @@ impl PreparedGraphPipelineAggregateText {
         let mut key_aliases = Vec::new();
         let mut having_columns = Vec::new();
         let mut output_schema = Vec::new();
-        for item in returned {
+        for item in &returned {
             let (slot, column, kind) = match item.value {
                 ReturnedValue::Key(input) => {
                     let key = keys
@@ -733,57 +741,55 @@ impl PreparedGraphPipelineAggregateText {
             // Actual values are rebound to the exact HAVING program below.
             let _ = bind_having(&having, &having_columns, None, having_at)?;
         }
-        let mut ordering = Vec::new();
-        let mut projected_ordering = Vec::new();
+        parser.projected_sources =
+            (!order_sources.is_empty()).then_some((output_schema.len(), order_sources));
+        let order = order::parse(
+            &mut parser,
+            &schema,
+            &output_schema,
+            &having_columns,
+            &computed_at,
+            &keys,
+            &mut inputs,
+            &mut summaries,
+        )?;
+        parser.projected_sources = None;
+        if !order.computed.is_empty() {
+            if output.is_none() {
+                output = Some(
+                    returned
+                        .iter()
+                        .map(|item| {
+                            let column = match item.value {
+                                ReturnedValue::Key(input) => keys
+                                    .iter()
+                                    .position(|column| *column == input)
+                                    .expect("returned keys validated above"),
+                                ReturnedValue::Summary(index) => keys.len() + index,
+                                ReturnedValue::Computed(_) => {
+                                    unreachable!("computed output already has a projection")
+                                }
+                            };
+                            ReadProjectionTemplate {
+                                name: item.name.text.to_owned(),
+                                value: ReadValueTemplate::Column(column),
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            slots = (0..names.len())
+                .map(GraphAggregateTextSlot::Aggregate)
+                .collect();
+        }
         let mut offset = ReadPageNumber::Literal(0);
         let mut count = None;
         if let Some(ReadStageTemplate::Page {
-            order,
             offset: skip,
             count: limit,
             ..
         }) = parser.row_page(&output_schema)?
         {
-            // A combined item ranks the computed output tuple, as the MATCH
-            // aggregate does: every key then addresses that tuple, whose
-            // rows hold one value per written item. Other queries keep their
-            // evaluation-column ordering and exact transcripts.
-            let projected = order.iter().any(|key| computed_at.contains(&key.column));
-            for key in order {
-                if projected {
-                    if projected_ordering
-                        .iter()
-                        .any(|prior: &GraphValueOrder| prior.column == key.column)
-                    {
-                        return Err(expected(aggregate_at, "unique ORDER BY column"));
-                    }
-                    projected_ordering.push(GraphValueOrder {
-                        column: key.column,
-                        descending: key.descending,
-                        nulls_first: key.nulls_first,
-                    });
-                    continue;
-                }
-                let column = having_columns[key.column];
-                if ordering
-                    .iter()
-                    .any(|prior: &GraphAggregateOrder| prior.column == column)
-                {
-                    return Err(build(
-                        aggregate_at,
-                        GraphAggregateBuildError::DuplicateOrder { column },
-                    ));
-                }
-                ordering.push(GraphAggregateOrder {
-                    column,
-                    descending: key.descending,
-                    nulls: if key.nulls_first {
-                        GraphNullPlacement::First
-                    } else {
-                        GraphNullPlacement::Last
-                    },
-                });
-            }
             offset = skip;
             count = limit;
         }
@@ -810,7 +816,7 @@ impl PreparedGraphPipelineAggregateText {
             slots,
             having,
             having_columns,
-            ordering,
+            ordering: order.evaluation,
             offset,
             count,
             aggregate_at,
@@ -818,7 +824,8 @@ impl PreparedGraphPipelineAggregateText {
             output: output.map(|items| {
                 Box::new(PipelineOutput {
                     items,
-                    ordering: projected_ordering,
+                    ordering: order.projected,
+                    computed_ordering: order.computed,
                 })
             }),
         })
@@ -856,7 +863,16 @@ impl PreparedGraphPipelineAggregateText {
             query = query
                 .with_output_projection(bind_output(&output.items, &values)?)
                 .map_err(|kind| build(self.aggregate_at, kind))?;
-            if !output.ordering.is_empty() {
+            if !output.computed_ordering.is_empty() {
+                let expressions = output
+                    .computed_ordering
+                    .iter()
+                    .map(|expression| bind_read_value(expression, &values).map_err(Error::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                query = query
+                    .with_computed_order_by(expressions, &output.ordering)
+                    .map_err(|kind| build(self.aggregate_at, kind))?;
+            } else if !output.ordering.is_empty() {
                 query = query
                     .with_projected_order_by(&output.ordering)
                     .map_err(|kind| build(self.aggregate_at, kind))?;

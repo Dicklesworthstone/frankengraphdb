@@ -943,6 +943,10 @@ struct Parser<'a> {
     /// argument (fgdb-qbaex): a resolver that registers a hidden collect of
     /// the expression here clears it, and one that leaves it set refuses.
     percentile_leaf: bool,
+    /// Collected value functions read so far. Lazy scalar constructs compare
+    /// this bounded, monotonic count around their operands: a call anywhere
+    /// inside their eager let slots cannot retain deferred evaluation.
+    collected_scalar_calls: usize,
     /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
     /// key belongs to the HAVING test, not to the key expression.
     having_operand: bool,
@@ -1071,6 +1075,7 @@ impl<'a> Parser<'a> {
             random_sites: 0,
             aggregate_argument: false,
             percentile_leaf: false,
+            collected_scalar_calls: 0,
             having_operand: false,
             label_test: None,
             zones: None,

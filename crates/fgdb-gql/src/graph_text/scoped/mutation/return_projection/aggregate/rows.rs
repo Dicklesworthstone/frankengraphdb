@@ -337,7 +337,16 @@ impl PreparedGraphPipelineAggregateText {
             query = query
                 .with_output_projection(super::bind_output(&output.items, &values)?)
                 .map_err(|kind| build(self.aggregate_at, kind))?;
-            if !output.ordering.is_empty() {
+            if !output.computed_ordering.is_empty() {
+                let expressions = output
+                    .computed_ordering
+                    .iter()
+                    .map(|expression| bind_read_value(expression, &values).map_err(Error::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                query = query
+                    .with_computed_order_by(expressions, &output.ordering)
+                    .map_err(|kind| build(self.aggregate_at, kind))?;
+            } else if !output.ordering.is_empty() {
                 query = query
                     .with_projected_order_by(&output.ordering)
                     .map_err(|kind| build(self.aggregate_at, kind))?;

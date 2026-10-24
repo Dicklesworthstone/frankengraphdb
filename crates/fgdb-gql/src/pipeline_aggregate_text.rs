@@ -154,6 +154,9 @@ pub(crate) struct PipelineOutput {
     /// a written item's position (with_projected_order_by), and the
     /// evaluation `ordering` is then empty. Otherwise this is empty.
     pub(crate) ordering: Vec<crate::algebra::GraphValueOrder>,
+    /// A separate private rank tuple over evaluation cells followed by the
+    /// already computed visible items. Its cells never enter result DISTINCT.
+    pub(crate) computed_ordering: Vec<crate::set_text::ReadValueTemplate>,
 }
 impl core::fmt::Debug for PreparedGraphPipelineAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -281,6 +284,13 @@ impl PreparedGraphPipelineAggregateText {
                     ordinal(&mut bytes, order.column);
                     bytes.push(u8::from(order.descending));
                     bytes.push(u8::from(order.nulls_first));
+                }
+            }
+            if !output.computed_ordering.is_empty() {
+                bytes.extend_from_slice(b"fgdb:pipeline-aggregate-computed-order:v1\0");
+                ordinal(&mut bytes, output.computed_ordering.len());
+                for expression in &output.computed_ordering {
+                    expression.append_template_transcript(&mut bytes);
                 }
             }
         }

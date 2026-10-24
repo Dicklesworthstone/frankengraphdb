@@ -37,7 +37,7 @@ impl PreparedGraphAggregate {
     /// ordering() alone does not describe a computed result's rank.
     #[must_use]
     pub fn incremental_source_definition(&self) -> Option<Self> {
-        if !self.supports_incremental_input() {
+        if !self.supports_incremental_input() || self.computed_order_requires_element_reads() {
             return None;
         }
         let mut source = self.clone();
@@ -48,6 +48,7 @@ impl PreparedGraphAggregate {
         source.output_distinct = false;
         source.ordering.clear();
         source.projected_ordering.clear();
+        source.computed_ordering.clear();
         source.offset = 0;
         source.count = None;
         source
@@ -89,6 +90,71 @@ impl PreparedGraphAggregate {
             return Ok(None);
         }
         self.project_complete_output(row, &mut govern).map(Some)
+    }
+
+    /// Compute only the private rank tuple from a complete group and its
+    /// already evaluated visible output. This tuple is never a result or a
+    /// DISTINCT key. None rejects a schema or a definition without computed
+    /// ordering; it never means that the group is filtered away.
+    pub fn project_incremental_order<C>(
+        &self,
+        row: &GraphAggregateRow,
+        projected: &GraphAggregateRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<GraphAggregateRow>, QueryError<Infallible, C>> {
+        let mut govern = |event| {
+            control(event).map_err(GqlQueryError::<GraphAggregateError<Infallible>, C>::Interrupted)
+        };
+        govern(GlaExecutionEvent::Work)?;
+        if !self.has_computed_ordering()
+            || !self.supports_incremental_input()
+            || row.keys.len() != self.keys.len()
+            || row.values.len() != self.aggregates.len()
+            || !projected.keys.is_empty()
+            || projected.values.len() != self.output_names.len()
+            || !self.accepts_incremental_row(&row.keys, &row.values)
+        {
+            return Ok(None);
+        }
+        self.project_complete_order_with_elements(
+            row,
+            projected,
+            &mut crate::set_ops::no_element_reads,
+            &mut govern,
+        )
+        .map(Some)
+    }
+
+    pub(crate) fn project_complete_order_with_elements<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+        projected: &GraphAggregateRow,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<GraphAggregateRow, QueryError<E, C>> {
+        let width = row.keys.len() + row.values.len();
+        let values = self.computed_order_values(
+            |at| {
+                if at < row.keys.len() {
+                    Ok(Cell::Value(value_ref(&row.keys[at])))
+                } else if at < width {
+                    Ok(result_cell(&row.values[at - row.keys.len()]))
+                } else {
+                    projected
+                        .values
+                        .get(at - width)
+                        .map(result_cell)
+                        .ok_or(GraphIntegerErrorKind::MissingColumn)
+                }
+            },
+            width + projected.values.len(),
+            read,
+            govern,
+        )?;
+        Ok(GraphAggregateRow {
+            keys: Box::new([]),
+            values: values.into_boxed_slice(),
+        })
     }
 
     // Both consumers validate their own complete-group source contract before

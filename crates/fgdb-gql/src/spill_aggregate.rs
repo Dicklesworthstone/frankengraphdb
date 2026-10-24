@@ -310,7 +310,8 @@ impl SpillAggregateDefinition {
         // Direct graph cursors have separate visitation-order proofs. Only a
         // complete relational owner establishes the order this profile needs;
         // do not silently sort collected values or select a graph-only leaf.
-        if (collections && aggregate.input_relation().is_none())
+        if aggregate.computed_order_requires_element_reads()
+            || (collections && aggregate.input_relation().is_none())
             || input_width > MAX_PATTERN_VERTICES
             || aggregate
                 .input_projection()
@@ -422,6 +423,9 @@ impl SpillAggregateDefinition {
     pub fn has_projected_ordering(&self) -> bool {
         !self.projected_ordering.is_empty()
     }
+    pub fn computed_rank_width(&self) -> usize {
+        self.aggregate.computed_ordering().len()
+    }
     pub fn result_window(&self) -> (u64, Option<u64>) {
         self.aggregate.incremental_result_window()
     }
@@ -497,6 +501,34 @@ impl SpillAggregateDefinition {
         }
     }
 
+    /// Evaluate visible output and private rank cells once, before pagination.
+    /// The host retains them as separate scratch rows so DISTINCT and delivery
+    /// continue to observe only the visible tuple.
+    pub fn project_output_with_rank<E, C>(
+        &self,
+        row: GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<
+        (GraphAggregateRow, Option<GraphAggregateRow>),
+        GqlQueryError<GraphAggregateError<E>, C>,
+    > {
+        if self.computed_rank_width() == 0 {
+            return self.project_output(row, control).map(|row| (row, None));
+        }
+        self.check_complete(&row)?;
+        let mut govern = |event| control(result_event(event));
+        let projected = self.aggregate.project_complete_output(&row, &mut govern)?;
+        let rank = self.aggregate.project_complete_order_with_elements(
+            &row,
+            &projected,
+            &mut crate::set_ops::no_element_reads,
+            &mut govern,
+        )?;
+        Ok((projected, Some(rank)))
+    }
+
     /// The SAME exact comparator used by completed in-memory groups. Unsigned
     /// counts, wide signed sums and rational averages are never narrowed or
     /// compared by their serialization tags. Full ascending keys break ties.
@@ -543,6 +575,11 @@ impl SpillAggregateDefinition {
             VertexScanEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        if self.computed_rank_width() != 0 {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
         self.check_complete(left)?;
         self.check_complete(right)?;
         self.check_projected(left_projected)?;
@@ -563,6 +600,51 @@ impl SpillAggregateDefinition {
             if order != core::cmp::Ordering::Equal {
                 return Ok(order);
             }
+        }
+        left.compare_incremental_order(right, self.ordering(), &mut |event| {
+            control(result_event(event))
+        })?
+        .ok_or(GqlQueryError::Source(
+            GraphAggregateError::InvalidReductionInput,
+        ))
+    }
+
+    /// Rank an already evaluated private tuple, then complete ascending keys.
+    /// Visible output is checked and compared separately for DISTINCT. No
+    /// expression runs inside this comparator and all rank schemas are checked
+    /// before an early decisive key can hide a malformed later cell.
+    pub fn compare_precomputed_rank<E, C>(
+        &self,
+        left: &GraphAggregateRow,
+        left_rank: &GraphAggregateRow,
+        right: &GraphAggregateRow,
+        right_rank: &GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.check_complete(left)?;
+        self.check_complete(right)?;
+        let width = self.computed_rank_width();
+        if width == 0
+            || !left_rank.keys().is_empty()
+            || !right_rank.keys().is_empty()
+            || left_rank.values().len() != width
+            || right_rank.values().len() != width
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        let rank = left_rank
+            .compare_incremental_order(right_rank, &self.projected_ordering, &mut |event| {
+                control(result_event(event))
+            })?
+            .ok_or(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ))?;
+        if rank != core::cmp::Ordering::Equal {
+            return Ok(rank);
         }
         left.compare_incremental_order(right, self.ordering(), &mut |event| {
             control(result_event(event))

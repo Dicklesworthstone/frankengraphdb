@@ -285,7 +285,30 @@ impl State {
                 if projected_order && !projected.keys().is_empty() {
                     return Err(StandingQueryFailure::InvalidDelta);
                 }
-                let sort_row = if projected_order { &projected } else { row };
+                let computed_rank = if definition.has_computed_ordering() {
+                    Some(
+                        definition
+                            .project_incremental_order(row, &projected, &mut |event| {
+                                govern(meter, event)
+                            })
+                            .map_err(|error| match error {
+                                GqlQueryError::Interrupted(reason) => reason,
+                                GqlQueryError::Source(GraphAggregateError::OutputExpression {
+                                    column,
+                                    error,
+                                }) => StandingQueryFailure::OutputExpression { column, error },
+                                _ => StandingQueryFailure::InvalidDelta,
+                            })?
+                            .ok_or(StandingQueryFailure::InvalidDelta)?,
+                    )
+                } else {
+                    None
+                };
+                let sort_row = computed_rank.as_ref().unwrap_or(if projected_order {
+                    &projected
+                } else {
+                    row
+                });
                 if sort_row
                     .compare_incremental_order(sort_row, &order, &mut |event| govern(meter, event))?
                     .is_none()
@@ -306,14 +329,21 @@ impl State {
                 }
                 reserve_row(row, meter)?;
                 meter.charge(ZSetEvent::ScratchEntry)?;
-                // This Arc is the tuple's sole allocation. Rank and delivered
-                // candidate share it; updates with equal rank replace both.
+                // Ordinary projected ranks share the visible tuple. Computed
+                // ranks retain their private tuple separately; DISTINCT and
+                // delivered candidates always own only the visible output.
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 let projected = Arc::new(projected);
+                let rank_output = if let Some(rank) = computed_rank {
+                    meter.charge(ZSetEvent::ScratchEntry)?;
+                    Some(Arc::new(rank))
+                } else {
+                    projected_order.then(|| Arc::clone(&projected))
+                };
                 let rank = Rank {
                     order: Arc::clone(&order),
                     group: Arc::new(row.clone()),
-                    projected: projected_order.then(|| Arc::clone(&projected)),
+                    projected: rank_output,
                 };
                 meter.units(ZSetEvent::ScratchEntry, 2)?;
                 groups.insert(key, if sign < 0 { None } else { Some(rank.clone()) });

@@ -27,6 +27,230 @@ fn wide() -> GqlQueryPolicy {
 }
 
 #[test]
+fn computed_terminal_order_keeps_native_exact_domains_and_hidden_cells_private() {
+    let input = [1, 1, 3, 3, 3, 8].map(CanonicalScalar::Int);
+    for (rank, expected) in [
+        ("c + 1", vec![3, 1, 8]),
+        ("k + s", vec![8, 3, 1]),
+        ("x + count(*)", vec![8, 3, 1]),
+        ("avg(x) + 1", vec![8, 3, 1]),
+    ] {
+        let statement = format!(
+            "MATCH (n) WITH n.p AS x RETURN x AS k,count(*) AS c,sum(x) AS s,avg(x) AS a ORDER BY {rank} DESC"
+        );
+        let definition = query(&statement);
+        let rows = run(&definition, &input, wide()).value;
+        assert_eq!(
+            rows.iter()
+                .map(
+                    |row| match row.values()[0].as_value().unwrap().as_scalar().unwrap() {
+                        CanonicalScalar::Int(value) => *value,
+                        _ => panic!("key"),
+                    }
+                )
+                .collect::<Vec<_>>(),
+            expected,
+            "{rank}"
+        );
+        for row in rows {
+            assert!(row.keys().is_empty());
+            assert_eq!(row.values().len(), 4);
+            assert!(row.values()[1].as_count().is_some());
+            assert!(row.values()[2].as_integer().is_some());
+            assert!(row.values()[3].as_average().is_some());
+        }
+    }
+    let definition = query(
+        "MATCH (n) WITH n.p AS x RETURN DISTINCT count(*) AS c GROUP BY x ORDER BY x + count(*) DESC SKIP 1 LIMIT 1",
+    );
+    let rows = run(&definition, &input, wide()).value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values().len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(3));
+}
+
+#[test]
+fn terminal_order_reuses_computed_aliases_and_repeated_group_properties() {
+    let input = [1, 1, 3, 3, 3, 8].map(CanonicalScalar::Int);
+    for statement in [
+        "MATCH (n) WITH n AS n RETURN n.p AS k,count(*) AS c ORDER BY n.p + count(*) DESC",
+        "MATCH (n) WITH n.p AS x RETURN x AS k,-count(*) AS score ORDER BY score + k DESC",
+        "MATCH (n) WITH n.p AS x RETURN count(*) AS c GROUP BY x ORDER BY avg(x) + 1 DESC",
+    ] {
+        let definition = query(statement);
+        assert!(definition.has_computed_ordering());
+        let rows = run(&definition, &input, wide()).value;
+        assert_eq!(rows.len(), 3, "{statement}");
+        assert!(rows.iter().all(|row| row.keys().is_empty()));
+    }
+}
+
+#[test]
+fn terminal_deviation_ranks_share_hidden_collects_across_pipeline_owners() {
+    use fgdb_gql::algebra::GraphValue;
+    let input = [100, 100, 200, 210, 300, 304, 308].map(CanonicalScalar::Int);
+    for head in [
+        "MATCH (n) WITH n.p / 100 AS bucket,n.p % 100 AS value",
+        "UNWIND [[1,0],[1,0],[2,0],[2,10],[3,0],[3,4],[3,8]] AS row WITH row[0] AS bucket,row[1] AS value",
+    ] {
+        for rank in [
+            "stDev(value)",
+            "stDevP(value)",
+            "stDev(value) + 1",
+            "stDevP(value) + 1",
+            "1 + stDevP(value)",
+            "(stDev(value) + 1) * 2",
+            "sqrt(stDevP(value))",
+            "(CASE WHEN true THEN 0 ELSE 1 END) + stDev(value)",
+            "coalesce(0, count(*)) + stDev(value)",
+            "stDevP(value) + coalesce(0, count(*))",
+            "size(CASE WHEN true THEN [0] ELSE [stDev(true)] END) + stDev(value)",
+            "size(coalesce([0], [stDev(true)])) + stDev(value)",
+        ] {
+            let statement =
+                format!("{head} RETURN bucket,count(*) AS count ORDER BY {rank} DESC,bucket");
+            let template = PreparedGraphPipelineAggregateText::prepare(&statement, symbols)
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            let rows = if template.requires_relational_input() {
+                template
+                    .bind_relation_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .execute_governed::<(), ()>(
+                        wide(),
+                        |_, _| panic!("source-free deviation cannot scan a graph"),
+                        || Ok::<_, ()>(()),
+                    )
+                    .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                    .value
+            } else {
+                try_run(
+                    &template.bind_parameters(&GqlParameters::new()).unwrap(),
+                    &input,
+                    wide(),
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                .value
+            };
+            assert!(
+                rows.iter()
+                    .all(|row| row.keys().is_empty() && row.values().len() == 2)
+            );
+            let actual = rows
+                .iter()
+                .map(|row| {
+                    let Some(GraphValue::Scalar(CanonicalScalar::Int(bucket))) =
+                        row.values()[0].as_value()
+                    else {
+                        panic!("integer grouping key");
+                    };
+                    (*bucket, row.values()[1].as_count().unwrap())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, [(2, 2), (3, 3), (1, 2)], "{statement}");
+        }
+    }
+
+    // A zero computed from COUNT remains exact Integer. COALESCE retains
+    // that domain, so mixing it with Float must keep the existing refusal.
+    for rank in [
+        "coalesce(count(*) * 0, 0) + stDev(value)",
+        "stDevP(value) + coalesce(count(*) * 0, 0)",
+    ] {
+        let statement = format!(
+            "MATCH (n) WITH n.p / 100 AS bucket,n.p % 100 AS value \
+             RETURN bucket,count(*) AS count ORDER BY {rank}"
+        );
+        assert!(
+            matches!(
+                try_run(&query(&statement), &input, wide()),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        error: fgdb_gql::GraphIntegerError {
+                            kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+            ),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn existence_group_keys_remain_visible_to_computed_aggregate_ordering() {
+    use fgdb_gql::algebra::GraphValue;
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(0), R, VId(1)),
+        (fgdb_types::EId(3), VId(1), R, VId(2)),
+    ];
+    for projection in [
+        "RETURN exists((n)-->()) AS linked,count(*) AS count",
+        "RETURN EXISTS { (n)-->() } AS linked,count(*) AS count",
+        "WITH exists((n)-->()) AS linked RETURN linked,count(*) AS count",
+    ] {
+        let statement = format!(
+            "MATCH (n) {projection} ORDER BY CASE WHEN linked THEN count + 1 ELSE 0 END DESC"
+        );
+        let rows = query(&statement)
+            .execute_governed_with_identified_properties(
+                6,
+                (0..3).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            .value;
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 2)
+        );
+        let actual = rows
+            .iter()
+            .map(|row| {
+                let Some(GraphValue::Scalar(CanonicalScalar::Bool(linked))) =
+                    row.values()[0].as_value()
+                else {
+                    panic!("boolean existence grouping key");
+                };
+                (*linked, row.values()[1].as_count().unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, [(true, 2), (false, 1)], "{statement}");
+    }
+}
+
+#[test]
+fn zero_source_terminal_aggregate_orders_private_rank_without_scalar_coercion() {
+    let template = PreparedGraphPipelineAggregateText::prepare(
+        "UNWIND [1,1,3,3,3,8] AS x RETURN x AS k,count(*) AS c,avg(x) AS a ORDER BY k + c DESC LIMIT 2", symbols,
+    ).unwrap();
+    let definition = template
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
+    let rows = definition
+        .execute_governed::<(), ()>(
+            wide(),
+            |_, _| panic!("source-free aggregate cannot scan a graph"),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].values()[1].as_count(), Some(1));
+    assert_eq!(rows[1].values()[1].as_count(), Some(3));
+    assert_eq!(
+        rows[0].values()[2].as_average(),
+        Some(GraphExactAverage::new(8, 1).unwrap())
+    );
+}
+
+#[test]
 fn leading_identity_bags_keep_the_seeded_source_for_terminal_aggregates() {
     use fgdb_gql::algebra::GraphValue;
     use std::cell::Cell;
@@ -125,22 +349,27 @@ fn run(
     input: &[CanonicalScalar],
     policy: GqlQueryPolicy,
 ) -> GqlQueryExecution<GraphAggregateRow> {
+    try_run(query, input, policy).unwrap()
+}
+fn try_run(
+    query: &PreparedGraphAggregate,
+    input: &[CanonicalScalar],
+    policy: GqlQueryPolicy,
+) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<()>, ()>> {
     let stored: Vec<_> = input
         .iter()
         .cloned()
         .map(CanonicalPropertyValue::from)
         .collect();
-    query
-        .execute_governed(
-            input.len() as u64,
-            (0..input.len()).map(|at| VId(at as u128)),
-            [],
-            |_, _| Ok::<_, ()>(true),
-            |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
-            policy,
-            || Ok::<_, ()>(()),
-        )
-        .unwrap()
+    query.execute_governed(
+        input.len() as u64,
+        (0..input.len()).map(|at| VId(at as u128)),
+        [],
+        |_, _| Ok::<_, ()>(true),
+        |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+        policy,
+        || Ok::<_, ()>(()),
+    )
 }
 
 #[test]
@@ -863,9 +1092,9 @@ fn a_with_before_an_aggregate_reads_carried_properties_in_its_where_and_pages() 
 /// fgdb-djlxq: the aggregate RETURN itself reads carried-vertex properties,
 /// as grouping keys, aggregate arguments and GROUP BY items. Each form equals
 /// the explicit `WITH n, n.p AS h` column. An unaliased key `n.p` is named
-/// `p`. The private names never resolve, and HAVING and the result page
-/// address only the output row: a boundary of the same width as that row
-/// must not resolve `n.p` there.
+/// `p`. The private names never resolve, and HAVING addresses only the
+/// output row. ORDER BY may repeat an admitted grouping expression, without
+/// exposing unrelated columns of a boundary that happens to have the same width.
 #[test]
 fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by() {
     let input = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -909,12 +1138,36 @@ fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by()
     )
     .unwrap();
     assert_eq!(template.columns(), &["n.p", "c"]);
+    let repeated = run(
+        &query("MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c ORDER BY n.p DESC"),
+        &input,
+        wide(),
+    )
+    .value;
+    let aliased = run(
+        &query("MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c ORDER BY k DESC"),
+        &input,
+        wide(),
+    )
+    .value;
+    assert_eq!(repeated, aliased);
+    assert_eq!(
+        repeated
+            .iter()
+            .map(|row| {
+                let CanonicalScalar::Int(key) = row.keys()[0].as_scalar().unwrap() else {
+                    panic!("integer key");
+                };
+                (*key, row.values()[0].as_count().unwrap())
+            })
+            .collect::<Vec<_>>(),
+        [(4, 1), (3, 1), (2, 2), (1, 1)]
+    );
     for text in [
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(__fg_boundary_0) AS c",
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c GROUP BY __fg_boundary_0",
         // Two output columns, as the boundary row has (n plus hidden n.p).
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING n.p > 1",
-        "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c ORDER BY n.p",
     ] {
         assert!(
             PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),

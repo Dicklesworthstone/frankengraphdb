@@ -1,4 +1,6 @@
 //! WITH aggregates execute against real snapshots and canonical staged effects.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
     Database, DatabaseKeys, GqlError, MemVfs, ReadError, VertexRow, WriteBatch, WriteError,
@@ -124,6 +126,81 @@ fn summaries(rows: &[GraphAggregateRow]) -> Vec<Summary> {
             )
         })
         .collect()
+}
+
+#[test]
+fn private_terminal_rank_reads_the_transaction_overlay_and_keeps_exact_outputs() {
+    let ((), report) = run_async_under_lab(0xa661_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let definition = query(
+            "MATCH (n) WITH n.p AS x WHERE x IS NOT NULL RETURN x AS k,count(*) AS c,avg(x) AS a ORDER BY k + c DESC LIMIT 3",
+        );
+        let visible = |rows: &[GraphAggregateRow]| {
+            rows.iter()
+                .map(|row| {
+                    assert!(row.keys().is_empty());
+                    assert_eq!(row.values().len(), 3);
+                    let CanonicalScalar::Int(key) =
+                        row.values()[0].as_value().unwrap().as_scalar().unwrap()
+                    else {
+                        panic!("integer key");
+                    };
+                    let average = row.values()[2].as_average().unwrap();
+                    (
+                        *key,
+                        row.values()[1].as_count().unwrap(),
+                        (average.numerator(), average.denominator()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = db
+            .execute_graph_aggregate_governed(&cx, &definition, policy())
+            .unwrap()
+            .value;
+        assert_eq!(
+            visible(&before),
+            [(9, 1, (9, 1)), (5, 2, (5, 1)), (2, 1, (2, 1))]
+        );
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(30))]);
+        batch.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(1)));
+        txn.write(&mut db, batch).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let staged = txn
+            .execute_graph_aggregate_governed(&db, &cx, &definition, policy())
+            .unwrap()
+            .value;
+        assert_eq!(
+            visible(&staged),
+            [(30, 1, (30, 1)), (5, 2, (5, 1)), (2, 1, (2, 1))]
+        );
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&cx, &definition, policy())
+                .unwrap()
+                .value,
+            before
+        );
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&cx, &definition, policy())
+                .unwrap()
+                .value,
+            staged
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

@@ -44,6 +44,7 @@ pub trait GroupDefinition: sealed::Sealed + Clone {
     /// complete grouping keys/summaries. Full group keys still break all ties.
     fn ordering(&self) -> &[GraphAggregateOrder];
     fn projected_ordering(&self) -> &[crate::algebra::GraphValueOrder];
+    fn has_computed_ordering(&self) -> bool;
     fn has_incremental_output_transform(&self) -> bool;
     fn has_incremental_ranking(&self) -> bool;
     fn incremental_output_is_distinct(&self) -> bool;
@@ -65,6 +66,12 @@ pub trait GroupDefinition: sealed::Sealed + Clone {
     fn project_incremental_output<C>(
         &self,
         row: &GraphAggregateRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<GraphAggregateRow>, GqlQueryError<GraphAggregateError<Infallible>, C>>;
+    fn project_incremental_order<C>(
+        &self,
+        row: &GraphAggregateRow,
+        projected: &GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<GraphAggregateRow>, GqlQueryError<GraphAggregateError<Infallible>, C>>;
 }
@@ -123,6 +130,10 @@ macro_rules! delegate_group_definition {
                 let $this = self;
                 ($inner).projected_ordering()
             }
+            fn has_computed_ordering(&self) -> bool {
+                let $this = self;
+                ($inner).has_computed_ordering()
+            }
             fn has_incremental_output_transform(&self) -> bool {
                 let $this = self;
                 ($inner).has_incremental_output_transform()
@@ -172,6 +183,18 @@ macro_rules! delegate_group_definition {
             > {
                 let $this = self;
                 ($inner).project_incremental_output(row, control)
+            }
+            fn project_incremental_order<C>(
+                &self,
+                row: &$crate::GraphAggregateRow,
+                projected: &$crate::GraphAggregateRow,
+                control: &mut impl FnMut($crate::GlaExecutionEvent) -> Result<(), C>,
+            ) -> Result<
+                Option<$crate::GraphAggregateRow>,
+                $crate::GqlQueryError<$crate::GraphAggregateError<core::convert::Infallible>, C>,
+            > {
+                let $this = self;
+                ($inner).project_incremental_order(row, projected, control)
             }
         }
     };

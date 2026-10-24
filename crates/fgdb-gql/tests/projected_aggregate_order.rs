@@ -612,13 +612,10 @@ fn computed_alias_sort_keeps_distinct_page_and_limit_zero_failures() {
 }
 
 #[test]
-fn ambiguous_or_hidden_mixed_order_refuses_before_catalog_access() {
+fn ambiguous_or_unknown_order_refuses_before_catalog_access() {
     for statement in [
-        "MATCH (n) RETURN -sum(n.p) AS score GROUP BY n.g ORDER BY score, n.g",
-        "MATCH (n) RETURN -sum(n.p) AS score GROUP BY n.g ORDER BY score, sum(n.p)",
         "MATCH (n) RETURN -sum(n.p) AS score ORDER BY score, score",
         "MATCH (n) RETURN -sum(n.p) AS score ORDER BY missing",
-        "MATCH (n) RETURN -sum(n.p) AS score ORDER BY score + 1",
     ] {
         let calls = std::cell::Cell::new(0);
         let result = PreparedGraphAggregateText::prepare(statement, |kind, name| {
@@ -627,5 +624,593 @@ fn ambiguous_or_hidden_mixed_order_refuses_before_catalog_access() {
         });
         assert!(result.is_err(), "{statement}");
         assert_eq!(calls.get(), 0, "{statement}");
+    }
+}
+
+#[test]
+fn computed_rank_expressions_keep_exact_visible_counts_sums_and_averages() {
+    let values = data(&[
+        (1, Some(9)),
+        (1, Some(11)),
+        (2, Some(40)),
+        (3, Some(5)),
+        (3, Some(5)),
+        (3, Some(5)),
+        (4, None),
+    ]);
+    for (rank, expected) in [
+        ("c + 1", vec![3, 1, 2, 4]),
+        ("count(*) + 1", vec![3, 1, 2, 4]),
+        ("k + s", vec![2, 1, 3, 4]),
+        ("n.g + count(*)", vec![3, 4, 1, 2]),
+        ("avg(n.p) * 2 - 1000", vec![2, 1, 3, 4]),
+        ("a + 3", vec![2, 1, 3, 4]),
+    ] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c,sum(n.p) AS s,avg(n.p) AS a ORDER BY {rank} DESC"
+        ));
+        assert!(query.has_computed_ordering());
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+            expected,
+            "{rank}"
+        );
+        for row in rows {
+            assert!(row.keys().is_empty());
+            assert_eq!(row.values().len(), 4, "private rank must not be delivered");
+            let key = bucket(&row, 0);
+            let (count, sum, average) = match key {
+                1 => (2, Some(20), Some((10, 1))),
+                2 => (1, Some(40), Some((40, 1))),
+                3 => (3, Some(15), Some((5, 1))),
+                4 => (1, None, None),
+                _ => unreachable!(),
+            };
+            assert_eq!(row.values()[1].as_count(), Some(count));
+            assert_eq!(row.values()[2].as_integer(), sum);
+            assert_eq!(
+                row.values()[3]
+                    .as_average()
+                    .map(|a| (a.numerator(), a.denominator())),
+                average
+            );
+        }
+    }
+}
+
+#[test]
+fn private_rank_cells_do_not_participate_in_distinct_or_result_pagination() {
+    let values = data(&[
+        (1, Some(1)),
+        (2, Some(1)),
+        (2, Some(1)),
+        (3, Some(1)),
+        (4, Some(1)),
+        (4, Some(1)),
+        (4, Some(1)),
+    ]);
+    // Groups 2 and 3 both rank at 4; the complete ascending key puts group 2
+    // (count 2) first. Group 3 is the best representative of count 1.
+    for (page, expected) in [("", vec![3, 2, 1]), (" SKIP 1 LIMIT 1", vec![2])] {
+        let query = text(&format!(
+            "MATCH (n) RETURN DISTINCT count(*) AS c GROUP BY n.g ORDER BY n.g + count(*) DESC{page}"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.values()[0].as_count().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 1)
+        );
+    }
+}
+
+#[test]
+fn computed_alias_rank_can_mix_hidden_keys_and_hidden_summaries() {
+    let values = data(&[(1, Some(3)), (1, Some(5)), (2, Some(6)), (3, Some(6))]);
+    for rank in ["score, n.g DESC", "score + n.g DESC", "score, sum(n.p)"] {
+        let query = text(&format!(
+            "MATCH (n) RETURN -sum(n.p) AS score GROUP BY n.g ORDER BY {rank}"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 1)
+        );
+    }
+    let query = text("MATCH (n) RETURN count(*) AS c GROUP BY n.g ORDER BY avg(n.p) + 1 DESC");
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+        .unwrap()
+        .value;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.values()[0].as_count().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 1, 2]
+    );
+    for rank in [
+        "percentileDisc(n.p, 0.5)",
+        "percentileDisc(n.p, 0.5) + 1",
+        "1 + percentileCont(n.p, 0.5)",
+    ] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY {rank} DESC"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+            [2, 3, 1],
+            "{rank}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.values().len() == 2 && row.values()[1].as_count().is_some())
+        );
+    }
+}
+
+#[test]
+fn deviation_order_expressions_collect_hidden_inputs_without_widening_rows() {
+    let values = data(&[
+        (1, Some(0)),
+        (1, Some(0)),
+        (2, Some(0)),
+        (2, Some(10)),
+        (3, Some(0)),
+        (3, Some(4)),
+        (3, Some(8)),
+    ]);
+    // Bucket 2 has the largest sample and population deviation, bucket 3
+    // the next largest, and bucket 1 zero. Only the key and exact count are
+    // returned: neither the collected values nor the rank may leak out.
+    for rank in [
+        "stDev(n.p)",
+        "stDevP(n.p)",
+        "stDev(n.p) + 1",
+        "stDevP(n.p) + 1",
+        "1 + stDevP(n.p)",
+        "(stDev(n.p) + 1) * 2",
+        "sqrt(stDevP(n.p))",
+        "(CASE WHEN true THEN 0 ELSE 1 END) + stDev(n.p)",
+        "coalesce(0, count(*)) + stDev(n.p)",
+        "stDevP(n.p) + coalesce(0, count(*))",
+        "size(CASE WHEN true THEN [0] ELSE [stDev(true)] END) + stDev(n.p)",
+        "size(coalesce([0], [stDev(true)])) + stDev(n.p)",
+    ] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY {rank} DESC,k"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap_or_else(|error| panic!("{rank}: {error:?}"))
+            .value;
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 2)
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| (bucket(row, 0), row.values()[1].as_count().unwrap()))
+                .collect::<Vec<_>>(),
+            [(2, 2), (3, 3), (1, 2)],
+            "{rank}"
+        );
+    }
+
+    // Multiplication preserves the aggregate's exact Integer domain even
+    // when its value is zero. The established numeric VM refuses mixing
+    // that domain with Float; the composed rank must not silently narrow it.
+    for rank in [
+        "coalesce(count(*) * 0, 0) + stDev(n.p)",
+        "stDevP(n.p) + coalesce(count(*) * 0, 0)",
+    ] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY {rank}"
+        ));
+        assert!(
+            matches!(
+                execute(&query, &values, policy(), || Ok::<_, ()>(())),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        error: fgdb_gql::GraphIntegerError {
+                            kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+            ),
+            "{rank}"
+        );
+    }
+
+    // A named subscript result routes this CASE through the existing value
+    // owner, whose branches own their slots. Its bad numeric aggregate must
+    // fail only when that branch is selected, not while building the rank.
+    for condition in [true, false] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c,collect(n.p) AS values \
+             ORDER BY CASE WHEN {condition} THEN 0 ELSE values[stDev(true) + 1] END"
+        ));
+        let result = execute(&query, &values, policy(), || Ok::<_, ()>(()));
+        if condition {
+            let rows = result.unwrap().value;
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (bucket(row, 0), row.values()[1].as_count().unwrap()))
+                    .collect::<Vec<_>>(),
+                [(1, 2), (2, 2), (3, 3)]
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| row.keys().is_empty() && row.values().len() == 3)
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        error: fgdb_gql::GraphIntegerError {
+                            kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn collected_numeric_calls_refuse_scalar_lazy_scopes_before_resolution() {
+    use std::cell::Cell;
+    for pipeline in [false, true] {
+        let input = if pipeline { "p" } else { "n.p" };
+        let head = if pipeline {
+            "MATCH (n) WITH n.p AS p RETURN count(*) AS c,collect(p) AS values"
+        } else {
+            "MATCH (n) RETURN count(*) AS c,collect(n.p) AS values"
+        };
+        for rank in [
+            format!("CASE WHEN true THEN 0 ELSE stDev({input}) + 1 END"),
+            format!("CASE c WHEN 0 THEN 0 ELSE stDevP({input}) END"),
+            format!("CASE WHEN true THEN 0 WHEN stDev({input}) > 0 THEN 1 ELSE 2 END"),
+            format!("coalesce(0, sqrt(stDev({input})))"),
+            format!("coalesce(c, percentileDisc({input}, 0.5) + 1)"),
+            format!("CASE WHEN true THEN 0 ELSE stDev({input})[0] END"),
+            format!("CASE WHEN true THEN 0 ELSE stDev({input})[0..1] END"),
+            format!("CASE WHEN true THEN 0 ELSE 0 + values[stDev({input}) + 1] END"),
+            format!("CASE WHEN true THEN 0 ELSE size(stDev({input})) END"),
+            format!("coalesce(0, size(stDev({input})))"),
+            format!("CASE WHEN true THEN 0 ELSE size([stDev({input})]) END"),
+            format!("coalesce(0, size([{{value: stDev({input})}}]))"),
+            format!("CASE WHEN true THEN 0 ELSE size([stDev({input})][0..1]) END"),
+            format!("coalesce(0, size([stDev({input}) + 1]))"),
+        ] {
+            // Refusal belongs to preparation, even when a zero page or empty
+            // source would otherwise hide eager evaluation of an untaken arm.
+            for page in ["", " LIMIT 0"] {
+                let statement = format!("{head} ORDER BY {rank}{page}");
+                let calls = Cell::new(0);
+                let resolve = |kind: GraphSymbolKind, name: &str| {
+                    calls.set(calls.get() + 1);
+                    catalog(kind, name)
+                };
+                let failure = if pipeline {
+                    format!(
+                        "{:?}",
+                        fgdb_gql::PreparedGraphPipelineAggregateText::prepare(&statement, resolve)
+                            .err()
+                            .expect("unsupported lazy collected call")
+                    )
+                } else {
+                    format!(
+                        "{:?}",
+                        PreparedGraphAggregateText::prepare(&statement, resolve)
+                            .err()
+                            .expect("unsupported lazy collected call")
+                    )
+                };
+                assert!(
+                    failure
+                        .contains("collected aggregate functions outside scalar CASE and COALESCE"),
+                    "{statement}: {failure}"
+                );
+                assert_eq!(calls.get(), 0, "{statement}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_aggregate_conditionals_keep_exact_mean_and_wide_sum_ranks() {
+    let values = data(&[
+        (1, Some(9_007_199_254_740_992)),
+        (2, Some(9_007_199_254_740_993)),
+        (3, Some(i64::MAX)),
+        (3, Some(i64::MAX)),
+    ]);
+    for (rank, expected) in [
+        ("coalesce(avg(n.p), 0)", [3, 2, 1]),
+        ("coalesce(sum(n.p), 0)", [3, 2, 1]),
+        (
+            "CASE avg(n.p) WHEN 9007199254740992 THEN 0 ELSE 1 END",
+            [2, 3, 1],
+        ),
+        (
+            "CASE WHEN count(*) > 1 THEN sum(n.p) ELSE sum(n.p) END",
+            [3, 2, 1],
+        ),
+    ] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,count(*) AS c,sum(n.p) AS s,avg(n.p) AS a ORDER BY {rank} DESC,k"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+            expected,
+            "{rank}"
+        );
+        for row in &rows {
+            assert_eq!(row.values().len(), 4);
+            assert!(row.values()[1].as_count().is_some());
+            assert!(row.values()[2].as_integer().is_some());
+            assert!(row.values()[3].as_average().is_some());
+        }
+        let wide = rows.iter().find(|row| bucket(row, 0) == 3).unwrap();
+        assert_eq!(
+            wide.values()[2].as_integer(),
+            Some(2 * i128::from(i64::MAX))
+        );
+    }
+}
+
+#[test]
+fn rank_only_errors_remain_observable_on_zero_and_off_page_results() {
+    let values = data(&[(1, Some(4)), (2, Some(8))]);
+    for page in ["LIMIT 0", "LIMIT 1", "SKIP 2 LIMIT 1"] {
+        let query = text(&format!(
+            "MATCH (n) RETURN count(*) AS c GROUP BY n.g ORDER BY 1 / (n.g - 2) {page}"
+        ));
+        assert!(matches!(
+            execute(&query, &values, policy(), || Ok::<_, ()>(())),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::OutputExpression { .. }
+            ))
+        ));
+    }
+}
+
+#[test]
+fn computed_rank_parameters_rebind_without_narrowing_terminal_average() {
+    let statement = "MATCH (n) RETURN n.g AS k,avg(n.p) AS a ORDER BY $age + avg(n.p) - 1000 DESC";
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        statement,
+        &[("age", GqlParameterType::Int64)],
+        catalog,
+    )
+    .unwrap();
+    assert_eq!(template.parameter_schema()[0].occurrences, 1);
+    let definition = template.canonical_template_bytes();
+    let values = data(&[(1, Some(1)), (1, Some(2)), (2, Some(2)), (2, Some(3))]);
+    let first = template
+        .bind_parameters(&GqlParameters::new().with_int64("age", 42).unwrap())
+        .unwrap();
+    let second = template
+        .bind_parameters(&GqlParameters::new().with_int64("age", 43).unwrap())
+        .unwrap();
+    assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(template.canonical_template_bytes(), definition);
+    let rows = execute(&first, &values, policy(), || Ok::<_, ()>(()))
+        .unwrap()
+        .value;
+    assert_eq!(
+        rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+        [2, 1]
+    );
+    assert_eq!(
+        rows[0].values()[1]
+            .as_average()
+            .map(|a| (a.numerator(), a.denominator())),
+        Some((5, 2))
+    );
+}
+
+#[test]
+fn computed_rank_builder_checks_private_and_visible_schemas_and_replacement() {
+    let query = projection(native(0, None));
+    assert!(matches!(
+        query
+            .clone()
+            .with_computed_order_by(vec![], &[order(0, false, false)]),
+        Err(GraphAggregateBuildError::UnknownProjectedOrderColumn { column: 0 })
+    ));
+    let ranked = query
+        .with_computed_order_by(vec![GraphSetValue::Column(6)], &[order(0, true, false)])
+        .unwrap();
+    assert!(
+        ranked
+            .clone()
+            .with_output_projection(vec![GraphSetProjection::new(
+                "only",
+                GraphSetValue::Column(1)
+            )])
+            .is_err()
+    );
+    assert!(matches!(
+        ranked
+            .clone()
+            .with_computed_order_by(vec![GraphSetValue::Column(4)], &[order(1, true, false)]),
+        Err(GraphAggregateBuildError::UnknownProjectedOrderColumn { column: 1 })
+    ));
+    assert!(
+        !ranked
+            .clone()
+            .with_projected_order_by(&[])
+            .unwrap()
+            .has_computed_ordering()
+    );
+    assert!(
+        !ranked
+            .with_result_clauses(
+                &[],
+                &[GraphAggregateOrder::ascending(
+                    GraphAggregateColumn::GroupKey(0)
+                )]
+            )
+            .unwrap()
+            .has_computed_ordering()
+    );
+}
+
+#[test]
+fn aggregate_rank_postfix_reads_visible_map_aliases_and_honors_shadowing() {
+    let values = data(&[
+        (1, Some(1)),
+        (1, Some(2)),
+        (2, Some(3)),
+        (3, Some(4)),
+        (3, Some(5)),
+        (3, Some(6)),
+    ]);
+    for alias in ["stats", "n"] {
+        let query = text(&format!(
+            "MATCH (n) RETURN n.g AS k,{{p:count(*)}} AS {alias} ORDER BY {alias}.p DESC"
+        ));
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+            [3, 1, 2]
+        );
+        assert!(rows.iter().all(|row| row.values().len() == 2));
+    }
+    let query = text("MATCH (n) RETURN n.g AS n,count(*) AS c ORDER BY n.g DESC");
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+        .unwrap()
+        .value;
+    assert_eq!(
+        rows.iter()
+            .map(|row| match row.keys()[0].as_scalar().unwrap() {
+                CanonicalScalar::Int(value) => *value,
+                _ => panic!("key"),
+            })
+            .collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
+    // An already grouped source property keeps its established precedence,
+    // even beside a same-named computed alias. Otherwise this query would
+    // silently switch from key order [1,2,3] to count order [2,1,3].
+    let query = text("MATCH (n) RETURN n.g AS k,{g:count(*)} AS n GROUP BY n.g ORDER BY n.g");
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(()))
+        .unwrap()
+        .value;
+    assert_eq!(
+        rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
+fn repeated_computed_group_keys_retain_the_existing_evaluation_order() {
+    for statement in [
+        "MATCH (n) RETURN n.g + 1 AS k,count(*) AS c ORDER BY n.g + 1",
+        "MATCH (n) RETURN n.g + 1 AS k,count(*) AS c ORDER BY (n.g + 1)",
+        "MATCH (n) RETURN keys(n) AS k,count(*) AS c ORDER BY keys(n)",
+    ] {
+        let query = text(statement);
+        assert!(!query.has_computed_ordering(), "{statement}");
+        assert_eq!(
+            query.ordering(),
+            &[GraphAggregateOrder::ascending(
+                GraphAggregateColumn::GroupKey(0)
+            )]
+        );
+    }
+}
+
+#[test]
+fn reader_free_rank_owners_refuse_graph_dependencies_but_admit_value_maps() {
+    use fgdb_gql::stream::aggregate::VertexAggregatePlan;
+    for statement in [
+        "MATCH (n) RETURN n AS v,count(*) AS c ORDER BY v.p + c",
+        "MATCH (n) RETURN n AS v,count(*) AS c ORDER BY CASE WHEN c = 0 THEN v.p ELSE c END",
+    ] {
+        let query = text(statement);
+        assert!(
+            query.incremental_source_definition().is_none(),
+            "{statement}"
+        );
+        assert!(SpillAggregatePlan::compile(&query).is_err(), "{statement}");
+        assert!(
+            AsyncSpillAggregatePlan::compile(&query).is_err(),
+            "{statement}"
+        );
+        assert!(VertexAggregatePlan::compile(&query).is_err(), "{statement}");
+    }
+    for statement in [
+        "MATCH (n) RETURN n.g AS k,{p:count(*)} AS stats ORDER BY stats.p + k",
+        "MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY n.g + c",
+    ] {
+        let query = text(statement);
+        assert!(
+            query.incremental_source_definition().is_some(),
+            "{statement}"
+        );
+        assert!(SpillAggregatePlan::compile(&query).is_ok(), "{statement}");
+        assert!(
+            AsyncSpillAggregatePlan::compile(&query).is_ok(),
+            "{statement}"
+        );
+        assert!(VertexAggregatePlan::compile(&query).is_ok(), "{statement}");
+    }
+}
+
+#[test]
+fn private_rank_work_and_allocations_remain_governed_and_cancellable() {
+    let values = data(&[(1, Some(1)), (1, Some(2)), (2, Some(5))]);
+    let query = text("MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY k + c DESC LIMIT 1");
+    for limited in [
+        GqlQueryPolicy::new(100, 100, 0, 1_000_000),
+        GqlQueryPolicy::new(100, 100, 1_000_000, 0),
+    ] {
+        assert!(execute(&query, &values, limited, || Ok::<_, ()>(())).is_err());
+    }
+    let mut checkpoints = 0;
+    execute(&query, &values, policy(), || {
+        checkpoints += 1;
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    assert!(checkpoints > 1);
+    for stop in 1..=checkpoints {
+        let mut seen = 0;
+        assert!(
+            matches!(
+                execute(&query, &values, policy(), || {
+                    seen += 1;
+                    if seen == stop { Err("stop") } else { Ok(()) }
+                }),
+                Err(GqlQueryError::Interrupted("stop"))
+            ),
+            "checkpoint {stop}"
+        );
     }
 }

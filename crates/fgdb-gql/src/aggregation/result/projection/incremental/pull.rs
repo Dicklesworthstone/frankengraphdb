@@ -167,6 +167,7 @@ impl PreparedGraphAggregate {
 struct RankedGroup {
     complete: GraphAggregateRow,
     projected: Option<GraphAggregateRow>,
+    rank: Option<GraphAggregateRow>,
     distinct_key: Option<DistinctKey>,
 }
 
@@ -214,12 +215,27 @@ impl StreamedGroupRanking {
         } else {
             None
         };
+        let rank = if query.has_computed_ordering() {
+            Some(
+                query.project_complete_order_with_elements(
+                    &row,
+                    projected
+                        .as_ref()
+                        .expect("computed ordering has an output projection"),
+                    read,
+                    control,
+                )?,
+            )
+        } else {
+            None
+        };
         if self.prefix == 0 {
             return Ok(());
         }
         let mut candidate = RankedGroup {
             complete: row,
             projected,
+            rank,
             distinct_key: None,
         };
         if let Some(index) = &mut self.distinct {
@@ -329,12 +345,14 @@ impl StreamedGroupRanking {
         // cells, never re-evaluate expressions here. Preparation checks indices.
         for order in query.projected_ordering() {
             let a = left
-                .projected
+                .rank
                 .as_ref()
+                .or(left.projected.as_ref())
                 .expect("projected ordering has a checked output projection");
             let b = right
-                .projected
+                .rank
                 .as_ref()
+                .or(right.projected.as_ref())
                 .expect("projected ordering has a checked output projection");
             let result = compare_cell(
                 result_cell(&a.values()[order.column]),

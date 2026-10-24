@@ -1,4 +1,6 @@
 //! Real committed deltas must maintain computed aggregate rank and result pages.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::WriteBatch;
 use fgdb::{Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult};
@@ -73,6 +75,12 @@ fn native_ranked_aggregates_follow_updates_deletes_and_empty_ticks_without_rebin
             "MATCH (a:L)-[:R]->(b) RETURN a.p AS bucket,-COUNT(*) AS score GROUP BY a.p ORDER BY score DESC,bucket ASC LIMIT 2",
             "MATCH (n:L) RETURN -SUM(n.q) AS score GROUP BY n.p HAVING COUNT(*)>1 ORDER BY score DESC LIMIT 2",
             "MATCH (n:L) RETURN -COUNT(*) AS score GROUP BY n.p ORDER BY score LIMIT 0",
+            "MATCH (n:L) RETURN n.p AS bucket,COUNT(*) AS count,AVG(n.q) AS mean ORDER BY count + 1 DESC,bucket LIMIT 3",
+            "MATCH (n:L) RETURN DISTINCT COUNT(*) AS count GROUP BY n.p ORDER BY n.p + COUNT(*) DESC SKIP 1 LIMIT 2",
+            "MATCH (n:L) RETURN n.p AS bucket,AVG(n.q) AS mean ORDER BY mean + 1 DESC NULLS FIRST LIMIT 3",
+            "MATCH (n:L) WITH n.p AS bucket,n.q AS amount RETURN bucket,COUNT(*) AS count ORDER BY bucket + count DESC LIMIT 3",
+            "MATCH (a:L)-[:R]->(b) RETURN a.p AS bucket,COUNT(*) AS count ORDER BY a.p + COUNT(*) DESC LIMIT 2",
+            "MATCH (n:L) RETURN n.p AS bucket,{p:COUNT(*)} AS stats ORDER BY stats.p + bucket DESC LIMIT 3",
         ];
         let mut registered = Vec::new();
         for text in statements {
@@ -193,6 +201,47 @@ fn parameterized_computed_rank_registrations_keep_independent_bound_sort_cells()
                 a, b,
                 "bound ranks must not borrow another registration's scale"
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn untracked_rank_property_reads_refuse_before_empty_or_nonempty_registration() {
+    let ((), report) = run_async_under_lab(0x6a98_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let params = GqlParameters::new();
+        for nonempty in [false, true] {
+            let mut db = if nonempty {
+                seed(&commit).await
+            } else {
+                Database::open_memory(&commit, keys()).await.unwrap()
+            };
+            for statement in [
+                "MATCH (n:L) RETURN n AS v,count(*) AS c ORDER BY v.p + c DESC LIMIT 1",
+                "MATCH (n:L) WITH n AS v RETURN v,count(*) AS c ORDER BY v.p + c DESC LIMIT 1",
+                "MATCH (n:L) RETURN n AS v,avg(n.p) AS a ORDER BY v.p + a DESC LIMIT 1",
+            ] {
+                let prepared = PreparedNativeRead::prepare(statement, &params, resolve).unwrap();
+                // No graph records are permitted: refusal must precede the
+                // source bootstrap for direct and relational group owners.
+                assert!(
+                    matches!(
+                        prepared.register_standing(&mut db, &cx, &params, delivery()),
+                        Err(fgdb::StandingQueryError::Unsupported)
+                    ),
+                    "nonempty={nonempty}: {statement}"
+                );
+            }
+            let value_map = PreparedNativeRead::prepare(
+                "MATCH (n:L) RETURN n.p AS k,{p:count(*)} AS stats ORDER BY stats.p + k DESC LIMIT 1",
+                &params, resolve,
+            ).unwrap();
+            value_map
+                .register_standing(&mut db, &cx, &params, policy())
+                .unwrap();
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

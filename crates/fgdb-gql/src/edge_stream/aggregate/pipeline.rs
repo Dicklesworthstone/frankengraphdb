@@ -36,6 +36,9 @@ impl InputPipeline {
     pub(crate) fn prepare(
         aggregate: &PreparedGraphAggregate,
     ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
+        if aggregate.computed_order_requires_element_reads() {
+            return None;
+        }
         let Some(relation) = aggregate.input_relation() else {
             return Some((aggregate.prepare_streamed_output()?, None));
         };

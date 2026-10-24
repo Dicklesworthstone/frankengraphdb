@@ -390,6 +390,28 @@ impl<'a> Parser<'a> {
         self.let_slot(program, value, at)
     }
 
+    /// Scalar CASE and COALESCE defer their selected operands, but their
+    /// enclosing let slots are eager. Collected functions, including calls
+    /// nested inside composite wrappers, cannot occupy those outer slots
+    /// without changing error visibility.
+    /// Existing value-language branches have their own slot scope and keep
+    /// their established routing; ordinary aggregate columns need no slots.
+    fn admit_lazy_collected_calls(
+        &self,
+        start: usize,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        if self.collected_scalar_calls != start {
+            return Err(failure(
+                at,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                    "collected aggregate functions outside scalar CASE and COALESCE",
+                )),
+            ));
+        }
+        Ok(())
+    }
+
     /// A `+`/`-` chain with a list operand (sum_has_list), read whole by
     /// list_sum; false, with nothing consumed, for any other chain. Out of
     /// line: integer_sum repeats once per nested parenthesis.
@@ -1901,8 +1923,10 @@ impl<'a> Parser<'a> {
             if self.lets.is_some() && self.list_case_here(columns, depth, program, at)? {
                 return Ok(());
             }
+            let start = self.collected_scalar_calls;
             self.advance()?;
-            return self.integer_case(columns, depth + 1, program, at);
+            self.integer_case(columns, depth + 1, program, at)?;
+            return self.admit_lazy_collected_calls(start, at);
         }
         // -9223372036854775808 is one legal signed literal, not negation of
         // an unrepresentable positive integer. Other signs are checked unary
@@ -1932,8 +1956,13 @@ impl<'a> Parser<'a> {
         }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.
-        if self.lets.is_some() && self.let_operand_here()? {
-            return self.composite_slot(columns, depth, program, at);
+        if self.lets.is_some() {
+            let collected = matches!(columns, ExpressionColumns::Resolved(_))
+                && self.collected_aggregate_call()?;
+            if self.let_operand_here()? || collected {
+                self.composite_slot(columns, depth, program, at)?;
+                return Ok(());
+            }
         }
         if self.row_entry_slot(columns, program, at)? {
             return Ok(());
@@ -1962,6 +1991,7 @@ impl<'a> Parser<'a> {
             None
         };
         if let Some(function) = function {
+            let start = self.collected_scalar_calls;
             self.advance()?;
             self.punct(b'(', "(")?;
             if self.constant_function(function, program, at)? {
@@ -2070,6 +2100,7 @@ impl<'a> Parser<'a> {
                 emit(program, ParsedOp::Coalesce, at)?;
             }
             self.punct(b')', ")")?;
+            self.admit_lazy_collected_calls(start, at)?;
             return Ok(());
         }
         // `$doc.key` reads a map argument's field; `$from..` is a slice bound

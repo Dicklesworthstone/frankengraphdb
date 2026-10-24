@@ -11,12 +11,6 @@ impl AggregateOrder<'_> {
         projected: bool,
         work: &Work<'_>,
     ) -> Result<NativeAggregateSpoolRow> {
-        // Reserve both the decoded envelope and its exact row before either
-        // allocation. The envelope retires here; the row's guard survives the
-        // comparison, including every early error. Reuse the ordinary owned
-        // spool-row wrapper so payloads are dropped before refunding memory.
-        let charge = decoded_reservation(&self.pool, work.cx, bytes, 2)?;
-        let frame = decode_row(bytes, self.resolver)?;
         let (keys, values) = if projected {
             (
                 self.definition.key_columns().len(),
@@ -28,6 +22,21 @@ impl AggregateOrder<'_> {
                 self.definition.evaluation_aggregate_columns().len(),
             )
         };
+        self.decode_rank_cells(bytes, keys, values, work)
+    }
+
+    fn decode_rank_cells(
+        &self,
+        bytes: &[u8],
+        keys: usize,
+        values: usize,
+        work: &Work<'_>,
+    ) -> Result<NativeAggregateSpoolRow> {
+        // Reserve both the decoded envelope and its exact row before either
+        // allocation. The envelope retires here; the row's guard survives the
+        // comparison, including every early error.
+        let charge = decoded_reservation(&self.pool, work.cx, bytes, 2)?;
+        let frame = decode_row(bytes, self.resolver)?;
         let row = decode_envelope(&frame, keys, values)?;
         Ok(NativeAggregateSpoolRow {
             row,
@@ -43,6 +52,12 @@ impl AggregateOrder<'_> {
     ) -> Result<Ordering> {
         let (left, left_projected) = split_projected_frame(left)?;
         let (right, right_projected) = split_projected_frame(right)?;
+        let rank = if self.definition.computed_rank_width() != 0 {
+            Some((split_projected_frame(left)?, split_projected_frame(right)?))
+        } else {
+            None
+        };
+        let (left, right) = rank.map_or((left, right), |((left, _), (right, _))| (left, right));
         // Validate all four rows before a decisive projected key could hide a
         // malformed complete group or a malformed later projected column.
         // Only these two candidates coexist, independently of total groups.
@@ -50,6 +65,17 @@ impl AggregateOrder<'_> {
         let left_projected = self.decode_rank_row(left_projected, true, work)?;
         let right = self.decode_rank_row(right, false, work)?;
         let right_projected = self.decode_rank_row(right_projected, true, work)?;
+        if let Some(((_, left_rank), (_, right_rank))) = rank {
+            let width = self.definition.computed_rank_width();
+            let left_rank = self.decode_rank_cells(left_rank, 0, width, work)?;
+            let right_rank = self.decode_rank_cells(right_rank, 0, width, work)?;
+            return self
+                .definition
+                .compare_precomputed_rank(&left, &left_rank, &right, &right_rank, &mut |event| {
+                    self.input.charge(event)
+                })
+                .map_err(execute_error);
+        }
         self.definition
             .compare_precomputed_output(
                 &left,

@@ -1906,6 +1906,17 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// These numeric aggregates apply a value function to a hidden Collect.
+    /// A resolved scalar expression may read that function through one let
+    /// slot; the graph/row scalar grammar does not acquire aggregate calls.
+    pub(super) fn collected_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(matches!(self.current.kind, TokenKind::Word(word)
+            if ["PERCENTILEDISC", "PERCENTILECONT", "STDEV", "STDEVP"]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name)))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
     /// Whether the value here is a let operand, or size(), followed by a
     /// scalar operator, as in `none(...) = all(...)` or `size(l) > 0`
     /// (fgdb-o5o9t). The lookahead skips the value and its postfix reads on
@@ -1931,7 +1942,12 @@ impl<'a> Parser<'a> {
         let entry = self.call_element_reads && self.property_dot_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
-        if !subscript && !entry && !size && !self.starts_let_operand()? {
+        if !subscript
+            && !entry
+            && !size
+            && !self.starts_let_operand()?
+            && !self.collected_aggregate_call()?
+        {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
@@ -2653,13 +2669,7 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
-        } else if resolve.is_some()
-            && (self.is_word("PERCENTILEDISC")
-                || self.is_word("PERCENTILECONT")
-                || self.is_word("STDEV")
-                || self.is_word("STDEVP"))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-        {
+        } else if resolve.is_some() && self.collected_aggregate_call()? {
             // percentileDisc(x, p): the resolver collects x as a hidden
             // aggregate, and p reads after aggregation (fgdb-qbaex).
             // stDev(x) and stDevP(x) take the collected list alone.
@@ -2700,6 +2710,11 @@ impl<'a> Parser<'a> {
                 ReadValueTemplate::List(vec![ReadValueTemplate::Column(collected), p])
             };
             self.punct(b')', ")")?;
+            // Count at the value reader, so a scalar lazy owner's eager
+            // slot cannot hide a collected call inside SIZE, a list/map,
+            // or a subscript. Value-language conditional owners do not
+            // observe this count and keep their own deferred branch scopes.
+            self.collected_scalar_calls += 1;
             ReadValueTemplate::Function {
                 function,
                 argument: Box::new(argument),

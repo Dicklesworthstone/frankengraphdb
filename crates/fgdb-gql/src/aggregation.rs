@@ -543,6 +543,10 @@ pub struct PreparedGraphAggregate {
     // Positions in output_projection, never in the evaluation group schema.
     // The two ordering setters make these mutually exclusive with ordering.
     projected_ordering: Vec<crate::algebra::GraphValueOrder>,
+    // Optional private rank tuple. Its expressions read the complete evaluation
+    // row followed by the already computed visible output; it never enters
+    // DISTINCT identity, result schemas or delivered aggregate rows.
+    computed_ordering: Vec<crate::GraphSetValue>,
 }
 impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -709,6 +713,7 @@ impl PreparedGraphAggregate {
             having_expression: None,
             ordering: Vec::new(),
             projected_ordering: Vec::new(),
+            computed_ordering: Vec::new(),
         })
     }
 
@@ -990,6 +995,13 @@ impl PreparedGraphAggregate {
                 bytes.extend_from_slice(&(order.column as u64).to_be_bytes());
                 bytes.push(u8::from(order.descending));
                 bytes.push(u8::from(order.nulls_first));
+            }
+        }
+        if !self.computed_ordering.is_empty() {
+            bytes.extend_from_slice(b"fgdb:aggregate-computed-order:v1\0");
+            bytes.extend_from_slice(&(self.computed_ordering.len() as u64).to_be_bytes());
+            for expression in &self.computed_ordering {
+                expression.append_canonical_bytes(&mut bytes);
             }
         }
         self.append_input_projection(&mut bytes);

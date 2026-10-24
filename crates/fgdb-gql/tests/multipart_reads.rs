@@ -1589,7 +1589,9 @@ fn a_carried_element_reads_its_properties_past_an_unwind() {
             .collect(),
     );
     assert_eq!(
-        sorted(execute("MATCH (n) WITH n UNWIND [1, 2] AS i RETURN n.p AS p, i")),
+        sorted(execute(
+            "MATCH (n) WITH n UNWIND [1, 2] AS i RETURN n.p AS p, i"
+        )),
         unwound
     );
     let pairs = sorted(
@@ -1653,7 +1655,9 @@ fn existence_tests_read_as_values() {
     let per_vertex = |value: &dyn Fn(u128) -> GraphValue| -> Vec<GraphValueRow> {
         sorted(
             (1..=4)
-                .map(|n| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), value(n)]))
+                .map(|n| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), value(n)])
+                })
                 .collect(),
         )
     };
@@ -1706,6 +1710,11 @@ fn existence_tests_read_as_values() {
     );
     assert_eq!(
         sorted(execute("MATCH (n) WITH n WHERE exists((n)-->()) RETURN n")),
-        sorted((1..=4).filter(|&n| out(n)).map(|n| vertices(&[n])).collect())
+        sorted(
+            (1..=4)
+                .filter(|&n| out(n))
+                .map(|n| vertices(&[n]))
+                .collect()
+        )
     );
 }

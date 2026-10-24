@@ -6,6 +6,7 @@
 //! Nontrivial output DISTINCT uses a separately metered borrowed-group buffer.
 
 mod distinct;
+mod effects;
 mod having;
 mod projection;
 mod streaming;
@@ -319,27 +320,11 @@ impl<'g, 'a: 'g> Group<'g, 'a> {
 }
 
 impl PreparedGraphAggregate {
-    /// Evaluate these expressions after HAVING, before DISTINCT/order/page.
-    /// Columns address all evaluation keys followed by all aggregates. Output
-    /// rows have no keys and one value per named expression.
-    pub fn with_output_projection(
-        mut self,
-        projection: Vec<crate::GraphSetProjection>,
-    ) -> Result<Self, GraphAggregateBuildError> {
-        use crate::{
-            GraphSetColumnType as Kind, GraphSetProjection as Projection,
-            GraphSetProjectionError as Error,
-        };
+    fn output_input_types(
+        &self,
+    ) -> Result<Vec<crate::GraphSetColumnType>, GraphAggregateBuildError> {
+        use crate::{GraphSetColumnType as Kind, GraphSetProjection as Projection};
         let failure = GraphAggregateBuildError::OutputProjection;
-        if projection.is_empty() {
-            return Err(failure(Error::Empty));
-        }
-        if projection.len() > MAX_PATTERN_VERTICES {
-            return Err(failure(Error::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES,
-                observed: projection.len(),
-            }));
-        }
         let source_types = if let Some(relation) = &self.relational_input {
             relation.column_types().to_vec()
         } else {
@@ -375,17 +360,50 @@ impl PreparedGraphAggregate {
                     _ => Kind::Scalar,
                 }),
         );
+        Ok(types)
+    }
+
+    /// Evaluate these expressions after HAVING, before DISTINCT/order/page.
+    /// Columns address all evaluation keys followed by all aggregates. Output
+    /// rows have no keys and one value per named expression.
+    pub fn with_output_projection(
+        mut self,
+        projection: Vec<crate::GraphSetProjection>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        use crate::{GraphSetProjection as Projection, GraphSetProjectionError as Error};
+        let failure = GraphAggregateBuildError::OutputProjection;
+        if projection.is_empty() {
+            return Err(failure(Error::Empty));
+        }
+        if projection.len() > MAX_PATTERN_VERTICES {
+            return Err(failure(Error::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: projection.len(),
+            }));
+        }
+        let mut types = self.output_input_types()?;
+        let mut projected_types = Vec::new();
         let mut names = BTreeSet::new();
         for (column, value) in projection.iter().enumerate() {
             Projection::validate_output_name(value.name(), column).map_err(failure)?;
             if !names.insert(value.name()) {
                 return Err(failure(Error::DuplicateName { column }));
             }
-            Projection::admit_output(value.value(), &types, column).map_err(failure)?;
+            projected_types
+                .push(Projection::admit_output(value.value(), &types, column).map_err(failure)?);
         }
         // Replacing a projection must not leave previously admitted sort
         // indices dangling. The builder remains valid in either call order.
-        Self::validate_projected_ordering(&self.projected_ordering, projection.len())?;
+        let order_width = if self.computed_ordering.is_empty() {
+            projection.len()
+        } else {
+            self.computed_ordering.len()
+        };
+        Self::validate_projected_ordering(&self.projected_ordering, order_width)?;
+        types.extend(projected_types);
+        for (column, expression) in self.computed_ordering.iter().enumerate() {
+            Projection::admit_output(expression, &types, column).map_err(failure)?;
+        }
         self.output_names = projection
             .iter()
             .map(|value| value.name().to_owned())
@@ -421,8 +439,67 @@ impl PreparedGraphAggregate {
         };
         Self::validate_projected_ordering(ordering, width)?;
         self.projected_ordering = ordering.to_vec();
+        self.computed_ordering.clear();
         self.ordering.clear();
         Ok(self)
+    }
+
+    /// Evaluate a private rank tuple after the visible projection. Expression
+    /// columns address all evaluation keys, then all evaluation summaries, then
+    /// the already computed visible output. An alias therefore reads its exact
+    /// count/sum/average cell without narrowing or re-evaluating its expression.
+    /// Ordering indices address this private tuple. It is never part of output
+    /// DISTINCT or delivery, and every qualified group evaluates it even when
+    /// pagination ultimately discards the group.
+    pub fn with_computed_order_by(
+        mut self,
+        expressions: Vec<crate::GraphSetValue>,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        if ordering.is_empty() {
+            return self.with_projected_order_by(ordering);
+        }
+        if expressions.len() > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: expressions.len(),
+            });
+        }
+        let projection = self
+            .output_projection
+            .as_ref()
+            .ok_or(GraphAggregateBuildError::RequiresOutputProjection)?;
+        let mut types = self.output_input_types()?;
+        let projected_types = projection
+            .iter()
+            .enumerate()
+            .map(|(column, value)| {
+                crate::GraphSetProjection::admit_output(value.value(), &types, column)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(GraphAggregateBuildError::OutputProjection)?;
+        types.extend(projected_types);
+        for (column, expression) in expressions.iter().enumerate() {
+            crate::GraphSetProjection::admit_output(expression, &types, column)
+                .map_err(GraphAggregateBuildError::OutputProjection)?;
+        }
+        Self::validate_projected_ordering(ordering, expressions.len())?;
+        self.computed_ordering = expressions;
+        self.projected_ordering = ordering.to_vec();
+        self.ordering.clear();
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn has_computed_ordering(&self) -> bool {
+        !self.computed_ordering.is_empty()
+    }
+
+    /// Private rank expressions, over evaluation cells followed by the visible
+    /// projection. These expressions do not add any public output columns.
+    #[must_use]
+    pub fn computed_ordering(&self) -> &[crate::GraphSetValue] {
+        &self.computed_ordering
     }
 
     #[must_use]
@@ -509,6 +586,7 @@ impl PreparedGraphAggregate {
         self.having_expression = None;
         self.ordering = ordering.to_vec();
         self.projected_ordering.clear();
+        self.computed_ordering.clear();
         Ok(self)
     }
     #[must_use]

@@ -885,9 +885,33 @@ fn graph_value<E, C>(
 struct ProjectedGroup<'g, 'a> {
     group: Group<'g, 'a>,
     values: Vec<OutputValue<'g>>,
+    rank: Vec<GraphAggregateValue>,
 }
 
 impl PreparedGraphAggregate {
+    fn computed_order_values<'g, E, C>(
+        &'g self,
+        columns: impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>,
+        width: usize,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<Vec<GraphAggregateValue>, QueryError<E, C>> {
+        let mut values = Vec::new();
+        let mut input = ExpressionInput {
+            columns,
+            width,
+            locals: Vec::new(),
+            read,
+        };
+        for (column, value) in self.computed_ordering.iter().enumerate() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            // Own rank cells before retaining them beside their visible input.
+            // No self-referential row and no repeated comparator evaluation.
+            values.push(expression(value, &mut input, column, control)?.into_owned(control)?);
+        }
+        Ok(values)
+    }
+
     /// Construct an untransformed COUNT/SUM/AVG result from a delta maintainer.
     /// Keys use the evaluation grouping order and retain their typed domains.
     /// This validates shape and result domains, not the maintained arithmetic.
@@ -966,9 +990,20 @@ impl PreparedGraphAggregate {
         // selection. Reuse the exact result cells, not a scalar conversion or
         // a second execution of their expressions inside the comparator.
         for order in &self.projected_ordering {
+            let (left, right) = if self.has_computed_ordering() {
+                (
+                    result_cell(&left.rank[order.column]),
+                    result_cell(&right.rank[order.column]),
+                )
+            } else {
+                (
+                    left.values[order.column].cell(),
+                    right.values[order.column].cell(),
+                )
+            };
             let result = compare_cell(
-                left.values[order.column].cell(),
-                right.values[order.column].cell(),
+                left,
+                right,
                 order.descending,
                 if order.nulls_first {
                     GraphNullPlacement::First
@@ -1109,8 +1144,28 @@ impl PreparedGraphAggregate {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(expression(value.value(), &mut input, column, control)?);
             }
+            let group_width = group.key.len() + group.state.len();
+            let rank = self.computed_order_values(
+                |at| {
+                    if at < group_width {
+                        input_cell(group, at)
+                    } else {
+                        values
+                            .get(at - group_width)
+                            .map(OutputValue::cell)
+                            .ok_or(GraphIntegerErrorKind::MissingColumn)
+                    }
+                },
+                group_width + values.len(),
+                input.read,
+                control,
+            )?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            rows.push(ProjectedGroup { group, values });
+            rows.push(ProjectedGroup {
+                group,
+                values,
+                rank,
+            });
         }
         if self.output_distinct {
             self.sort_projected(&mut rows, true, control)?;

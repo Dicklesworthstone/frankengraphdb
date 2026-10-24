@@ -1,5 +1,7 @@
 //! Native query -> external grouping -> projected rank -> exact result rows.
 //! Small run/group capacities force the real authenticated spill pipeline.
+#![recursion_limit = "256"]
+
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
@@ -139,6 +141,11 @@ fn projected_alias_spill_matches_native_streams_across_sources_distinct_and_wind
             "MATCH (n:L) RETURN DISTINCT -COUNT(*) AS score GROUP BY n.p ORDER BY score DESC",
             "MATCH (a)-[e:R]->(b) RETURN e.p AS bucket,-SUM(e.q) AS score ORDER BY score DESC,bucket ASC",
             "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS bucket,-COUNT(*) AS score ORDER BY score DESC,bucket DESC",
+            "MATCH (n:L) RETURN n.p AS bucket,COUNT(*) AS count,AVG(n.q) AS average ORDER BY bucket + count DESC",
+            "MATCH (n:L) RETURN DISTINCT COUNT(n.q) AS count GROUP BY n.p ORDER BY n.p + COUNT(n.q) DESC",
+            "MATCH (n:L) RETURN n.p AS bucket,AVG(n.q) AS average ORDER BY average + 1 DESC,bucket",
+            "MATCH (a)-[e:R]->(b) RETURN e.p AS bucket,COUNT(*) AS count ORDER BY e.p + COUNT(*) DESC",
+            "MATCH (n:L) RETURN n.p AS bucket,{p:COUNT(*)} AS stats ORDER BY stats.p + bucket DESC",
         ] {
             for window in ["", " SKIP 1 LIMIT 3", " LIMIT 0", " SKIP 1000 LIMIT 1"] {
                 let text = format!("{statement}{window}");
@@ -252,6 +259,58 @@ fn projected_spill_rebinding_changes_rank_without_changing_the_prepared_template
         }
         assert_ne!(results[0], results[1]);
         assert_eq!(results[0], results[2]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_rank_refuses_unowned_property_reads_before_source_cardinality_matters() {
+    let ((), report) = run_async_under_lab(0x5ba1_1025, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let parameters = GqlParameters::new();
+        for nonempty in [false, true] {
+            let db = if nonempty {
+                seed(&commit).await
+            } else {
+                Database::open_memory(&commit, keys()).await.unwrap()
+            };
+            let view = db.read_session().unwrap();
+            let prepared = prepare(
+                "MATCH (n:L) RETURN n AS v,COUNT(*) AS c ORDER BY v.p + c DESC LIMIT 1",
+                &parameters,
+            );
+            let pool = MemoryPool::new(1_000_000, 0).unwrap();
+            let mut a = scratch(&cx, &pool).await;
+            let mut b = scratch(&cx, &pool).await;
+            let mut c = scratch(&cx, &pool).await;
+            let result = prepared
+                .spool_aggregate_in_view(
+                    &view,
+                    &cx,
+                    &parameters,
+                    policy(10),
+                    &mut a,
+                    &mut b,
+                    &mut c,
+                    1,
+                    256,
+                    1,
+                    128,
+                    257,
+                    16_384,
+                    1000,
+                    100_000_000,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(NativeAggregateSpoolError::Unsupported)),
+                "nonempty={nonempty}"
+            );
+            assert_eq!(pool.used(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

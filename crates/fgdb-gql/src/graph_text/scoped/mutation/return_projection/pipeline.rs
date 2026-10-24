@@ -224,7 +224,8 @@ pub(super) fn hoist_candidate(token: TokenKind<'_>, after_dot: bool) -> bool {
     match token {
         TokenKind::Punct(b'[') => true,
         TokenKind::Word(word) => {
-            !after_dot && (word.eq_ignore_ascii_case("COUNT") || word.eq_ignore_ascii_case("EXISTS"))
+            !after_dot
+                && (word.eq_ignore_ascii_case("COUNT") || word.eq_ignore_ascii_case("EXISTS"))
         }
         _ => false,
     }
@@ -1038,7 +1039,8 @@ impl<'a> Parser<'a> {
         };
         Ok(self.boundary_reads.as_ref().is_some_and(|boundary| {
             boundary.width == width
-                && ((boundary.reads.iter()).any(|&(read, name, _)| read == alias && name.text == key)
+                && ((boundary.reads.iter())
+                    .any(|&(read, name, _)| read == alias && name.text == key)
                     || (boundary.grouped.iter())
                         .any(|&(read, _, name, _)| read == alias && name.text == key))
         }))

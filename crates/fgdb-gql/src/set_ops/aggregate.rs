@@ -99,6 +99,17 @@ impl PreparedGraphSetAggregate {
         Ok(self)
     }
 
+    /// Rank private post-group expressions without adding cells to the visible
+    /// output tuple. The native aggregate owns their exact value semantics.
+    pub fn with_computed_order_by(
+        mut self,
+        expressions: Vec<crate::GraphSetValue>,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_computed_order_by(expressions, ordering)?;
+        Ok(self)
+    }
+
     /// Keys and arguments address the completed relation's column schema.
     /// The usual nine exact aggregate functions and group-result clauses are
     /// unchanged; counts/sums/averages never narrow into CanonicalScalar.

@@ -6,6 +6,7 @@
 use super::*;
 use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_gql::PreparedGraphSetAggregate;
+use fgdb_gql::row_aggregate::definition::GroupDefinition;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_window::RowWindowSpec;
@@ -494,6 +495,12 @@ fn register_group_checked<V: Vfs + Clone>(
     checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     checkpoint()?;
+    // Reject unowned rank dependencies before compiling or seeding the input
+    // circuit. Empty data or an input-record budget must not decide whether a
+    // graph-property rank belongs to this reader-free maintained owner.
+    if definition.has_computed_ordering() && definition.complete_groups().is_none() {
+        return Err(StandingQueryError::Unsupported);
+    }
     if columns.len() != slots.len()
         || columns.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES
         || slots.iter().any(|slot| match *slot {

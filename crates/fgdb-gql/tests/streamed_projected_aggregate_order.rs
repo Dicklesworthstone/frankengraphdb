@@ -193,6 +193,52 @@ fn vertex_stream_orders_computed_aliases_and_preserves_exact_aggregate_outputs()
 }
 
 #[test]
+fn vertex_stream_evaluates_private_rank_before_distinct_window_and_limit_zero() {
+    let rows = records(&[
+        (1, Some(1)),
+        (2, Some(1)),
+        (2, Some(1)),
+        (3, Some(1)),
+        (4, Some(1)),
+        (4, Some(1)),
+        (4, Some(1)),
+    ]);
+    let q = query(
+        "MATCH (n) RETURN DISTINCT count(*) AS c GROUP BY n.g ORDER BY n.g + count(*) DESC SKIP 1 LIMIT 1",
+    );
+    let mut cursor = VertexAggregateCursor::new(
+        Vertices::new(rows.clone()),
+        VertexAggregatePlan::compile(&q).unwrap(),
+        policy(1),
+        || Ok::<_, ()>(()),
+    );
+    let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(actual, batch_vertices(&q, &rows));
+    assert_eq!(actual.len(), 1);
+    assert_eq!(actual[0].values()[0].as_count(), Some(2));
+    assert!(actual[0].keys().is_empty() && actual[0].values().len() == 1);
+    for page in ["LIMIT 0", "LIMIT 1"] {
+        let q = query(&format!(
+            "MATCH (n) RETURN count(*) AS c GROUP BY n.g ORDER BY 1/(n.g-4) {page}"
+        ));
+        let mut cursor = VertexAggregateCursor::new(
+            Vertices::new(rows.clone()),
+            VertexAggregatePlan::compile(&q).unwrap(),
+            policy(1),
+            || Ok::<_, ()>(()),
+        );
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(
+                GraphAggregateError::OutputExpression { .. }
+            )))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert!(cursor.next().is_none());
+    }
+}
+
+#[test]
 fn cooperative_vertex_polling_keeps_projected_distinct_window_and_quotas() {
     let values: Vec<_> = (0..130).map(|at| (at % 5, Some(at % 5 + 1))).collect();
     let rows = records(&values);
@@ -475,6 +521,29 @@ fn fixed_edge_and_join_streams_rank_computed_counts_and_full_width_identities() 
         assert_eq!(cursor.row_stats().result_rows, 2);
         assert_eq!(cursor.state(), EdgeScanState::Exhausted);
         assert!(dropped.get() && cursor.next().is_none());
+    }
+}
+
+#[test]
+fn edge_and_join_streams_keep_private_count_ranks_out_of_visible_rows() {
+    for pattern in ["(a)-[e:R]->(b)", "(a)-[e:R]->(b)-[f:S]->(c)"] {
+        let q = query(&format!(
+            "MATCH {pattern} RETURN a AS owner,COUNT(*) AS count ORDER BY count + 1 DESC,owner DESC LIMIT 2"
+        ));
+        let expected = batch_edges(&q, &Edges::new());
+        let mut cursor = EdgeAggregateCursor::new(
+            Edges::new(),
+            EdgeAggregatePlan::compile(&q).unwrap(),
+            policy(2),
+            || Ok::<_, ()>(()),
+        );
+        let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|row| row.keys().is_empty()
+            && row.values().len() == 2
+            && row.values()[1].as_count().is_some()));
+        assert_eq!(cursor.row_stats().result_rows, 2);
+        assert!(cursor.next().is_none());
     }
 }
 

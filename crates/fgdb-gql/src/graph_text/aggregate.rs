@@ -4,6 +4,7 @@
 //! Group pagination is never pushed into the matching child.
 
 mod having;
+mod order;
 
 use super::boolean::{append_number, comparison_tag};
 use super::*;
@@ -40,6 +41,7 @@ struct Summary {
 enum ResultOrderColumn {
     Evaluation(GraphAggregateColumn),
     Projected(usize),
+    Computed(usize),
 }
 
 #[derive(Clone)]
@@ -113,8 +115,8 @@ impl Summary {
 /// and summaries retain all reads, errors and resource costs. ALL preserves
 /// distinct groups with equal visible cells; DISTINCT removes duplicate visible
 /// rows after filtering/ranking and before pagination, never from child matches.
-/// ORDER BY also accepts computed RETURN aliases. When one is used, every
-/// ordering key must address the returned tuple, not a hidden evaluation cell.
+/// ORDER BY expressions read grouping keys, aggregate calls and computed
+/// RETURN aliases without changing the visible tuple or its exact cell types.
 #[derive(Clone)]
 pub struct PreparedGraphAggregateText {
     child: PreparedGraphText,
@@ -133,6 +135,7 @@ pub struct PreparedGraphAggregateText {
     having_expression: Option<having::HavingTemplate>,
     ordering: Vec<GraphAggregateOrder>,
     projected_ordering: Vec<GraphValueOrder>,
+    computed_ordering: Vec<ReadValueTemplate>,
 }
 impl core::fmt::Debug for PreparedGraphAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -318,7 +321,7 @@ impl PreparedGraphAggregateText {
             )?;
         }
         let mut hidden = Vec::new();
-        let has_output_projection = returned.iter().any(|item| item.output.is_some());
+        let mut has_output_projection = returned.iter().any(|item| item.output.is_some());
         let visible = returned
             .iter()
             .filter(|item| item.function.is_some())
@@ -385,6 +388,7 @@ impl PreparedGraphAggregateText {
             || having_expression.is_some();
         let mut result_order: Vec<(ResultOrderColumn, bool, GraphNullPlacement, usize)> =
             Vec::new();
+        let mut order_expressions = Vec::new();
         if parser.take_word("ORDER")? {
             parser.word("BY")?;
             loop {
@@ -394,30 +398,13 @@ impl PreparedGraphAggregateText {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = parser.current.at;
-                let projected = if let TokenKind::Word(word) = parser.current.kind
-                    && !matches!(
-                        parser.lexer.clone().next()?.kind,
-                        TokenKind::Punct(b'.' | b'(')
-                    ) {
-                    returned
-                        .iter()
-                        .position(|item| item.output.is_some() && item.alias.text == word)
-                } else {
-                    None
-                };
-                let column = if let Some(column) = projected {
-                    // The alias addresses its existing computed result. Never
-                    // parse its source again or register its parameters twice.
-                    parser.advance()?;
-                    ResultOrderColumn::Projected(column)
-                } else {
-                    ResultOrderColumn::Evaluation(parser.result_column(
-                        &returned,
-                        &groups,
-                        &mut hidden,
-                        &mut computed,
-                    )?)
-                };
+                let column = parser.aggregate_order_expression(
+                    &returned,
+                    &groups,
+                    &mut hidden,
+                    &mut computed,
+                    &mut order_expressions,
+                )?;
                 if result_order
                     .iter()
                     .any(|(previous, _, _, _)| *previous == column)
@@ -449,10 +436,61 @@ impl PreparedGraphAggregateText {
         }
         let mut ordering = Vec::new();
         let mut projected_ordering = Vec::new();
-        if result_order
+        let mut computed_ordering = Vec::new();
+        let projected_column = |column: ResultOrderColumn| match column {
+            ResultOrderColumn::Projected(column) => Some(column),
+            ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(key)) => {
+                returned.iter().position(|item| {
+                    item.function.is_none()
+                        && item.output.is_none()
+                        && item.expression.is_some_and(|expr| expr.same(groups[key]))
+                })
+            }
+            ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(summary)) => returned
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.function.is_some())
+                .nth(summary)
+                .map(|(column, _)| column),
+            ResultOrderColumn::Computed(_) => None,
+        };
+        let projected = result_order
             .iter()
-            .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)))
-        {
+            .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)));
+        let private_rank = !order_expressions.is_empty()
+            || (projected
+                && result_order
+                    .iter()
+                    .any(|(column, _, _, _)| projected_column(*column).is_none()));
+        if private_rank {
+            has_output_projection = true;
+            let width = groups.len() + visible + hidden.len();
+            let input_column = |column| match column {
+                ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(at)) => at,
+                ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(at)) => {
+                    groups.len() + at
+                }
+                ResultOrderColumn::Projected(at) => width + at,
+                ResultOrderColumn::Computed(_) => unreachable!("expression leaves are columns"),
+            };
+            for (column, descending, nulls, _) in result_order {
+                let value = if let ResultOrderColumn::Computed(index) = column {
+                    let (value, leaves) = &order_expressions[index];
+                    let mut value = value.clone();
+                    let columns = leaves.iter().copied().map(input_column).collect::<Vec<_>>();
+                    remap_output_columns(&mut value, &columns);
+                    value
+                } else {
+                    ReadValueTemplate::Column(input_column(column))
+                };
+                projected_ordering.push(GraphValueOrder {
+                    column: computed_ordering.len(),
+                    descending,
+                    nulls_first: nulls == GraphNullPlacement::First,
+                });
+                computed_ordering.push(value);
+            }
+        } else if projected {
             // A computed alias selects the existing post-group projection
             // owner. Other keys must be in that same returned tuple; hidden
             // evaluation keys cannot masquerade as projected positions.
@@ -474,6 +512,7 @@ impl PreparedGraphAggregateText {
                             .nth(summary)
                             .map(|(column, _)| column)
                     }
+                    ResultOrderColumn::Computed(_) => unreachable!("private rank selected above"),
                 }
                 .ok_or_else(|| {
                     error(
@@ -801,6 +840,7 @@ impl PreparedGraphAggregateText {
             having_expression,
             ordering,
             projected_ordering,
+            computed_ordering,
         })
     }
 
@@ -953,6 +993,13 @@ impl PreparedGraphAggregateText {
                 bytes.push(u8::from(order.nulls_first));
             }
         }
+        if !self.computed_ordering.is_empty() {
+            bytes.extend_from_slice(b"fgdb:gql:aggregate-computed-order:v1\0");
+            ordinal(&mut bytes, self.computed_ordering.len());
+            for expression in &self.computed_ordering {
+                expression.append_template_transcript(&mut bytes);
+            }
+        }
         bytes
     }
 
@@ -1061,7 +1108,21 @@ impl PreparedGraphAggregateText {
                 })?,
             None => aggregate,
         };
-        if self.projected_ordering.is_empty() {
+        if !self.computed_ordering.is_empty() {
+            let expressions = self
+                .computed_ordering
+                .iter()
+                .map(|value| Self::bind_input_value(value, &values))
+                .collect::<Result<Vec<_>, _>>()?;
+            aggregate
+                .with_computed_order_by(expressions, &self.projected_ordering)
+                .map_err(|kind| {
+                    error(
+                        self.child.return_at,
+                        GraphPatternTextErrorKind::AggregateBuild(kind),
+                    )
+                })
+        } else if self.projected_ordering.is_empty() {
             Ok(aggregate)
         } else {
             aggregate

@@ -100,9 +100,9 @@ fn project_computed(
     row: GraphAggregateRow,
     charge: &mut MemoryCharge,
     cx: &QueryCx,
-) -> Result<GraphAggregateRow> {
+) -> Result<(GraphAggregateRow, Option<GraphAggregateRow>)> {
     definition
-        .project_output(row, &mut |event| {
+        .project_output_with_rank(row, &mut |event| {
             input
                 .charge(event)
                 .map_err(execute_error)
@@ -185,6 +185,12 @@ impl FrameOrder for AggregateOrder<'_> {
         } else {
             (bytes, None)
         };
+        let (bytes, rank) = if self.definition.computed_rank_width() != 0 {
+            let (complete, rank) = split_projected_frame(bytes)?;
+            (complete, Some(rank))
+        } else {
+            (bytes, None)
+        };
         let _charge = decoded_reservation(&self.pool, work.cx, bytes, 2)?;
         let frame = decode_row(bytes, self.resolver)?;
         decode_envelope(
@@ -200,6 +206,11 @@ impl FrameOrder for AggregateOrder<'_> {
                 self.definition.key_columns().len(),
                 self.definition.aggregate_columns().len(),
             )?;
+        }
+        if let Some(rank) = rank {
+            let _charge = decoded_reservation(&self.pool, work.cx, rank, 2)?;
+            let frame = decode_row(rank, self.resolver)?;
+            decode_envelope(&frame, 0, self.definition.computed_rank_width())?;
         }
         Ok(())
     }
@@ -514,19 +525,42 @@ where
                     Some(decoded_reservation(&pool, work.cx, bytes.as_ref(), copies)?)
                 };
                 let mut charge = pool.reserve(work.cx, 512).map_err(SpillError::Memory)?;
-                let row = project_computed(
+                let (row, rank) = project_computed(
                     &opened.definition,
                     opened.input.as_mut(),
                     row,
                     &mut charge,
                     work.cx,
                 )?;
-                let envelope = envelope(&row);
+                let output_envelope = envelope(&row);
                 // Keep bytes and their charge in field-drop order: a tuple
                 // frees its byte vector before refunding the codec workspace.
-                let projected = account::encode(&pool, work, &envelope, max_row_bytes)?;
-                let frame =
-                    projected_frame(bytes.as_ref(), &projected.0, &pool, work, max_row_bytes)?;
+                let projected = account::encode(&pool, work, &output_envelope, max_row_bytes)?;
+                // Rank cells are a third independent envelope, never appended
+                // to the visible row. A nested private frame preserves the
+                // original two-row format for definitions without rank values.
+                let complete = if let Some(rank) = rank {
+                    let rank_envelope = envelope(&rank);
+                    let rank = account::encode(&pool, work, &rank_envelope, max_row_bytes)?;
+                    Some(projected_frame(
+                        bytes.as_ref(),
+                        &rank.0,
+                        &pool,
+                        work,
+                        max_row_bytes,
+                    )?)
+                } else {
+                    None
+                };
+                let frame = projected_frame(
+                    complete
+                        .as_ref()
+                        .map_or(bytes.as_ref(), |frame| frame.as_ref()),
+                    &projected.0,
+                    &pool,
+                    work,
+                    max_row_bytes,
+                )?;
                 largest = largest.max(frame.len());
                 work.write(&mut writer, frame.as_ref()).await?;
             } else {
@@ -792,8 +826,12 @@ mod tests {
                 stop: usize::MAX,
             };
             let mut charge = pool.reserve(&cx, 512).unwrap();
-            let output =
+            let (output, rank) =
                 project_computed(&definition, &mut control, complete(), &mut charge, &cx).unwrap();
+            assert!(
+                rank.is_none(),
+                "a projection alone has no private rank tuple"
+            );
             let GraphAggregateValue::Value(GraphValue::Map { keys, values }) = &output.values()[0]
             else {
                 panic!("native map projection");

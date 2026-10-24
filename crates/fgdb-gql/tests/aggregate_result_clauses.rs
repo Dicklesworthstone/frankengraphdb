@@ -132,7 +132,6 @@ fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
         "ORDER BY total ASC DESC",
         "ORDER BY total NULLS MIDDLE",
         "ORDER BY total, SUM(b.p)",
-        "ORDER BY 1",
         "ORDER BY b.p",
         "ORDER BY total HAVING n > 0",
         "LIMIT 1 ORDER BY total",
@@ -166,6 +165,66 @@ fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
         .is_err()
     );
     assert_eq!(calls, 0);
+}
+
+#[test]
+fn a_literal_rank_keeps_complete_key_ties_and_exact_visible_values() {
+    let value = CanonicalPropertyValue::from(CanonicalScalar::Int(10));
+    let edges = [
+        (VId(3), RelationId(1), VId(10)),
+        (VId(1), RelationId(1), VId(10)),
+        (VId(3), RelationId(1), VId(10)),
+        (VId(2), RelationId(1), VId(10)),
+        (VId(1), RelationId(1), VId(10)),
+        (VId(1), RelationId(1), VId(10)),
+    ];
+    // Literal 1 is a constant expression, not an ordinal referring to the
+    // first returned column. All ranks tie, so the full ascending group key
+    // orders owners 1, 2, 3 even under DESC and before pagination.
+    for (tail, expected) in [
+        (
+            "ORDER BY 1",
+            vec![(3, VId(1), 30), (1, VId(2), 10), (2, VId(3), 20)],
+        ),
+        (
+            "ORDER BY 1 DESC",
+            vec![(3, VId(1), 30), (1, VId(2), 10), (2, VId(3), 20)],
+        ),
+        ("ORDER BY 1 DESC SKIP 1 LIMIT 1", vec![(1, VId(2), 10)]),
+    ] {
+        let text = format!("{HEAD} {tail}");
+        let template = PreparedGraphAggregateText::prepare(&text, symbols).unwrap();
+        assert_eq!(template.columns(), &["n", "owner", "total"]);
+        let rows = template
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .execute_governed(
+                edges.len() as u64,
+                [],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(Some(&value)),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 3)
+        );
+        let actual = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.values()[0].as_count().unwrap(),
+                    row.values()[1].as_value().unwrap().as_vertex().unwrap(),
+                    row.values()[2].as_integer().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{tail}");
+    }
 }
 
 #[test]

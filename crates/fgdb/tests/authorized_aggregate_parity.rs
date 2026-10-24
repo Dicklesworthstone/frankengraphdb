@@ -1,6 +1,8 @@
 //! Restricted eager aggregation must have the native visitor's semantics.
 //! The independent database contains only the explicitly admitted graph; it
 //! neither calls the authorization adapter nor reconstructs results afterward.
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
@@ -208,6 +210,9 @@ fn graph_matching_grouping_and_computed_inputs_keep_the_native_order_boundaries(
             "MATCH (a)<-[:R]-(b) RETURN COLLECT(b.p) AS items,COUNT(*) AS n",
             "MATCH (n) WHERE NOT EXISTS { MATCH (n)-[:R]->(m) } RETURN COLLECT(n.p) AS items,COUNT(*) AS n",
             "MATCH (n) RETURN COLLECT(n.p) AS items LIMIT 0",
+            "MATCH (n) RETURN n.p AS key,COUNT(*) AS count,AVG(n.p) AS mean ORDER BY key + count DESC",
+            "MATCH (n) RETURN DISTINCT COUNT(*) AS count GROUP BY n.p ORDER BY n.p + COUNT(*) DESC SKIP 1 LIMIT 2",
+            "MATCH (n) RETURN AVG(n.p) AS mean GROUP BY n.hidden ORDER BY mean + 1 DESC",
         ] {
             let definition = prepare(text);
             let expected = reference
