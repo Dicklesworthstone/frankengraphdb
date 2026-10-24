@@ -113,6 +113,7 @@ impl FnxCallSpec {
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
                         | FoundationAlgorithm::HarmonicCentrality
+                        | FoundationAlgorithm::BetweennessCentrality
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
                 )
@@ -262,6 +263,25 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::distance::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::betweenness_cooperative::execute_cooperative(
                     self,
                     graph,
                     limits,

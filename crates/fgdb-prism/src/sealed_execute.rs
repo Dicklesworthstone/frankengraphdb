@@ -23,6 +23,8 @@ use std::mem::size_of;
 
 #[path = "sealed_betweenness.rs"]
 mod betweenness;
+#[path = "sealed_betweenness_cooperative.rs"]
+mod betweenness_cooperative;
 #[path = "sealed_cdlp.rs"]
 mod cdlp;
 #[path = "sealed_clustering.rs"]
@@ -585,8 +587,8 @@ impl FnxCallSpec {
     /// Eigenvector iteration keeps two score vectors and canonical reductions.
     /// Closeness and harmonic centrality reuse one FIFO and distance vector
     /// for all sources; their retained-history work bound applies to every pass.
-    /// Betweenness keeps five vertex-sized vectors and preserves source-ordered
-    /// Brandes reductions; only reached vertices are reset between sources.
+    /// Exact betweenness shares source-ordered Brandes arithmetic with the native
+    /// kernel and reopens compressed rows for dependencies using O(|V|) workspace.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -630,12 +632,6 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
-        if matches!(
-            self.algorithm(),
-            FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
-        ) {
-            return betweenness::execute(self, cx, graph, limits, memory, &admission);
-        }
         if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
             return cdlp::execute(self, cx, graph, limits, memory, &admission);
         }
@@ -670,6 +666,12 @@ impl FnxCallSpec {
             )
         ) {
             return distance::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
+        ) {
+            return betweenness::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
@@ -1038,6 +1040,8 @@ fn source_digest() -> Digest {
             include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
+            include_str!("sealed_betweenness.rs"),
+            include_str!("sealed_betweenness_cooperative.rs"),
             include_str!("sealed_core.rs"),
             include_str!("sealed_distance.rs"),
             include_str!("sealed_eigenvector.rs"),
@@ -1045,7 +1049,6 @@ fn source_digest() -> Digest {
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_directed_clustering.rs"),
             include_str!("sealed_cdlp.rs"),
-            include_str!("sealed_betweenness.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
             include_str!("shortest_path.rs"),

@@ -6,6 +6,8 @@
 //! and adds sleep backoff. Keep actual yield futures, the explicit poll/wake
 //! assertions, all cancellation cuts and the existing deadline unchanged.
 
+#![recursion_limit = "256"]
+
 use asupersync::runtime::yield_now::yield_now;
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
@@ -31,6 +33,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+#[path = "prism_cooperative/betweenness.rs"]
+mod betweenness;
 #[path = "prism_cooperative/clustering.rs"]
 mod clustering;
 #[path = "prism_cooperative/connectivity.rs"]

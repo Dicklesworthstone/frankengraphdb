@@ -1141,6 +1141,10 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
                 "CALL fnx.harmonic_centrality() YIELD vertex,score",
                 "undirected",
             ),
+            (
+                "CALL fnx.betweenness_centrality() YIELD vertex,score",
+                "undirected",
+            ),
         ] {
             let mut previous_rows = None;
             for cut in [&historical, &current] {

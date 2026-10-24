@@ -18,11 +18,11 @@ use super::{
 use crate::sealed_control::Control;
 use std::mem::size_of;
 
-fn workspace(n: usize) -> Result<usize> {
+pub(super) fn workspace(n: usize) -> Result<usize> {
     mul(n, 2 * size_of::<usize>() + 3 * size_of::<f64>())
 }
 
-fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
+pub(super) fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
     if n == 0 {
         return Ok(0);
     }
@@ -38,6 +38,16 @@ fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
         mul(component, per_component)?,
         add(mul(n, add(columns, 24)?)?, add(columns, 16)?)?,
     )
+}
+
+pub(super) fn witness() -> ComplexityWitness {
+    ComplexityWitness {
+        algorithm: "brandes_betweenness_compressed_fifo".to_owned(),
+        complexity_claim: "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds component size, E is projected undirected edges and H is retained incidence count; O(V) kernel workspace".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
+    }
 }
 
 fn reserved<T>(
@@ -112,13 +122,7 @@ fn run(
         delta.push(0.0f64);
         scores.push(0.0f64);
     }
-    let mut witness = ComplexityWitness {
-        algorithm: "brandes_betweenness_compressed_fifo".to_owned(),
-        complexity_claim: "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds component size, E is projected undirected edges and H is retained incidence count; O(V) kernel workspace".to_owned(),
-        nodes_touched: 0,
-        edges_scanned: 0,
-        queue_peak: 0,
-    };
+    let mut witness = witness();
     for source in 0..n {
         control()?;
         queue.clear();
@@ -235,14 +239,13 @@ fn run(
     ))
 }
 
-pub(super) fn execute(
+pub(super) fn prepare(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<usize> {
     let n = graph.node_count();
     admission.rows(n)?;
     let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
@@ -254,6 +257,18 @@ pub(super) fn execute(
         memory.max_kernel_workspace_bytes,
     )?;
     require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    Ok(estimated)
+}
+
+pub(super) fn execute(
+    call: &FnxCallSpec,
+    cx: &Control<'_>,
+    graph: &SealedGraphView,
+    limits: FnxExecutionLimits,
+    memory: FnxMemoryLimits,
+    admission: &ResultAdmission,
+) -> Result<FnxResult> {
+    let estimated = prepare(call, graph, limits, memory, admission)?;
     let rows = SealedRows { cx, graph };
     let mut control = || checkpoint(cx);
     let (output, peak) = run(&rows, memory.max_kernel_workspace_bytes, &mut control)?;
