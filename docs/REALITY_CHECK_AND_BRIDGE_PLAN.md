@@ -155,16 +155,25 @@ additional compressed analytics and numeric parameter work. Those later changes
 are outside this cut's runtime qualification. Neither the original findings nor
 their old line numbers should be projected onto the moving tip without review.
 
-**New P0 security blocker:** the executed dependency gate rejects the locked
-`ctutils 0.4.2` for
+**Frozen-cut P0 security finding, patched on later `main`:** the executed
+dependency gate rejects `20c5d0911`'s locked `ctutils 0.4.2` for
 [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html),
 issued on 2026-10-23. It reaches the product through the pinned asupersync
 crypto dependency chain. The advisory's patched floor is `>=0.4.4`;
 [the upstream fix](https://github.com/RustCrypto/utils/pull/1569) was also
 checked. This is an affected dependency and a real gate failure, not evidence
-that a database secret was recovered. Draft `.33`/`.34` own a targeted
-resolution and independent acceptance; no advisory ignore or dependency-path
-exception is proposed.
+that a database secret was recovered.
+
+Concurrent commit `baaec02be` subsequently updates only that locked package
+and its checksum to **0.4.5**, retaining the existing dependency path and
+policy. This audit independently reran `scripts/dependency_policy_e2e.sh` at
+`232962dcc`: **exit 0, six assertions passed, zero failed/unrun**, including
+all four planted negative controls. HEAD and recorded lock/root-manifest/
+policy/script hashes were unchanged before/after. This clears the advisory
+gate on the later lock; it does not retroactively change the frozen proof or
+qualify the patched product's full runtime/crypto behavior. Draft `.33`/`.34`
+now retain that repair and track remaining acceptance, rather than recreating
+it. No advisory ignore, gate weakening or new dependency path was needed.
 
 ### Twenty concrete vision goals and their next acceptance witnesses
 
@@ -172,6 +181,8 @@ exception is proposed.
 it does not imply fresh end-to-end qualification of every path. The source
 references below are the measuring points. Broad architectural owners already
 cover all twenty groups; narrow draft-only scopes are identified afterwards.
+The table describes the frozen cut; the later patched-lock policy pass above
+is separate evidence.
 
 | # | Testable target | Current code and decisive gap | Existing owner and required acceptance |
 |---:|---|---|---|
@@ -256,9 +267,9 @@ Several old descriptions would now cause duplicate or misguided work:
 
 ### Bridge: close the composition gaps in a testable order
 
-1. **Repair the new dependency exposure and restore adoption/proof.** Resolve
-   the affected existing transitive package without widening the dependency
-   universe, then prove the audit/policy/crypto-consumer controls. Resolve the live tracker's
+1. **Retain the security repair and restore adoption/proof.** Keep the later
+   `ctutils 0.4.5` patch and its fresh six-assertion policy pass, then complete
+   the remaining patched-source crypto/application acceptance. Resolve the live tracker's
    exact relation/scalar differences without discarding either history or any
    DB-only record; publish only the attributable ID set. Prove a clean frozen
    subject with `.beads` present for tracker-dependent assertions. This gates
@@ -353,7 +364,7 @@ Twelve tasks were created only through `br`, as children of the existing bridge:
 | `.30` | Retain independent query models and a shared execution-mode differential corpus | Related existing reference/TCK task `.19` |
 | `.31` | Current delta V3/vertex V4/property V3 field/version registry and decoder-floor crosswalk | Related existing FGPK task `.11` |
 | `.32` | Preserved-byte, hostile-reader, crash/rebuild/compaction compatibility proof | Blocks on `.31` |
-| `.33` | P0: resolve affected locked ctutils on its existing foundation-transitive path | No new first-party dependency or advisory exemption |
+| `.33` | P0: retain and qualify the landed ctutils 0.4.5 repair on its existing path | Policy now passes; remaining full acceptance, no new edge or exemption |
 | `.34` | P0: independently verify all-feature dependency and protected crypto-consumer acceptance | Blocks on `.33` |
 
 The existing parent and `.13`, `.16`, `.17`, `.19`, `.20`, `.21`, `.22` were refined
@@ -405,9 +416,11 @@ the reviewed mutations through `br` under one writer and use exact-ID export.
 | Rust AST `todo!` / `unimplemented!` scans | Exit 1 / 1, empty arrays | No matching macros in `crates`; implemented feature coverage cannot be inferred from that. |
 | First shared `bash scripts/check.sh` | Exit 1; **VOID/UNRUN after tracked movement** | Initially four non-Rust passes, formatting red on five files, all-target check exit 0; all six child verdicts invalidated after peer CDLP changes. Clippy/tests/UBS/registered gates did not run in that invocation. |
 | Isolated clean `scripts/local_proof.sh` at `20c5d0911` | Exit **1**, `tree_stable=true`, `verdict=red`; independent `local_proof_verify.sh` exits **0** and verifies that red receipt | Core: 4 passed / 3 red / 2 unrun out of 9. Registered: 3 passed / 4 red / 33 unrun out of 40. Verification authenticates attribution and consistency, not a green product verdict. |
+| Later patched-lock dependency-policy gate at `232962dcc` | Exit **0**, **6 passed / 0 failed / 0 unrun**; same observed HEAD and recorded policy inputs before/after | Fresh audit/all-feature-dev policy acceptance plus four negative controls for ctutils 0.4.5. Separate source from the affected frozen product run; no full patched-tree qualification. |
 | `bash scripts/check.sh` after the report rewrite, on `d879a0711` plus that report overlay | Exit **1**; core 5 passed / 3 red / 1 unrun; registered 3 passed / 4 red / 33 unrun | All-target check passed; formatting, Clippy and UBS remained red; Cargo testing was offloader-refused. This is a dirty report-tree run, not a clean landing proof or a runtime qualification of CDLP. |
-| Frozen `open_a_database`, explicit Linux target and clean no-overlay source | Exit **0**, complete RCH terminal/source receipt for exact commit/tree | Real commit, GQL, compaction, full handle drop and reopen agree. An earlier implicit-target attempt executed successfully but wrapper retrieval failed (`RCH-E327`); that failed invocation is retained separately. |
-| Frozen Linux `cargo test --workspace --all-features --locked --no-fail-fast --exclude registry-check` | Still compiling; no runtime tally yet | Explicitly separate product retry; registry-dependent tests run locally above. No passing or failing runtime verdict is inferred from compiler progress. |
+| Frozen `open_a_database`, explicit Linux target and clean no-overlay source | Exit **0**, complete RCH terminal/source receipt for exact commit/tree | Three vertices, two edges: commit, GQL, compaction, full handle drop and reopen agree. An earlier implicit-target attempt executed successfully but wrapper retrieval failed (`RCH-E327`); that failed invocation is retained separately. |
+| Frozen Linux `cargo test --workspace --all-features --locked --no-fail-fast --exclude registry-check` | Wrapper exit **1** after **7,230-second SSH timeout**; `RCH_SCOPED_COMPLETION_UNCONFIRMED`; **zero observed test summaries** | Normal configured test limit remained 7,200 seconds. RCH verified the remote process group dead, retained ownership and refused fallback/replay. Runtime qualification is incomplete; this is neither a passing suite nor an observed engine assertion failure. |
+| Separate GQL library/original-fuzzer retry | UNRUN; cancelled while waiting for the same source/target pair, local wrapper exit **130** | Zero tests observed before local cancellation; remote retirement remains unconfirmed. Retained lease disposition is explicit below. No fuzzer limits or concurrency were altered. |
 | Report claims-marker lint and `git diff --check` | Exit 0 / 0 | Marker resolution and whitespace only; narrative accuracy remains the source/evidence review's responsibility. |
 | Live Beads additive reconciliation / exact-ID export | Exit 6 / 65 | Existing source divergence and attribution refusal; neither authorizes forced mutation or staging. |
 | Native draft cycles and three `bv` robot commands | All exit 0; cycles computed and empty | Draft graph only; not live publication. |
@@ -418,6 +431,16 @@ durable workspace named above. The red proof is in `proof/manifest.txt` with
 its independently verified checksums; registered-gate details and the real
 dependency audit are retained outside temporary storage. No current release or
 feature landing is established by this narrative.
+
+The full product wrapper is `rchw-79d88d10-dc78-4d6b-b34b-0e3f088c3b03`,
+daemon build `30078269650894925`. Same-ID recovery exited 1 because no durable
+completion exists; it did not replay the command. The cancelled duplicate is
+`rchw-cdf3daeb-9430-486a-aca3-ff2cc3f6748e`, build `30078269650895030`;
+its local owner is absent but terminal acknowledgment remains unconfirmed.
+These two ownership records remain a concrete RCH recovery handoff. No shared
+daemon restart, lock removal, forced ownership bypass or automatic replay was
+performed. The original fuzzer and full engine suite remain unqualified in
+this invocation despite the successful embedded example and registry suite.
 
 The observed Clippy diagnostic is `collapsible_match` at
 `crates/fgdb/src/write_txn_parts/authorized/selection.rs:184`; it is not a claim
