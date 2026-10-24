@@ -871,7 +871,12 @@ gate_tracked_sources() {
 # inner grep may match nothing in most files; `|| true` keeps that from
 # becoming the pipeline's status under pipefail.
 include_rs_sources() {
-  local list src rel rc
+  local list src rel rc realpath_command=realpath
+  # Homebrew names GNU realpath grealpath. BSD realpath has neither -m nor
+  # --relative-to; use the installed GNU operation, retaining its semantics.
+  if command -v grealpath >/dev/null 2>&1; then
+    realpath_command=grealpath
+  fi
   list="$(mktemp "${TMPDIR:-/tmp}/gate-include-src.XXXXXX")" || return 1
   if ! gate_tracked_sources '*.rs' > "$list"; then
     rm -f "$list"
@@ -881,12 +886,42 @@ include_rs_sources() {
     { grep -oE 'include!\(\s*"[^"]+\.rs"\s*\)' "$src" || true; } \
       | sed -E 's/^include!\(\s*"//; s/"\s*\)$//' \
       | while IFS= read -r rel; do
-          realpath -m --relative-to=. -- "$(dirname -- "$src")/$rel"
-        done
+          "$realpath_command" -m --relative-to=. -- "$(dirname -- "$src")/$rel" \
+            || exit 1
+        done || exit 1
   done < "$list" | LC_ALL=C sort -u
   rc="${PIPESTATUS[0]}"
   rm -f "$list"
   return "$rc"
+}
+
+include_enumeration_control() {
+  local work="$1" fixture="$1/include-enumeration"
+  mkdir -p "$fixture" || return 1
+  printf 'include!("shared.rs");\n' >"$fixture/a.rs"
+  printf 'const SHARED: () = ();\n' >"$fixture/shared.rs"
+  printf 'const LAST: () = ();\n' >"$fixture/z.rs"
+  git -C "$fixture" init -q --initial-branch=main || return 1
+  git -C "$fixture" add a.rs shared.rs z.rs || return 1
+  (
+    cd "$fixture" || exit 1
+    include_rs_sources >"$work/include-good.list" || exit 1
+    if [ "$(cat "$work/include-good.list")" != shared.rs ]; then
+      echo "SELF-TEST RED: the real include enumeration lost its nonempty source" >&2
+      exit 1
+    fi
+    # Fail the first include lookup; later tracked files have no include.
+    # Previously their success erased this failure and returned an empty set.
+    grealpath() { printf 'planted include resolver failure\n' >&2; return 73; }
+    if include_rs_sources >"$work/include-bad.list" 2>"$work/include-bad.err"; then
+      echo "SELF-TEST RED: an include resolver failure became a successful empty set" >&2
+      exit 1
+    fi
+    if ! grep -Fq 'planted include resolver failure' "$work/include-bad.err"; then
+      echo "SELF-TEST RED: the include resolver failure control did not execute" >&2
+      exit 1
+    fi
+  )
 }
 
 # The fmt core gate: `cargo fmt --check`, then `rustfmt --check` over the
@@ -3833,6 +3868,7 @@ EOF
 
   verdict_stream_control "$work" || return 1
   verdict_contract_control "$work" || return 1
+  include_enumeration_control "$work" || return 1
   tree_scope_control "$work" || return 1
   catalog_lane_test_scope_control || return 1
   landing_guidance_control "$work" || return 1
@@ -3864,6 +3900,7 @@ EOF
   echo "  UBS partial scan: UBS's truncation lines classify ubs-partial-scan and the"
   echo "    core gate reports UNRUN without a retry; a prefilter bypass alone stays a verdict"
   echo "  evidence retained at $work"
+  echo "  include enumeration: nonempty source retained; an early resolver failure stays red"
 }
 
 case "${1:-}" in
