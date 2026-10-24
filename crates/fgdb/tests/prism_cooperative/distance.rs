@@ -237,9 +237,14 @@ fn compressed_distance_centralities_preserve_empty_isolate_and_graph_kind_laws()
             for n in [0, 1, 512] {
                 let db = small_database(&contexts.commit(), n, false).await;
                 let graph = projection(&db, &cx, opt).await;
-                let expected = call
-                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
-                    .unwrap();
+                // This real compressed call has only linear work. The old
+                // all-source times whole-population bound refused n=512
+                // under this allowance despite opening every empty row once.
+                let linear = FnxExecutionLimits {
+                    max_estimated_work: 64 * n + 128,
+                    ..opt.execution_limits
+                };
+                let expected = call.execute_sealed(&cx, &graph, linear, memory()).unwrap();
                 let native = db
                     .read_session()
                     .unwrap()
@@ -265,7 +270,7 @@ fn compressed_distance_centralities_preserve_empty_isolate_and_graph_kind_laws()
                     call.execute_sealed_cooperative(
                         &controlled,
                         &graph,
-                        opt.execution_limits,
+                        linear,
                         memory(),
                         quantum(1),
                         yield_now,
@@ -279,6 +284,37 @@ fn compressed_distance_centralities_preserve_empty_isolate_and_graph_kind_laws()
                     pending < 16 * n + 32,
                     "isolates must not repeatedly clear the whole population"
                 );
+                if n == 512 {
+                    let mut bounded = opt;
+                    bounded.execution_limits = linear;
+                    assert_eq!(
+                        db.execute_fnx_sealed(
+                            &cx,
+                            &call,
+                            bounded,
+                            memory(),
+                            SealedLimits::default(),
+                        )
+                        .await
+                        .unwrap()
+                        .analytics,
+                        expected
+                    );
+                    compare_execution(
+                        &db.execute_fnx_sealed_cooperative(
+                            &cx,
+                            &call,
+                            bounded,
+                            memory(),
+                            SealedLimits::default(),
+                            quantum(7),
+                        )
+                        .await
+                        .unwrap()
+                        .analytics,
+                        &expected,
+                    );
+                }
             }
             let (db, _) = database(&contexts.commit()).await;
             let kept = projection(&db, &cx, opt).await;
@@ -337,6 +373,128 @@ fn compressed_distance_centralities_preserve_empty_isolate_and_graph_kind_laws()
                     ));
                 }
             }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn sparse_distance_admission_retains_excluded_incidence_cost_and_exact_refusals() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let n = 257;
+        let pairs = 8;
+        let mut db = small_database(&contexts.commit(), n, false).await;
+        let mut edges = WriteBatch::new(RelationId(1));
+        edges.create_vertex(VId(u128::MAX), vec![LabelId(2)], vec![]);
+        for pair in 0..pairs {
+            edges.add_edge(
+                EId(pair as u128),
+                VId((2 * pair) as u128),
+                VId((2 * pair + 1) as u128),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(-7))],
+            );
+        }
+        for vertex in 0..16 {
+            edges.add_edge(
+                EId(100 + vertex),
+                VId(vertex),
+                VId(u128::MAX),
+                vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+            );
+        }
+        db.write(&contexts.commit(), edges).await.unwrap();
+        let mut opt = options(Directedness::Undirected);
+        opt.execution_limits.max_estimated_work = 100_000;
+        let graph = projection(&db, &cx, opt).await;
+        assert_eq!(graph.node_count(), n);
+        assert_eq!(graph.edge_count(), pairs);
+        assert!(graph.scan_incidence_bound() > graph.adjacency_entry_count());
+        for harmonic in [false, true] {
+            let call = call(harmonic);
+            let checkpoints = Cell::new(0usize);
+            let expected = call
+                .execute_sealed_with_checkpoint(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    || {
+                        checkpoints.set(checkpoints.get() + 1);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert!(checkpoints.get() <= expected.certificate.estimated_work);
+            assert_eq!(expected.certificate.witness.nodes_touched, n + 2 * pairs);
+            assert_eq!(expected.certificate.witness.edges_scanned, 4 * pairs);
+            let connected_score = if harmonic { 1.0 } else { 1.0 / (n - 1) as f64 };
+            for (vertex, row) in expected.rows.iter().enumerate() {
+                assert_eq!(row[1], FnxValue::Vertex(VId(vertex as u128)));
+                assert_eq!(
+                    row[0],
+                    FnxValue::Score(if vertex < 2 * pairs { connected_score } else { 0.0 })
+                );
+            }
+            let exact = FnxExecutionLimits {
+                max_estimated_work: expected.certificate.estimated_work,
+                ..opt.execution_limits
+            };
+            assert_eq!(call.execute_sealed(&cx, &graph, exact, memory()).unwrap(), expected);
+            compare_execution(
+                &call
+                    .execute_sealed_cooperative(&cx, &graph, exact, memory(), quantum(7), yield_now)
+                    .await
+                    .unwrap(),
+                &expected,
+            );
+            let below = FnxExecutionLimits {
+                max_estimated_work: exact.max_estimated_work - 1,
+                ..exact
+            };
+            for cooperative in [false, true] {
+                let result = if cooperative {
+                    call.execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        below,
+                        memory(),
+                        quantum(1),
+                        || -> std::future::Ready<()> { panic!("admission precedes yield") },
+                    )
+                    .await
+                } else {
+                    call.execute_sealed(&cx, &graph, below, memory())
+                };
+                assert!(matches!(result, Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work", limit, requested,
+                    })) if limit == below.max_estimated_work && requested == exact.max_estimated_work));
+            }
+            assert_eq!(
+                db.execute_fnx_sealed(&cx, &call, opt, memory(), SealedLimits::default())
+                    .await
+                    .unwrap()
+                    .analytics,
+                expected
+            );
+            compare_execution(
+                &db.execute_fnx_sealed_cooperative(
+                    &cx,
+                    &call,
+                    opt,
+                    memory(),
+                    SealedLimits::default(),
+                    quantum(7),
+                )
+                .await
+                .unwrap()
+                .analytics,
+                &expected,
+            );
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

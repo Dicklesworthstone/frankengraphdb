@@ -208,7 +208,16 @@ fn every_small_distance_centrality_matches_pinned_fnx_and_independent_distances(
                         .count();
                     assert_eq!(graph.opens[vertex].get(), reached_from);
                 }
-                assert!(ticks <= work(n, rows.iter().map(Vec::len).sum(), 0, 2).unwrap());
+                let projected_arcs = rows.iter().map(Vec::len).sum();
+                // A complete fixture pass costs one open and one terminal
+                // pull per vertex, plus each incidence. Count that source
+                // work alongside all state-machine ticks, not just the
+                // projected edge visits the optimized kernel reports.
+                let source_pass = 2 * n + projected_arcs;
+                assert!(
+                    ticks + graph.source_steps.get()
+                        <= work(n, projected_arcs, source_pass, 2).unwrap()
+                );
             }
             cases += 1;
         }
@@ -242,6 +251,10 @@ fn long_paths_disconnected_components_and_hubs_preserve_score_bits() {
 #[test]
 fn isolates_only_initialize_once_and_never_clear_unreached_vertices() {
     let n = 4096;
+    let pass = directional_pass_work(n, 0, crate::Directedness::Undirected).unwrap();
+    let estimated = work(n, 0, pass, 2).unwrap();
+    assert_eq!(estimated, 33 * n + 18);
+    assert!(estimated < n * n);
     for harmonic in [false, true] {
         let graph = Fixture::new(vec![Vec::new(); n]);
         let mut ticks = 0;
@@ -256,7 +269,48 @@ fn isolates_only_initialize_once_and_never_clear_unreached_vertices() {
         assert_eq!(output.witness.queue_peak, 1);
         assert!(graph.opens.iter().all(|count| count.get() == 1));
         assert!(ticks < 8 * n, "scalar work on isolates must stay linear");
+        assert!(ticks + graph.source_steps.get() < estimated);
         assert_eq!(peak, workspace(n).unwrap());
+    }
+}
+
+#[test]
+fn sparse_components_admit_all_source_and_retained_history_work() {
+    let n = 4096;
+    let pairs: Vec<_> = (0..32).map(|pair| (2 * pair, 2 * pair + 1)).collect();
+    let projected_arcs = 2 * pairs.len();
+    let graph_rows = rows(n, &pairs);
+    // Excluded endpoints or retained invisible versions may greatly outnumber
+    // the reduced arcs. The entire physical pass must remain in admission.
+    let retained = 8192;
+    let pass = directional_pass_work(n, retained, crate::Directedness::Undirected).unwrap();
+    let estimated = work(n, projected_arcs, pass, 2).unwrap();
+    let component_bound = pairs.len() + 1;
+    let fixed = n * 13 + 18;
+    assert!(estimated >= component_bound * pass + fixed);
+    let all_source_bound = n * (pass + projected_arcs + 4 * n + 8) + n * 5 + 18;
+    assert!(estimated < all_source_bound / 100);
+
+    for harmonic in [false, true] {
+        let graph = Fixture::new(graph_rows.clone());
+        let mut ticks = 0;
+        let (output, _) = run(&graph, harmonic, usize::MAX, &mut || {
+            ticks += 1;
+            Ok(())
+        })
+        .unwrap();
+        let connected_score: f64 = if harmonic { 1.0 } else { 1.0 / (n - 1) as f64 };
+        let mut expected = vec![0.0_f64.to_bits(); n];
+        expected[..2 * pairs.len()].fill(connected_score.to_bits());
+        assert_eq!(bits(&output), expected);
+        assert_eq!(output.witness.nodes_touched, n + 2 * pairs.len());
+        assert_eq!(output.witness.edges_scanned, 4 * pairs.len());
+        assert!(ticks + graph.source_steps.get() <= estimated);
+        // The scalar/source bound is valid even without retained history.
+        assert!(
+            ticks + graph.source_steps.get()
+                <= work(n, projected_arcs, 2 * n + projected_arcs, 2).unwrap()
+        );
     }
 }
 

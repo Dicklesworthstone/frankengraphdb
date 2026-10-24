@@ -22,14 +22,18 @@ fn workspace(n: usize) -> Result<usize> {
 }
 
 fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
-    // Each source can open every row once. `pass` prices BOTH compressed
-    // faces and retained/excluded history, independent of the reduced arcs.
-    // Also include every reduced-arc visit, queue/score/reset scalar step,
-    // initialization, output fields and fixed phase transitions.
-    let source = add(pass, add(arcs, add(mul(n, 4)?, 8)?)?)?;
+    // The registered graph is simple, undirected and loop-free. A component
+    // of c vertices needs at least c-1 edges, so no row can be reached from
+    // more than min(V,E+1) sources. Reached-only resets share the same bound.
+    // `pass` still prices BOTH compressed faces and all retained/excluded
+    // history: reducing the number of visits never makes a visit cheaper.
+    let component = n.min(add(arcs / 2, 1)?);
+    let traversals = add(pass, add(arcs, mul(n, 4)?)?)?;
+    // Initialization/output and every source's start/finish transitions stay
+    // linear in the full population, including sources that are isolates.
     add(
-        mul(n, source)?,
-        add(mul(n, add(columns, 3)?)?, add(columns, 16)?)?,
+        mul(component, traversals)?,
+        add(mul(n, add(columns, 11)?)?, add(columns, 16)?)?,
     )
 }
 
@@ -93,7 +97,7 @@ impl Traversals {
                     "closeness_centrality_fifo_cursor"
                 }
                 .to_owned(),
-                complexity_claim: "O(|V| * (|V| + |E|)) scalar work plus O(|V| * (|V| log(1+H) + H log(1+|V|))) compressed row visits; O(|V|) workspace".to_owned(),
+                complexity_claim: "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds component size, E is projected undirected edges and H is retained incidence count; O(V) workspace".to_owned(),
                 nodes_touched: 0,
                 edges_scanned: 0,
                 queue_peak: 0,
