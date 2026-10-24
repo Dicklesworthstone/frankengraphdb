@@ -27,6 +27,7 @@ enum WorkerError {
     Stopped,
     SizeOverflow,
     InvalidProjection,
+    InvalidNumericResult,
 }
 
 /// One live admission covers at most 4096 initialization, vertex, incidence
@@ -194,9 +195,15 @@ impl Worker {
                             self.distance[neighbor] = next_distance;
                             self.queue.push(neighbor);
                             self.queue_peak = self.queue_peak.max(self.queue.len() - head);
+                        }
+                        if self.distance[neighbor] == next_distance {
                             self.sigma[neighbor] += sigma_vertex;
-                        } else if self.distance[neighbor] == next_distance {
-                            self.sigma[neighbor] += sigma_vertex;
+                            // A last-layer overflow can leave every dependency
+                            // finite: finite / Inf becomes zero and silently
+                            // loses paths. Refuse before using that count.
+                            if !self.sigma[neighbor].is_finite() {
+                                return Err(WorkerError::InvalidNumericResult);
+                            }
                         }
                     }
                     self.edges_scanned = self
@@ -373,6 +380,7 @@ fn run_with_schedule<C>(
             if let Some(error) = worker.error {
                 return Err(match error {
                     WorkerError::SizeOverflow => FnxExecutionError::SizeOverflow,
+                    WorkerError::InvalidNumericResult => FnxExecutionError::InvalidNumericResult,
                     WorkerError::InvalidProjection | WorkerError::Stopped => {
                         FnxExecutionError::InvalidUpstreamResult
                     }

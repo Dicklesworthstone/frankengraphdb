@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionLimits, ProjectionSpec,
-    SelfLoopPolicy, SnapshotBinding,
+    Directedness, FnxCallSpec, FnxExecutionLimits, FnxParameters, ParallelEdgePolicy,
+    ProjectionEdge, ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding,
 };
 use fgdb_types::{CommitSeq, EId, VId, ids::ObjectId};
 use fnx_classes::Graph;
@@ -383,24 +383,74 @@ fn parallel_brandes_joins_after_live_refusal_with_a_non_send_host_error() {
 
 #[test]
 fn overflowing_shortest_path_counts_keep_the_finite_result_refusal() {
-    let layers = 1030;
-    let n = 2 * layers + 1;
-    let mut edges = vec![(0, 1), (0, 2)];
-    for layer in 1..layers {
-        for left in [2 * layer - 1, 2 * layer] {
-            for right in [2 * layer + 1, 2 * layer + 2] {
-                edges.push((left, right));
+    for layers in [1024, 1025, 1030] {
+        let n = 2 * layers + 1;
+        let mut edges = vec![(0, 1), (0, 2)];
+        for layer in 1..layers {
+            for left in [2 * layer - 1, 2 * layer] {
+                for right in [2 * layer + 1, 2 * layer + 2] {
+                    edges.push((left, right));
+                }
             }
         }
-    }
-    let graph = graph(n, &edges);
-    let expected = reference(&graph);
-    assert!(expected.scores.iter().any(|score| !score.score.is_finite()));
-    for (threads, window) in [(1, 1), (4, 31)] {
-        assert!(matches!(
-            run_with_schedule(&graph, &mut Unstoppable, threads, window),
-            Err(FnxExecutionError::InvalidNumericResult)
-        ));
+        let graph = graph(n, &edges);
+        let mut worker = Worker::new(n, 1, &mut Unstoppable).unwrap();
+        worker.sources = 1;
+        if layers == 1024 {
+            worker.run(&graph, &mut || true).unwrap();
+            assert!(worker.sigma.iter().all(|count| count.is_finite()));
+            assert_eq!(worker.sigma[n - 1].to_bits(), 2.0f64.powi(1023).to_bits());
+            assert_eq!(worker.deltas[0].to_bits(), 0.0f64.to_bits());
+            // Each vertex lies on half the paths to each of the two vertices
+            // in every later layer: its exact dependency is layers - layer.
+            for layer in 1..=layers {
+                let expected = (layers - layer) as f64;
+                for vertex in [2 * layer - 1, 2 * layer] {
+                    assert_eq!(worker.deltas[vertex].to_bits(), expected.to_bits());
+                }
+            }
+            continue;
+        }
+
+        assert_eq!(
+            worker.run(&graph, &mut || true),
+            Err(WorkerError::InvalidNumericResult)
+        );
+        if layers == 1025 {
+            // Only the final layer overflows. The unchecked predecessor
+            // oracle demonstrates why a final finite-score check misses it:
+            // every dependency is finite, but the first layer loses one.
+            let unchecked = source_delta(&graph, 0);
+            assert!(unchecked.iter().all(|score| score.is_finite()));
+            assert_eq!(unchecked[1].to_bits(), 1023.0f64.to_bits());
+            assert_ne!(unchecked[1].to_bits(), 1024.0f64.to_bits());
+            let call =
+                FnxCallSpec::bind("CALL fnx.betweenness_centrality()", &FnxParameters::new())
+                    .unwrap();
+            assert!(matches!(
+                call.execute(
+                    &graph,
+                    FnxExecutionLimits {
+                        max_iterations: 0,
+                        max_result_rows: n,
+                        max_estimated_work: n * (n + 2 * edges.len()),
+                    },
+                    || Ok::<(), Infallible>(()),
+                ),
+                Err(FnxExecutionError::InvalidNumericResult)
+            ));
+        } else {
+            // Preserve the existing deeper-overflow oracle: consecutive
+            // infinite path counts also make its final scores nonfinite.
+            let expected = reference(&graph);
+            assert!(expected.scores.iter().any(|score| !score.score.is_finite()));
+        }
+        for (threads, window) in [(1, 1), (4, 31)] {
+            assert!(matches!(
+                run_with_schedule(&graph, &mut Unstoppable, threads, window),
+                Err(FnxExecutionError::InvalidNumericResult)
+            ));
+        }
     }
 }
 
