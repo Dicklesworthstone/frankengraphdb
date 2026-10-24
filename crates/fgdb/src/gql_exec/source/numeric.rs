@@ -659,6 +659,9 @@ mod tests {
             block_props: vec![],
             patches: patches
                 .iter()
+                // Preserve the large logical fixture without asking one
+                // physical patch to violate its normative row ceiling.
+                .flat_map(|rows| rows.chunks(fgdb_strata::vertex::MAX_PATCH_ROWS as usize))
                 .map(|rows| decode_patch(&encode_patch(rows).unwrap()).unwrap())
                 .collect(),
             patch_refs: vec![],
@@ -705,6 +708,15 @@ mod tests {
                             .map(|id| compound_row(id, 1, None, tenant.clone(), key(id)))
                             .collect(),
                     ]);
+                    assert_eq!(
+                        snapshot
+                            .patches
+                            .iter()
+                            .map(|patch| patch.len())
+                            .sum::<usize>(),
+                        count as usize,
+                        "physical chunking must retain the whole logical fixture"
+                    );
                     let mut predicates = [equal(KEY, tenant), equal(ID_KEY, key(17))];
                     for reverse in [false, true] {
                         if reverse {
