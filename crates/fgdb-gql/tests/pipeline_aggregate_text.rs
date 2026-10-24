@@ -1332,3 +1332,45 @@ fn an_aggregate_output_indexes_compact_vertex_and_edge_lists() {
     let null = GraphValue::Scalar(CanonicalScalar::Null);
     assert_eq!(list(2), [null.clone(), null]);
 }
+
+/// A terminal aggregate RETURN over pattern counts, `size((n)-->())` and
+/// `COUNT { ... }`: as with a comprehension, the RETURN reads its MATCH
+/// through an implicit `WITH *` whose head gathers the count. Vertex 0 has
+/// two parallel edges to vertex 1, vertex 1 one edge to vertex 2.
+#[test]
+fn a_terminal_aggregate_return_reads_pattern_counts() {
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(0), R, VId(1)),
+        (fgdb_types::EId(3), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let rows = |text: &str| {
+        let mut rows = query(text)
+            .execute_governed_with_identified_properties(
+                (stored.len() + edges.len()) as u64,
+                (0..3).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows.sort();
+        rows
+    };
+    let total = rows("MATCH (n) RETURN sum(size((n)-->())) AS s");
+    assert_eq!(total.len(), 1);
+    assert_eq!(total[0].values()[0].as_integer(), Some(3));
+    let total = rows("MATCH (n) RETURN sum(COUNT { MATCH (n)-->(m) WHERE m.p > 10 }) AS s");
+    assert_eq!(total[0].values()[0].as_integer(), Some(3));
+    let grouped = rows("MATCH (n) RETURN COUNT { (n)-->() } AS d, count(*) AS c");
+    let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
+    let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
+    assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
+    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
+}

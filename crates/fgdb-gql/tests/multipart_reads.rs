@@ -1176,3 +1176,98 @@ fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
         );
     }
 }
+
+/// openCypher pattern counts: `size((n)-->())`, the length of a pattern
+/// expression's list, and `COUNT { ... }`, a count subquery in either form
+/// EXISTS takes. Each is the size of a Collect scope's witness list, one
+/// entry per witness: read in place by a RETURN's head, and gathered by a
+/// WITH head for its WHERE, pages and RETURN, by a grouping WITH for its
+/// items, and by the implicit `WITH *` of a MATCH WHERE. The parallel
+/// 1 -R-> 2 edges are two witnesses.
+#[test]
+fn pattern_counts_read_witness_list_sizes() {
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let into_high = |n: u128| {
+        EDGES
+            .iter()
+            .filter(|&&(from, _, to)| from == VId(n) && p(to.0) > 2)
+            .count() as i64
+    };
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let per_vertex = |value: &dyn Fn(u128) -> i64| -> Vec<GraphValueRow> {
+        (1..=4)
+            .map(|n| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(n)), int(value(n))]))
+            .collect()
+    };
+    for (text, expected) in [
+        ("MATCH (n) RETURN n, size((n)-->()) AS d", per_vertex(&out)),
+        ("MATCH (n) RETURN n, COUNT { (n)-->() } AS d", per_vertex(&out)),
+        (
+            "MATCH (n) RETURN n, COUNT { MATCH (n)-->(m) WHERE m.p > 2 } AS d",
+            per_vertex(&into_high),
+        ),
+        (
+            "MATCH (n) RETURN n, size((n)-->()) + 1 AS d",
+            per_vertex(&|n| out(n) + 1),
+        ),
+        (
+            "MATCH (n) WITH n RETURN n, size((n)-->()) * 2 AS d",
+            per_vertex(&|n| out(n) * 2),
+        ),
+    ] {
+        assert_eq!(sorted(execute(text)), expected, "{text}");
+    }
+    let with_degree = |keep: &dyn Fn(i64) -> bool| -> Vec<GraphValueRow> {
+        (1..=4)
+            .filter(|&n| keep(out(n)))
+            .map(|n| vertices(&[n]))
+            .collect()
+    };
+    assert_eq!(
+        sorted(execute("MATCH (n) WHERE size((n)-->()) > 1 RETURN n")),
+        with_degree(&|degree| degree > 1)
+    );
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n WHERE COUNT { (n)-->() } = 1 RETURN n"
+        )),
+        with_degree(&|degree| degree == 1)
+    );
+    assert_eq!(
+        execute("MATCH (n) WITH n ORDER BY COUNT { (n)-->() } DESC, n LIMIT 1 RETURN n"),
+        vec![vertices(&[1])]
+    );
+    // A grouping key: degrees 3, 1, 1 and 0.
+    let mut groups: Vec<(i64, i64)> = Vec::new();
+    for n in 1..=4 {
+        match groups.iter_mut().find(|(degree, _)| *degree == out(n)) {
+            Some((_, members)) => *members += 1,
+            None => groups.push((out(n), 1)),
+        }
+    }
+    let grouped: Vec<GraphValueRow> = groups
+        .into_iter()
+        .map(|(degree, members)| GraphValueRow::from_owned_values(vec![int(degree), int(members)]))
+        .collect();
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH COUNT { (n)-->() } AS d, collect(n) AS ns RETURN d, size(ns) AS k"
+        )),
+        sorted(grouped)
+    );
+    for text in [
+        // An enclosing element local, and a binding the row renames.
+        "MATCH (n) WITH n RETURN [x IN [n] | size((x)-->())] AS l",
+        "MATCH (n)-->(k) WITH n AS k RETURN COUNT { (k)-->() } AS l",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
