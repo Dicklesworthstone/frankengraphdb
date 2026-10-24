@@ -131,10 +131,16 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     // owns output expressions, HAVING, ordering and pages. An independently
     // fallible reader keeps its ordinary materialized source.
     if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_summary_source()) {
-        let (examined, matching) = count_input(snapshot, source, as_of, &mut |event| {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
-            usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
-        })
+        let (examined, matching) = count_input(
+            snapshot,
+            aggregate.input_pattern().plan(),
+            source,
+            as_of,
+            &mut |event| {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+            },
+        )
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
         let count = aggregate
             .prepare_count_summary(source, examined, matching)
@@ -193,6 +199,7 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
 // this removes the second live-edge table, not the source's history work.
 fn count_input<E>(
     snapshot: &Snapshot,
+    plan: &fgdb_gql::algebra::GlaPlan<fgdb_gql::algebra::GraphValueRow>,
     source: GraphCountSource,
     as_of: CommitSeq,
     control: &mut impl FnMut(super::SourceEvent) -> Result<(), E>,
@@ -201,6 +208,12 @@ fn count_input<E>(
     let mut matching = 0;
     match source {
         GraphCountSource::Vertices => {
+            // Ordinary vertex admission first checks index eligibility. A
+            // validated filterless count has no seek predicate, but that
+            // bounded plan probe still owns work and refusal checkpoints.
+            if super::PROPERTY_INDEX_SERVING {
+                let _ = super::bound_vertices(snapshot, plan, as_of, control)?;
+            }
             super::visit_vertices(&snapshot.patches, as_of, control, |_, control| {
                 control(super::SourceEvent::SnapshotRecord)?;
                 control(super::SourceEvent::ScratchEntry)?;

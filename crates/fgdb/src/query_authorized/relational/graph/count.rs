@@ -12,6 +12,28 @@ pub(super) struct Input {
     pub(super) matching: u64,
 }
 
+/// Match Tables' source-selection boundary before either a cold fold or a
+/// retained-core lookup. Only unrestricted vertex admission can probe the
+/// property index; scoped and edge counts keep their existing scan boundary.
+pub(super) fn probe(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    source: GraphCountSource,
+    plan: &GlaPlan<GraphValueRow>,
+    predicates: &PlannerPredicates,
+    poll: &mut impl FnMut() -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    if source == GraphCountSource::Vertices
+        && predicates.sees_all_incidence()
+        && predicates.sees_all_fields()
+    {
+        // The checked count shape contains no indexable predicate. Run the
+        // real bounded eligibility check rather than fabricate its polls.
+        let _ = source::bound_vertices(snapshot, plan, at, &mut |_| poll())?;
+    }
+    Ok(())
+}
+
 pub(super) fn admit(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,

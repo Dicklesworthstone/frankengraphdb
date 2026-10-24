@@ -395,6 +395,17 @@ fn count_run(
     };
     let result = if folded {
         let source = query.count_summary_source().unwrap();
+        count::probe(
+            snapshot,
+            at,
+            source,
+            query.input_pattern().plan(),
+            scope,
+            &mut poll,
+        )
+        .map_err(|error| {
+            error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+        })?;
         let input = count::admit(
             snapshot,
             at,

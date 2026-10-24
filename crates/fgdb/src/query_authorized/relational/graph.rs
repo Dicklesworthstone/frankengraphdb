@@ -144,6 +144,22 @@ fn visit_at<Clock: FnMut() -> u64>(
         // an edge table. A core without a bounded count summary keeps the
         // ordinary cached visitor rather than rescanning its history.
         let count_summary = if let Some(source) = query.count_summary_source() {
+            count::probe(
+                snapshot,
+                at,
+                source,
+                query.input_pattern().plan(),
+                scope,
+                &mut || {
+                    execution
+                        .borrow_mut()
+                        .poll()
+                        .map_err(GqlQueryError::Interrupted)
+                },
+            )
+            .map_err(|error| {
+                error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+            })?;
             let core = if scope.sees_all_incidence() && scope.sees_all_fields() {
                 snapshot.read_caches.admitted.lookup_controlled(
                     snapshot,

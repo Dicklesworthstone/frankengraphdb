@@ -42,7 +42,13 @@ fn source_run(
         }
     };
     let result = if summary {
-        count_input(snapshot, source, at, &mut control)
+        count_input(
+            snapshot,
+            aggregate.input_pattern().plan(),
+            source,
+            at,
+            &mut control,
+        )
     } else {
         super::super::admit(snapshot, aggregate.input_pattern().plan(), at, &mut control).map(
             |tables| match source {
