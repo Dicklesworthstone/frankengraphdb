@@ -12,7 +12,7 @@ No G1–G4 or release qualification is asserted.
 **Previous audit: 2026-10-22**, local tree
 `77cad971163f2636e6c35003eb8441b291c58615`, with the fetched remote delta through
 `f0c40dc1cb371e1cc63f2d332fa4ebce537efb6d` examined separately.
-The [current section](#current-delta--2026-10-22) records the 20-goal assessment,
+The [previous section](#previous-delta--2026-10-22) records the 20-goal assessment,
 fresh checks, three ambition passes, five refinement passes, and ten concrete
 Beads drafts created through `br`. **The drafts are isolated, not published to
 the shared work graph.** Disk admission and attributable tracker publication
@@ -148,6 +148,13 @@ movement. A detached, clean checkout at
 for stable verification. No engine, gate, registry or normative plan was edited
 by this audit.
 
+While the frozen suite compiled, concurrent work advanced `main` through
+`dd4f5d9b9` and committed the report as `8ba900ff4`. The later source includes
+read-cache ownership/budgeting, point-effect selection, computed CREATE output,
+additional compressed analytics and numeric parameter work. Those later changes
+are outside this cut's runtime qualification. Neither the original findings nor
+their old line numbers should be projected onto the moving tip without review.
+
 **New P0 security blocker:** the executed dependency gate rejects the locked
 `ctutils 0.4.2` for
 [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html),
@@ -193,6 +200,15 @@ Production manifest closure counts are 12 first-party crates for `fgdb`, 14 for
 the CLI and 15 for the server. Both replication and calibration are outside
 those closures. The reference is also outside them **as intended for a test
 oracle**; that exclusion is not a product defect.
+
+The performance gap is quantitative, not just missing marketing polish. The
+provisional §17 targets include 40M edges/s bulk loading, 2M transactional edge
+inserts/s, 8M point lookups/s, 500M sealed-scan edges/s per core, and competitive
+LDBC SF-100/Graphalytics runs on a pinned reference class. They are targets,
+not current measurements. Their activation must include complete durable
+operation costs, result consumption, retained versions, memory and background
+maintenance, with an incumbent in the same comparison invocation. No fresh
+measurement in this audit establishes those target rates.
 
 The plan contains important scope beyond the front-page six bets. Existing
 nonclosed owners were also found for valid-time slices (`fgdb-w4-valid-time-h8i`),
@@ -290,8 +306,9 @@ targets after that slice.
 
 ### Beads, ambition and refinement actually performed
 
-The tracked graph contains **1,310 records**: 885 closed, 380 open, 36 in
-progress, six deferred and three blocked. These counts are not a percentage of
+At the initial source cut the tracked graph contained **1,310 records**:
+885 closed, 380 open, 36 in progress, six deferred and three blocked.
+These counts are not a percentage of
 vision delivery. The shared DB contains 1,314 exportable records and 31 pending
 dirty records. Its native read-only reconciliation preview exited **6** with
 101 `shared_relation_drift` conflicts and one
@@ -305,6 +322,14 @@ That liveness record has retained historical hangs and no final acceptance;
 this audit does not present it as a freshly reproduced causal interleaving.
 None of draft `.23`–`.34` collides with an observed live-DB ID, and neither
 the live DB nor tracked JSONL had a task naming the new ctutils advisory.
+
+A later read-only refresh at `dd4f5d9b9` found 1,314 tracked records (889 closed)
+and still 31 dirty DB records. Additive reconciliation again exited 6, now with
+102 relation conflicts and one scalar conflict, preserving 15 DB-only records
+and proposing 15 source-only creates. Its reviewed plan token is
+`c46155241f702fd49b64c99324b037744414847fbef72c09b3faaca23fe195f4`;
+The conflicted preview was not applied. The draft remains
+bound to the original 1,310-record source rather than replacing newer history.
 
 A separate durable workspace is retained at
 `/Users/jemanuel/Documents/Codex/2026-10-23/frankengraphdb-reality-check-20c5d091`.
@@ -356,6 +381,10 @@ omits six deferred records; its denominator is not the full draft denominator.
 Robot priority suggestions include stale open tasks, so they are navigation,
 not completion evidence.
 
+The database-directed refresh used `/Users/jemanuel/.local/bin/bv` v0.25.2.
+The older Homebrew v0.12.0 earlier on `PATH` rejects `--db` with exit 2;
+those rejected refresh attempts are not counted as graph validation.
+
 The required shared `scripts/br_sync.sh` was attempted with exactly these
 **20** intended records (twelve new plus eight refined). It exited **65** before
 export: 31 dirty shared DB records cannot fit 20 declared IDs. The tracked
@@ -406,6 +435,10 @@ before semantic assertions; tree-stability fixtures/control mutations also
 failed. Their wrapper verdicts remain red, but those failures are not evidence
 of incorrect graph query answers. The draft portability/proof tasks retain
 their original ownership checks and require the real assertions to execute.
+A separate macOS probe demonstrates that an FD open through `/dev/fd` is
+rejected by `reapable_lock_fd_is_open`, which checks only Linux `/proc`.
+This reproduces a portability defect; it does not qualify a replacement check
+or discharge the complete gate and its ownership controls.
 
 ### Direct answers and remaining handoff
 
