@@ -1082,7 +1082,10 @@ fn compile_stages<'a>(
             true,
             false,
         ),
-        SetNode::ProcedureCall(_) | SetNode::Owned { .. } => {
+        SetNode::ProcedureCall(_)
+        | SetNode::Owned { .. }
+        | SetNode::Arguments
+        | SetNode::Apply { .. } => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };

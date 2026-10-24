@@ -198,6 +198,15 @@ impl GraphSetColumnType {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetBuildError {
+    /// An Apply import does not name a column of its left input.
+    UnknownArgument {
+        argument: usize,
+        input: usize,
+    },
+    TooManyArguments {
+        limit: usize,
+        observed: usize,
+    },
     /// The complete left (0) or right (1) schema differs from the checked join.
     JoinInputSchema {
         side: usize,
@@ -223,6 +232,12 @@ pub enum GraphSetBuildError {
 impl core::fmt::Display for GraphSetBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::UnknownArgument { argument, input } => {
+                write!(f, "Apply argument {argument} imports absent column {input}")
+            }
+            Self::TooManyArguments { limit, observed } => {
+                write!(f, "Apply imports {observed} arguments, limit {limit}")
+            }
             Self::JoinInputSchema { side } => {
                 write!(f, "join input {side} does not have the checked schema")
             }
@@ -297,6 +312,8 @@ pub enum GraphSetExecutionError<E> {
     },
     /// An owned-row leaf reached a host that supplies no owned rows.
     OwnedRowsUnavailable,
+    /// An argument relation is executable only inside its owning Apply body.
+    ArgumentsUnavailable,
 }
 impl<E> GraphSetExecutionError<E> {
     /// Preserve relational failures while translating only the host source.
@@ -324,6 +341,7 @@ impl<E> GraphSetExecutionError<E> {
                 GraphSetExecutionError::PatternFactorsUnavailable { operand }
             }
             Self::OwnedRowsUnavailable => GraphSetExecutionError::OwnedRowsUnavailable,
+            Self::ArgumentsUnavailable => GraphSetExecutionError::ArgumentsUnavailable,
         }
     }
 }
@@ -355,6 +373,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
             Self::OwnedRowsUnavailable => {
                 f.write_str("a write tail reached a host without its head rows")
             }
+            Self::ArgumentsUnavailable => {
+                f.write_str("an argument relation was executed outside its Apply scope")
+            }
             Self::PatternFactorsUnavailable { operand } => {
                 write!(
                     f,
@@ -383,6 +404,9 @@ enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
     Aggregate(Box<PreparedGraphSetAggregate>),
     Values,
+    /// One imported row from the nearest enclosing Apply. Unlike Owned, each
+    /// occurrence reads the frame without consuming it and charges its copy.
+    Arguments,
     Unwind {
         input: Box<PreparedGraphSet>,
         value: GraphSetValue,
@@ -398,6 +422,11 @@ enum SetNode {
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
+    },
+    Apply {
+        left: Box<PreparedGraphSet>,
+        right: Box<PreparedGraphSet>,
+        imports: Vec<usize>,
     },
     Join {
         left: Box<PreparedGraphSet>,
@@ -478,6 +507,45 @@ fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
     }
 }
 impl PreparedGraphSet {
+    /// A typed argument relation for a correlated Apply body. Names are local
+    /// aliases; `apply` checks these domains against its imported left columns.
+    /// This relation has exactly one row per body invocation, including when
+    /// an imported value is NULL. It cannot obtain ambient or host-owned rows.
+    pub fn arguments(
+        columns: Vec<String>,
+        types: Vec<GraphSetColumnType>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        use GraphSetProjectionError as Error;
+        if columns.len() != types.len() {
+            return Err(Error::SetBuild(GraphSetBuildError::ColumnCount {
+                left: columns.len(),
+                right: types.len(),
+            }));
+        }
+        if columns.len() > crate::algebra::MAX_PATTERN_VERTICES {
+            return Err(Error::TooManyColumns {
+                limit: crate::algebra::MAX_PATTERN_VERTICES,
+                observed: columns.len(),
+            });
+        }
+        for (column, name) in columns.iter().enumerate() {
+            projection::validate_binding_name(name, column)?;
+            if columns[..column].contains(name) {
+                return Err(Error::DuplicateName { column });
+            }
+        }
+        Ok(Self {
+            node: SetNode::Arguments,
+            columns,
+            types,
+            operands: 0,
+            depth: 1,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
     /// A write head's owned rows under its WITH tail: the schema only. The
     /// executing write supplies the rows (`GraphSetSource::owned`).
     pub(crate) fn owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
@@ -705,6 +773,97 @@ impl PreparedGraphSet {
         })
     }
 
+    /// Evaluate `right` once per selected left occurrence under one cumulative
+    /// allowance. Its argument relations receive `imports` in that order.
+    /// Each right result extends that left row; an empty body emits no row.
+    /// Right ordering, grouping and pagination are local to each invocation.
+    /// Nested Apply shadows its argument frame only while its body executes.
+    /// This is the bounded relational Apply operator, not CALL syntax or a
+    /// claim of spill/incremental support.
+    pub fn apply(self, right: Self, imports: Vec<usize>) -> Result<Self, GraphSetBuildError> {
+        if imports.len() > crate::algebra::MAX_PATTERN_VERTICES {
+            return Err(GraphSetBuildError::TooManyArguments {
+                limit: crate::algebra::MAX_PATTERN_VERTICES,
+                observed: imports.len(),
+            });
+        }
+        let mut arguments = Vec::with_capacity(imports.len());
+        for (argument, &input) in imports.iter().enumerate() {
+            let kind = self
+                .types
+                .get(input)
+                .ok_or(GraphSetBuildError::UnknownArgument { argument, input })?;
+            arguments.push(*kind);
+        }
+        right.check_arguments(&arguments)?;
+        let operands = self.operands + right.operands;
+        if operands > MAX_GRAPH_SET_OPERANDS {
+            return Err(GraphSetBuildError::TooManyOperands {
+                limit: MAX_GRAPH_SET_OPERANDS,
+                observed: operands,
+            });
+        }
+        let depth = 1 + self.depth.max(right.depth);
+        check_depth(depth)?;
+        let mut columns = self.columns.clone();
+        columns.extend_from_slice(&right.columns);
+        let mut types = self.types.clone();
+        types.extend_from_slice(&right.types);
+        Ok(Self {
+            node: SetNode::Apply {
+                left: Box::new(self),
+                right: Box::new(right),
+                imports,
+            },
+            columns,
+            types,
+            operands,
+            depth,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
+    fn check_arguments(&self, arguments: &[GraphSetColumnType]) -> Result<(), GraphSetBuildError> {
+        match &self.node {
+            SetNode::Arguments => {
+                if self.types.len() != arguments.len() {
+                    return Err(GraphSetBuildError::ColumnCount {
+                        left: arguments.len(),
+                        right: self.types.len(),
+                    });
+                }
+                for (column, (&left, &right)) in arguments.iter().zip(&self.types).enumerate() {
+                    if left != right {
+                        return Err(GraphSetBuildError::ColumnType {
+                            column,
+                            left,
+                            right,
+                        });
+                    }
+                }
+            }
+            SetNode::Aggregate(summary) => summary.input().check_arguments(arguments)?,
+            SetNode::Unwind { input, .. }
+            | SetNode::Scope(input)
+            | SetNode::Filter { input, .. }
+            | SetNode::Project { input, .. }
+            | SetNode::Apply { left: input, .. } => input.check_arguments(arguments)?,
+            SetNode::CrossJoin { left, right }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => {
+                left.check_arguments(arguments)?;
+                right.check_arguments(arguments)?;
+            }
+            SetNode::Pattern(_)
+            | SetNode::Values
+            | SetNode::Owned { .. }
+            | SetNode::ProcedureCall(_) => {}
+        }
+        Ok(())
+    }
+
     /// The actual sole graph leaf, for a host that admits that source once.
     /// This does not turn a relation into a pattern or flatten any row stage.
     /// Multiple graph sources require a multi-source admission owner.
@@ -718,7 +877,11 @@ impl PreparedGraphSet {
 
     fn preserves_row_order(&self) -> bool {
         match &self.node {
-            SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
+            SetNode::Values
+            | SetNode::Arguments
+            | SetNode::Unwind { .. }
+            | SetNode::CrossJoin { .. }
+            | SetNode::Apply { .. } => true,
             // Procedure rows are canonically sorted on arrival, like a pattern,
             // unless the procedure itself defines a ranked output order (`hybrid.*`).
             SetNode::ProcedureCall(call) => call.preserves_row_order(),
@@ -884,6 +1047,14 @@ impl PreparedGraphSet {
                 bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
+            SetNode::Arguments => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:set:arguments:v1\0");
+                bytes.extend_from_slice(&(self.types.len() as u64).to_be_bytes());
+                for kind in &self.types {
+                    bytes.push(kind.tag());
+                }
+            }
             SetNode::Owned {
                 preserve_order: false,
             } => bytes.push(11),
@@ -906,6 +1077,20 @@ impl PreparedGraphSet {
                 bytes.push(7);
                 left.append_transcript(bytes);
                 right.append_transcript(bytes);
+            }
+            SetNode::Apply {
+                left,
+                right,
+                imports,
+            } => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:set:apply:v1\0");
+                left.append_transcript(bytes);
+                right.append_transcript(bytes);
+                bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
+                for &input in imports {
+                    bytes.extend_from_slice(&(input as u64).to_be_bytes());
+                }
             }
             SetNode::Join { left, right, spec } => {
                 bytes.push(8);
@@ -978,8 +1163,10 @@ impl PreparedGraphSet {
     /// closure is a trusted source adapter, not an arbitrary result provider.
     /// Database and pinned-view adapters enforce that lifetime structurally.
     ///
-    /// Each operand executes exactly once, left-to-right, including an empty
-    /// right side and LIMIT 0. No short circuit erases negative-read witnesses
+    /// Ordinary set and join operands execute exactly once, left-to-right,
+    /// including an empty right side and LIMIT 0. Apply evaluates its body once
+    /// per selected left occurrence; an empty left input never invokes it.
+    /// No ordinary-set short circuit erases negative-read witnesses
     /// or turns a late source failure into a successful difference. Source
     /// record counts are admission VISITS summed across operands, not unique
     /// database records. All work/scratch shares one allowance. Only the final
@@ -1216,13 +1403,14 @@ impl PreparedGraphSet {
     pub fn reads_graph(&self) -> bool {
         match &self.node {
             SetNode::Pattern(_) | SetNode::ProcedureCall(_) => true,
-            SetNode::Values | SetNode::Owned { .. } => false,
+            SetNode::Values | SetNode::Arguments | SetNode::Owned { .. } => false,
             SetNode::Aggregate(summary) => summary.input().reads_graph(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)
             | SetNode::Filter { input, .. }
             | SetNode::Project { input, .. } => input.reads_graph(),
             SetNode::CrossJoin { left, right }
+            | SetNode::Apply { left, right, .. }
             | SetNode::Join { left, right, .. }
             | SetNode::Binary { left, right, .. } => left.reads_graph() || right.reads_graph(),
         }
@@ -1233,13 +1421,16 @@ impl PreparedGraphSet {
     pub fn calls_procedure(&self) -> bool {
         match &self.node {
             SetNode::ProcedureCall(_) => true,
-            SetNode::Pattern(_) | SetNode::Values | SetNode::Owned { .. } => false,
+            SetNode::Pattern(_) | SetNode::Values | SetNode::Arguments | SetNode::Owned { .. } => {
+                false
+            }
             SetNode::Aggregate(summary) => summary.input().calls_procedure(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)
             | SetNode::Filter { input, .. }
             | SetNode::Project { input, .. } => input.calls_procedure(),
             SetNode::CrossJoin { left, right }
+            | SetNode::Apply { left, right, .. }
             | SetNode::Join { left, right, .. }
             | SetNode::Binary { left, right, .. } => {
                 left.calls_procedure() || right.calls_procedure()

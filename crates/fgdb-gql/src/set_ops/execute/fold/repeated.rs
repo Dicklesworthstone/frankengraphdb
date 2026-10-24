@@ -67,6 +67,7 @@ impl PreparedGraphSet {
         let mut meter = Meter {
             policy,
             checkpoint,
+            arguments: Vec::new(),
             rows: GqlExecutionStats {
                 snapshot_records: 0,
                 result_rows: 0,

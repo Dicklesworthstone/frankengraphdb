@@ -28,6 +28,7 @@ pub(super) fn copy_cross_pair<E>(
 struct Meter<Checkpoint> {
     policy: GqlQueryPolicy,
     checkpoint: Checkpoint,
+    arguments: Vec<std::sync::Arc<GraphValueRow>>,
     rows: GqlExecutionStats,
     evaluator: GlaExecutionStats,
 }
@@ -207,6 +208,7 @@ pub(super) fn execute<E, C>(
     let mut meter = Meter {
         policy,
         checkpoint,
+        arguments: Vec::new(),
         rows: GqlExecutionStats {
             snapshot_records: 0,
             result_rows: 0,
@@ -405,6 +407,20 @@ where
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vec![GraphValueRow::unit()]
         }
+        SetNode::Arguments => {
+            let row = meter
+                .arguments
+                .last()
+                .cloned()
+                .ok_or(GqlQueryError::Source(
+                    GraphSetExecutionError::ArgumentsUnavailable,
+                ))?;
+            vec![copy_cross_pair(
+                &GraphValueRow::unit(),
+                &row,
+                &mut |event| meter.event(event),
+            )?]
+        }
         // The write charged these rows as it built them; the tail counts its
         // own work over them from here.
         SetNode::Owned { .. } => source.owned().ok_or(GqlQueryError::Source(
@@ -453,6 +469,56 @@ where
             for left_row in &left {
                 for right_row in &right {
                     output.push(copy_cross_pair(left_row, right_row, &mut |event| {
+                        meter.event(event)
+                    })?);
+                }
+            }
+            output
+        }
+        SetNode::Apply {
+            left,
+            right,
+            imports,
+        } => {
+            let left = run(left, source, meter, operand)?;
+            let right_operand = *operand;
+            // Logical source ordinals do not depend on outer cardinality.
+            *operand += right.operands;
+            let mut output = Vec::new();
+            for (row_at, row) in left.iter().enumerate() {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                let mut arguments = Vec::with_capacity(imports.len());
+                for (column, &input) in imports.iter().enumerate() {
+                    let value = projection::evaluate_value(
+                        &GraphSetValue::Column(input),
+                        row,
+                        column,
+                        &mut |event| meter.event(event),
+                    )
+                    .map_err(|error| match error {
+                        projection::ProjectionFailure::Control(error) => error,
+                        projection::ProjectionFailure::Arithmetic { column, error } => {
+                            GqlQueryError::Source(GraphSetExecutionError::Projection {
+                                row: row_at,
+                                column,
+                                error,
+                            })
+                        }
+                    })?;
+                    arguments.push(value);
+                }
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                meter
+                    .arguments
+                    .push(std::sync::Arc::new(GraphValueRow::from_owned_values(
+                        arguments,
+                    )));
+                let mut inner_operand = right_operand;
+                let inner = run(right, source, meter, &mut inner_operand);
+                // Restore the enclosing frame on errors and cancellation too.
+                meter.arguments.pop();
+                for right_row in inner? {
+                    output.push(copy_cross_pair(row, &right_row, &mut |event| {
                         meter.event(event)
                     })?);
                 }
@@ -656,6 +722,7 @@ pub(crate) fn finish_owned_aggregate_reading<E, C>(
     let mut meter = Meter {
         policy,
         checkpoint,
+        arguments: Vec::new(),
         rows: GqlExecutionStats {
             snapshot_records: input.rows.snapshot_records,
             result_rows: 0,
@@ -735,6 +802,7 @@ pub(crate) fn finish_owned_projection_reading<E, C>(
     let mut meter = Meter {
         policy,
         checkpoint,
+        arguments: Vec::new(),
         rows: GqlExecutionStats {
             snapshot_records: input.rows.snapshot_records,
             result_rows: 0,
@@ -934,10 +1002,80 @@ mod tests {
     use fgdb_types::VId;
 
     #[test]
+    fn apply_restores_its_parent_frame_after_source_failure_and_cancellation() {
+        use std::cell::Cell;
+        use std::sync::Arc;
+        for interrupt in [false, true] {
+            let reached_source = Cell::new(false);
+            let parent = Arc::new(GraphValueRow::unit());
+            let mut meter = Meter {
+                policy: GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                checkpoint: || {
+                    if interrupt && reached_source.get() {
+                        Err("cancelled inside body")
+                    } else {
+                        Ok(())
+                    }
+                },
+                arguments: vec![Arc::clone(&parent)],
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+            };
+            let body = PreparedGraphSet::arguments(vec![], vec![])
+                .unwrap()
+                .cross_join(scope_leaf())
+                .unwrap();
+            let query = PreparedGraphSet::singleton().apply(body, vec![]).unwrap();
+            let mut source = |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| {
+                reached_source.set(true);
+                if interrupt {
+                    Ok(GqlQueryExecution {
+                        // The source returns a real row to admit. Its first
+                        // admission checkpoint observes cancellation while
+                        // the body's argument frame is still installed.
+                        value: vec![GraphValueRow::from_owned_values(vec![GraphValue::Vertex(
+                            VId(1),
+                        )])],
+                        rows: GqlExecutionStats {
+                            snapshot_records: 1,
+                            result_rows: 1,
+                        },
+                        evaluator: GlaExecutionStats::default(),
+                    })
+                } else {
+                    Err(GqlQueryError::Source("body source failed"))
+                }
+            };
+            let result = run(&query, &mut source, &mut meter, &mut 0);
+            assert!(reached_source.get());
+            if interrupt {
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Interrupted("cancelled inside body"))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                        "body source failed"
+                    )))
+                ));
+            }
+            assert_eq!(meter.arguments.len(), 1);
+            assert!(Arc::ptr_eq(&meter.arguments[0], &parent));
+            assert_eq!(meter.rows.result_rows, 0);
+        }
+    }
+
+    #[test]
     fn cumulative_counters_refuse_overflow_without_mutation() {
         let mut meter = Meter {
             policy: GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
             checkpoint: || Ok::<_, ()>(()),
+            arguments: Vec::new(),
             rows: GqlExecutionStats {
                 snapshot_records: 0,
                 result_rows: 0,

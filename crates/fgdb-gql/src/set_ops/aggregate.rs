@@ -357,11 +357,18 @@ impl PreparedGraphSet {
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
             SetNode::Aggregate(summary) => summary.input().first_pattern_input(),
-            SetNode::Values | SetNode::ProcedureCall(_) | SetNode::Owned { .. } => None,
+            SetNode::Values
+            | SetNode::Arguments
+            | SetNode::ProcedureCall(_)
+            | SetNode::Owned { .. } => None,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Unwind { input, .. }
             | SetNode::Filter { input, .. } => input.first_pattern_input(),
+            // The left executes once. A body-only graph input is conditional
+            // on outer occurrences and must not be promoted to a sole eager
+            // source admission before its Apply owner executes.
+            SetNode::Apply { left, .. } => left.first_pattern_input(),
             SetNode::Binary { left, right, .. }
             | SetNode::Join { left, right, .. }
             | SetNode::CrossJoin { left, right } => left

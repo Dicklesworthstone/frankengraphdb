@@ -36,6 +36,10 @@ impl PreparedGraphSet {
                 | SetNode::Binary { left, right, .. } => {
                     visit(left, columns, types, found) && visit(right, columns, types, found)
                 }
+                // A correlated body executes repeatedly. It cannot borrow the
+                // single-use owned write result until that lifecycle has its
+                // own admission and execution contract.
+                SetNode::Arguments | SetNode::Apply { .. } => false,
                 SetNode::Pattern(_) | SetNode::Values | SetNode::ProcedureCall(_) => true,
             }
         }

@@ -124,6 +124,269 @@ fn oracle(rows: &[VertexRow], operation: Op, quantifier: Q) -> Vec<CanonicalScal
 }
 
 #[test]
+fn correlated_apply_uses_pinned_and_staged_native_graph_views() {
+    use fgdb_gql::algebra::IntegerComparison;
+    use fgdb_gql::{
+        GraphSetColumnType, GraphSetOperand, GraphSetPredicateOp, GraphSetProjection, GraphSetValue,
+    };
+    let ((), report) = run_async_under_lab(0x5e70_a991, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = seed(&mut db, &commit).await;
+        let expected = |rows: &[VertexRow], correlated_graph: bool| {
+            let values: Vec<_> = rows
+                .iter()
+                .filter(|row| row.labels.contains(&L))
+                .map(|row| {
+                    row.props
+                        .iter()
+                        .find(|(key, _)| *key == N)
+                        .map_or(CanonicalScalar::Null, |(_, value)| {
+                            value.as_scalar().unwrap().clone()
+                        })
+                })
+                .collect();
+            let mut output = Vec::new();
+            for outer in &values {
+                if correlated_graph {
+                    for inner in &values {
+                        if *outer != CanonicalScalar::Null && outer == inner {
+                            output.push(vec![outer.clone(), inner.clone()]);
+                        }
+                    }
+                } else {
+                    output.push(vec![outer.clone(), outer.clone()]);
+                }
+            }
+            output.sort();
+            output
+        };
+        let actual = |result: fgdb_gql::GqlQueryExecution<GraphValueRow>| {
+            let mut output: Vec<Vec<_>> = result
+                .value
+                .iter()
+                .map(|row| {
+                    row.values()
+                        .iter()
+                        .map(|value| value.as_scalar().unwrap().clone())
+                        .collect()
+                })
+                .collect();
+            output.sort();
+            output
+        };
+        let left: PreparedGraphSet = pattern("MATCH (n:Left) RETURN n.n AS original").into();
+        let body =
+            PreparedGraphSet::arguments(vec!["captured".into()], vec![GraphSetColumnType::Stored])
+                .unwrap()
+                .project(
+                    vec![GraphSetProjection::new("echo", GraphSetValue::Column(0))],
+                    Q::All,
+                )
+                .unwrap();
+        let echo = left.clone().apply(body, vec![0]).unwrap();
+        let graph_body =
+            PreparedGraphSet::arguments(vec!["captured".into()], vec![GraphSetColumnType::Stored])
+                .unwrap()
+                .cross_join(pattern("MATCH (m:Left) RETURN m.n AS candidate").into())
+                .unwrap()
+                .filter(&[GraphSetPredicateOp::Compare {
+                    left: GraphSetOperand::Column(0),
+                    comparison: IntegerComparison::Equal,
+                    right: GraphSetOperand::Column(1),
+                }])
+                .unwrap()
+                .project(
+                    vec![GraphSetProjection::new("matched", GraphSetValue::Column(1))],
+                    Q::All,
+                )
+                .unwrap();
+        let graph = left.apply(graph_body, vec![0]).unwrap();
+        let issuer = fgdb_warden::Authority::new(
+            asupersync::security::key::AuthKey::from_seed(0xa991),
+            DatabaseSecurityNamespaceId([0xd2; 32]),
+            "apply-fixture",
+            fgdb_delta_types::SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = fgdb_warden::Grant::read_only(
+            "main",
+            1000,
+            fgdb_warden::QueryLimits {
+                max_nodes: 1000,
+                max_work: 5_000_000,
+                max_rows: 1000,
+            },
+        );
+        grant.labels = fgdb_warden::Scope::only([L]);
+        grant.properties = fgdb_warden::Scope::only([N]);
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        for query in [&echo, &graph] {
+            assert_eq!(
+                db.execute_graph_set_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    query,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                db.execute_graph_set_governed(&cx, query, policy())
+                    .unwrap()
+                    .value
+            );
+        }
+        let hidden_body: PreparedGraphSet = pattern("MATCH (m:Right) RETURN m.n AS hidden").into();
+        let hidden = PreparedGraphSet::from(pattern("MATCH (n:Left) RETURN n.n AS original"))
+            .apply(hidden_body, vec![])
+            .unwrap();
+        assert!(
+            !db.execute_graph_set_governed(&cx, &hidden, policy())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        assert!(
+            db.execute_graph_set_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                &hidden,
+                policy(),
+                || 100,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        grant.properties = fgdb_warden::Scope::only([]);
+        let masked = issuer.issue_at(&grant, 100).unwrap();
+        assert!(
+            db.execute_graph_set_authorized(
+                &cx,
+                &issuer,
+                &masked,
+                "main",
+                &graph,
+                policy(),
+                || 100,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let masked_echo = db
+            .execute_graph_set_authorized(&cx, &issuer, &masked, "main", &echo, policy(), || 100)
+            .unwrap();
+        assert_eq!(masked_echo.len(), 4);
+        assert!(masked_echo.iter().all(|row| {
+            row.values()
+                .iter()
+                .all(|value| value.as_scalar() == Some(&CanonicalScalar::Null))
+        }));
+        let source_free = PreparedGraphSet::singleton()
+            .apply(PreparedGraphSet::singleton(), vec![])
+            .unwrap();
+        assert!(
+            db.execute_graph_set_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "wrong-branch",
+                &source_free,
+                policy(),
+                || 100,
+            )
+            .is_err()
+        );
+        let pinned = db.read_session().unwrap();
+        let mut txn = db.begin(&txn_cx).unwrap();
+        txn.write(&mut db, changes()).unwrap();
+        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+            let old = expected(&db.vertices().unwrap(), correlated_graph);
+            let staged = expected(&txn.vertices(&db).unwrap(), correlated_graph);
+            assert_ne!(old, staged);
+            assert_eq!(
+                actual(db.execute_graph_set_governed(&cx, query, policy()).unwrap()),
+                old
+            );
+            assert_eq!(
+                actual(
+                    db.execute_graph_set_governed_at(&cx, query, basis, policy())
+                        .unwrap()
+                ),
+                old
+            );
+            assert_eq!(
+                actual(
+                    pinned
+                        .execute_graph_set_governed(&cx, query, policy())
+                        .unwrap()
+                ),
+                old
+            );
+            assert_eq!(
+                actual(
+                    txn.execute_graph_set_governed(&db, &cx, query, policy())
+                        .unwrap()
+                ),
+                staged
+            );
+        }
+        let old_rows = db.vertices().unwrap();
+        let staged_rows = txn.vertices(&db).unwrap();
+        txn.commit(&mut db, &commit).await.unwrap();
+        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+            let old = expected(&old_rows, correlated_graph);
+            let staged = expected(&staged_rows, correlated_graph);
+            assert_eq!(
+                actual(db.execute_graph_set_governed(&cx, query, policy()).unwrap()),
+                staged
+            );
+            assert_eq!(
+                actual(
+                    pinned
+                        .execute_graph_set_governed(&cx, query, policy())
+                        .unwrap()
+                ),
+                old
+            );
+        }
+        drop(pinned);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for (query, correlated_graph) in [(&echo, false), (&graph, true)] {
+            let old = expected(&old_rows, correlated_graph);
+            let staged = expected(&staged_rows, correlated_graph);
+            assert_eq!(
+                actual(db.execute_graph_set_governed(&cx, query, policy()).unwrap()),
+                staged
+            );
+            assert_eq!(
+                actual(
+                    db.execute_graph_set_governed_at(&cx, query, basis, policy())
+                        .unwrap()
+                ),
+                old
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:#?}");
+}
+
+#[test]
 fn compound_relations_follow_staged_effects_and_preserve_pinned_history_after_reopen() {
     let ((), report) = run_async_under_lab(0x5e70_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -14,6 +14,246 @@ use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
+// Public Apply contracts belong beside the other public relational contracts.
+// Private frame cleanup on interruption remains an executor unit test.
+mod apply_tests {
+    use super::*;
+    use fgdb_gql::{GqlParameters, PreparedGraphText};
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+    fn list(values: Vec<GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_boxed_slice())
+    }
+    fn input(values: Vec<GraphValue>) -> PreparedGraphSet {
+        PreparedGraphSet::singleton()
+            .unwind("outer".into(), GraphSetValue::Value(list(values)))
+            .unwrap()
+    }
+    fn arguments() -> PreparedGraphSet {
+        PreparedGraphSet::arguments(vec!["arg".into()], vec![GraphSetColumnType::Any]).unwrap()
+    }
+    fn execute(
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<()>, ()>>
+    {
+        query.execute_governed(policy, |_, _| Err(GqlQueryError::Source(())), || Ok(()))
+    }
+    fn policy() -> GqlQueryPolicy {
+        GqlQueryPolicy::new(0, 10_000, 1_000_000, 1_000_000)
+    }
+    fn plain(query: &PreparedGraphSet) -> Vec<Vec<GraphValue>> {
+        execute(query, policy())
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect()
+    }
+    fn echo() -> PreparedGraphSet {
+        arguments()
+            .project(
+                vec![GraphSetProjection::new("echo", GraphSetValue::Column(0))],
+                Q::All,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn apply_preserves_bags_null_imports_and_empty_inner_lists() {
+        let values = vec![
+            list(vec![int(2), int(1), int(1)]),
+            list(vec![]),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            list(vec![int(9)]),
+            list(vec![int(9)]),
+        ];
+        let mut expected = Vec::new();
+        for outer in &values {
+            if let GraphValue::List(elements) = outer {
+                for element in elements.iter() {
+                    expected.push(vec![outer.clone(), element.clone()]);
+                }
+            }
+        }
+        let body = arguments()
+            .unwind("item".into(), GraphSetValue::Column(0))
+            .unwrap()
+            .project(
+                vec![GraphSetProjection::new("value", GraphSetValue::Column(1))],
+                Q::All,
+            )
+            .unwrap();
+        assert_eq!(
+            plain(&input(values).apply(body, vec![0]).unwrap()),
+            expected
+        );
+        let nullable = input(vec![
+            int(2),
+            int(2),
+            GraphValue::Scalar(CanonicalScalar::Null),
+        ])
+        .apply(echo(), vec![0])
+        .unwrap();
+        assert_eq!(
+            plain(&nullable),
+            vec![
+                vec![int(2), int(2)],
+                vec![int(2), int(2)],
+                vec![GraphValue::Scalar(CanonicalScalar::Null); 2],
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_runs_the_inner_page_for_each_occurrence() {
+        let body = arguments()
+            .unwind("item".into(), GraphSetValue::Column(0))
+            .unwrap()
+            .project(
+                vec![GraphSetProjection::new("value", GraphSetValue::Column(1))],
+                Q::All,
+            )
+            .unwrap()
+            .with_page(1, Some(1));
+        let left = vec![
+            list(vec![int(4), int(5), int(6)]),
+            list(vec![int(8), int(9)]),
+            list(vec![int(0)]),
+        ];
+        assert_eq!(
+            plain(&input(left.clone()).apply(body, vec![0]).unwrap()),
+            vec![vec![left[0].clone(), int(5)], vec![left[1].clone(), int(9)]]
+        );
+    }
+
+    #[test]
+    fn nested_apply_restores_the_enclosing_argument_frame() {
+        let inner_left = arguments()
+            .unwind(
+                "local".into(),
+                GraphSetValue::Value(list(vec![int(7), int(8)])),
+            )
+            .unwrap();
+        let nested = inner_left
+            .apply(echo(), vec![1])
+            .unwrap()
+            .cross_join(arguments())
+            .unwrap();
+        let query = input(vec![int(1), int(2)]).apply(nested, vec![0]).unwrap();
+        let expected: Vec<_> = [1, 2]
+            .into_iter()
+            .flat_map(|outer| {
+                [7, 8].into_iter().map(move |local| {
+                    vec![int(outer), int(outer), int(local), int(local), int(outer)]
+                })
+            })
+            .collect();
+        assert_eq!(plain(&query), expected);
+    }
+
+    #[test]
+    fn apply_checks_import_positions_and_complete_argument_domains() {
+        assert!(matches!(
+            input(vec![]).apply(echo(), vec![1]),
+            Err(GraphSetBuildError::UnknownArgument { input: 1, .. })
+        ));
+        let scalar =
+            PreparedGraphSet::arguments(vec!["arg".into()], vec![GraphSetColumnType::Scalar])
+                .unwrap();
+        assert!(matches!(
+            input(vec![]).apply(scalar, vec![0]),
+            Err(GraphSetBuildError::ColumnType { .. })
+        ));
+        assert!(matches!(
+            input(vec![]).apply(echo(), vec![]),
+            Err(GraphSetBuildError::ColumnCount { .. })
+        ));
+        assert!(
+            PreparedGraphSet::arguments(
+                vec!["x".into(), "x".into()],
+                vec![GraphSetColumnType::Any; 2]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn arguments_require_an_apply_owner_and_have_no_spill_fallback() {
+        assert!(matches!(
+            execute(&arguments(), policy()),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::ArgumentsUnavailable
+            ))
+        ));
+        let query = input(vec![int(1)]).apply(echo(), vec![0]).unwrap();
+        assert!(!query.reads_graph() && !query.calls_procedure());
+        assert!(fgdb_gql::spill_set::AsyncSpillSetPlan::compile(&query).is_err());
+    }
+
+    #[test]
+    fn apply_spends_one_cumulative_allowance_and_enforces_final_row_limit() {
+        let left = input((0..32).map(int).collect());
+        let left_work = execute(&left, policy()).unwrap().evaluator.work_units;
+        let query = left.apply(echo(), vec![0]).unwrap();
+        assert_eq!(plain(&query).len(), 32);
+        // Room for the complete left plus one body, not 32 body allowances.
+        let bounded = GqlQueryPolicy::new(0, 100, left_work + 40, 1_000_000);
+        assert!(matches!(
+            execute(&query, bounded),
+            Err(GqlQueryError::Evaluator(_))
+        ));
+        assert!(matches!(
+            execute(&query, GqlQueryPolicy::new(0, 31, 1_000_000, 1_000_000)),
+            Err(GqlQueryError::Rows(_))
+        ));
+    }
+
+    #[test]
+    fn empty_left_never_invokes_the_body_source_but_nonempty_left_does() {
+        let pattern = PreparedGraphText::prepare("MATCH (n) RETURN n", |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        for (count, expected_calls) in [(0, 0), (1, 1)] {
+            let query = PreparedGraphSet::singleton()
+                .with_page(0, Some(count))
+                .apply(pattern.clone().into(), vec![])
+                .unwrap();
+            let mut calls = 0;
+            let result = query.execute_governed(
+                policy(),
+                |_, _| {
+                    calls += 1;
+                    Err::<GqlQueryExecution<GraphValueRow>, _>(GqlQueryError::<(), ()>::Source(()))
+                },
+                || Ok(()),
+            );
+            assert_eq!(calls, expected_calls);
+            if count == 0 {
+                assert!(result.unwrap().value.is_empty());
+            } else {
+                assert!(matches!(result, Err(GqlQueryError::Source(_))));
+            }
+        }
+    }
+
+    #[test]
+    fn apply_transcript_binds_import_order_and_differs_from_cross_join() {
+        let left = input(vec![int(1)])
+            .unwind("second".into(), GraphSetValue::Value(list(vec![int(2)])))
+            .unwrap();
+        let a = left.clone().apply(echo(), vec![0]).unwrap();
+        let b = left.clone().apply(echo(), vec![1]).unwrap();
+        let cross = left.cross_join(echo()).unwrap();
+        assert_ne!(a.canonical_bytes(), b.canonical_bytes());
+        assert_ne!(a.canonical_bytes(), cross.canonical_bytes());
+        assert_eq!(a.canonical_bytes(), a.clone().canonical_bytes());
+    }
+}
+
 fn pattern(key: u64, alias: &str) -> PreparedGraphPattern<GraphValueRow> {
     let mut builder = GraphPatternBuilder::new();
     builder.vertex("n").unwrap();
