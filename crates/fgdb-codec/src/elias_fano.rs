@@ -316,6 +316,21 @@ impl EliasFano {
         self.low_words.len() + self.high_words.len() + self.high_word_ranks.len().div_ceil(2)
     }
 
+    /// Capacity of all owned word and rank-directory allocations. This omits
+    /// the inline value and allocator metadata; unlike logical_storage_words,
+    /// it includes spare capacity and is suitable for retained-cache admission.
+    pub fn owned_heap_bytes(&self) -> Option<usize> {
+        self.low_words
+            .capacity()
+            .checked_add(self.high_words.capacity())?
+            .checked_mul(size_of::<u64>())?
+            .checked_add(
+                self.high_word_ranks
+                    .capacity()
+                    .checked_mul(size_of::<u32>())?,
+            )
+    }
+
     /// Logical number of bits in the unary high vector, excluding word padding.
     #[must_use]
     pub const fn high_bit_len(&self) -> usize {
@@ -703,6 +718,21 @@ fn select_one(mut bits: u64, ordinal: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_heap_counts_spare_words_and_rank_directory_capacity() {
+        let mut encoded =
+            super::EliasFano::try_new(&[1, 9, 1000], super::EntryLimit::new(3)).unwrap();
+        encoded.low_words.reserve_exact(101);
+        encoded.high_words.reserve_exact(73);
+        encoded.high_word_ranks.reserve_exact(53);
+        let expected = (encoded.low_words.capacity() + encoded.high_words.capacity())
+            * size_of::<u64>()
+            + encoded.high_word_ranks.capacity() * size_of::<u32>();
+        assert_eq!(encoded.owned_heap_bytes(), Some(expected));
+        assert!(expected > encoded.logical_storage_words() * size_of::<u64>());
+        assert_eq!(encoded.select(2), Some(1000));
+    }
+
     use super::*;
 
     fn assert_matches_naive(values: &[u64]) {

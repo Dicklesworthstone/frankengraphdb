@@ -28,6 +28,7 @@ const ZERO: ReadCacheLimits = ReadCacheLimits {
     projection_bytes: 0,
     admission_bytes: 0,
     authorized_projection_bytes: 0,
+    sealed_projection_bytes: 0,
 };
 
 async fn database(cx: &CommitCx) -> Database<MemVfs> {
@@ -235,6 +236,7 @@ fn scoped_reuse_and_tiny_budgets_preserve_rows_charges_and_refusal_boundaries() 
             projection_bytes: 0,
             admission_bytes: retained.admissions.retained_bytes,
             authorized_projection_bytes: retained.authorized_projections.retained_bytes,
+            sealed_projection_bytes: 0,
         };
         warm.set_read_cache_limits(&cx, ZERO).unwrap();
         warm.set_read_cache_limits(&cx, exact).unwrap();
@@ -256,6 +258,7 @@ fn scoped_reuse_and_tiny_budgets_preserve_rows_charges_and_refusal_boundaries() 
                 projection_bytes: 0,
                 admission_bytes: exact.admission_bytes - 1,
                 authorized_projection_bytes: exact.authorized_projection_bytes - 1,
+                sealed_projection_bytes: 0,
             },
         )
         .unwrap();
@@ -359,6 +362,7 @@ fn generation_changes_and_recovery_preserve_policy_without_reusing_stale_sources
             projection_bytes: 1 << 20,
             admission_bytes: 1 << 18,
             authorized_projection_bytes: 1 << 19,
+            sealed_projection_bytes: 1 << 18,
         };
         database.set_read_cache_limits(&cx, limits).unwrap();
         let old = database.read_session().unwrap();

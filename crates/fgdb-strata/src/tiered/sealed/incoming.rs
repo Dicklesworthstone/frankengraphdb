@@ -69,6 +69,7 @@ struct Index {
     rows: Vec<IncomingRow>,
     chunks: Vec<EliasFano>,
     stats: IncomingIndexStats,
+    retained_bytes: usize,
 }
 
 /// Clone-shared incoming index that also pins its ORIGINAL authenticated image.
@@ -243,6 +244,13 @@ impl SealedIncomingIndex {
     }
     pub fn stats(&self) -> IncomingIndexStats {
         self.index.stats
+    }
+
+    /// Actual owned index capacities and inline metadata, excluding its shared
+    /// source image, Arc control block, allocator headers and build scratch.
+    /// This is measured once during construction, including every EF directory.
+    pub fn retained_index_bytes(&self) -> usize {
+        self.index.retained_bytes
     }
     pub fn shares_index_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.index, &other.index)
@@ -799,6 +807,21 @@ mod construction {
             start = end;
         }
         control.check().await?;
+        let mut retained_bytes = add(
+            size_of::<Index>(),
+            add(
+                mul(rows.capacity(), size_of::<IncomingRow>())?,
+                mul(chunks.capacity(), size_of::<EliasFano>())?,
+            )?,
+        )?;
+        for chunk in &chunks {
+            control.check().await?;
+            retained_bytes = add(
+                retained_bytes,
+                chunk.owned_heap_bytes().ok_or(SealedError::SizeOverflow)?,
+            )?;
+        }
+        control.check().await?;
         Ok(SealedIncomingIndex {
             source: source.clone(),
             index: Arc::new(Index {
@@ -811,6 +834,7 @@ mod construction {
                     charged_resident_bytes: resident,
                     charged_workspace_bytes: workspace,
                 },
+                retained_bytes,
             }),
         })
     }

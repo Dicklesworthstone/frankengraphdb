@@ -15,6 +15,8 @@ pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
 
 #[path = "query_prism/buffered.rs"]
 mod prism;
+#[path = "query_prism/buffered_cooperative.rs"]
+mod prism_cooperative;
 
 /// Failure to acquire an authenticated, bounded cold read view.
 #[derive(Debug)]
@@ -93,6 +95,7 @@ impl From<MemoryError> for BufferedOpenError {
 pub struct BufferedReadView<V: Vfs = UnixVfs> {
     partition: BufferedPartition<V>,
     manifest: ManifestVersion,
+    sealed_cache: crate::query::BufferedSealedCache,
 }
 
 impl<V: Vfs> core::fmt::Debug for BufferedReadView<V> {
@@ -120,6 +123,31 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
 
     pub fn memory_pool(&self) -> &MemoryPool {
         self.partition.pool()
+    }
+
+    /// Retention for completed compressed analytics projections. This pool is
+    /// separate from the source extent pool and defaults to 1 GiB with at most
+    /// eight entries. It counts completed image/index/property capacities, not
+    /// allocator metadata, active builders, caller-held clones or process RSS.
+    pub fn sealed_read_cache_pool(&self) -> &MemoryPool {
+        self.sealed_cache.pool()
+    }
+
+    pub fn sealed_read_cache_usage(&self) -> ReadCacheUsage {
+        self.sealed_cache.usage()
+    }
+
+    /// Replace this view's compressed-retention allowance and release its
+    /// existing cache ownership. A zero-limit pool explicitly disables reuse;
+    /// ordinary preparations still work. A host may supply a child of its own
+    /// global budget, so ancestor ceilings constrain every retained admission.
+    /// Previously returned graphs stay valid; their clones are caller-owned.
+    pub fn set_sealed_read_cache_pool(
+        &mut self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+    ) -> Result<ReadCacheUsage, Box<asupersync::error::Error>> {
+        self.sealed_cache.replace_pool(cx, pool)
     }
 
     pub async fn vertex(
@@ -346,6 +374,10 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(BufferedReadView {
             partition,
             manifest,
+            sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
+                crate::query::SEALED_CACHE_BYTES,
+                0,
+            )?),
         })
     }
 }

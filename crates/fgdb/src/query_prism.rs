@@ -32,10 +32,16 @@ use fgdb_prism::FnxSealedExecutionError;
 mod cache;
 #[path = "query_prism/projection.rs"]
 mod projection;
+#[path = "query_prism/sealed_cache.rs"]
+mod sealed_cache;
 pub(crate) use cache::{
     CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
 };
 pub(crate) use projection::{bind_procedure, procedure_options};
+pub(crate) use sealed_cache::{
+    BufferedCache as BufferedSealedCache, CACHE_BYTES as SEALED_CACHE_BYTES,
+    Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
+};
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
@@ -486,6 +492,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// as new durable graph authority. Sealing uses Strata's existing verified
     /// reopen/compaction path, which itself materializes its admitted source.
     /// Sealing, vertex staging, projection and kernel have separate budgets.
+    /// Completed exact preparations may reuse this database owner's compressed
+    /// cache. Every construction limit is part of the key; current cancellation
+    /// and kernel/result admission still run on every call.
     /// This async I/O composition does not make the CPU kernel asynchronous or
     /// spill-capable, nor does it replace secure-view admission.
     pub async fn execute_fnx_sealed(
@@ -601,7 +610,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// change its vertices, edge weights or source identity. Preparing itself
     /// does not grant a durable lease or make the source larger-than-memory.
     /// Only the selected relation enters compaction, the sealed image and its
-    /// incoming index; every source object is still read and authenticated.
+    /// incoming index. On a miss every source object is read and authenticated;
+    /// a completed exact request reuses that admission and immutable projection
+    /// under this owner's separately configured sealed-projection allowance.
     #[allow(clippy::too_many_arguments)]
     pub async fn prism_sealed_projection_at(
         &self,
@@ -653,6 +664,29 @@ impl<V: Vfs + Clone> Database<V> {
             let relation = selection.relation.ok_or(SealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ))?;
+            let request = SealedProjectionRequest {
+                projection: ProjectionRequest {
+                    binding: SnapshotBinding {
+                        root: view.partition_root().0,
+                        as_of,
+                    },
+                    selection,
+                    projection: spec,
+                    projection_limits: limits,
+                    source_limits,
+                },
+                source: SealedProjectionSource::Root {
+                    sealing,
+                    limits: root_limits,
+                },
+            };
+            let cache = &view.snapshot.read_caches.sealed;
+            if let Some(graph) = cache.lookup_controlled(&view.snapshot, request, &mut || {
+                cx.checkpoint().map_err(Error::Cancelled)
+            })? {
+                cx.checkpoint().map_err(Error::Cancelled)?;
+                return Ok(graph);
+            }
             // Refuse vertex admission before the potentially expensive seal.
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
@@ -677,7 +711,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
                 .map_err(SealedReadError::Seal)?;
             view.check_sealed_source(&partition, as_of)?;
-            SealedGraphView::build(
+            let graph = SealedGraphView::build(
                 cx,
                 &partition,
                 &vertices,
@@ -688,7 +722,16 @@ impl<V: Vfs + Clone> Database<V> {
                 },
                 limits,
             )
-            .map_err(SealedReadError::Projection)
+            .map_err(SealedReadError::Projection)?;
+            cx.checkpoint().map_err(Error::Cancelled)?;
+            cache.remember(
+                &view.snapshot,
+                request,
+                graph.clone(),
+                graph.charged_resident_bytes(),
+                &mut || cx.checkpoint().map_err(Error::Cancelled),
+            )?;
+            Ok(graph)
         })
         .await
     }
@@ -787,6 +830,26 @@ impl EmbeddedReadView {
             self.snapshot.check_frontier(as_of).map_err(Error::Read)?;
             self.check_sealed_source(partition, as_of)?;
             self.check_sealed_request(cx, as_of, selection)?;
+            let request = SealedProjectionRequest {
+                projection: ProjectionRequest {
+                    binding: SnapshotBinding {
+                        root: self.partition_root().0,
+                        as_of,
+                    },
+                    selection,
+                    projection: spec,
+                    projection_limits: limits,
+                    source_limits,
+                },
+                source: SealedProjectionSource::Admitted(partition.anchor()),
+            };
+            let cache = &self.snapshot.read_caches.sealed;
+            if let Some(graph) = cache.lookup_controlled(&self.snapshot, request, &mut || {
+                cx.checkpoint().map_err(Error::Cancelled)
+            })? {
+                cx.checkpoint().map_err(Error::Cancelled)?;
+                return Ok(graph);
+            }
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
             let vertices = self.select_prism_vertices(
@@ -797,7 +860,7 @@ impl EmbeddedReadView {
                 &mut control,
                 &mut staging_bytes,
             )?;
-            SealedGraphView::build(
+            let graph = SealedGraphView::build(
                 cx,
                 partition,
                 &vertices,
@@ -808,7 +871,16 @@ impl EmbeddedReadView {
                 },
                 limits,
             )
-            .map_err(SealedReadError::Projection)
+            .map_err(SealedReadError::Projection)?;
+            cx.checkpoint().map_err(Error::Cancelled)?;
+            cache.remember(
+                &self.snapshot,
+                request,
+                graph.clone(),
+                graph.charged_resident_bytes(),
+                &mut || cx.checkpoint().map_err(Error::Cancelled),
+            )?;
+            Ok(graph)
         })
     }
 

@@ -5,7 +5,10 @@
 
 use super::{BufferedReadError, BufferedReadView};
 use crate::gql_exec::source::SourceEvent;
-use crate::query::{prism_source_control, push_prism_staged};
+use crate::query::{
+    ProjectionRequest, SealedProjectionRequest, SealedProjectionSource, prism_source_control,
+    push_prism_staged,
+};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
     FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
@@ -162,6 +165,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// never heals a missing/lagging checkpoint through a writable open.
     /// The owned image may outlive the view. Its storage has the existing
     /// sealing/projection allowances, not the source pool's lifetime charge.
+    /// Completed exact requests may share this view's separately charged
+    /// compressed cache. All construction limits are part of its key; a hit
+    /// skips physical build checkpoints/I/O but always checks live cancellation.
     #[allow(clippy::too_many_arguments)]
     pub async fn prism_sealed_projection_at(
         &mut self,
@@ -179,6 +185,36 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             let relation = selection.relation.ok_or(FnxSealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
             ))?;
+            if as_of > self.frontier() {
+                return Err(read_failure(BufferedReadError::BeyondPublication {
+                    requested: as_of,
+                    publication: self.frontier(),
+                })
+                .into());
+            }
+            let request = SealedProjectionRequest {
+                projection: ProjectionRequest {
+                    binding: SnapshotBinding {
+                        root: self.partition_root().0,
+                        as_of,
+                    },
+                    selection,
+                    projection: spec,
+                    projection_limits: limits,
+                    source_limits,
+                },
+                source: SealedProjectionSource::Buffered {
+                    sealing,
+                    max_source_incidences,
+                },
+            };
+            if let Some(graph) = self
+                .sealed_cache
+                .lookup(cx, request)
+                .map_err(FnxReadError::Cancelled)?
+            {
+                return Ok(graph);
+            }
             let mut control = prism_source_control(cx, source_limits);
             let mut staged_bytes = 0;
             let vertices = self
@@ -207,7 +243,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             {
                 return Err(FnxSealedReadError::SourceMismatch);
             }
-            SealedGraphView::build(
+            let graph = SealedGraphView::build(
                 cx,
                 &partition,
                 &vertices,
@@ -218,7 +254,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 },
                 limits,
             )
-            .map_err(FnxSealedReadError::Projection)
+            .map_err(FnxSealedReadError::Projection)?;
+            self.sealed_cache
+                .remember(cx, request, &graph)
+                .map_err(FnxReadError::Cancelled)?;
+            Ok(graph)
         })
         .await
     }

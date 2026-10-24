@@ -885,6 +885,48 @@ pub struct IdentityColumn<T: ElementIdentity> {
 }
 
 impl<T: ElementIdentity> IdentityColumn<T> {
+    /// Capacity of every owned backing allocation, excluding this value and
+    /// allocator metadata. Encoded payload length is not a retained-memory
+    /// bound: prefix/index vectors can have different layouts and spare space.
+    pub fn owned_heap_bytes(&self) -> Option<usize> {
+        fn bytes<T>(values: &Vec<T>) -> Option<usize> {
+            values.capacity().checked_mul(size_of::<T>())
+        }
+        fn indexes(value: &PrefixIndexes) -> Option<usize> {
+            match value {
+                PrefixIndexes::Zero => Some(0),
+                PrefixIndexes::U8(values) => bytes(values),
+                PrefixIndexes::U16(values) => bytes(values),
+                PrefixIndexes::U32(values) => bytes(values),
+            }
+        }
+        match &self.storage {
+            IdentityStorage::Raw128(values) => bytes(values),
+            IdentityStorage::SharedPrefixFixed {
+                prefixes,
+                indexes: index,
+                slots,
+            } => bytes(prefixes)?
+                .checked_add(indexes(index)?)?
+                .checked_add(bytes(slots)?),
+            IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes: index,
+                slots,
+            } => bytes(prefixes)?
+                .checked_add(indexes(index)?)?
+                .checked_add(bytes(&slots.packed_deltas)?),
+            IdentityStorage::SharedPrefixDeltaFor {
+                prefixes,
+                indexes: index,
+                slots,
+            } => bytes(prefixes)?
+                .checked_add(indexes(index)?)?
+                .checked_add(bytes(&slots.bases)?)?
+                .checked_add(bytes(&slots.packed_deltas)?),
+        }
+    }
+
     /// Selects the strictly smaller scalar representation.
     ///
     /// Exact size ties, a caller prefix ceiling, or a dictionary outside the
@@ -2737,6 +2779,86 @@ const fn slot_from_be_bytes(bytes: [u8; SLOT_BYTES]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_heap_counts_every_identity_layout_and_index_width() {
+        use super::{DeltaForSlots, ForSlots, IdentityStorage, PrefixIndexes};
+        fn allocation<T>(capacity: usize) -> (Vec<T>, usize) {
+            let values = Vec::with_capacity(capacity);
+            let bytes = values.capacity() * size_of::<T>();
+            (values, bytes)
+        }
+        let check = |storage, expected| {
+            let column = super::IdentityColumn::<fgdb_types::VId> {
+                storage,
+                encoded_payload_len: 0,
+                identity_type: core::marker::PhantomData,
+            };
+            assert_eq!(column.owned_heap_bytes(), Some(expected));
+            assert!(expected > column.encoded_payload_len());
+        };
+        let (values, bytes) = allocation::<u128>(19);
+        check(IdentityStorage::Raw128(values), bytes);
+        for width in [0, 1, 2, 4] {
+            let (prefixes, prefix_bytes) = allocation(17);
+            let (slots, slot_bytes) = allocation(31);
+            let (indexes, index_bytes) = match width {
+                0 => (PrefixIndexes::Zero, 0),
+                1 => {
+                    let (values, bytes) = allocation(29);
+                    (PrefixIndexes::U8(values), bytes)
+                }
+                2 => {
+                    let (values, bytes) = allocation(29);
+                    (PrefixIndexes::U16(values), bytes)
+                }
+                _ => {
+                    let (values, bytes) = allocation(29);
+                    (PrefixIndexes::U32(values), bytes)
+                }
+            };
+            check(
+                IdentityStorage::SharedPrefixFixed {
+                    prefixes,
+                    indexes,
+                    slots,
+                },
+                prefix_bytes + index_bytes + slot_bytes,
+            );
+        }
+        let (prefixes, prefix_bytes) = allocation(13);
+        let (packed_deltas, packed_bytes) = allocation(47);
+        check(
+            IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes: PrefixIndexes::Zero,
+                slots: ForSlots {
+                    base: 0,
+                    width: 0,
+                    row_count: 0,
+                    packed_deltas,
+                },
+            },
+            prefix_bytes + packed_bytes,
+        );
+        let (prefixes, prefix_bytes) = allocation(7);
+        let (indexes, index_bytes) = allocation(11);
+        let (bases, base_bytes) = allocation(23);
+        let (packed_deltas, packed_bytes) = allocation(41);
+        check(
+            IdentityStorage::SharedPrefixDeltaFor {
+                prefixes,
+                indexes: PrefixIndexes::U16(indexes),
+                slots: DeltaForSlots {
+                    bases,
+                    width: 0,
+                    row_count: 0,
+                    packed_deltas,
+                },
+            },
+            prefix_bytes + index_bytes + base_bytes + packed_bytes,
+        );
+    }
+
     use core::cell::Cell;
 
     use super::*;

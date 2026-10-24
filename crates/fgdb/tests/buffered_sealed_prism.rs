@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
+use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     BufferLimits, BufferedReadError, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys,
     MemVfs, MemoryPool, WriteBatch,
@@ -11,7 +12,8 @@ use fgdb::{
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxSealedReadError, FnxValue, ParallelEdgePolicy, SealedProjectionError, SelfLoopPolicy,
+    FnxReadResult, FnxSealedExecutionError, FnxSealedReadError, FnxValue, ParallelEdgePolicy,
+    SealedProjectionError, SelfLoopPolicy,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits};
 use fgdb_types::context::SimulationCheckpointProbe;
@@ -19,6 +21,11 @@ use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use std::sync::Arc;
+use std::{
+    future::Future,
+    num::NonZeroUsize,
+    task::{Context, Poll, Waker},
+};
 
 const R: RelationId = RelationId(7);
 const L: LabelId = LabelId(10);
@@ -424,4 +431,324 @@ fn every_reached_checkpoint_can_cancel_without_losing_the_reader_or_source_reser
         assert_eq!(writer.frontier().unwrap(), CommitSeq(2));
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn same_answer(actual: &FnxReadResult, expected: &FnxReadResult) {
+    assert_eq!(actual.selection, expected.selection);
+    assert_eq!(actual.analytics.columns, expected.analytics.columns);
+    assert_eq!(actual.analytics.rows, expected.analytics.rows);
+    let actual = &actual.analytics.certificate;
+    let expected = &expected.analytics.certificate;
+    assert_eq!(actual.result_digest, expected.result_digest);
+    assert_eq!(actual.projection_digest, expected.projection_digest);
+    assert_eq!(actual.snapshot, expected.snapshot);
+    assert_eq!(actual.estimated_work, expected.estimated_work);
+    assert_eq!(
+        actual.kernel_workspace_bytes,
+        expected.kernel_workspace_bytes
+    );
+}
+
+#[test]
+fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
+    // The existing cooperative kernel future is non-Send. Its registered
+    // current-thread driver executes real yield futures without an unsafe
+    // Send shim or the unregistered-root driver's self-wake backoff.
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut writer = seed(&contexts, &vfs).await;
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(BASE + 3));
+        writer.write(&contexts.commit(), change).await.unwrap();
+        writer.compact(&contexts.commit()).await.unwrap();
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        for text in [
+            TRIANGLES,
+            "CALL fnx.betweenness_centrality() YIELD vertex,score",
+            "CALL fnx.pagerank(iterations => 4, weighted => false) YIELD vertex,score",
+        ] {
+            for cut in [CommitSeq(2), CommitSeq(3)] {
+                let mut opt = options();
+                opt.as_of = Some(cut);
+                let procedure = FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
+                let synchronous = view
+                    .execute_fnx_sealed(&cx, &procedure, opt, memory(), sealing(), RAW)
+                    .await
+                    .unwrap();
+                let decoded = writer.execute_fnx(&cx, &procedure, opt).unwrap();
+                assert_eq!(synchronous.analytics.rows, decoded.analytics.rows);
+                assert_eq!(
+                    synchronous.analytics.certificate.result_digest,
+                    decoded.analytics.certificate.result_digest
+                );
+                if text == TRIANGLES {
+                    assert_eq!(
+                        synchronous.analytics.rows,
+                        expected(
+                            &[BASE + 1, BASE + 2, BASE + 3, u128::MAX],
+                            cut == CommitSeq(2)
+                        )
+                    );
+                }
+                for q in [1, 7, 257] {
+                    let parameters = FnxParameters::new();
+                    let mut future = Box::pin(view.call_fnx_sealed_cooperative(
+                        &cx,
+                        text,
+                        &parameters,
+                        opt,
+                        memory(),
+                        sealing(),
+                        RAW,
+                        NonZeroUsize::new(q).unwrap(),
+                    ));
+                    let mut pending = 0;
+                    let actual = std::future::poll_fn(|task| {
+                        let result = future.as_mut().poll(task);
+                        if result.is_pending() {
+                            pending += 1;
+                        }
+                        result
+                    })
+                    .await
+                    .unwrap();
+                    same_answer(&actual, &synchronous);
+                    assert_ne!(
+                        actual.analytics.certificate.execution_kernel,
+                        synchronous.analytics.certificate.execution_kernel
+                    );
+                    if q == 1 {
+                        assert!(pending > 0, "the actual future must yield: {text}");
+                    }
+                }
+            }
+        }
+        assert_eq!(writer.frontier().unwrap(), CommitSeq(3));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn cooperative_buffered_preflight_and_limits_remain_active_after_a_warm_build() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _writer = seed(&contexts, &vfs).await;
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let q = NonZeroUsize::new(1).unwrap();
+        let before = view.buffer_stats();
+        let unsupported = FnxCallSpec::bind(
+            "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            view.execute_fnx_sealed_cooperative(
+                &cx,
+                &unsupported,
+                options(),
+                memory(),
+                sealing(),
+                RAW,
+                q,
+            )
+            .await,
+            Err(FnxSealedReadError::Execution(
+                FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(_)
+            ))
+        ));
+        let mut directed = options();
+        directed.projection.directedness = Directedness::Directed;
+        assert!(
+            view.execute_fnx_sealed_cooperative(
+                &cx,
+                &call(),
+                directed,
+                memory(),
+                sealing(),
+                RAW,
+                q,
+            )
+            .await
+            .is_err()
+        );
+        let mut future = options();
+        future.as_of = Some(CommitSeq(3));
+        assert!(
+            view.execute_fnx_sealed_cooperative(&cx, &call(), future, memory(), sealing(), RAW, q,)
+                .await
+                .is_err()
+        );
+        assert_eq!(view.buffer_stats(), before);
+
+        let procedure = call();
+        let good = view
+            .execute_fnx_sealed_cooperative(&cx, &procedure, options(), memory(), sealing(), RAW, q)
+            .await
+            .unwrap();
+        for dimension in 0..10 {
+            let mut opt = options();
+            let mut image = sealing();
+            let mut kernel = memory();
+            let mut raw = RAW;
+            match dimension {
+                0 => opt.source_limits.max_work_units = 0,
+                1 => opt.source_limits.max_scratch_entries = 0,
+                2 => opt.source_limits.max_staging_bytes = 0,
+                3 => raw = 0,
+                4 => image.max_image_bytes = 0,
+                5 => image.max_incidences = 0,
+                6 => opt.projection_limits.max_vertices = 0,
+                7 => kernel.max_kernel_workspace_bytes = 0,
+                8 => kernel.max_result_bytes = 0,
+                9 => opt.execution_limits.max_result_rows = 0,
+                _ => unreachable!(),
+            }
+            assert!(
+                view.execute_fnx_sealed_cooperative(&cx, &procedure, opt, kernel, image, raw, q,)
+                    .await
+                    .is_err(),
+                "dimension {dimension}"
+            );
+            assert_eq!(
+                view.execute_fnx_sealed_cooperative(
+                    &cx,
+                    &procedure,
+                    options(),
+                    memory(),
+                    sealing(),
+                    RAW,
+                    q,
+                )
+                .await
+                .unwrap(),
+                good
+            );
+        }
+        let mut empty = options();
+        empty.selection.relation = Some(RelationId(99));
+        assert_eq!(
+            view.execute_fnx_sealed_cooperative(&cx, &procedure, empty, memory(), sealing(), 0, q,)
+                .await
+                .unwrap()
+                .analytics
+                .rows,
+            expected(&[BASE + 1, BASE + 2, BASE + 3, u128::MAX], false)
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn cooperative_buffered_cancellation_and_every_warm_suspend_release_the_reader() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let writer = seed(&contexts, &vfs).await;
+        let source_pool = pool();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        let procedure = FnxCallSpec::bind(
+            "CALL fnx.betweenness_centrality() YIELD vertex,score",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        let q = NonZeroUsize::new(1).unwrap();
+        let expected = view
+            .execute_fnx_sealed_cooperative(&cx, &procedure, options(), memory(), sealing(), RAW, q)
+            .await
+            .unwrap();
+        let source_bytes = source_pool.used();
+        let observe = Arc::new(SimulationCheckpointProbe::new(None));
+        let measured = cx.with_checkpoint_probe(Arc::clone(&observe));
+        let mut pending = 0;
+        {
+            let mut future = Box::pin(view.execute_fnx_sealed_cooperative(
+                &measured,
+                &procedure,
+                options(),
+                memory(),
+                sealing(),
+                RAW,
+                q,
+            ));
+            let actual = std::future::poll_fn(|task| {
+                let result = future.as_mut().poll(task);
+                if result.is_pending() {
+                    pending += 1;
+                }
+                result
+            })
+            .await
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+        assert!(pending > 0);
+        for stop in 1..=observe.calls() {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let cancelled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                view.execute_fnx_sealed_cooperative(
+                    &cancelled,
+                    &procedure,
+                    options(),
+                    memory(),
+                    sealing(),
+                    RAW,
+                    q,
+                )
+                .await
+                .is_err(),
+                "checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(source_pool.used(), source_bytes);
+        }
+        // Preparation is already cached. These futures have no source I/O;
+        // each Pending is the real cooperative kernel's yield primitive.
+        for stop in 0..=pending {
+            let mut task = Context::from_waker(Waker::noop());
+            let mut future = Box::pin(view.execute_fnx_sealed_cooperative(
+                &cx,
+                &procedure,
+                options(),
+                memory(),
+                sealing(),
+                RAW,
+                q,
+            ));
+            for _ in 0..stop {
+                assert!(matches!(future.as_mut().poll(&mut task), Poll::Pending));
+            }
+            drop(future);
+            assert_eq!(source_pool.used(), source_bytes);
+            assert_eq!(
+                view.execute_fnx_sealed_cooperative(
+                    &cx,
+                    &procedure,
+                    options(),
+                    memory(),
+                    sealing(),
+                    RAW,
+                    q,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+        assert_eq!(writer.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
 }

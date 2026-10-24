@@ -218,6 +218,7 @@ fn served_cache_limits_and_retained_bytes_follow_authoritative_recovery() {
             projection_bytes: 1 << 20,
             admission_bytes: 1 << 18,
             authorized_projection_bytes: 1 << 19,
+            sealed_projection_bytes: 1 << 18,
         };
         let (server, token, _) = served_with_cache_limits(&root, "read-cache-owner", limits).await;
         let contexts = PurposeContexts::narrow_runtime_root(&root);

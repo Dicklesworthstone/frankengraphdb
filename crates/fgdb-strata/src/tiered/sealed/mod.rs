@@ -31,6 +31,8 @@ pub use incoming::{
 #[cfg(test)]
 mod relation_tests;
 #[cfg(test)]
+mod retained_tests;
+#[cfg(test)]
 mod tests;
 mod wire;
 
@@ -211,6 +213,7 @@ pub struct SealedStats {
 pub struct SealedPartition {
     anchor: SealedAnchor,
     image: Arc<Image>,
+    retained_bytes: usize,
 }
 
 impl core::fmt::Debug for SealedPartition {
@@ -456,10 +459,12 @@ impl SealedPartition {
             encoded_bytes: bytes.len(),
         };
         Self::check_image_scope(anchor, &image, checkpoint)?;
+        let retained_bytes = image.retained_bytes(checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
             image: Arc::new(image),
+            retained_bytes,
         })
     }
 
@@ -483,6 +488,14 @@ impl SealedPartition {
 
     pub fn shares_image_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.image, &other.image)
+    }
+
+    /// Completed image metadata and owned allocation capacities, measured once
+    /// under cancellation during sealing/reload. Includes nested property heaps;
+    /// excludes Arc control blocks, allocator headers and construction scratch.
+    /// Shared clones name the same charge, not additional image allocations.
+    pub fn charged_resident_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     pub fn stats(&self) -> SealedStats {
@@ -545,10 +558,12 @@ impl SealedPartition {
         let image = wire::decode(bytes, limits, resolver, checkpoint)?;
         image.validate(anchor.scope, limits, checkpoint)?;
         Self::check_image_scope(anchor, &image, checkpoint)?;
+        let retained_bytes = image.retained_bytes(checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
             image: Arc::new(image),
+            retained_bytes,
         })
     }
 

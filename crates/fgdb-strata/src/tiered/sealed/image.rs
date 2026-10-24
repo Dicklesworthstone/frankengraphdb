@@ -270,6 +270,70 @@ impl Row {
 }
 
 impl Image {
+    /// Measure the completed immutable owner once. Property collections are
+    /// traversed under live control; no wire encoding or decoded clone is made.
+    pub fn retained_bytes(
+        &self,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<usize, SealedError> {
+        fn bytes<T>(values: &Vec<T>) -> Result<usize, SealedError> {
+            values
+                .capacity()
+                .checked_mul(size_of::<T>())
+                .ok_or(SealedError::SizeOverflow)
+        }
+        fn add(left: usize, right: usize) -> Result<usize, SealedError> {
+            left.checked_add(right).ok_or(SealedError::SizeOverflow)
+        }
+        checkpoint()?;
+        let mut retained = size_of::<Self>();
+        for bytes in [
+            self.dictionary
+                .owned_heap_bytes()
+                .ok_or(SealedError::SizeOverflow)?,
+            self.offsets
+                .owned_heap_bytes()
+                .ok_or(SealedError::SizeOverflow)?,
+            bytes(&self.rows)?,
+            bytes(&self.inlines)?,
+            bytes(&self.runs)?,
+            bytes(&self.properties)?,
+        ] {
+            retained = add(retained, bytes)?;
+        }
+        for run in &self.runs {
+            checkpoint()?;
+            retained = add(
+                retained,
+                run.neighbors
+                    .owned_heap_bytes()
+                    .ok_or(SealedError::SizeOverflow)?,
+            )?;
+            retained = add(
+                retained,
+                run.edge_ids
+                    .owned_heap_bytes()
+                    .ok_or(SealedError::SizeOverflow)?,
+            )?;
+            retained = add(retained, bytes(&run.spans)?)?;
+            retained = add(retained, bytes(&run.locators)?)?;
+        }
+        for row in &self.properties {
+            checkpoint()?;
+            retained = add(retained, bytes(row)?)?;
+            for (_, value) in row {
+                retained = add(
+                    retained,
+                    value
+                        .owned_heap_bytes_controlled(checkpoint)?
+                        .ok_or(SealedError::SizeOverflow)?,
+                )?;
+            }
+        }
+        checkpoint()?;
+        Ok(retained)
+    }
+
     pub fn find_row(&self, src: VId, relation: RelationId) -> Option<&Row> {
         let key = DescriptorKey {
             src,

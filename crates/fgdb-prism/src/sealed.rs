@@ -166,6 +166,7 @@ struct Projection {
     adjacency_entries: usize,
     scan_bound: usize,
     workspace_bytes: usize,
+    resident_bytes: usize,
 }
 
 /// O(1)-cloneable, immutable compressed projection. The source root is derived
@@ -407,6 +408,21 @@ impl SealedGraphView {
         hash.update(&(input_edges as u128).to_le_bytes());
         hash.update(&(edges as u128).to_le_bytes());
         checkpoint(cx)?;
+        let mut resident_bytes = add(size_of::<Projection>(), partition.charged_resident_bytes())?;
+        if let Some(index) = &incoming {
+            // The incoming owner shares the very same source image; count it
+            // above exactly once, and count only the index's additional heap.
+            resident_bytes = add(resident_bytes, index.retained_index_bytes())?;
+        }
+        for bytes in [
+            owned_vertices.capacity().checked_mul(size_of::<VId>()),
+            vertex_prefix
+                .capacity()
+                .checked_mul(size_of::<OrdinalPrefix>()),
+            degrees.capacity().checked_mul(size_of::<usize>()),
+        ] {
+            resident_bytes = add(resident_bytes, bytes.ok_or(ProjectionError::SizeOverflow)?)?;
+        }
         Ok(Self(Arc::new(Projection {
             partition: partition.clone(),
             incoming,
@@ -422,6 +438,7 @@ impl SealedGraphView {
             adjacency_entries,
             scan_bound,
             workspace_bytes,
+            resident_bytes,
         })))
     }
 
@@ -473,6 +490,21 @@ impl SealedGraphView {
     }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes
+    }
+
+    /// Completed projection, compressed image, optional incoming index and all
+    /// owned vector/property capacities. The shared source image counts once.
+    /// Arc control blocks, allocator metadata, source readers and transient
+    /// construction workspace are outside this retained-owner measurement.
+    pub fn charged_resident_bytes(&self) -> usize {
+        self.0.resident_bytes
+    }
+
+    /// Physical reuse witness: both handles retain the identical immutable
+    /// projection, including its authenticated image and incoming directory.
+    /// This is not part of the logical result/certificate identity.
+    pub fn shares_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// The opposite directed face of this exact admitted projection. The

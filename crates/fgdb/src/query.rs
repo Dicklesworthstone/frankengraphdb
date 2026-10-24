@@ -48,11 +48,12 @@ pub use beacon::{
 };
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};
-pub use prism::{ProcedureError, SealedProjectionOpenError};
 pub(crate) use prism::{
-    bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
-    push_staged as push_prism_staged, source_control as prism_source_control,
+    BufferedSealedCache, ProjectionRequest, SEALED_CACHE_BYTES, SealedProjectionRequest,
+    SealedProjectionSource, bind_procedure, fnx_procedure, procedure_failure, procedure_options,
+    procedure_rows, push_staged as push_prism_staged, source_control as prism_source_control,
 };
+pub use prism::{ProcedureError, SealedProjectionOpenError};
 pub(crate) use read_cache::ReadCaches;
 pub use read_cache::{ReadCacheLimits, ReadCacheStatus, ReadCacheUsage};
 pub use view::{

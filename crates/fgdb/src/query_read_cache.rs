@@ -2,7 +2,9 @@
 //! Entries identify an exact snapshot allocation and retain only a weak pin.
 
 use super::authorized::{ADMITTED_BYTES, AdmittedCache, AuthorizedProjectionCache};
-use super::prism::{PROJECTION_CACHE_BYTES, ProjectionCache};
+use super::prism::{
+    PROJECTION_CACHE_BYTES, ProjectionCache, SEALED_CACHE_BYTES, SealedProjectionCache,
+};
 use crate::{Database, EmbeddedReadView, Snapshot};
 use asupersync::fs::Vfs;
 use fgdb_types::QueryCx;
@@ -17,8 +19,8 @@ use live::LiveCache;
 /// handle and every pinned view keep the existing owner and policy.
 ///
 /// These bound charged vector capacities and reserved lazy indexes, not process
-/// RSS. Source snapshots, active callers' clones, concurrent builders and
-/// allocator metadata are outside the retained-cache allowance. Each cache
+/// RSS. Source snapshots, active callers' clones, concurrent builders, Arc
+/// control blocks and allocator metadata are outside the retained-cache allowance. Each cache
 /// additionally keeps at most eight entries. Zero explicitly disables retention
 /// for that cache; it does not disable the underlying query functionality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +28,9 @@ pub struct ReadCacheLimits {
     pub projection_bytes: usize,
     pub admission_bytes: usize,
     pub authorized_projection_bytes: usize,
+    /// Compressed image plus projection/incoming directories, including nested
+    /// property heaps. This is independent of decoded projection retention.
+    pub sealed_projection_bytes: usize,
 }
 
 impl Default for ReadCacheLimits {
@@ -34,6 +39,7 @@ impl Default for ReadCacheLimits {
             projection_bytes: PROJECTION_CACHE_BYTES,
             admission_bytes: ADMITTED_BYTES,
             authorized_projection_bytes: PROJECTION_CACHE_BYTES,
+            sealed_projection_bytes: SEALED_CACHE_BYTES,
         }
     }
 }
@@ -53,6 +59,7 @@ pub struct ReadCacheStatus {
     pub projections: ReadCacheUsage,
     pub admissions: ReadCacheUsage,
     pub authorized_projections: ReadCacheUsage,
+    pub sealed_projections: ReadCacheUsage,
 }
 
 #[derive(Debug)]
@@ -60,6 +67,7 @@ pub(crate) struct ReadCaches {
     pub(crate) projections: ProjectionCache<Snapshot>,
     pub(crate) admitted: AdmittedCache,
     pub(crate) authorized: AuthorizedProjectionCache,
+    pub(crate) sealed: SealedProjectionCache,
 }
 
 impl Default for ReadCaches {
@@ -69,12 +77,13 @@ impl Default for ReadCaches {
             projections: LiveCache::new(limits.projection_bytes),
             admitted: LiveCache::new(limits.admission_bytes),
             authorized: LiveCache::new(limits.authorized_projection_bytes),
+            sealed: LiveCache::new(limits.sealed_projection_bytes),
         }
     }
 }
 
 impl ReadCaches {
-    /// Acquire the three short metadata sections together. If any is busy,
+    /// Acquire the short metadata sections together. If any is busy,
     /// release every acquired guard BEFORE invoking the caller's checkpoint.
     /// Thus a policy update is all-or-nothing even when cancellation races it.
     fn inspect(
@@ -88,7 +97,8 @@ impl ReadCaches {
                 let mut projections = self.projections.try_lock()?;
                 let mut admitted = self.admitted.try_lock()?;
                 let mut authorized = self.authorized.try_lock()?;
-                let (old_projections, old_admitted, old_authorized) = match limits {
+                let mut sealed = self.sealed.try_lock()?;
+                let (old_projections, old_admitted, old_authorized, old_sealed) = match limits {
                     Some(limits) => (
                         self.projections
                             .set_limit(&mut projections, limits.projection_bytes),
@@ -96,22 +106,28 @@ impl ReadCaches {
                             .set_limit(&mut admitted, limits.admission_bytes),
                         self.authorized
                             .set_limit(&mut authorized, limits.authorized_projection_bytes),
+                        self.sealed
+                            .set_limit(&mut sealed, limits.sealed_projection_bytes),
                     ),
                     None => (
                         LiveCache::prune(&mut projections),
                         LiveCache::prune(&mut admitted),
                         LiveCache::prune(&mut authorized),
+                        LiveCache::prune(&mut sealed),
                     ),
                 };
                 let status = ReadCacheStatus {
                     projections: self.projections.usage(&projections),
                     admissions: self.admitted.usage(&admitted),
                     authorized_projections: self.authorized.usage(&authorized),
+                    sealed_projections: self.sealed.usage(&sealed),
                 };
+                drop(sealed);
                 drop(authorized);
                 drop(admitted);
                 drop(projections);
                 // Potentially large vectors are released outside every lock.
+                drop(old_sealed);
                 drop(old_authorized);
                 drop(old_admitted);
                 drop(old_projections);
@@ -195,6 +211,7 @@ mod tests {
                             projection_bytes: 1,
                             admission_bytes: 2,
                             authorized_projection_bytes: 3,
+                            sealed_projection_bytes: 4,
                         })
                     )
                     .is_err()
@@ -216,12 +233,14 @@ mod tests {
                         projection_bytes: 1,
                         admission_bytes: 2,
                         authorized_projection_bytes: 3,
+                        sealed_projection_bytes: 4,
                     }),
                 )
                 .unwrap();
             assert_eq!(updated.projections.max_bytes, 1);
             assert_eq!(updated.admissions.max_bytes, 2);
             assert_eq!(updated.authorized_projections.max_bytes, 3);
+            assert_eq!(updated.sealed_projections.max_bytes, 4);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
