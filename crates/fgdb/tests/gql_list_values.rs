@@ -171,10 +171,38 @@ fn unwind_parameters_match_and_empty_inputs_preserve_multiplicity() {
             rows(&db, &cx, "MATCH (n {p:1}) RETURN n", &GqlParameters::new()),
             vec![vec![GraphValue::Vertex(VId(3))]]
         );
+        // id=3 occurs twice and admits two optional witnesses, while id=1
+        // admits one: five occurrences of every unfiltered outer vertex.
+        let mut optional = rows(
+            &db,
+            &cx,
+            "UNWIND $ids AS id MATCH (n) OPTIONAL MATCH (m {p:id}) RETURN n",
+            &params,
+        );
+        optional.sort();
+        let expected: Vec<_> = (1..=4)
+            .flat_map(|id| vec![vec![GraphValue::Vertex(VId(id))]; 5])
+            .collect();
+        assert_eq!(optional, expected);
+        // No optional witnesses still preserves each of the three incoming
+        // occurrences. It cannot erase the outer relation or deduplicate it.
+        let mut unmatched = rows(
+            &db,
+            &cx,
+            "UNWIND $ids AS id MATCH (n) OPTIONAL MATCH (m {p:99}) RETURN n",
+            &params,
+        );
+        unmatched.sort();
+        assert_eq!(
+            unmatched,
+            (1..=4)
+                .flat_map(|id| vec![vec![GraphValue::Vertex(VId(id))]; 3])
+                .collect::<Vec<_>>()
+        );
         assert!(
             db.query(
                 &cx,
-                "UNWIND $ids AS id MATCH (n) OPTIONAL MATCH (m {p:id}) RETURN n",
+                "UNWIND $ids AS id WITH id AS kept MATCH (n) OPTIONAL MATCH (m {p:id}) RETURN n",
                 &params,
                 symbols,
                 policy()

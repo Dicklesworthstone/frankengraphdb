@@ -465,13 +465,27 @@ fn pattern_comprehensions_collect_each_rows_witnesses() {
             ),
             vec![vec![int(10), ints(&[30])], vec![int(20), ints(&[30])],]
         );
-        // Two pattern locals in one projection, an aggregate argument, a row
+        // Gathering precedes COUNT: empty lists are nonnull too, so all four
+        // outer vertices count. Omitting zero-degree vertices would return 2.
+        let QueryResult::Rows { rows: counted, .. } = db
+            .query(
+                cx,
+                "MATCH (n:Person) RETURN count([(n)-[:R]->() | 1]) AS v",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            panic!("aggregate read must return rows");
+        };
+        assert_eq!(counted, vec![vec![QueryValue::Count(4)]]);
+        // Two pattern locals in one projection, a row
         // scope, and a pattern over an enclosing list-comprehension local
         // (gathered once per row, so it could not follow the local; TCK
         // Pattern2 [7]) refuse typed.
         for text in [
             "MATCH (n:Person) RETURN [(n)-[:R]->(m)-[:R]->(o) | m.p + o.p] AS v",
-            "MATCH (n:Person) RETURN count([(n)-[:R]->() | 1]) AS v",
             "WITH 1 AS x RETURN [(x)-[:R]->() | 1] AS v",
             "MATCH p = (n:Person)-[:R]->() RETURN [x IN nodes(p) | size([(x)-[:R]->() | 1])] AS v",
         ] {
