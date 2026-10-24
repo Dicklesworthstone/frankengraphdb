@@ -1170,6 +1170,21 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
                     sealed.stdout, decoded.stdout,
                     "complete NDJSON differs at cut {cut}: {text}"
                 );
+                for extra in [
+                    &["--buffered"][..],
+                    &["--sealed-quantum", "1"][..],
+                    &["--buffered", "--sealed-quantum", "1"][..],
+                ] {
+                    let mut mode = arguments[..arguments.len() - 1].to_vec();
+                    mode.extend_from_slice(extra);
+                    mode.push(text);
+                    let actual = fixture.robot("query", &mode);
+                    assert_eq!(succeeded(&actual, "rows"), cut.parse::<u64>().unwrap());
+                    assert_eq!(
+                        actual.stdout, decoded.stdout,
+                        "complete NDJSON differs for {extra:?} at cut {cut}: {text}"
+                    );
+                }
                 let actual_rows = rows(&sealed);
                 assert_eq!(actual_rows.len(), if cut == &historical { 2 } else { 3 });
                 if let Some(old) = previous_rows.replace(actual_rows.clone()) {

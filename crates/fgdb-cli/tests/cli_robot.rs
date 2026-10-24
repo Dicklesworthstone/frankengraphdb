@@ -3399,8 +3399,11 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "KNOWS",
                 "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
             ],
-            3,
-            "query",
+            // Invalid named calls retain native routing, which refuses
+            // explicit Prism flags. Both preserved and current CLI binaries
+            // produce this usage refusal before opening the database.
+            2,
+            "usage",
         ),
         (
             &[
@@ -3443,6 +3446,53 @@ fn sealed_prism_cli_preflights_before_writable_open() {
             "query",
         ),
         (&["--sealed", "--sealed", call], 2, "usage"),
+        (&["--sealed-quantum", "1", call], 2, "usage"),
+        (&["--sealed", "--sealed-quantum", "0", call], 2, "usage"),
+        (&["--sealed", "--sealed-quantum", "-1", call], 2, "usage"),
+        (&["--sealed-source-incidences", "1", call], 2, "usage"),
+        (
+            &[
+                "--buffered",
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--sealed-quantum",
+                "1",
+                "--sealed-quantum",
+                "2",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--buffered",
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--sealed-quantum",
+                "1",
+                "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--buffered",
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--sealed-source-incidences",
+                "1",
+                "--sealed-source-incidences",
+                "2",
+                call,
+            ],
+            2,
+            "usage",
+        ),
         (&["--sealed-result-bytes", "1", call], 2, "usage"),
         (
             &["--sealed", "--sealed-result-bytes", "-1", call],
@@ -3536,6 +3586,64 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     }
     db.command("create", &["--sealed"]).failure(2, "usage");
     assert!(!std::path::Path::new(&db.db).exists());
+}
+
+#[test]
+fn buffered_sealed_cli_keeps_source_kernel_and_output_limits_distinct() {
+    let db = TestDb::new("prism-buffered-sealed-limits");
+    db.create();
+    db.write(&["INSERT (a:Person),(b:Person),(c:Person), \
+               (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(a)"]);
+    let call = "CALL fnx.triangles() YIELD vertex,triangles";
+    let projection = [
+        "--graph-relation",
+        "KNOWS",
+        "--direction",
+        "undirected",
+        "--parallel-edges",
+        "collapse",
+        "--self-loops",
+        "drop",
+    ];
+    let mut decoded = projection.to_vec();
+    decoded.push(call);
+    let oracle = db.command("query", &decoded);
+    oracle.success();
+    for cooperative in [false, true] {
+        let mut args = vec!["--buffered", "--sealed"];
+        args.extend_from_slice(&projection);
+        if cooperative {
+            args.extend_from_slice(&["--sealed-quantum", "1"]);
+        }
+        for flag in [
+            "--buffer-memory-bytes",
+            "--buffer-source-bytes",
+            "--max-work-units",
+        ] {
+            let mut bad = args.clone();
+            bad.extend_from_slice(&[flag, "0", call]);
+            db.command("query", &bad).failure(4, "open");
+        }
+        for flag in [
+            "--sealed-source-incidences",
+            "--sealed-max-incidences",
+            "--sealed-image-bytes",
+            "--sealed-kernel-bytes",
+            "--sealed-result-bytes",
+            "--graph-staging-bytes",
+            "--graph-workspace-bytes",
+        ] {
+            let mut bad = args.clone();
+            bad.extend_from_slice(&[flag, "0", call]);
+            db.command("query", &bad).failure(3, "query");
+        }
+        // The source work flag is live in this combined mode. A successful
+        // query after the refusals still returns the complete original graph.
+        args.extend_from_slice(&["--max-work-units", "10000000", call]);
+        let actual = db.command("query", &args);
+        actual.success();
+        assert_eq!(actual.events, oracle.events);
+    }
 }
 
 #[test]

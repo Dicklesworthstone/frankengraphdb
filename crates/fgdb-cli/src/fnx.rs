@@ -1,8 +1,9 @@
 //! `query 'CALL fnx.<procedure>(...) YIELD ...'`: registered Prism analytics
 //! over the admitted generation. The default uses the decoded adapter on a
-//! read-only open; --buffered builds only the selected decoded projection
-//! through authenticated checkpoint cursors; --sealed explicitly seals one
-//! pinned source in one read-only pass and executes compressed cursors.
+//! read-only open; --buffered faults the source through authenticated checkpoint
+//! cursors; --sealed executes compressed cursors over the selected relation.
+//! Combining them keeps source payloads in the extent pool. --sealed-quantum
+//! additionally yields between bounded steps of a supported compressed kernel.
 //!
 //! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
@@ -25,12 +26,13 @@ use fgdb::{BufferedReadView, Database, DatabaseKeys, EmbeddedReadView, SealedPro
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
-    FnxReadResult, FnxSelection, FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
-    ProjectionSpec, SelfLoopPolicy,
+    FnxReadResult, FnxSealedExecutionError, FnxSelection, FnxValue, FnxWeightSpec,
+    MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_strata::{store::RootReadLimits, tiered::sealed::SealedLimits};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::io::Write;
+use std::num::NonZeroUsize;
 
 /// Is this `query` text a standalone Prism call? `CALL` is a keyword (any
 /// case); the procedure namespace `fnx.` is case-sensitive, like the
@@ -75,10 +77,12 @@ pub(super) struct ProjectionFlags {
     sealed_property_bytes: Option<usize>,
     sealed_rows: Option<usize>,
     sealed_incidences: Option<usize>,
+    sealed_source_incidences: Option<usize>,
+    sealed_quantum: Option<NonZeroUsize>,
 }
 
 impl ProjectionFlags {
-    pub(super) const FLAGS: [&str; 16] = [
+    pub(super) const FLAGS: [&str; 18] = [
         "--graph-label",
         "--graph-relation",
         "--weight",
@@ -95,6 +99,8 @@ impl ProjectionFlags {
         "--sealed-property-bytes",
         "--sealed-max-rows",
         "--sealed-max-incidences",
+        "--sealed-source-incidences",
+        "--sealed-quantum",
     ];
 
     pub(super) fn is_empty(&self) -> bool {
@@ -120,6 +126,10 @@ impl ProjectionFlags {
         Ok(())
     }
 
+    pub(super) fn uses_sealed_quantum(&self) -> bool {
+        self.sealed && self.sealed_quantum.is_some()
+    }
+
     fn has_sealed_limits(&self) -> bool {
         self.sealed_kernel_bytes.is_some()
             || self.sealed_result_bytes.is_some()
@@ -127,6 +137,8 @@ impl ProjectionFlags {
             || self.sealed_property_bytes.is_some()
             || self.sealed_rows.is_some()
             || self.sealed_incidences.is_some()
+            || self.sealed_source_incidences.is_some()
+            || self.sealed_quantum.is_some()
     }
 
     pub(super) fn validate(&self) -> Result<(), Failure> {
@@ -248,6 +260,17 @@ impl ProjectionFlags {
                 decimal_usize(flag, value)?,
                 flag,
             ),
+            "--sealed-source-incidences" => once(
+                &mut self.sealed_source_incidences,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--sealed-quantum" => once(
+                &mut self.sealed_quantum,
+                NonZeroUsize::new(decimal_usize(flag, value)?)
+                    .ok_or_else(|| Failure::usage("--sealed-quantum must be positive"))?,
+                flag,
+            ),
             _ => Err(Failure::usage("unknown analytics flag")),
         }
     }
@@ -341,6 +364,8 @@ pub(super) struct Prepared {
     call: FnxCallSpec,
     read: FnxReadOptions,
     sealed: Option<(FnxMemoryLimits, SealedLimits)>,
+    source_incidences: usize,
+    quantum: Option<NonZeroUsize>,
 }
 
 impl Prepared {
@@ -356,11 +381,6 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::statement)?;
     let sealed = options.fnx.sealed_limits();
     if options.buffered.enabled() {
-        if sealed.is_some() {
-            return Err(Failure::usage(
-                "--buffered cannot be combined with --sealed",
-            ));
-        }
         if options.budget.records.is_some()
             || options.budget.rows.is_some()
             || options.budget.scratch.is_some()
@@ -373,12 +393,12 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }
     }
     if sealed.is_some() {
-        // These checks must precede the writable open needed for the temporary
-        // seal. Unsupported algorithms never fall back to decoded adjacency.
+        // All graph-law and scheduling checks precede either read-only open.
+        // Unsupported algorithms never fall back to decoded adjacency.
         if read.selection.relation.is_none() {
             return Err(Failure::usage("--sealed requires --graph-relation"));
         }
-        if options.budget != super::QueryBudget::default() {
+        if !options.buffered.enabled() && options.budget != super::QueryBudget::default() {
             return Err(Failure::usage(
                 "native --max-snapshot-records, --max-result-rows, --max-work-units \
                  and --max-scratch-entries do not apply to --sealed; use --sealed-* limits",
@@ -386,8 +406,24 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         }
         call.validate_sealed_projection(read.projection.directedness)
             .map_err(Failure::query)?;
+        if options.fnx.sealed_quantum.is_some() && !call.supports_cooperative_sealed_execution() {
+            return Err(Failure::query(
+                FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(call.algorithm()),
+            ));
+        }
     }
-    Ok(Prepared { call, read, sealed })
+    let source_incidences = options.fnx.sealed_source_incidences.unwrap_or_else(|| {
+        RootReadLimits::default()
+            .max_incidences
+            .max(sealed.map_or(0, |(_, limits)| limits.max_incidences))
+    });
+    Ok(Prepared {
+        call,
+        read,
+        sealed,
+        source_incidences,
+        quantum: options.fnx.sealed_quantum,
+    })
 }
 
 pub(super) fn run(
@@ -404,7 +440,8 @@ pub(super) fn run(
 }
 
 /// The extent cache and graph source use the buffered view's allowances;
-/// selected staging, decoded CSR and execution retain their Prism limits.
+/// selected staging, compressed or decoded projection, and execution retain
+/// their Prism limits. No resident database or writer lease is constructed.
 pub(super) async fn run_buffered<V: Vfs + Clone>(
     view: &mut BufferedReadView<V>,
     cx: &QueryCx,
@@ -412,10 +449,38 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let result = view
-        .execute_fnx(cx, &prepared.call, prepared.read)
-        .await
-        .map_err(super::execution_failure)?;
+    let result = if let Some((memory, sealing)) = prepared.sealed {
+        match prepared.quantum {
+            Some(quantum) => {
+                view.execute_fnx_sealed_cooperative(
+                    cx,
+                    &prepared.call,
+                    prepared.read,
+                    memory,
+                    sealing,
+                    prepared.source_incidences,
+                    quantum,
+                )
+                .await
+            }
+            None => {
+                view.execute_fnx_sealed(
+                    cx,
+                    &prepared.call,
+                    prepared.read,
+                    memory,
+                    sealing,
+                    prepared.source_incidences,
+                )
+                .await
+            }
+        }
+        .map_err(super::execution_failure)?
+    } else {
+        view.execute_fnx(cx, &prepared.call, prepared.read)
+            .await
+            .map_err(super::execution_failure)?
+    };
     render(result, robot, out)
 }
 
@@ -435,7 +500,7 @@ pub(super) async fn run_sealed(
         .sealed
         .ok_or_else(|| Failure::usage("compressed analytics requires --sealed"))?;
     let mut root_limits = RootReadLimits::default();
-    root_limits.max_incidences = root_limits.max_incidences.max(sealing.max_incidences);
+    root_limits.max_incidences = prepared.source_incidences;
     let graph = Database::open_prism_sealed_projection(
         open_cx,
         cx,
@@ -451,10 +516,25 @@ pub(super) async fn run_sealed(
         SealedProjectionOpenError::Read(error) => super::execution_failure(error),
         SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
     })?;
-    let analytics = prepared
-        .call
-        .execute_sealed(cx, &graph, prepared.read.execution_limits, memory)
-        .map_err(super::execution_failure)?;
+    let analytics = match prepared.quantum {
+        Some(quantum) => {
+            prepared
+                .call
+                .execute_sealed_cooperative(
+                    cx,
+                    &graph,
+                    prepared.read.execution_limits,
+                    memory,
+                    quantum,
+                    asupersync::runtime::yield_now::yield_now,
+                )
+                .await
+        }
+        None => prepared
+            .call
+            .execute_sealed(cx, &graph, prepared.read.execution_limits, memory),
+    }
+    .map_err(super::execution_failure)?;
     render(
         FnxReadResult::bind_selection(analytics, prepared.read.selection),
         robot,
