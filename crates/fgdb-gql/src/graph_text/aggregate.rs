@@ -87,7 +87,7 @@ impl Summary {
 
 /// Parse-once grouped text definition. Binding returns the existing aggregate
 /// with one shared governed source at execution time. Without GROUP BY, each
-/// distinct nonaggregate RETURN expression is a grouping key, in first-use
+/// distinct row-dependent nonaggregate RETURN expression is a grouping key, in first-use
 /// order. An explicit GROUP BY remains authoritative: every nonaggregate
 /// RETURN expression must occur in it, but its keys may be omitted from RETURN.
 /// Projected aliases resolve to the original expression, not a new key.
@@ -668,7 +668,7 @@ impl PreparedGraphAggregateText {
                 alias: text.clone(),
             });
         }
-        let input_projection = if computed.operands.is_empty() {
+        let input_projection = if !inputs.iter().any(|input| input.computed.is_some()) {
             None
         } else {
             let mut projection = Vec::new();
@@ -1475,6 +1475,21 @@ impl<'a> Parser<'a> {
         } else {
             self.source_name(at, end)
         };
+        // Parameters, literals and their local value programs are output
+        // expressions, not implicit keys. In particular they must still run
+        // once for a global aggregate over an empty graph. Reuse the parsed
+        // template without registering parameters or catalog reads again.
+        if function.is_none()
+            && let Some(index) = expression.and_then(|expression| expression.computed)
+            && computed.operands[index].row_independent()
+        {
+            return Ok(ReturnItem {
+                expression: None,
+                function: None,
+                alias,
+                output: Some(computed.operands[index].clone()),
+            });
+        }
         Ok(ReturnItem {
             expression,
             function,

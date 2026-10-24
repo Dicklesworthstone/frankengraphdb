@@ -1106,6 +1106,90 @@ fn computed_keys_work_as_hidden_grouping_and_direct_clause_references() {
 }
 
 #[test]
+fn row_independent_outputs_run_after_global_aggregation_even_on_empty_input() {
+    use fgdb_gql::GraphCountSource;
+    use fgdb_gql::algebra::GraphValue;
+
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        "MATCH (n) RETURN COUNT(*) AS count, [x IN $values | x+1] AS values",
+        &[("values", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(template.parameter_schema()[0].occurrences, 1);
+    for numbers in [vec![1, 1, 3], vec![]] {
+        let args = GqlParameters::new()
+            .with_list(
+                "values",
+                numbers
+                    .iter()
+                    .map(|&value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    .collect(),
+            )
+            .unwrap();
+        let plan = template.bind_parameters(&args).unwrap();
+        assert_eq!(
+            plan.count_summary_source(),
+            Some(GraphCountSource::Vertices)
+        );
+        for vertices in [&[][..], &[VId(1), VId(2), VId(3)][..]] {
+            let rows = run(&plan, vertices, &[], &Props::new()).unwrap().value;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].values()[0].as_count(), Some(vertices.len() as u64));
+            assert_eq!(
+                rows[0].values()[1].as_value(),
+                Some(&GraphValue::List(
+                    numbers
+                        .iter()
+                        .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value + 1)))
+                        .collect()
+                ))
+            );
+            let summary = plan
+                .prepare_count_summary(
+                    GraphCountSource::Vertices,
+                    vertices.len() as u64,
+                    vertices.len() as u64,
+                )
+                .unwrap();
+            assert_eq!(
+                summary
+                    .execute_governed::<&'static str, ()>(
+                        vertices.len() as u64,
+                        policy(),
+                        || Ok(())
+                    )
+                    .unwrap()
+                    .value,
+                rows
+            );
+        }
+    }
+    let grouped = prepare("MATCH (n) RETURN n.q AS key, COUNT(*) AS count, [1,2] AS values");
+    assert!(grouped.count_summary_source().is_none());
+    let groups = run(&grouped, &[VId(1), VId(2), VId(3)], &[], &properties())
+        .unwrap()
+        .value;
+    assert_eq!(groups.len(), 3);
+    assert!(
+        run(&grouped, &[], &[], &Props::new())
+            .unwrap()
+            .value
+            .is_empty()
+    );
+    assert!(
+        prepare("MATCH (n) RETURN COUNT(*) AS count, rand() AS draw")
+            .count_summary_source()
+            .is_none()
+    );
+    assert!(
+        prepare("MATCH (n) RETURN COUNT(*) AS count, [n.p] AS values")
+            .count_summary_source()
+            .is_none()
+    );
+}
+
+#[test]
 fn constant_and_nullable_arguments_preserve_walk_optional_and_empty_bags() {
     let plan = prepare(
         "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN \

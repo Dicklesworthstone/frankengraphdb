@@ -266,6 +266,75 @@ impl ElementKeySlot {
 }
 
 impl ReadValueTemplate {
+    /// Whether this expression can run after grouping without an input row.
+    /// Element locals belong to their enclosing comprehension/LET; random
+    /// draws remain row-dependent even when all explicit arguments are fixed.
+    pub(crate) fn row_independent(&self) -> bool {
+        use crate::GraphIntegerOp;
+        use crate::mutation_text::MutationIntegerTemplateOp;
+        match self {
+            Self::Column(_) | Self::Random { .. } => false,
+            Self::Literal(_) | Self::Parameter { .. } | Self::Local(_) => true,
+            Self::Integer { program, .. } => !program.iter().any(|op| {
+                matches!(
+                    op,
+                    MutationIntegerTemplateOp::Bound(
+                        GraphIntegerOp::Column(_)
+                            | GraphIntegerOp::ScalarColumn(_)
+                            | GraphIntegerOp::IdentityColumn { .. }
+                    )
+                )
+            }),
+            Self::List(values) => values.iter().all(Self::row_independent),
+            Self::Index { list, index } => list.row_independent() && index.row_independent(),
+            Self::Size(value) | Self::Keys(value) => value.row_independent(),
+            Self::In { value, list } => value.row_independent() && list.row_independent(),
+            Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
+                left.row_independent() && right.row_independent()
+            }
+            Self::Temporal { argument, .. } | Self::Function { argument, .. } => {
+                argument.row_independent()
+            }
+            Self::Comprehension { list, filter, map } => {
+                list.row_independent()
+                    && filter.as_deref().is_none_or(Self::row_independent)
+                    && map.as_deref().is_none_or(Self::row_independent)
+            }
+            Self::Quantifier {
+                list, predicate, ..
+            } => list.row_independent() && predicate.row_independent(),
+            Self::Slice { list, from, to } => {
+                list.row_independent()
+                    && from.as_deref().is_none_or(Self::row_independent)
+                    && to.as_deref().is_none_or(Self::row_independent)
+            }
+            Self::Range { start, end, step } => {
+                start.row_independent()
+                    && end.row_independent()
+                    && step.as_deref().is_none_or(Self::row_independent)
+            }
+            Self::Reduce { init, list, expr } => {
+                init.row_independent() && list.row_independent() && expr.row_independent()
+            }
+            Self::MapLiteral { values, guard, .. } => {
+                values.iter().all(Self::row_independent)
+                    && guard.as_deref().is_none_or(Self::row_independent)
+            }
+            Self::MapGet { map, .. } => map.row_independent(),
+            Self::MapOverlay { base, values, .. } => {
+                base.row_independent() && values.iter().all(Self::row_independent)
+            }
+            Self::Let { values, body } => {
+                values.iter().all(Self::row_independent) && body.row_independent()
+            }
+            Self::Case { arms, otherwise } => {
+                arms.iter().all(|(condition, value)| {
+                    condition.row_independent() && value.row_independent()
+                }) && otherwise.as_deref().is_none_or(Self::row_independent)
+            }
+        }
+    }
+
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
         Self::Parameter {
             index,
