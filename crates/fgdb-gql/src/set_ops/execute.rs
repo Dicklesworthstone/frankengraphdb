@@ -637,6 +637,22 @@ pub(crate) fn finish_owned_aggregate<E, C>(
     grouping: &super::WriteReturnGroup,
     checkpoint: impl FnMut() -> Result<(), C>,
 ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    finish_owned_aggregate_reading(
+        input,
+        policy,
+        grouping,
+        &mut projection::no_element_reads,
+        checkpoint,
+    )
+}
+
+pub(crate) fn finish_owned_aggregate_reading<E, C>(
+    input: GqlQueryExecution<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    grouping: &super::WriteReturnGroup,
+    elements: &mut projection::ElementRead<'_, E>,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
     let mut meter = Meter {
         policy,
         checkpoint,
@@ -646,14 +662,17 @@ pub(crate) fn finish_owned_aggregate<E, C>(
         },
         evaluator: input.evaluator,
     };
-    // A write's owned rows have no graph source to read elements from.
     let input = project_rows(
         input.value,
         &grouping.inputs,
         GraphSetQuantifier::All,
         true,
         &mut meter,
-        &mut projection::no_element_reads,
+        &mut |element, key| {
+            elements(element, key).map(|read| {
+                read.map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))
+            })
+        },
     )?;
     let value = grouping
         .summarize_value_rows(&input, &mut |event| {
@@ -690,6 +709,29 @@ pub(crate) fn finish_owned_projection<E, C>(
     page: (u64, Option<u64>),
     checkpoint: impl FnMut() -> Result<(), C>,
 ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    finish_owned_projection_reading(
+        input,
+        policy,
+        projection,
+        quantifier,
+        order,
+        page,
+        &mut projection::no_element_reads,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_owned_projection_reading<E, C>(
+    input: GqlQueryExecution<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    projection: &[GraphSetProjection],
+    quantifier: GraphSetQuantifier,
+    order: &[GraphValueOrder],
+    page: (u64, Option<u64>),
+    elements: &mut projection::ElementRead<'_, E>,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
     let mut meter = Meter {
         policy,
         checkpoint,
@@ -705,7 +747,11 @@ pub(crate) fn finish_owned_projection<E, C>(
         quantifier,
         true,
         &mut meter,
-        &mut projection::no_element_reads,
+        &mut |element, key| {
+            elements(element, key).map(|read| {
+                read.map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))
+            })
+        },
     )?;
     let rows = order_page(rows, order, page.0, page.1, &mut meter)?;
     for _ in &rows {
@@ -740,6 +786,22 @@ pub(crate) fn finish_owned_tail<E, C>(
     policy: GqlQueryPolicy,
     checkpoint: impl FnMut() -> Result<(), C>,
 ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    finish_owned_tail_reading(
+        head,
+        tail,
+        policy,
+        &mut projection::no_element_reads,
+        checkpoint,
+    )
+}
+
+pub(crate) fn finish_owned_tail_reading<E, C>(
+    head: GqlQueryExecution<GraphValueRow>,
+    tail: &PreparedGraphSet,
+    policy: GqlQueryPolicy,
+    elements: &mut projection::ElementRead<'_, E>,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
     let remaining = |limit: u64, spent: u64| limit.saturating_sub(spent);
     let budget = GqlQueryPolicy::new(
         remaining(
@@ -753,7 +815,7 @@ pub(crate) fn finish_owned_tail<E, C>(
             head.evaluator.scratch_entries,
         ),
     );
-    let output = tail.execute_over_owned(head.value, budget, checkpoint)?;
+    let output = tail.execute_over_owned_reading(head.value, budget, elements, checkpoint)?;
     // The tail ran inside what the head left, so each sum stays within the
     // statement's own limit; saturation only guards an unbounded policy.
     Ok(GqlQueryExecution {

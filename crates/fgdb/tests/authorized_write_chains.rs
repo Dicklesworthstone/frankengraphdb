@@ -1,5 +1,8 @@
 //! Real capabilities, native chain collectors, transaction staging and reopen.
 //! Private WITH rows cannot bypass scope, quotas or the one commit boundary.
+
+#![recursion_limit = "256"]
+
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
@@ -7,8 +10,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+    PreparedGraphInsertQueryText, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -1117,5 +1120,270 @@ fn plain_and_detach_delete_chains_keep_native_incidence_rules_and_reopen() {
             assert_eq!(reopened.vertices().unwrap(), survivors);
             assert!(reopened.edges().unwrap().is_empty());
         }
+    });
+}
+
+#[test]
+fn computed_create_output_and_private_with_read_the_admitted_staged_bag() {
+    lab(0xc4a1_2014, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let definition = PreparedGraphInsertQueryText::prepare(
+            "UNWIND [2,3] AS x CREATE (a:Visible {p:x})-[r:R {p:x*10}]->(b:Visible {p:x+1}) \
+             WITH collect(a) AS ns, sum([e IN [r] | e.p][0]) AS total \
+             RETURN [n IN ns | n.p] AS values, total",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let (stats, rows, _) = db
+            .execute_graph_insert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &definition,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (4, 2));
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::List(
+                    vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(2)),
+                        GraphValue::Scalar(CanonicalScalar::Int(3))
+                    ]
+                    .into_boxed_slice()
+                ),
+                GraphValue::Scalar(CanonicalScalar::Int(50)),
+            ]
+        );
+        let program = chain(
+            "CREATE (a:Visible {p:7}) WITH a, [v IN [a] | v.p][0] AS old \
+             CREATE (b:Visible {p:old+1}) RETURN [v IN [a,b] | v.p] AS values",
+        );
+        let (stats, rows, _) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                    GraphValue::Scalar(CanonicalScalar::Int(8))
+                ]
+                .into_boxed_slice()
+            ),]
+        );
+        assert_eq!(db.vertices().unwrap().len(), 6);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn computed_create_output_masks_untrusted_identities_and_refuses_hidden_fields() {
+    lab(0xc4a1_2015, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(11))]);
+        seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(22))]);
+        seed.create_vertex(VId(3), vec![HIDDEN], vec![(P, CanonicalScalar::Int(33))]);
+        seed.add_edge(EId(11), VId(1), VId(2), vec![(P, CanonicalScalar::Int(44))]);
+        seed.add_edge(EId(12), VId(1), VId(3), vec![(P, CanonicalScalar::Int(55))]);
+        seed.add_edge(EId(13), VId(3), VId(2), vec![(P, CanonicalScalar::Int(66))]);
+        db.write(&commit, seed).await.unwrap();
+        let mut outside = WriteBatch::new(RelationId(3));
+        outside.add_edge(EId(14), VId(1), VId(2), vec![(P, CanonicalScalar::Int(77))]);
+        db.write(&commit, outside).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let definition = PreparedGraphInsertQueryText::prepare_with_parameter_types(
+            "CREATE (n:Visible {p:7}) RETURN [v IN $refs | v.p] AS values",
+            R,
+            &[("refs", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_list(
+                    "refs",
+                    vec![
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Edge(EId(11)),
+                        GraphValue::Vertex(VId(3)),
+                        GraphValue::Vertex(VId(999)),
+                        GraphValue::Edge(EId(12)),
+                        GraphValue::Edge(EId(13)),
+                        GraphValue::Edge(EId(14)),
+                        GraphValue::Edge(EId(999)),
+                    ],
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let (_, rows, _) = db
+            .execute_graph_insert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &definition,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        let mut expected = vec![
+            GraphValue::Scalar(CanonicalScalar::Int(11)),
+            GraphValue::Scalar(CanonicalScalar::Int(44)),
+        ];
+        expected.extend((0..6).map(|_| GraphValue::Scalar(CanonicalScalar::Null)));
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::List(expected.into_boxed_slice())]
+        );
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        for text in [
+            "CREATE (n:Visible {p:7}) RETURN [v IN [n] | v.secret][0] AS hidden",
+            "UNWIND [1,0] AS x CREATE (n:Visible {p:x}) RETURN [v IN [n] | 1/v.p][0] AS value LIMIT 0",
+        ] {
+            let definition = PreparedGraphInsertQueryText::prepare(text, R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let error = db
+                .execute_graph_insert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &definition,
+                    policy(1),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if text.contains("secret") {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            }
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn blind_create_continuations_cannot_read_parameter_carried_element_ids() {
+    lab(0xc4a1_2016, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(11))]);
+        seed.create_vertex(VId(2), vec![HIDDEN], vec![(P, CanonicalScalar::Int(22))]);
+        db.write(&commit, seed).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::Write, 0), NOW).unwrap();
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            "CREATE (a:Visible) WITH [v IN $refs | v.p][0] AS copied \
+             CREATE (b:Visible {p:copied})",
+            R,
+            &[("refs", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        for identity in [
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(2)),
+            GraphValue::Vertex(VId(999)),
+            GraphValue::Edge(EId(999)),
+        ] {
+            let program = template
+                .bind_parameters(
+                    &GqlParameters::new()
+                        .with_list("refs", vec![identity])
+                        .unwrap(),
+                )
+                .unwrap();
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                authorization(&error),
+                Some(Error::PermissionDenied),
+                "{error:?}"
+            );
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+        }
+        // Returning a known CREATE binding to a private continuation retains
+        // the existing blind-write contract; it performs no element lookup.
+        let own = chain("CREATE (a:Visible {p:3}) WITH a, a.p AS p CREATE (b:Visible {p:p+1})");
+        let (stats, rows, _) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &own,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 2);
+        assert!(rows.value.is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

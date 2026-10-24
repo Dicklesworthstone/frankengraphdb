@@ -175,7 +175,8 @@ pub use graph_text::{
 };
 pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{
-    GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
+    GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError,
+    GraphInsertQueryCollection, GraphInsertQueryError, GraphInsertQueryOutput,
     PreparedGraphInsertQuery,
 };
 pub use insertion_query_text::PreparedGraphInsertQueryText;

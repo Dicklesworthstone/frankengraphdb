@@ -1088,18 +1088,16 @@ impl PreparedGraphInsertText {
             }
             Some(input)
         };
-        if relational
-            .as_ref()
-            .is_some_and(|input| !input.row_fields.is_empty())
-        {
-            for (key, slot) in &syntax.element_keys {
-                slot.resolve(
-                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
-                        Some(GraphSymbol::Property(key)) => Some(key),
-                        _ => None,
-                    },
-                );
-            }
+        // Computed RETURN/WITH values can dereference created identities even
+        // for a standalone CREATE with no relational input or hidden fields.
+        // Bind every parsed key at the same catalog boundary as source keys.
+        for (key, slot) in &syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
         }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
@@ -1352,6 +1350,17 @@ impl PreparedGraphInsertText {
         // or RETURN it is a query step. insertion_over_row decides after the
         // CREATE clauses, where the head is.
         let (parsed, returning, continuation) = parser.insertion_over_row(&schema, false)?;
+        // This input is already bound owned rows, so it does not pass through
+        // ReadSetTextInput::resolve. Resolve the new CREATE's computed output
+        // keys here, including reads that mix carried and newly created IDs.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let (columns, types) = schema
             .iter()
             .map(|(name, kind)| (name.text.to_owned(), *kind))

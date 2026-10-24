@@ -290,7 +290,8 @@ impl<V: Vfs + Clone> Database<V> {
                     // borrows end before intent staging or awaiting completion.
                     let controls = RefCell::new(&mut execution);
                     let database = RefCell::new(&mut *self);
-                    query.execute_governed_with_source(
+                    query.collect_governed_over(
+                        None,
                         policy,
                         InsertGraphSource {
                             transaction: workspace.transaction(),
@@ -306,15 +307,7 @@ impl<V: Vfs + Clone> Database<V> {
                         },
                     )
                 })?;
-                let (creation, result) = proposal.into_parts();
-                let rows = u64::try_from(result.value.len())
-                    .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
-                // Even an empty result rechecks expiry. No identity-row charge
-                // is made by stage_proposal on this projected-result path.
-                execution
-                    .permit
-                    .charge_rows_at((execution.clock)(), rows)
-                    .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
+                let (creation, output) = proposal.into_parts();
                 let (stats, _, _) = stage_proposal(
                     workspace.transaction(),
                     self,
@@ -326,6 +319,23 @@ impl<V: Vfs + Clone> Database<V> {
                     None,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                let result = finish_output(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    output,
+                    verified.predicates(),
+                    &mut execution,
+                )
+                .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+                let rows = u64::try_from(result.value.len())
+                    .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
+                // Even an empty result rechecks expiry. No identity-row charge
+                // is made by stage_proposal on this projected-result path.
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(|error| query_source(WriteTxnError::Authorization(error)))?;
                 query_cx
                     .with_restriction(|| {
                         admit(&result.value, &mut |work| {
@@ -461,6 +471,49 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         returning,
         None,
     )
+}
+
+/// Finish only after all original CREATE intents are privately staged. Point
+/// reads authorize arbitrary identities and both edge endpoints before payload
+/// access. A blind write may still return its existing direct creation bindings,
+/// but those bindings never confer Read authority on a computed identity.
+pub(super) fn finish_output<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    query_cx: &QueryCx,
+    output: fgdb_gql::GraphInsertQueryOutput<'_>,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<
+    GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<fgdb_gql::GraphSetExecutionError<WriteTxnError>, WriteTxnError>,
+> {
+    query_cx.with_restriction(|| {
+        let controls = RefCell::new(execution);
+        output.finish_governed_reading(
+            |element, key| {
+                if !scope.rights().can_read() {
+                    return Err(WriteTxnError::Authorization(Error::PermissionDenied));
+                }
+                if !scope.allows_property(key) {
+                    return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                }
+                selection::mutation_element_property(
+                    transaction,
+                    database,
+                    query_cx,
+                    element,
+                    key,
+                    scope,
+                    &controls,
+                )
+            },
+            || {
+                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                controls.borrow_mut().checkpoint()
+            },
+        )
+    })
 }
 
 // Both insertion result surfaces stage identical original intents. Only the

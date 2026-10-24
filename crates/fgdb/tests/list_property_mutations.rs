@@ -1,6 +1,8 @@
 //! List-valued mutation proposals through real database and capability owners.
 //! Storage expectations are constructed directly, not by a second evaluator.
 
+#![recursion_limit = "256"]
+
 use asupersync::Budget;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
@@ -830,7 +832,8 @@ fn authorized_chain_reads_newly_created_elements_from_the_staged_cut() {
         };
         let token = authority.issue_at(&grant, 100).unwrap();
         let chain = fgdb_gql::PreparedGraphWriteChainText::prepare(
-            "CREATE (n:Item {q:7}) WITH n, [n][0] AS b SET n.p = b.q RETURN n.p AS p",
+            "CREATE (n:Item {q:7}) WITH n, [n][0] AS b, [x IN [n] | x.q][0] AS old \
+             SET n.p = b.q + old RETURN n.p AS p",
             R,
             Catalog,
         )
@@ -852,7 +855,7 @@ fn authorized_chain_reads_newly_created_elements_from_the_staged_cut() {
             .await
             .unwrap();
         assert_eq!(result.value.len(), 1);
-        assert_eq!(result.value[0].values(), &[int(7)]);
+        assert_eq!(result.value[0].values(), &[int(14)]);
         let mut hidden = grant;
         hidden.properties = Scope::only([P]);
         let token = authority.issue_at(&hidden, 100).unwrap();
