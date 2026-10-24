@@ -210,6 +210,22 @@ impl PreparedGraphAggregateText {
         }
         let mut groups = Vec::new();
         let explicit_groups = parser.take_word("GROUP")?;
+        if !explicit_groups {
+            // Parameters, literals and their local value programs are output
+            // expressions, not implicit keys. They must still run once for a
+            // global aggregate over an empty graph. Reuse parsed templates;
+            // do not register parameters or catalog reads twice. Explicit
+            // GROUP BY retains its declared key and alias semantics.
+            for item in &mut returned {
+                if item.function.is_none()
+                    && let Some(index) = item.expression.and_then(|expression| expression.computed)
+                    && computed.operands[index].row_independent()
+                {
+                    item.expression = None;
+                    item.output = Some(computed.operands[index].clone());
+                }
+            }
+        }
         if explicit_groups {
             parser.word("BY")?;
             loop {
@@ -1475,21 +1491,6 @@ impl<'a> Parser<'a> {
         } else {
             self.source_name(at, end)
         };
-        // Parameters, literals and their local value programs are output
-        // expressions, not implicit keys. In particular they must still run
-        // once for a global aggregate over an empty graph. Reuse the parsed
-        // template without registering parameters or catalog reads again.
-        if function.is_none()
-            && let Some(index) = expression.and_then(|expression| expression.computed)
-            && computed.operands[index].row_independent()
-        {
-            return Ok(ReturnItem {
-                expression: None,
-                function: None,
-                alias,
-                output: Some(computed.operands[index].clone()),
-            });
-        }
         Ok(ReturnItem {
             expression,
             function,
