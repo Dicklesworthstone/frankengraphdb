@@ -173,7 +173,7 @@ impl FnxCallSpec {
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
         quantum: NonZeroUsize,
-        yield_now: Yield,
+        mut yield_now: Yield,
         guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
     ) -> Result<FnxResult>
     where
@@ -292,6 +292,28 @@ impl FnxCallSpec {
             }
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;
+            if super::directional_bfs::eligible(self, graph, limits, memory, &admission) {
+                // Borrow the host's yield callback until optional scratch is
+                // admitted. A capacity fallback can still use the ordinary
+                // queue driver and the same callback without restarting work.
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now: &mut yield_now,
+                };
+                if let Some(result) = super::directional_bfs::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await?
+                {
+                    return Ok(result);
+                }
+            }
             let pass = execution_pass_work(self, graph)?;
             let (kernel, estimated_work, workspace, source) = match self.algorithm() {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {

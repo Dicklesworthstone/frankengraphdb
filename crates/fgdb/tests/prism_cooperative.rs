@@ -35,6 +35,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 #[path = "prism_cooperative/betweenness.rs"]
 mod betweenness;
+#[path = "prism_cooperative/bfs.rs"]
+mod bfs;
 #[path = "prism_cooperative/clustering.rs"]
 mod clustering;
 #[path = "prism_cooperative/connectivity.rs"]

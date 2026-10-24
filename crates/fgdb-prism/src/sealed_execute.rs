@@ -8,7 +8,7 @@ use crate::execute::{
 };
 use crate::sealed_control::Control;
 use crate::{
-    AdapterPath, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
+    AdapterPath, BfsDecisionCard, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
     FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxOutput, FnxParameters, FnxResult,
     FnxValue, FoundationAlgorithm, PageRankOptions, SealedGraphView, SealedNeighborCursor,
@@ -37,6 +37,8 @@ mod cooperative;
 mod core_number;
 #[path = "sealed_directed_clustering.rs"]
 mod directed_clustering;
+#[path = "sealed_bfs.rs"]
+mod directional_bfs;
 #[path = "sealed_distance.rs"]
 mod distance;
 #[path = "sealed_eigenvector.rs"]
@@ -632,6 +634,12 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
+        if directional_bfs::eligible(self, graph, limits, memory, &admission)
+            && let Some(result) =
+                directional_bfs::execute(self, cx, graph, limits, memory, &admission)?
+        {
+            return Ok(result);
+        }
         if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
             return cdlp::execute(self, cx, graph, limits, memory, &admission);
         }
@@ -802,12 +810,37 @@ fn finish(
     admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<FnxResult> {
+    finish_bfs(
+        call,
+        graph,
+        output,
+        kernel,
+        estimated_work,
+        workspace,
+        admission,
+        None,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_bfs(
+    call: &FnxCallSpec,
+    graph: &SealedGraphView,
+    output: KernelOutput,
+    kernel: &'static str,
+    estimated_work: usize,
+    workspace: usize,
+    admission: &ResultAdmission,
+    bfs_decision_card: Option<BfsDecisionCard>,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<FnxResult> {
     checkpoint()?;
     let mut encoded = EncodedRows::new(call, output.row_count, admission)?;
     for index in 0..graph.node_count() {
         encoded.push(call, graph, &output.values, index, checkpoint)?;
     }
-    finish_encoded(
+    finish_encoded_bfs(
         call,
         graph,
         encoded,
@@ -815,6 +848,7 @@ fn finish(
         kernel,
         estimated_work,
         workspace,
+        bfs_decision_card,
         checkpoint,
     )
 }
@@ -934,10 +968,35 @@ fn finish_encoded(
     call: &FnxCallSpec,
     graph: &SealedGraphView,
     encoded: EncodedRows,
+    witness: ComplexityWitness,
+    kernel: &'static str,
+    estimated_work: usize,
+    workspace: usize,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<FnxResult> {
+    finish_encoded_bfs(
+        call,
+        graph,
+        encoded,
+        witness,
+        kernel,
+        estimated_work,
+        workspace,
+        None,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_encoded_bfs(
+    call: &FnxCallSpec,
+    graph: &SealedGraphView,
+    encoded: EncodedRows,
     mut witness: ComplexityWitness,
     kernel: &'static str,
     estimated_work: usize,
     workspace: usize,
+    bfs_decision_card: Option<BfsDecisionCard>,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<FnxResult> {
     let EncodedRows {
@@ -998,7 +1057,7 @@ fn finish_encoded(
     }
     hash_text(&mut hash, &witness.algorithm);
     hash_text(&mut hash, &witness.complexity_claim);
-    hash_bfs_decision_card(&mut hash, None, checkpoint)?;
+    hash_bfs_decision_card(&mut hash, bfs_decision_card.as_ref(), checkpoint)?;
     hash_component_decision_card(&mut hash, None, checkpoint)?;
     checkpoint()?;
     Ok(FnxResult {
@@ -1020,7 +1079,7 @@ fn finish_encoded(
             input_edges: graph.input_edge_count(),
             estimated_work,
             kernel_workspace_bytes: workspace,
-            bfs_decision_card: None,
+            bfs_decision_card,
             component_decision_card: None,
             witness,
             digest: hash.finalize(),
@@ -1039,6 +1098,7 @@ fn source_digest() -> Digest {
         for source in [
             include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
+            include_str!("sealed_bfs.rs"),
             include_str!("sealed_cooperative.rs"),
             include_str!("sealed_betweenness.rs"),
             include_str!("sealed_betweenness_cooperative.rs"),
