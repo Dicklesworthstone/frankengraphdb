@@ -25,11 +25,26 @@ pub(crate) struct VertexPositions {
 }
 
 impl VertexPositions {
+    fn capacity(len: usize) -> Option<usize> {
+        let len = u32::try_from(len).ok().filter(|&len| len < EMPTY)?;
+        (len as usize)
+            .max(1)
+            .checked_mul(2)?
+            .checked_next_power_of_two()
+    }
+
+    /// Reserve the exact prospective index allocation before retaining its
+    /// lazy owner. Rounding to a power of two can exceed eight bytes per row.
+    pub(crate) fn retained_bytes(len: usize) -> Option<usize> {
+        Self::capacity(len)?
+            .checked_mul(std::mem::size_of::<u32>())?
+            .checked_add(std::mem::size_of::<Self>())
+    }
+
     /// Index `table`, sorted and unique by identity. `None` when it is too
     /// long to address with a slot.
     pub(crate) fn build<T>(table: &[(VId, T)]) -> Option<Self> {
-        let len = u32::try_from(table.len()).ok().filter(|&len| len < EMPTY)?;
-        let capacity = (len as usize).max(1).checked_mul(2)?.next_power_of_two();
+        let capacity = Self::capacity(table.len())?;
         let mask = capacity - 1;
         let mut slots = vec![EMPTY; capacity].into_boxed_slice();
         for (position, &(vid, _)) in table.iter().enumerate() {
@@ -102,6 +117,13 @@ mod tests {
         ];
         for set in &sets {
             let positions = VertexPositions::build(set).unwrap();
+            assert_eq!(
+                VertexPositions::retained_bytes(set.len()),
+                Some(
+                    std::mem::size_of::<VertexPositions>()
+                        + positions.slots.len() * std::mem::size_of::<u32>()
+                )
+            );
             for (at, &(vid, _)) in set.iter().enumerate() {
                 assert_eq!(positions.find(set, vid), Some(at));
             }
@@ -112,6 +134,7 @@ mod tests {
                 assert_eq!(positions.find(set, VId(missing)), expected);
             }
         }
+        assert_eq!(VertexPositions::retained_bytes(u32::MAX as usize), None);
     }
 
     /// Identities chosen to share one slot overflow every probe window, and

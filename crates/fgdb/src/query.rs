@@ -22,6 +22,8 @@ mod diff;
 mod explain;
 #[path = "query_prism.rs"]
 mod prism;
+#[path = "query_read_cache.rs"]
+mod read_cache;
 #[path = "query_view.rs"]
 mod view;
 pub use crate::gql_cert::NativeResultCertificate;
@@ -51,6 +53,8 @@ pub(crate) use prism::{
     bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
     push_staged as push_prism_staged, source_control as prism_source_control,
 };
+pub(crate) use read_cache::ReadCaches;
+pub use read_cache::{ReadCacheLimits, ReadCacheStatus, ReadCacheUsage};
 pub use view::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,

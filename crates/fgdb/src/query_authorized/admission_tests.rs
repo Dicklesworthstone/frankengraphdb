@@ -5,7 +5,7 @@
 //! commit never serves the previous generation's records.
 
 use super::super::{SCANS, WORK_RUNS};
-use super::{ADMITTED, AdmissionKey, INLINE_IDENTITIES, POSITIONED_EDGES};
+use super::{AdmissionKey, INLINE_IDENTITIES, POSITIONED_EDGES};
 use crate::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
@@ -41,8 +41,7 @@ fn scans() -> usize {
     SCANS.with(Cell::get)
 }
 
-/// The reuse witnesses share the process-wide sidecar: a contended lookup
-/// lawfully scans, so the tests that count scans take turns.
+/// These tests vary process-wide physical-profile instrumentation.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     SERIAL
@@ -234,7 +233,10 @@ fn a_reused_full_scan_spends_exactly_what_its_scan_spent_with(inline: bool, posi
             assert_eq!(warm, cold, "{text}");
             if text != VERTEX_READ {
                 let at = db.frontier().unwrap();
-                let core = ADMITTED
+                let core = db
+                    .snapshot
+                    .read_caches
+                    .admitted
                     .lookup(&db.snapshot, AdmissionKey { at, edges: true })
                     .unwrap();
                 assert_eq!(core.identities.is_some(), inline, "{text}: refill form");
@@ -307,10 +309,16 @@ fn statements_with_one_admitted_set_share_it_with(inline: bool, positioned: bool
         assert_eq!(scans(), before + 1);
         // Both sets are retained, as coordinates of every admitted record.
         let at = warm.frontier().unwrap();
-        let edges = ADMITTED
+        let edges = warm
+            .snapshot
+            .read_caches
+            .admitted
             .lookup(&warm.snapshot, AdmissionKey { at, edges: true })
             .unwrap();
-        let vertices = ADMITTED
+        let vertices = warm
+            .snapshot
+            .read_caches
+            .admitted
             .lookup(&warm.snapshot, AdmissionKey { at, edges: false })
             .unwrap();
         assert_eq!((edges.vertices.len(), vertices.vertices.len()), (8, 8));
@@ -574,7 +582,10 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
                 .unwrap()
         );
         let at = db.frontier().unwrap();
-        let core = ADMITTED
+        let core = db
+            .snapshot
+            .read_caches
+            .admitted
             .lookup(&db.snapshot, AdmissionKey { at, edges: true })
             .unwrap();
         assert_eq!((core.vertices.len(), core.edges.len()), (400, 400));
@@ -602,7 +613,10 @@ fn filterless_counts_replay_without_refilling_source_tables() {
             let db = database(&c.commit()).await;
             let cold = read(&db, &cx, &token, text, || 100).unwrap();
             let before = scans();
-            let core = ADMITTED
+            let core = db
+                .snapshot
+                .read_caches
+                .admitted
                 .lookup(
                     &db.snapshot,
                     AdmissionKey {

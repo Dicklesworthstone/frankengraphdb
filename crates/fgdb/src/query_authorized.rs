@@ -55,7 +55,9 @@ pub use relational::{
     AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
-use admission::{ADMITTED, AdmissionKey, AdmittedCore, CoreEdge, Recording};
+pub(crate) use admission::{ADMITTED_BYTES, AdmittedCache};
+use admission::{AdmissionKey, AdmittedCore, CoreEdge, Recording};
+pub(crate) use analytics::AuthorizedProjectionCache;
 
 #[cfg(test)]
 thread_local! {
@@ -529,7 +531,15 @@ impl<'a> Tables<'a> {
         };
         let mut tables = Self::new();
         let mut reused = None;
-        if let Some(core) = reusable.then(|| ADMITTED.lookup(snapshot, key)).flatten() {
+        let retained = if reusable {
+            snapshot
+                .read_caches
+                .admitted
+                .lookup_controlled(snapshot, key, poll)?
+        } else {
+            None
+        };
+        if let Some(core) = retained {
             // Spend first: every limit refuses before the tables are refilled.
             core.replay(&mut node, poll, control)?;
             // A reader of triples alone takes a core's positioned edges or
@@ -546,7 +556,8 @@ impl<'a> Tables<'a> {
         } else {
             #[cfg(test)]
             SCANS.with(|scans| scans.set(scans.get() + 1));
-            let recording = reusable.then(|| RefCell::new(Recording::default()));
+            let recording = (reusable && snapshot.read_caches.admitted.max_bytes() != 0)
+                .then(|| RefCell::new(Recording::default()));
             let mut scan = |_| {
                 if let Some(recording) = &recording {
                     recording.borrow_mut().poll();
@@ -590,7 +601,13 @@ impl<'a> Tables<'a> {
                 recording.and_then(|recording| recording.into_inner().finish(tables.records))
             {
                 let bytes = core.bytes();
-                ADMITTED.remember(snapshot, key, Arc::new(core), bytes);
+                snapshot.read_caches.admitted.remember(
+                    snapshot,
+                    key,
+                    Arc::new(core),
+                    bytes,
+                    poll,
+                )?;
             }
         }
         tables.seal();

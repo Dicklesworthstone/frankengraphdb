@@ -42,9 +42,21 @@ fn builds() -> usize {
     BUILDS.with(Cell::get)
 }
 
-/// The reuse witnesses share the process-wide sidecar: a contended lookup
-/// lawfully builds, so the tests that count builds take turns, together with
-/// the session tests that fill it.
+fn remember_projection<Owner>(
+    cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
+    owner: &Arc<Owner>,
+    key: ProjectionKey,
+    graph: &SnapshotGraphView,
+    tape: Tape,
+) {
+    remember_projection_controlled(cache, owner, key, graph, tape, &mut || {
+        Ok::<_, core::convert::Infallible>(())
+    })
+    .unwrap();
+}
+
+/// Keep the existing simulation-instrumentation test turn. Cache capacity is
+/// owned by each test's opened database.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     super::reuse_test_turn()
 }

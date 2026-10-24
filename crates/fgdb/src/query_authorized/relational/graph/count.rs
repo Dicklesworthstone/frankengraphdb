@@ -28,7 +28,8 @@ pub(super) fn admit(
     // Preserve the existing unrestricted warm source for later statements,
     // including queries that need its actual records. Scoped sources never
     // populate or consume this shared core.
-    let recording = reusable.then(|| RefCell::new(Recording::default()));
+    let recording = (reusable && snapshot.read_caches.admitted.max_bytes() != 0)
+        .then(|| RefCell::new(Recording::default()));
     let mut scan = |_| {
         if let Some(recording) = &recording {
             recording.borrow_mut().poll();
@@ -85,7 +86,13 @@ pub(super) fn admit(
         recording.and_then(|recording| recording.into_inner().finish(tables.records))
     {
         let bytes = core.bytes();
-        ADMITTED.remember(snapshot, AdmissionKey { at, edges }, Arc::new(core), bytes);
+        snapshot.read_caches.admitted.remember(
+            snapshot,
+            AdmissionKey { at, edges },
+            Arc::new(core),
+            bytes,
+            poll,
+        )?;
     }
     Ok(Input {
         records: tables.records,

@@ -12,7 +12,8 @@
 //! before.
 //!
 //! The sidecar follows `query_prism/cache.rs`: a weak owner on the live
-//! snapshot allocation, no eviction of live entries, never a wait. It is
+//! snapshot allocation, no eviction of live entries on admission, and live
+//! cancellation checks while contended. Its database owns the allowance. It is
 //! trusted-host state and is never handed to a token holder.
 
 use super::tape::{Step, Tape};
@@ -31,14 +32,13 @@ use std::sync::Arc;
 /// vertices, 30.6M edges: ~300 MB of coordinates and ~370 MB of positioned
 /// edges) beside its vertex-only core, on a resident server that holds
 /// 15-50 GiB for such graphs.
-const ADMITTED_BYTES: usize = 1024 * 1024 * 1024;
+pub(crate) const ADMITTED_BYTES: usize = 1024 * 1024 * 1024;
 
-pub(super) static ADMITTED: LiveCache<Snapshot, AdmissionKey, Arc<AdmittedCore>> =
-    LiveCache::new(ADMITTED_BYTES);
+pub(crate) type AdmittedCache = LiveCache<Snapshot, AdmissionKey, Arc<AdmittedCore>>;
 
 /// What a full scan's admitted set depends on under a scope that hides nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct AdmissionKey {
+pub(crate) struct AdmissionKey {
     pub(super) at: CommitSeq,
     /// Whether the plan reads edges: a vertex-only plan admits none.
     pub(super) edges: bool,
@@ -126,7 +126,7 @@ pub(super) struct CoreEdge {
 /// A full scan's admitted records, in admission order (ascending identity),
 /// as coordinates into the snapshot allocation that produced them.
 #[derive(Debug, Default)]
-pub(super) struct AdmittedCore {
+pub(crate) struct AdmittedCore {
     /// Identity, patch and row of each admitted vertex. The identity stays
     /// inline: a vertex-only statement refills from it without touching the
     /// rows, and vertices are few beside edges.
@@ -143,7 +143,8 @@ pub(super) struct AdmittedCore {
     pub(super) tape: Tape,
     /// Where each vertex sits in the sealed table this core refills, built by
     /// the first statement that refills it and shared by every later one.
-    /// Not counted in `bytes`: 8 bytes per vertex, built after admission.
+    /// Its complete prospective allocation is reserved by `bytes` before
+    /// admission, even when a later statement is the first to build it.
     pub(super) positions: std::sync::OnceLock<Option<Arc<super::positions::VertexPositions>>>,
 }
 
@@ -198,6 +199,7 @@ impl AdmittedCore {
             })
             + self.positioned.as_ref().map_or(0, PositionedEdges::bytes)
             + self.tape.bytes()
+            + super::positions::VertexPositions::retained_bytes(self.vertices.len()).unwrap_or(0)
     }
 }
 
