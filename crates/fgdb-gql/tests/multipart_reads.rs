@@ -1323,3 +1323,35 @@ fn a_where_membership_reads_a_computed_list() {
         vec![vertices(&[1]), vertices(&[4])]
     );
 }
+
+/// A plain RETURN's ORDER BY over a count subquery or a pattern
+/// comprehension (`ORDER BY COUNT { (n)-->() } DESC`, top-N by degree): the
+/// RETURN's head gathers each into a private output, which the page sorts by
+/// and then projects away. Degrees are 3, 1, 1 and 0; ties fall to the next
+/// key. Under DISTINCT, and for a name an output alias shadows, it refuses.
+#[test]
+fn a_return_page_orders_by_pattern_counts() {
+    let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count();
+    let mut by_degree: Vec<u128> = (1..=4).collect();
+    by_degree.sort_by_key(|&n| (core::cmp::Reverse(out(n)), n));
+    assert_eq!(
+        execute("MATCH (n) RETURN n ORDER BY COUNT { (n)-->() } DESC, n"),
+        by_degree.iter().map(|&n| vertices(&[n])).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute("MATCH (n) RETURN n ORDER BY size([(n)-->(m) | m]) DESC, n LIMIT 2"),
+        by_degree[..2]
+            .iter()
+            .map(|&n| vertices(&[n]))
+            .collect::<Vec<_>>()
+    );
+    for text in [
+        "MATCH (n) RETURN DISTINCT n.p AS p ORDER BY COUNT { (n)-->() }",
+        "MATCH (n), (k) RETURN k AS n ORDER BY COUNT { (n)-->() }",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

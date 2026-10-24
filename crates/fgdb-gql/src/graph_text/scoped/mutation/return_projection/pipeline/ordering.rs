@@ -283,6 +283,92 @@ impl<'a> Parser<'a> {
     /// Graph leaves retain sort-only property/function reads in the SAME
     /// native source projection. Aliases name the already computed output;
     /// every scalar operation still compiles through read_resolved_value.
+    /// The pattern comprehensions and count subqueries in the ORDER BY at the
+    /// current token, gathered into private outputs of `head`
+    /// (hoist_comprehension). Returns the head's width after them, which
+    /// keys their reads (comprehension_read), or None when there are none. A
+    /// name an output alias shadows refuses, since the page reads the alias
+    /// by that name.
+    fn hoist_page_reads(
+        &mut self,
+        head: &mut GraphProjectionHead<'a>,
+        offset: usize,
+        visible: usize,
+    ) -> Result<Option<usize>, GraphSetTextError> {
+        let shadowed: Vec<&'a str> = (self.visible_graph_bindings())
+            .map(|binding| binding.text)
+            .filter(|name| {
+                head.outputs[..visible]
+                    .iter()
+                    .any(|(output, _)| output.text == *name)
+                    && !super::carries_own(head, offset, name)
+            })
+            .collect();
+        let mut spans = Vec::new();
+        let mut locals: Vec<&'a str> = Vec::new();
+        let mut skip_until = 0_usize;
+        let mut previous = Some(self.current.kind);
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        loop {
+            let token = lexer.next()?;
+            if token.at < skip_until {
+                continue;
+            }
+            let after_dot = matches!(previous, Some(TokenKind::Punct(b'.')));
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !after_dot
+                        && ["SKIP", "OFFSET", "LIMIT", "UNION"]
+                            .iter()
+                            .any(|end| word.eq_ignore_ascii_case(end)) =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+            if let TokenKind::Word(word) = token.kind
+                && !after_dot
+                && super::binds_local(previous, lexer.clone().next()?.kind)
+            {
+                locals.push(word);
+            }
+            if super::hoist_candidate(token.kind, after_dot)
+                && let Some(span) = self.hoist_comprehension(
+                    &lexer,
+                    token,
+                    &mut head.outputs,
+                    &mut head.inputs,
+                    offset,
+                    super::HoistGuard {
+                        names: &BOUNDARY_READ_NAMES,
+                        locals: &locals,
+                        refused: &shadowed,
+                    },
+                )?
+            {
+                skip_until = span.1;
+                spans.push(span);
+                previous = Some(TokenKind::Punct(b']'));
+                continue;
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+        if spans.is_empty() {
+            return Ok(None);
+        }
+        let width = head.outputs.len();
+        self.comprehension_reads = Some((width, spans));
+        Ok(Some(width))
+    }
+
     pub(in crate::graph_text::scoped::mutation::return_projection) fn graph_expression_page(
         &mut self,
         head: &mut GraphProjectionHead<'a>,
@@ -292,9 +378,23 @@ impl<'a> Parser<'a> {
         let visible = head.outputs.len();
         let distinct = self.syntax.distinct;
         let offset = incoming.len();
+        // `ORDER BY COUNT { (n)-->() }` or a pattern comprehension over this
+        // part's bindings: the head gathers each into a private output, as a
+        // WITH head gathers one for its row scope, and the resolver below
+        // takes it where it stands. Not under DISTINCT.
+        let hoisted = if self.is_word("ORDER") && !distinct {
+            self.hoist_page_reads(head, offset, visible)?
+        } else {
+            None
+        };
         let page = self.expression_page(|parser| {
             parser.read_resolved_value(
                 &mut |parser| {
+                    if let Some(width) = hoisted
+                        && let Some(column) = parser.comprehension_read(width)?
+                    {
+                        return Ok(Some(column));
+                    }
                     let TokenKind::Word(word) = parser.current.kind else {
                         return Ok(None);
                     };
