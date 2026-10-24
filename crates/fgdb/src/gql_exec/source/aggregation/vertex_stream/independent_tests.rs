@@ -29,7 +29,7 @@ fn local_successors_preserve_root_position_and_every_lookup_refusal_retries() {
             cx: &cx,
             as_of: db.frontier().unwrap(),
             after: None,
-            candidates: RootCandidates::Histories,
+            candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
         };
         assert_eq!(
             source.next_vertex(&mut |_| Ok::<_, usize>(())).unwrap(),
@@ -123,7 +123,7 @@ fn independent_history_and_capture_checkpoints_release_the_one_pin_on_refusal() 
                     cx: &cx,
                     as_of: cut,
                     after: None,
-                    candidates: RootCandidates::Histories,
+                    candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
                 };
                 let mut total = 0;
                 let mut good = VertexScanCursor::new(build(), plan.clone(), wide, || {

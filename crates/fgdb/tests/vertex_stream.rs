@@ -484,8 +484,15 @@ fn first_rows_do_not_admit_the_remaining_table_and_limits_survive_consumer_pause
             db.write(&commit, batch).await.unwrap();
         }
         let prepared = pattern(0, Some(2), false);
+        // The root cursor reserves only an AVL spine, never the remaining
+        // 2,048 identities. Its height is below twice the identity bit width.
+        let spine_bound = 2 * u64::from(usize::BITS - 2048_usize.leading_zeros());
         let mut cursor = db
-            .stream_graph_vertices_governed(&cx, &prepared, GqlQueryPolicy::new(2, 2, 512, 0))
+            .stream_graph_vertices_governed(
+                &cx,
+                &prepared,
+                GqlQueryPolicy::new(2, 2, 512, spine_bound),
+            )
             .unwrap();
         assert_eq!(cursor.row_stats().snapshot_records, 0);
         assert_eq!(cursor.evaluator_stats().work_units, 0);
@@ -495,7 +502,7 @@ fn first_rows_do_not_admit_the_remaining_table_and_limits_survive_consumer_pause
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert_eq!(cursor.row_stats().snapshot_records, 2);
         assert!(cursor.evaluator_stats().work_units < 512);
-        assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+        assert!((1..=spine_bound).contains(&cursor.evaluator_stats().scratch_entries));
         assert!(cursor.next().is_none());
 
         let unbounded = pattern(0, None, false);
@@ -866,6 +873,8 @@ fn value_streams_keep_exact_shared_budgets_and_refuse_unstreamable_order_before_
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[path = "vertex_stream/linear_scan.rs"]
+mod linear_scan;
 #[path = "vertex_stream/ranges.rs"]
 mod ranges;
 

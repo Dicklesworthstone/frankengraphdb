@@ -93,7 +93,7 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                     cx: &cx,
                     as_of,
                     after: None,
-                    candidates: RootCandidates::Histories,
+                    candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
                 }
                 .with_root_equality(&plan, |_| true),
                 plan.clone(),
@@ -119,7 +119,7 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                         cx: &cx,
                         as_of,
                         after: None,
-                        candidates: RootCandidates::Histories,
+                        candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
                     }
                     .with_root_equality(&plan, |_| true),
                     plan.clone(),
@@ -160,7 +160,7 @@ fn every_actual_history_source_checkpoint_refuses_once_and_preserves_the_deliver
                         cx: &cx,
                         as_of,
                         after: None,
-                        candidates: RootCandidates::Histories,
+                        candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
                     }
                     .with_root_equality(&plan, |_| true),
                     plan.clone(),
@@ -283,7 +283,7 @@ fn snapshot_successors_are_sorted_and_visibility_uses_the_shared_mvcc_resolver()
                 cx: &cx,
                 as_of: cut,
                 after: None,
-                candidates: RootCandidates::Histories,
+                candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
             };
             let mut candidates = Vec::new();
             let mut visible = Vec::new();

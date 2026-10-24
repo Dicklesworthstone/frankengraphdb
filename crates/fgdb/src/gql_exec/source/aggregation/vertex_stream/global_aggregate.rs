@@ -38,7 +38,7 @@ fn open_global<'q>(
             cx,
             as_of,
             after: None,
-            candidates: RootCandidates::Histories,
+            candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
         }
         .with_root_equality_predicates(plan.leading_root_predicates(), |_| true)
         .with_root_prefix(plan.leading_root_prefix(), |_| true),

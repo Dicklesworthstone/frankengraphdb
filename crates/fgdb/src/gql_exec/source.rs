@@ -4,6 +4,8 @@
 mod aggregation;
 pub use aggregation::{SnapshotEdgeSource, SnapshotVertexSource};
 mod numeric;
+mod vertex_scan;
+use vertex_scan::VertexHistoryScanCursor;
 
 use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -1719,7 +1721,25 @@ impl PropertyEqualityIndex {
         as_of: CommitSeq,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<&'a VertexRow>, E> {
+        self.visible_row_with_history(patches, vid, as_of, None, control)
+    }
+
+    /// A root stream may retain the exact history it just enumerated. The
+    /// source owns the same immutable generation and checks the identity
+    /// before supplying this hint; probes and indexed candidates still use
+    /// the ordinary lookup. A sequential scan never builds a second row index.
+    fn visible_row_with_history<'a, E>(
+        &self,
+        patches: &'a [VertexPatchRows],
+        vid: VId,
+        as_of: CommitSeq,
+        history: Option<&History>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<&'a VertexRow>, E> {
         control(SourceEvent::Work)?;
+        if let Some(history) = history {
+            return visible_history_row(patches, history, as_of, control);
+        }
         if let Some(flat) = self.flat_rows()
             && let Some(at) = flat.positions.find(&flat.rows, vid)
             && flat.rows[at].1.latest <= as_of
@@ -1750,24 +1770,26 @@ impl PropertyEqualityIndex {
         let Some(history) = history else {
             return Ok(None);
         };
-        let mut node = history.0.as_deref();
-        let mut winner = None;
-        while let Some(current) = node {
-            control(SourceEvent::Work)?;
-            if current.key.0 <= as_of {
-                winner = Some(current.key);
-                node = current.right.0.as_deref();
-            } else {
-                node = current.left.0.as_deref();
-            }
-        }
-        let Some((_, patch, row)) = winner else {
-            return Ok(None);
-        };
-        control(SourceEvent::Work)?;
-        let row = &patches[patch][row];
-        Ok(row.visible_at(as_of).then_some(row))
+        visible_history_row(patches, history, as_of, control)
     }
+}
+
+/// Both point lookups and root cursors resolve the same complete history.
+/// In particular, a retirement restatement wins over an older live copy.
+fn visible_history_row<'a, E>(
+    patches: &'a [VertexPatchRows],
+    history: &History,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<&'a VertexRow>, E> {
+    let Some((patch, row)) =
+        HistoryRef::Tree(history).latest_charged(as_of, &mut || control(SourceEvent::Work))?
+    else {
+        return Ok(None);
+    };
+    control(SourceEvent::Work)?;
+    let row = &patches[patch][row];
+    Ok(row.visible_at(as_of).then_some(row))
 }
 
 #[derive(Clone, Copy)]
