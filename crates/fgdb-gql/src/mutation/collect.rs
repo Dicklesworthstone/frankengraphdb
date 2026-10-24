@@ -829,8 +829,10 @@ fn execute_erased<E, C>(
                         }
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
+                            // `n.tags + 'x'` over a stored List writes the
+                            // joined List (fgdb-bqri3), stored as Composite is.
                             let value = expression
-                                .evaluate_scalar_with_control(row.values(), &mut |event| {
+                                .evaluate_value_with_control(row.values(), &mut |event| {
                                     meter.event(event)
                                 })
                                 .map_err(|failure| match failure {
@@ -843,7 +845,15 @@ fn execute_erased<E, C>(
                                         })
                                     }
                                 })?;
-                            Value::Computed(value)
+                            match value {
+                                crate::algebra::GraphValue::Scalar(value) => Value::Computed(value),
+                                value => Value::Stored(stored::written(
+                                    &value,
+                                    row_at,
+                                    action_at,
+                                    &mut |event| meter.event(event),
+                                )?),
+                            }
                         }
                         GraphMutationValue::Composite(value) => {
                             let value = evaluate_composite(

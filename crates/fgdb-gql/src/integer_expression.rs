@@ -566,6 +566,10 @@ pub(crate) enum ExpressionCell<'a> {
     Count(u64),
     Integer(i128),
     Average(crate::GraphExactAverage),
+    /// A List only evaluate_value_with_control loads (fgdb-bqri3). `+` joins
+    /// it (list_plus); every other instruction refuses it, NonScalar, as the
+    /// scalar loader refuses it.
+    List(Cow<'a, GraphValue>),
 }
 
 impl ExpressionCell<'_> {
@@ -579,6 +583,7 @@ impl ExpressionCell<'_> {
             Self::Count(value) => Ok(Some(i128::from(*value))),
             Self::Integer(value) => Ok(Some(*value)),
             Self::Average(_) => Err(GraphIntegerErrorKind::NonInteger),
+            Self::List(_) => Err(GraphIntegerErrorKind::NonScalar),
         }
     }
 
@@ -612,6 +617,8 @@ impl ExpressionCell<'_> {
 
     fn text(&self) -> Result<Option<&str>, GraphIntegerErrorKind> {
         match self {
+            // A List is not text: a text predicate over it is NULL
+            // (predicate_text), any other text function refuses.
             Self::Scalar(value) => scalar_text(value),
             _ => Err(GraphIntegerErrorKind::NonText),
         }
@@ -772,6 +779,19 @@ impl GraphIntegerExpression {
         })
     }
 
+    /// Whether a `+` here may join a List (fgdb-bqri3): an Add or a text
+    /// Concat, which evaluate_value_with_control applies to a List input.
+    pub fn joins_values(&self) -> bool {
+        self.code.iter().any(|op| {
+            matches!(
+                op,
+                Instruction::Concat
+                    | Instruction::Binary(GraphIntegerBinary::Add)
+                    | Instruction::NumericBinary(GraphIntegerBinary::Add)
+            )
+        })
+    }
+
     /// The input columns read as scalars; each must admit a scalar.
     pub fn scalar_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
@@ -831,6 +851,51 @@ impl GraphIntegerExpression {
             charge_payload(scalar_payload_bytes(value), true, control)?;
         }
         Ok(value.into_owned())
+    }
+
+    /// As evaluate_scalar_with_control, except that a List input may meet
+    /// `+` (fgdb-bqri3): openCypher concatenates two lists and appends or
+    /// prepends any other value, so `n.tags + 'x'` and `n.ids + 5` answer a
+    /// List when the stored property holds one. A List anywhere else refuses
+    /// as the scalar loader does. The owned result is reserved as a copy.
+    pub fn evaluate_value_with_control<E>(
+        &self,
+        values: &[GraphValue],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValue, GraphIntegerEvaluationError<E>> {
+        let value = self.evaluate_loaded_with_control(
+            values.len(),
+            |column| match values.get(column) {
+                Some(GraphValue::Scalar(value)) => Ok(ExpressionCell::Scalar(Cow::Borrowed(value))),
+                Some(value @ GraphValue::List(_)) => Ok(ExpressionCell::List(Cow::Borrowed(value))),
+                Some(_) => Err(GraphIntegerErrorKind::NonScalar),
+                None => Err(GraphIntegerErrorKind::MissingColumn),
+            },
+            |column| element_identity(values.get(column)),
+            control,
+        )?;
+        match value {
+            ExpressionCell::Scalar(value) => {
+                if let Cow::Borrowed(value) = &value {
+                    charge_payload(scalar_payload_bytes(value), true, control)?;
+                }
+                Ok(GraphValue::Scalar(value.into_owned()))
+            }
+            // Only a join (list_plus) makes a List result. A List an input
+            // only passes through (coalesce, CASE) still refuses, as the
+            // scalar loader does, so only a joining program, which value_type
+            // admits as Stored, ever answers a List.
+            ExpressionCell::List(Cow::Owned(value)) => Ok(value),
+            ExpressionCell::List(Cow::Borrowed(_)) => {
+                Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                    instruction: self.code.len(),
+                    kind: GraphIntegerErrorKind::NonScalar,
+                }))
+            }
+            ExpressionCell::Count(_) | ExpressionCell::Integer(_) | ExpressionCell::Average(_) => {
+                unreachable!("ordinary inputs cannot produce exact aggregate cells")
+            }
+        }
     }
 
     /// Execute the same bytecode over scalar-compatible loaded cells. Exact
@@ -948,6 +1013,15 @@ impl GraphIntegerExpression {
                 Instruction::Binary(op) | Instruction::NumericBinary(op) => {
                     let mut right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
+                    if *op == GraphIntegerBinary::Add
+                        && (matches!(left, ExpressionCell::List(_))
+                            || matches!(right, ExpressionCell::List(_)))
+                    {
+                        let joined = list_plus(left, &right, at, control)?;
+                        *left = joined;
+                        at += 1;
+                        continue;
+                    }
                     // Arithmetic rounds each average operand once; NULLIF is
                     // an equality and keeps it exact.
                     let averaged = *op != GraphIntegerBinary::NullIf
@@ -1150,6 +1224,16 @@ impl GraphIntegerExpression {
                 | Instruction::Contains => {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
+                    // `n.tags + 'x'` compiles to Concat; over a List it appends.
+                    if matches!(op, Instruction::Concat)
+                        && (matches!(left, ExpressionCell::List(_))
+                            || matches!(right, ExpressionCell::List(_)))
+                    {
+                        let joined = list_plus(left, &right, at, control)?;
+                        *left = joined;
+                        at += 1;
+                        continue;
+                    }
                     let (a, b) = if matches!(op, Instruction::Concat) {
                         (left.text(), right.text())
                     } else {
@@ -1676,6 +1760,7 @@ fn binary64(
             CanonicalScalar::Float(value) => *value,
             _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
         },
+        ExpressionCell::List(_) => return Err(GraphIntegerErrorKind::NonScalar),
     }))
 }
 
@@ -1717,6 +1802,7 @@ fn to_boolean<E>(
         ExpressionCell::Average(_) => {
             return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
         }
+        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => CanonicalScalar::Null,
             CanonicalScalar::Bool(value) => CanonicalScalar::Bool(*value),
@@ -1754,6 +1840,7 @@ fn convert<E>(
             let float = CanonicalScalar::Float(average.binary64()).into();
             return convert(&float, to_text, instruction, control);
         }
+        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
             CanonicalScalar::Int(value) => i128::from(*value),
@@ -1903,6 +1990,7 @@ fn numeric<E>(
         ExpressionCell::Count(value) => integer(i128::from(*value)),
         ExpressionCell::Integer(value) => integer(*value),
         ExpressionCell::Average(average) => average.binary64(),
+        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
             CanonicalScalar::Int(value) => integer(i128::from(*value)),
@@ -2024,6 +2112,66 @@ fn make_text<E>(
     })
 }
 
+/// openCypher `+` with a List operand (fgdb-bqri3, as the value language's
+/// sum_value, fgdb-c4i0d): NULL on either side is NULL, two lists
+/// concatenate, and a list with any other value appends or prepends it. An
+/// exact count or sum joins as its Int, an exact average as its binary64.
+/// Every copied element is reserved before the joined list exists.
+fn list_plus<'a, E>(
+    left: &ExpressionCell<'a>,
+    right: &ExpressionCell<'a>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+    if left.is_null() || right.is_null() {
+        return Ok(CanonicalScalar::Null.into());
+    }
+    let overflow = || {
+        GraphIntegerEvaluationError::Value(GraphIntegerError {
+            instruction,
+            kind: GraphIntegerErrorKind::Overflow,
+        })
+    };
+    let member = |cell: &ExpressionCell<'a>| -> Result<GraphValue, GraphIntegerEvaluationError<E>> {
+        Ok(GraphValue::Scalar(match cell {
+            ExpressionCell::Scalar(value) => value.as_ref().clone(),
+            ExpressionCell::Count(value) => {
+                CanonicalScalar::Int(i64::try_from(*value).map_err(|_| overflow())?)
+            }
+            ExpressionCell::Integer(value) => {
+                CanonicalScalar::Int(i64::try_from(*value).map_err(|_| overflow())?)
+            }
+            ExpressionCell::Average(average) => CanonicalScalar::Float(average.binary64()),
+            ExpressionCell::List(_) => unreachable!("lists join by their members"),
+        }))
+    };
+    let mut joined = Vec::new();
+    for cell in [left, right] {
+        if let ExpressionCell::List(list) = cell {
+            let members = list.as_list().expect("a List cell holds a list");
+            for value in members {
+                joined.push(
+                    value
+                        .copy_with_control(control)
+                        .map_err(GraphIntegerEvaluationError::Control)?,
+                );
+            }
+        } else {
+            let value = member(cell)?;
+            control(GlaExecutionEvent::ScratchEntry)
+                .map_err(GraphIntegerEvaluationError::Control)?;
+            if let GraphValue::Scalar(scalar) = &value {
+                charge_payload(scalar_payload_bytes(scalar), true, control)?;
+            }
+            joined.push(value);
+        }
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
+    Ok(ExpressionCell::List(Cow::Owned(GraphValue::List(
+        joined.into_boxed_slice(),
+    ))))
+}
+
 fn compare_cells<E>(
     comparison: IntegerComparison,
     left: &ExpressionCell<'_>,
@@ -2038,6 +2186,13 @@ fn compare_cells<E>(
     }
     if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
         return compare_scalars(comparison, left, right, instruction, control);
+    }
+    // A List compares only in the value language (membership).
+    if matches!(left, ExpressionCell::List(_)) || matches!(right, ExpressionCell::List(_)) {
+        return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+            instruction,
+            kind: GraphIntegerErrorKind::NonScalar,
+        }));
     }
     // Every other cell is a number: a count, a wide sum or an exact average.
     // It is unequal to a scalar of another domain (fgdb-v6ku6).

@@ -914,7 +914,17 @@ fn admit(
             {
                 return Err(Error::UnknownInput { column, input });
             }
-            GraphSetColumnType::Scalar
+            // `+` over an input that may hold a stored List answers that List
+            // joined (fgdb-bqri3): the column is Stored, as a property is.
+            let dynamic = expression.referenced_locals().next().is_some()
+                || expression
+                    .scalar_columns()
+                    .any(|input| types[input] != GraphSetColumnType::Scalar);
+            if expression.joins_values() && dynamic {
+                GraphSetColumnType::Stored
+            } else {
+                GraphSetColumnType::Scalar
+            }
         }
         GraphSetValue::Value(value) => {
             if !value.validate_bounds() || value.canonical_byte_len().is_err() {
@@ -2021,8 +2031,9 @@ where
             GraphValue::Scalar(CanonicalScalar::Null)
         }
         GraphSetValue::Integer(expression) => {
+            // A stored List input may meet `+` (fgdb-bqri3).
             let value = expression
-                .evaluate_scalar_with_control(row.values(), control)
+                .evaluate_value_with_control(row.values(), control)
                 .map_err(|error| match error {
                     GraphIntegerEvaluationError::Control(error) => {
                         ProjectionFailure::Control(error)
@@ -2032,7 +2043,7 @@ where
                     }
                 })?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-            GraphValue::Scalar(value)
+            value
         }
         GraphSetValue::Value(value) => {
             copy_value(value, control).map_err(ProjectionFailure::Control)?

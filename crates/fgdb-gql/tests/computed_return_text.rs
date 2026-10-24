@@ -737,22 +737,26 @@ fn indexed_scalar_operands_keep_parameter_types_nulls_and_typed_failures() {
         let execution = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
         assert!(execution.value[0].get(0).unwrap().is_null(), "{text}");
     }
-    for (items, expected) in [
-        ("[[1]]", GraphIntegerErrorKind::NonScalar),
-        ("[true]", GraphIntegerErrorKind::NonInteger),
-    ] {
-        let query = prepare(&format!(
-            "MATCH (n) WITH {items} AS items RETURN items[0] + 10 AS result LIMIT 0"
-        ));
-        assert!(
-            matches!(
-                run(&query, &[VId(1)], &[], &Props::new()),
-                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
-                    if error.kind == expected
-            ),
-            "{items}"
-        );
-    }
+    // A list element `+` a number appends it, as openCypher's `[1] + 10` is
+    // [1, 10] (fgdb-bqri3); a Boolean element still refuses.
+    let query = prepare("MATCH (n) WITH [[1]] AS items RETURN items[0] + 10 AS result");
+    let execution = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
+    assert_eq!(
+        execution.value[0].values(),
+        &[GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(10)),
+            ]
+            .into_boxed_slice()
+        )]
+    );
+    let query = prepare("MATCH (n) WITH [true] AS items RETURN items[0] + 10 AS result LIMIT 0");
+    assert!(matches!(
+        run(&query, &[VId(1)], &[], &Props::new()),
+        Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+            if error.kind == GraphIntegerErrorKind::NonInteger
+    ));
 }
 
 #[test]

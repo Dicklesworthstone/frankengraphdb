@@ -746,7 +746,8 @@ mod projection_schema_tests {
     }
 
     /// A property is a stored value (fgdb-kr8j1), carried as one through WITH;
-    /// arithmetic over it is a scalar.
+    /// arithmetic over it is a scalar, except `+`, which joins a stored List
+    /// (fgdb-bqri3) and so answers the stored domain.
     #[test]
     fn edge_property_output_types_match_the_bound_plan_in_every_projection_form() {
         for (terminal, kind) in [
@@ -756,8 +757,12 @@ mod projection_schema_tests {
                 GraphSetColumnType::Stored,
             ),
             (
-                "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+                "WITH e.cost AS cost WHERE cost > 0 RETURN cost * 2 AS next",
                 GraphSetColumnType::Scalar,
+            ),
+            (
+                "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+                GraphSetColumnType::Stored,
             ),
         ] {
             check(&format!("MATCH (a)-[e:R]->(b) {terminal}"), &[kind]);

@@ -214,6 +214,8 @@ fn expression<'g, E, C>(
                     ExpressionCell::Count(value) => GraphAggregateValue::Count(value),
                     ExpressionCell::Integer(value) => GraphAggregateValue::Integer(value),
                     ExpressionCell::Average(value) => GraphAggregateValue::Average(value),
+                    // load_cell admits no List, so no `+` here produces one.
+                    ExpressionCell::List(_) => unreachable!("aggregate outputs load scalars"),
                 };
                 return Ok(OutputValue::Owned(value));
             }
@@ -248,6 +250,7 @@ fn expression<'g, E, C>(
                     sum: value.numerator(),
                     count: value.denominator(),
                 }),
+                ExpressionCell::List(_) => unreachable!("aggregate outputs load scalars"),
             }
         }
         GraphSetValue::List(values) => {

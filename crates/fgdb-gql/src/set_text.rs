@@ -381,6 +381,30 @@ impl ReadValueTemplate {
                 | crate::GraphValueFunction::StDevP => GraphSetColumnType::Scalar,
             },
             Self::Let { body, .. } => body.column_type(input, parameters),
+            // `+` over a value that may hold a stored List answers that List
+            // joined (fgdb-bqri3): Stored, as the projection admits it.
+            Self::Integer { program, .. } => {
+                use crate::GraphIntegerOp as Op;
+                use crate::mutation_text::MutationIntegerTemplateOp as Template;
+                let joins = program.iter().any(|op| {
+                    matches!(
+                        op,
+                        Template::Bound(Op::Concat | Op::Binary(crate::GraphIntegerBinary::Add))
+                    )
+                });
+                let dynamic = program.iter().any(|op| match op {
+                    Template::Bound(Op::Local(_)) => true,
+                    Template::Bound(Op::Column(column) | Op::ScalarColumn(column)) => {
+                        input[*column] != GraphSetColumnType::Scalar
+                    }
+                    _ => false,
+                });
+                if joins && dynamic {
+                    GraphSetColumnType::Stored
+                } else {
+                    GraphSetColumnType::Scalar
+                }
+            }
             Self::Local(_) | Self::Case { .. } => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
             Self::Parameter { index, .. } => {

@@ -1213,3 +1213,106 @@ fn stored_lists_grow_in_write_rows_and_size_in_arithmetic() {
         );
     });
 }
+
+/// fgdb-bqri3: `+` joins a stored List whatever the other operand's static
+/// type, as openCypher does. A text or number appends or prepends, and two
+/// dynamic Lists concatenate, in SET (plain or over an UNWIND row) and in
+/// RETURN. A scalar counter still adds. Every other operator over a List
+/// still refuses, and a text predicate over one is NULL. Expected values are
+/// enumerated by hand.
+#[test]
+fn plus_joins_a_stored_list_with_any_operand() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let empty = GqlParameters::new();
+        let query = |db: &Database<fgdb::MemVfs>, text: &str| {
+            let mut rows = cells(db.query(&cx, text, &empty, symbols, policy()).expect(text));
+            rows.sort();
+            rows
+        };
+        for statement in [
+            "MATCH (n:Person) SET n.first = [n.name]",
+            // Text appends and prepends (the scalar compiler's Concat).
+            "MATCH (n:Person) SET n.first = n.first + 'z'",
+            "MATCH (n:Person {name: 'a'}) SET n.first = 'y' + n.first",
+            // A map entry that holds a List concatenates (both dynamic).
+            "UNWIND [{who: 'b', more: ['m', 'n']}] AS row \
+             MATCH (n:Person {name: row.who}) SET n.first = n.first + row.more",
+            // A number appends to a numeric List; a scalar counter adds.
+            "MATCH (n:Person {name: 'c'}) SET n.p = [n.p]",
+            "MATCH (n:Person {name: 'c'}) SET n.p = n.p + 5",
+            "MATCH (n:Person {name: 'a'}) SET n.p = n.p + 1",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Person) RETURN n.name AS name, n.first AS first, n.p AS p"
+            ),
+            vec![
+                vec![text("a"), list([text("y"), text("a"), text("z")]), int(11)],
+                vec![
+                    text("b"),
+                    list([text("b"), text("z"), text("m"), text("n")]),
+                    int(20)
+                ],
+                vec![
+                    text("c"),
+                    list([text("c"), text("z")]),
+                    list([int(30), int(5)])
+                ],
+            ]
+        );
+        // Two dynamic Lists in RETURN (TCK Return2 [7]), a List with a
+        // number, and a text predicate over a List, which is NULL.
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Person {name: 'c'}) \
+                 RETURN n.first + n.first AS twice, n.p + 7 AS more, \
+                 n.first STARTS WITH 'c' AS starts"
+            ),
+            vec![vec![
+                list([text("c"), text("z"), text("c"), text("z")]),
+                list([int(30), int(5), int(7)]),
+                null(),
+            ]]
+        );
+        for statement in [
+            "MATCH (n:Person {name: 'c'}) SET n.p = n.p * 2",
+            "MATCH (n:Person {name: 'c'}) SET n.p = n.p - 5",
+        ] {
+            let result = write(&mut db, cxs, statement, &empty).await;
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with("execute:")),
+                "{statement}: {result:?}"
+            );
+        }
+        assert_eq!(
+            query(&db, "MATCH (n:Person {name: 'c'}) RETURN n.p AS p"),
+            vec![vec![list([int(30), int(5)])]]
+        );
+        // Only a join answers a List from the scalar program: one an
+        // expression merely passes through (coalesce, CASE) still refuses.
+        for statement in [
+            "MATCH (n:Person {name: 'c'}) RETURN coalesce(n.first, 'x') AS c",
+            "MATCH (n:Person {name: 'c'}) RETURN CASE WHEN n.p IS NULL THEN 'x' ELSE n.p END AS c",
+        ] {
+            assert!(
+                db.query(&cx, statement, &empty, symbols, policy()).is_err(),
+                "{statement}"
+            );
+        }
+    });
+}

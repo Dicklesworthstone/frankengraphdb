@@ -584,10 +584,12 @@ fn open_output_keeps_child_source_admission_and_late_expression_errors() {
             dynamic(&[GraphValue::List(Vec::new().into_boxed_slice())]),
         )
         .unwrap();
+    // `*` refuses a List late. (`+` joins one since fgdb-bqri3: [] + 0 is
+    // [0], so it no longer witnesses a late expression error.)
     let arithmetic = GraphIntegerExpression::prepare_scalar(&[
         GraphIntegerOp::ScalarColumn(0),
         GraphIntegerOp::Literal(Some(0)),
-        GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+        GraphIntegerOp::Binary(GraphIntegerBinary::Multiply),
     ])
     .unwrap();
     let projected = mixed
