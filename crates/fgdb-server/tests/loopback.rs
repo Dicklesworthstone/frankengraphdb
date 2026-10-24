@@ -2386,6 +2386,269 @@ fn subscriptions_push_a_baseline_then_exact_deltas_until_cancelled() {
     });
 }
 
+#[test]
+fn subscriptions_reuse_served_slots_across_129_terminal_paths() {
+    use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use fgdb_protocol::client::Change;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    // Real TCP throughout. Once armed by the baseline callback, physically
+    // send exactly five bytes of the client's next QUERY_CANCEL, then fail
+    // its write. Dropping the client gives the server EOF inside that frame.
+    struct CutCancel {
+        stream: asupersync::net::TcpStream,
+        armed: Arc<AtomicBool>,
+        sent: Arc<AtomicUsize>,
+    }
+    impl AsyncRead for CutCancel {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_read(task, buffer)
+        }
+    }
+    impl AsyncWrite for CutCancel {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !self.armed.load(Ordering::Acquire) {
+                return Pin::new(&mut self.stream).poll_write(task, bytes);
+            }
+            let remaining = 5 - self.sent.load(Ordering::Acquire);
+            if remaining == 0 {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            let count = bytes.len().min(remaining);
+            match Pin::new(&mut self.stream).poll_write(task, &bytes[..count]) {
+                Poll::Ready(Ok(written)) => {
+                    self.sent.fetch_add(written, Ordering::AcqRel);
+                    Poll::Ready(Ok(written))
+                }
+                other => other,
+            }
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_flush(task)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_shutdown(task)
+        }
+    }
+
+    fn baseline(change: &Change) {
+        assert!(change.snapshot, "{change:?}");
+        assert_eq!(change.frontier, 1);
+        // Independent bag from the three literal inserts below, including
+        // duplicate and NULL values. Do not derive it from a maintained plan.
+        assert_eq!(change.entries.len(), 2, "{change:?}");
+        assert!(change.entries.contains(&(2, vec![WireValue::Int(1)])));
+        assert!(change.entries.contains(&(1, vec![WireValue::Null])));
+    }
+
+    run(async |cx| {
+        let server = Arc::new(served(cx, "subscribe-129-terminals").await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let task_server = Arc::clone(&server);
+        let mut serving = cx
+            .spawn(move |child| async move {
+                task_server.serve(&child, listener).await.unwrap();
+            })
+            .unwrap();
+        let mut writer = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        writer.select(cx, "social").await.unwrap();
+        writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "UNWIND [1,1,null] AS age CREATE (:Person {age:age})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let statement = "SUBSCRIBE TO MATCH (p:Person) RETURN p.age AS age";
+        let changes: Arc<Mutex<Vec<Change>>> = Arc::default();
+        let observed = Arc::clone(&changes);
+        let mut survivor = cx
+            .spawn(move |child| async move {
+                let mut client = Client::connect(&child, addr, token(&grant(Rights::Read)))
+                    .await
+                    .unwrap();
+                client.select(&child, "social").await.unwrap();
+                let end = client
+                    .subscribe(
+                        &child,
+                        statement,
+                        vec![],
+                        |_| {},
+                        |change| {
+                            let mut changes = observed.lock().unwrap();
+                            changes.push(change);
+                            Ok(changes.len() == 1)
+                        },
+                    )
+                    .await
+                    .unwrap();
+                client.close(&child).await.unwrap();
+                end
+            })
+            .unwrap();
+        until(cx, || changes.lock().unwrap().len() == 1).await;
+        baseline(&changes.lock().unwrap()[0]);
+        assert_eq!(server.subscription_counts(cx, "social"), Some((1, 0)));
+
+        // These signed grants must remain refusals while another consumer
+        // owns a real circuit. max_rows=0 reaches initial-batch admission.
+        for profile in 0..4 {
+            let mut denied = grant(Rights::Read);
+            let expected = match profile {
+                0 => {
+                    denied.labels = Scope::only([LabelId(1)]);
+                    ErrorCode::PermissionDenied
+                }
+                1 => {
+                    denied.limits.max_work = 0;
+                    ErrorCode::Budget
+                }
+                2 => {
+                    denied.limits.max_nodes = 0;
+                    ErrorCode::Budget
+                }
+                _ => {
+                    denied.limits.max_rows = 0;
+                    ErrorCode::Budget
+                }
+            };
+            let mut client = Client::connect(cx, addr, token(&denied)).await.unwrap();
+            client.select(cx, "social").await.unwrap();
+            let error = client
+                .subscribe(cx, statement, vec![], |_| {}, |_| panic!("denied baseline"))
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), expected, "profile {profile}");
+            client.close(cx).await.unwrap();
+            assert_eq!(server.subscription_counts(cx, "social"), Some((1, 0)));
+        }
+
+        for cycle in 0..129_u64 {
+            // Fail after circuit construction on every cycle. A leaked
+            // private producer or registration must not consume lifetime slots.
+            let mut denied = grant(Rights::Read);
+            denied.limits.max_rows = 0;
+            let mut failed = Client::connect(cx, addr, token(&denied)).await.unwrap();
+            failed.select(cx, "social").await.unwrap();
+            let error = failed
+                .subscribe(
+                    cx,
+                    statement,
+                    vec![],
+                    |_| {},
+                    |_| panic!("zero-row baseline"),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), ErrorCode::Budget);
+            failed.close(cx).await.unwrap();
+            assert_eq!(server.subscription_counts(cx, "social"), Some((1, cycle)));
+
+            let armed = Arc::new(AtomicBool::new(false));
+            let sent = Arc::new(AtomicUsize::new(0));
+            let stream = CutCancel {
+                stream: asupersync::net::TcpStream::connect(addr).await.unwrap(),
+                armed: Arc::clone(&armed),
+                sent: Arc::clone(&sent),
+            };
+            let mut client = Client::connect_stream(cx, stream, token(&grant(Rights::Read)))
+                .await
+                .unwrap();
+            client.select(cx, "social").await.unwrap();
+            let mut deliveries = 0;
+            let result = client
+                .subscribe(
+                    cx,
+                    statement,
+                    vec![],
+                    |columns| assert_eq!(columns, ["age"]),
+                    |change| {
+                        baseline(&change);
+                        deliveries += 1;
+                        assert_eq!(server.subscription_counts(cx, "social"), Some((2, cycle)));
+                        match cycle % 3 {
+                            0 => Ok(false),
+                            1 => Err(ClientError::Protocol("consumer dropped its subscription")),
+                            _ => {
+                                armed.store(true, Ordering::Release);
+                                Ok(false)
+                            }
+                        }
+                    },
+                )
+                .await;
+            assert_eq!(deliveries, 1, "cycle {cycle}");
+            match cycle % 3 {
+                0 => {
+                    assert_eq!(result.unwrap(), 1);
+                    client.close(cx).await.unwrap();
+                }
+                1 => {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("consumer dropped its subscription"))
+                    ));
+                    drop(client);
+                }
+                _ => {
+                    assert!(result.is_err(), "cycle {cycle}");
+                    assert_eq!(sent.load(Ordering::Acquire), 5);
+                    drop(client);
+                }
+            }
+            until(cx, || {
+                server.subscription_counts(cx, "social") == Some((1, cycle + 1))
+            })
+            .await;
+            eprintln!(
+                "subscription cycle={cycle} seq=1 authority=read terminal={} active=1 retired={} partial_bytes={}",
+                cycle % 3,
+                cycle + 1,
+                sent.load(Ordering::Acquire)
+            );
+        }
+
+        // Cleanup of all transient circuits must preserve the survivor's
+        // exact delta, rather than merely leave its registration counter live.
+        writer
+            .execute(cx, ExecuteMode::Write, "CREATE (:Person {age:2})", vec![])
+            .await
+            .unwrap();
+        assert_eq!(survivor.join(cx).await.unwrap(), 2);
+        let changes = changes.lock().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(!changes[1].snapshot);
+        assert_eq!(changes[1].frontier, 2);
+        assert_eq!(changes[1].entries, [(1, vec![WireValue::Int(2)])]);
+        drop(changes);
+        until(cx, || {
+            server.subscription_counts(cx, "social") == Some((0, 130))
+        })
+        .await;
+        writer.close(cx).await.unwrap();
+        shutdown.trigger();
+        serving.join(cx).await.unwrap();
+    });
+}
+
 /// A minimal Bolt 5.0 client over the fgdb-bolt codec.
 struct Bolt {
     stream: asupersync::net::TcpStream,
