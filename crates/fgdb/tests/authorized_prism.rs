@@ -1177,10 +1177,13 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
         let oracle = database(&c.commit(), false).await;
         let issuer = authority(311, NS);
         let token = issuer.issue_at(&grant(), 100).unwrap();
-        for (text, direction) in [
-            (BFS, Directedness::Directed),
-            (CC, Directedness::Undirected),
-            (TRIANGLES, Directedness::Undirected),
+        for (text, direction, relation) in [
+            (BFS, Directedness::Directed, None),
+            (CC, Directedness::Undirected, None),
+            (TRIANGLES, Directedness::Undirected, None),
+            (BFS, Directedness::Directed, Some(RelationId(1))),
+            (CC, Directedness::Undirected, Some(RelationId(1))),
+            (TRIANGLES, Directedness::Undirected, Some(RelationId(1))),
         ] {
             let run = |db: &Database<MemVfs>, token: &CapabilityToken, opt: FnxReadOptions| {
                 db.call_fnx_authorized(
@@ -1194,7 +1197,8 @@ fn hidden_records_move_no_signed_or_source_limit_threshold() {
                     || 100,
                 )
             };
-            let opt = options(direction);
+            let mut opt = options(direction);
+            opt.selection.relation = relation;
             assert_eq!(
                 run(&db, &token, opt).unwrap(),
                 run(&oracle, &token, opt).unwrap(),

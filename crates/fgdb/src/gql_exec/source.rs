@@ -2908,6 +2908,44 @@ where
     })
 }
 
+/// Merge only a requested relation from an already admitted snapshot. The
+/// whole-history validator fixes an EId's relation for its entire lifetime,
+/// including property successors and retirement restatements. Filtering that
+/// immutable field before winner selection therefore keeps exactly the same
+/// winners, properties and EId order as filtering the complete merge.
+///
+/// Every raw block and row still crosses the work/cancellation boundary. Only
+/// identities in the requested relation occupy winner scratch and enter the
+/// final sort. This does not validate or selectively admit raw storage.
+pub(crate) fn visit_edges_in_relation_with_properties<'a, E, C>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    relation: Option<RelationId>,
+    control: &mut C,
+    mut visit: impl FnMut(
+        &'a AdjacencyEntry,
+        &'a [(PropertyKeyId, CanonicalPropertyValue)],
+        &mut C,
+    ) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    visit_edge_coordinates_in_relation(
+        &snapshot.blocks,
+        as_of,
+        relation,
+        control,
+        |entry, block, row, control| {
+            visit(
+                entry,
+                edge_properties_at(&snapshot.block_props, block, row),
+                control,
+            )
+        },
+    )
+}
+
 /// As [`visit_edges_with_properties`], also naming each winner's block and
 /// row, so its statement and properties can be read again in this same
 /// snapshot without another merge ([`edge_properties_at`]).
@@ -2961,6 +2999,39 @@ fn visit_edge_coordinates<'a, E, C>(
     blocks: &'a [impl AsRef<[AdjacencyEntry]>],
     as_of: CommitSeq,
     control: &mut C,
+    visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    visit_edge_coordinates_selected::<false, _, _>(blocks, as_of, RelationId(0), control, visit)
+}
+
+fn visit_edge_coordinates_in_relation<'a, E, C>(
+    blocks: &'a [impl AsRef<[AdjacencyEntry]>],
+    as_of: CommitSeq,
+    relation: Option<RelationId>,
+    control: &mut C,
+    visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    match relation {
+        Some(relation) => {
+            visit_edge_coordinates_selected::<true, _, _>(blocks, as_of, relation, control, visit)
+        }
+        None => visit_edge_coordinates(blocks, as_of, control, visit),
+    }
+}
+
+/// Select the hot loop once per scan. Whole-graph visitors retain the original
+/// unfiltered loop, without checking an optional relation for every raw row.
+fn visit_edge_coordinates_selected<'a, const SELECT_RELATION: bool, E, C>(
+    blocks: &'a [impl AsRef<[AdjacencyEntry]>],
+    as_of: CommitSeq,
+    relation: RelationId,
+    control: &mut C,
     mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
 ) -> Result<(), E>
 where
@@ -2977,7 +3048,7 @@ where
         control(SourceEvent::Work)?;
         for (row_at, entry) in block.as_ref().iter().enumerate() {
             control(SourceEvent::Work)?;
-            if entry.created_at > as_of {
+            if entry.created_at > as_of || (SELECT_RELATION && relation != entry.relation) {
                 continue;
             }
             match index.find(entry.eid, &winners) {

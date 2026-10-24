@@ -564,60 +564,62 @@ fn build(
     })?;
     let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
     let mut edges = Vec::new();
-    source::visit_edges_with_properties(snapshot, binding.as_of, &mut scan, |entry, props, _| {
-        if !scope.allows_relation(entry.relation)
-            || options
-                .selection
-                .relation
-                .is_some_and(|relation| relation != entry.relation)
-            || !selected_vertices.contains(entry.src)
-            || !selected_vertices.contains(entry.dst)
-        {
-            return Ok(());
-        }
-        admit(Step::Edge)?;
-        if entry.src == entry.dst {
-            match options.projection.self_loops {
-                SelfLoopPolicy::Drop => return Ok(()),
-                SelfLoopPolicy::Reject => {
-                    return Err(Error::Projection(ProjectionError::SelfLoop(entry.eid)));
-                }
-                SelfLoopPolicy::Keep => {}
+    source::visit_edges_in_relation_with_properties(
+        snapshot,
+        binding.as_of,
+        options.selection.relation,
+        &mut scan,
+        |entry, props, _| {
+            if !scope.allows_relation(entry.relation)
+                || !selected_vertices.contains(entry.src)
+                || !selected_vertices.contains(entry.dst)
+            {
+                return Ok(());
             }
-        }
-        let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
-            1.0
-        } else {
-            let value = options
-                .selection
-                .weight
-                .property_key()
-                .filter(|&key| scope.allows_property(key))
-                .and_then(|key| props.binary_search_by_key(&key, |(key, _)| *key).ok())
-                .map(|index| &props[index].1);
-            options
-                .selection
-                .weight
-                .resolve(value)
-                .map_err(|reason| Error::Weight {
-                    edge: entry.eid,
-                    reason,
-                })?
-        };
-        push_staged(
-            &mut edges,
-            ProjectionEdge {
-                eid: entry.eid,
-                source: entry.src,
-                target: entry.dst,
-                weight,
-            },
-            "input edges",
-            options.projection_limits.max_input_edges,
-            &mut staged_bytes,
-            options.source_limits.max_staging_bytes,
-        )
-    })?;
+            admit(Step::Edge)?;
+            if entry.src == entry.dst {
+                match options.projection.self_loops {
+                    SelfLoopPolicy::Drop => return Ok(()),
+                    SelfLoopPolicy::Reject => {
+                        return Err(Error::Projection(ProjectionError::SelfLoop(entry.eid)));
+                    }
+                    SelfLoopPolicy::Keep => {}
+                }
+            }
+            let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
+                1.0
+            } else {
+                let value = options
+                    .selection
+                    .weight
+                    .property_key()
+                    .filter(|&key| scope.allows_property(key))
+                    .and_then(|key| props.binary_search_by_key(&key, |(key, _)| *key).ok())
+                    .map(|index| &props[index].1);
+                options
+                    .selection
+                    .weight
+                    .resolve(value)
+                    .map_err(|reason| Error::Weight {
+                        edge: entry.eid,
+                        reason,
+                    })?
+            };
+            push_staged(
+                &mut edges,
+                ProjectionEdge {
+                    eid: entry.eid,
+                    source: entry.src,
+                    target: entry.dst,
+                    weight,
+                },
+                "input edges",
+                options.projection_limits.max_input_edges,
+                &mut staged_bytes,
+                options.source_limits.max_staging_bytes,
+            )
+        },
+    )?;
     SnapshotGraphView::build_owned_with_checkpoint(
         binding,
         vertices,

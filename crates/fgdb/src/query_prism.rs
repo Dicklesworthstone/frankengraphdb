@@ -917,6 +917,9 @@ impl EmbeddedReadView {
     /// their full capacities enter projection admission. Projection sorting and
     /// assembly checkpoint under this same query context and pinned read view.
     /// The cache owns its decoded data and can outlive this read-view handle.
+    /// An explicit relation prunes edge-history winner scratch before merging;
+    /// every raw block and history row still consumes source work. The complete
+    /// snapshot was authenticated before any projection selection is applied.
     /// The source's work/scratch counters are separate from the cache budget;
     /// neither the source nor fnx is presented as a spill-capable operator.
     ///
@@ -970,16 +973,14 @@ impl EmbeddedReadView {
             )?;
             let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
             let mut edges = Vec::new();
-            source::visit_edges_with_properties(
+            source::visit_edges_in_relation_with_properties(
                 &self.snapshot,
                 as_of,
+                selection.relation,
                 &mut control,
                 |entry, props, control| {
                     control(SourceEvent::Work)?;
-                    if selection
-                        .relation
-                        .is_some_and(|relation| relation != entry.relation)
-                        || !selected_vertices.contains(entry.src)
+                    if !selected_vertices.contains(entry.src)
                         || !selected_vertices.contains(entry.dst)
                     {
                         return Ok(());
