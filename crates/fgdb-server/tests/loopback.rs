@@ -2453,6 +2453,20 @@ fn subscriptions_reuse_served_slots_across_129_terminal_paths() {
         assert!(change.entries.contains(&(1, vec![WireValue::Null])));
     }
 
+    async fn until_counts(cx: &Cx, server: &Server, expected: (usize, u64)) {
+        for _ in 0..2000 {
+            if server.subscription_counts(cx, "social") == Some(expected) {
+                return;
+            }
+            asupersync::time::sleep(cx.now(), std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            server.subscription_counts(cx, "social"),
+            Some(expected),
+            "subscription cleanup did not reach the expected live/released counts"
+        );
+    }
+
     run(async |cx| {
         let server = Arc::new(served(cx, "subscribe-129-terminals").await);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2614,10 +2628,7 @@ fn subscriptions_reuse_served_slots_across_129_terminal_paths() {
                     drop(client);
                 }
             }
-            until(cx, || {
-                server.subscription_counts(cx, "social") == Some((1, cycle + 1))
-            })
-            .await;
+            until_counts(cx, &server, (1, cycle + 1)).await;
             eprintln!(
                 "subscription cycle={cycle} seq=1 authority=read terminal={} active=1 retired={} partial_bytes={}",
                 cycle % 3,
@@ -2633,16 +2644,14 @@ fn subscriptions_reuse_served_slots_across_129_terminal_paths() {
             .await
             .unwrap();
         assert_eq!(survivor.join(cx).await.unwrap(), 2);
-        let changes = changes.lock().unwrap();
-        assert_eq!(changes.len(), 2);
-        assert!(!changes[1].snapshot);
-        assert_eq!(changes[1].frontier, 2);
-        assert_eq!(changes[1].entries, [(1, vec![WireValue::Int(2)])]);
-        drop(changes);
-        until(cx, || {
-            server.subscription_counts(cx, "social") == Some((0, 130))
-        })
-        .await;
+        {
+            let changes = changes.lock().unwrap();
+            assert_eq!(changes.len(), 2);
+            assert!(!changes[1].snapshot);
+            assert_eq!(changes[1].frontier, 2);
+            assert_eq!(changes[1].entries, [(1, vec![WireValue::Int(2)])]);
+        }
+        until_counts(cx, &server, (0, 130)).await;
         writer.close(cx).await.unwrap();
         shutdown.trigger();
         serving.join(cx).await.unwrap();
