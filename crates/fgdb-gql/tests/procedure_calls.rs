@@ -117,18 +117,24 @@ fn successive_constant_calls_preserve_incoming_bags_and_share_source_allowance()
             expected.push(vec![copy.clone(), int(7), int(score)]);
         }
     }
-    let mut actual: Vec<_> = result.value.iter().map(|row| row.values().to_vec()).collect();
+    let mut actual: Vec<_> = result
+        .value
+        .iter()
+        .map(|row| row.values().to_vec())
+        .collect();
     actual.sort();
     expected.sort();
     assert_eq!(actual, expected);
-    assert!(query
-        .execute_governed_with_procedures(
-            GqlQueryPolicy::new(4, 100, 100_000, 100_000),
-            no_graph,
-            |call, arguments, _| host(call, arguments),
-            || Ok::<_, usize>(()),
-        )
-        .is_err());
+    assert!(
+        query
+            .execute_governed_with_procedures(
+                GqlQueryPolicy::new(4, 100, 100_000, 100_000),
+                no_graph,
+                |call, arguments, _| host(call, arguments),
+                || Ok::<_, usize>(()),
+            )
+            .is_err()
+    );
 }
 
 fn projection_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {

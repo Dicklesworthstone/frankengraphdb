@@ -687,36 +687,15 @@ impl core::fmt::Debug for GraphSetProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetProjectionError {
     Empty,
-    TooManyColumns {
-        limit: usize,
-        observed: usize,
-    },
-    InvalidName {
-        column: usize,
-    },
-    DuplicateName {
-        column: usize,
-    },
-    UnknownInput {
-        column: usize,
-        input: usize,
-    },
-    IntegerInput {
-        column: usize,
-        input: usize,
-    },
-    ListInput {
-        column: usize,
-    },
-    MapInput {
-        column: usize,
-    },
-    ExpressionBounds {
-        column: usize,
-    },
-    InvalidValue {
-        column: usize,
-    },
+    TooManyColumns { limit: usize, observed: usize },
+    InvalidName { column: usize },
+    DuplicateName { column: usize },
+    UnknownInput { column: usize, input: usize },
+    IntegerInput { column: usize, input: usize },
+    ListInput { column: usize },
+    MapInput { column: usize },
+    ExpressionBounds { column: usize },
+    InvalidValue { column: usize },
     SetBuild(GraphSetBuildError),
 }
 impl core::fmt::Display for GraphSetProjectionError {
