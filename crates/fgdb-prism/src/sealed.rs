@@ -20,8 +20,12 @@ use fgdb_strata::tiered::sealed::{
 };
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
 use std::cell::RefCell;
+use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+#[path = "sealed_construction.rs"]
+mod construction;
 #[path = "sealed_direction.rs"]
 mod direction;
 use direction::Incidences;
@@ -234,7 +238,99 @@ impl SealedGraphView {
         mask: SealedProjectionMask,
         limits: ProjectionLimits,
     ) -> Result<Self, SealedProjectionError> {
-        checkpoint(cx)?;
+        construction::immediately(Self::construct(
+            cx,
+            partition,
+            vertices,
+            config,
+            mask,
+            limits,
+            &mut construction::Immediate::new(),
+        ))
+    }
+
+    /// Build the same projection while yielding between bounded directory and
+    /// raw-incidence steps, including incoming-index collection and sorting.
+    /// Invisible histories, excluded endpoints and unfinished parallel groups
+    /// spend raw fuel without exposing a partial neighbor or projection.
+    /// The quantum is a step allowance, not a CPU-time or allocation bound.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_cooperative<Y, F>(
+        cx: &QueryCx,
+        partition: &SealedPartition,
+        vertices: &[VId],
+        config: SealedProjectionSpec,
+        limits: ProjectionLimits,
+        quantum: NonZeroUsize,
+        yield_now: Y,
+    ) -> Result<Self, SealedProjectionError>
+    where
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+    {
+        Self::build_cooperative_with_checkpoint(
+            cx,
+            partition,
+            vertices,
+            config,
+            SealedProjectionMask::UNMASKED,
+            limits,
+            quantum,
+            yield_now,
+            || Ok(()),
+        )
+        .await
+    }
+
+    /// Cooperative construction with the same frozen mask and typed live guard
+    /// as `build_with_checkpoint`. QueryCx and the guard run on both sides of
+    /// every suspend. Dropping or refusing the future releases private build
+    /// state without publishing a graph or changing the source image.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_cooperative_with_checkpoint<Y, F>(
+        cx: &QueryCx,
+        partition: &SealedPartition,
+        vertices: &[VId],
+        config: SealedProjectionSpec,
+        mask: SealedProjectionMask,
+        limits: ProjectionLimits,
+        quantum: NonZeroUsize,
+        yield_now: Y,
+        guard: impl FnMut() -> Result<(), SealedProjectionError>,
+    ) -> Result<Self, SealedProjectionError>
+    where
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+    {
+        cx.with_restriction_async(async {
+            let guard = RefCell::new(guard);
+            let invoke = || (guard.borrow_mut())();
+            let control = Control::new(cx, &invoke);
+            Self::construct(
+                &control,
+                partition,
+                vertices,
+                config,
+                mask,
+                limits,
+                &mut construction::Cooperative::new(quantum, yield_now),
+            )
+            .await
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn construct<S: construction::Schedule>(
+        cx: &Control<'_>,
+        partition: &SealedPartition,
+        vertices: &[VId],
+        config: SealedProjectionSpec,
+        mask: SealedProjectionMask,
+        limits: ProjectionLimits,
+        schedule: &mut S,
+    ) -> Result<Self, SealedProjectionError> {
+        schedule.check(cx).await?;
         let relation = config
             .selection
             .relation
@@ -252,7 +348,7 @@ impl SealedGraphView {
         }
         let n = vertices.len();
         admit("vertices", n, limits.max_vertices)?;
-        let scan_bound = partition.stats().incidences;
+        let scan_bound = partition.incidence_count();
         admit("source incidences", scan_bound, limits.max_input_edges)?;
         let mut workspace_bytes = n
             .checked_mul(std::mem::size_of::<VId>() + std::mem::size_of::<usize>())
@@ -265,7 +361,7 @@ impl SealedGraphView {
         let mut owned_vertices = reserve(n)?;
         let mut previous = None;
         for &vertex in vertices {
-            checkpoint(cx)?;
+            schedule.check(cx).await?;
             if previous.is_some_and(|previous| previous >= vertex) {
                 return Err(SealedProjectionError::NonCanonicalVertices);
             }
@@ -276,18 +372,20 @@ impl SealedGraphView {
             if !mask.relation_visible || config.projection.directedness == Directedness::Directed {
                 None
             } else {
-                let index = partition.incoming_index_with_checkpoint(
-                    cx.query,
-                    IncomingIndexLimits {
-                        max_incidences: limits.max_input_edges,
-                        // This indexes the whole retained image, including
-                        // unselected endpoints. A relation-scoped source has
-                        // already excluded unrelated families before sealing.
-                        max_rows: limits.max_input_edges,
-                        max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
-                    },
-                    || cx.guard(),
-                )?;
+                let index = schedule
+                    .incoming(
+                        cx,
+                        partition,
+                        IncomingIndexLimits {
+                            max_incidences: limits.max_input_edges,
+                            // This indexes the whole retained image, including
+                            // unselected endpoints. A relation-scoped source has
+                            // already excluded unrelated families before sealing.
+                            max_rows: limits.max_input_edges,
+                            max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
+                        },
+                    )
+                    .await?;
                 workspace_bytes = add(workspace_bytes, index.stats().charged_workspace_bytes)?;
                 admit(
                     "workspace bytes",
@@ -330,7 +428,7 @@ impl SealedGraphView {
         ]);
         hash.update(&(n as u128).to_le_bytes());
         for (index, vertex) in owned_vertices.iter().enumerate() {
-            checkpoint(cx)?;
+            schedule.check(cx).await?;
             hash.update(&vertex.0.to_le_bytes());
             if let Some(prefix) = vertex_prefix.first_mut() {
                 prefix.include(*vertex, index);
@@ -344,7 +442,7 @@ impl SealedGraphView {
         let mut adjacency_entries = 0usize;
         let mut input_edges = 0usize;
         for source in 0..n {
-            checkpoint(cx)?;
+            schedule.check(cx).await?;
             hash.update(&[0]);
             hash.update(&owned_vertices[source].0.to_le_bytes());
             let mut cursor = SealedNeighborCursor::open(
@@ -386,7 +484,16 @@ impl SealedGraphView {
                     }
                     Ok(())
                 };
-                while let Some((target, _)) = cursor.next_observed(cx, &mut observe)? {
+                loop {
+                    let target =
+                        match cursor.next_budgeted_observed(cx, schedule.fuel(), &mut observe)? {
+                            SealedScanStep::Item((target, _)) => target,
+                            SealedScanStep::End => break,
+                            SealedScanStep::Yield => {
+                                schedule.refill(cx).await?;
+                                continue;
+                            }
+                        };
                     degree = add(degree, 1)?;
                     adjacency_entries = add(adjacency_entries, 1)?;
                     admit(
@@ -407,7 +514,7 @@ impl SealedGraphView {
         }
         hash.update(&(input_edges as u128).to_le_bytes());
         hash.update(&(edges as u128).to_le_bytes());
-        checkpoint(cx)?;
+        schedule.check(cx).await?;
         let mut resident_bytes = add(size_of::<Projection>(), partition.charged_resident_bytes())?;
         if let Some(index) = &incoming {
             // The incoming owner shares the very same source image; count it

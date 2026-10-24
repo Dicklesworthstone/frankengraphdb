@@ -51,8 +51,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// respective explicit limits. Cancellation or a dropped future cannot
     /// publish partial analytics. The view remains usable afterward.
     ///
-    /// Compaction, encoding and projection preparation still contain synchronous
-    /// CPU stages. The quantum bounds the cooperative kernel's steps, not the
+    /// Projection and incoming-index preparation also yield. Source admission,
+    /// compaction and encoding still contain synchronous CPU stages. The quantum
+    /// bounds cooperative construction/kernel steps, not the
     /// complete call's poll duration, and does not make its workspace spillable.
     /// This is an owner-level API, not a capability-authorized procedure host.
     /// The cooperative kernel future is not `Send`; use a registered
@@ -78,7 +79,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             call.validate_sealed_projection(options.projection.directedness)
                 .map_err(FnxSealedReadError::Execution)?;
             let graph = self
-                .prism_sealed_projection_at(
+                .prism_sealed_projection_cooperative_at(
                     cx,
                     options.as_of.unwrap_or(self.frontier()),
                     options.selection,
@@ -87,6 +88,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     options.source_limits,
                     sealing,
                     max_source_incidences,
+                    quantum,
                 )
                 .await?;
             let analytics = call

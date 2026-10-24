@@ -3,6 +3,9 @@
 //! matter: equal redacted diagnostics would not establish any of these laws.
 #![recursion_limit = "256"]
 
+#[path = "sealed_read_cache/construction.rs"]
+mod construction;
+
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys, MemVfs, MemoryPool,

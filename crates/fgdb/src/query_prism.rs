@@ -34,6 +34,8 @@ mod cache;
 mod projection;
 #[path = "query_prism/sealed_cache.rs"]
 mod sealed_cache;
+#[path = "query_prism/sealed_prepare.rs"]
+mod sealed_prepare;
 pub(crate) use cache::{
     CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
 };
@@ -42,6 +44,7 @@ pub(crate) use sealed_cache::{
     BufferedCache as BufferedSealedCache, CACHE_BYTES as SEALED_CACHE_BYTES,
     Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
 };
+pub(crate) use sealed_prepare::{CooperativeSealedBuild, ImmediateSealedBuild, SealedBuild};
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
@@ -122,6 +125,35 @@ impl Database<UnixVfs> {
         )
         .await
     }
+
+    /// Read-only sealed preparation with cooperative projection construction.
+    /// Vertex-directory copying, incoming-index building and raw projection
+    /// scans yield under `quantum`; source admission, compaction and image
+    /// encoding retain synchronous stages and their existing separate limits.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_prism_sealed_projection_cooperative(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        options: FnxReadOptions,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+        quantum: NonZeroUsize,
+    ) -> Result<SealedGraphView, SealedProjectionOpenError> {
+        Self::open_prism_sealed_projection_cooperative_with_vfs(
+            cx,
+            query_cx,
+            UnixVfs::new(),
+            path,
+            keys,
+            options,
+            sealing,
+            root_limits,
+            quantum,
+        )
+        .await
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -138,6 +170,61 @@ impl<V: Vfs + Clone> Database<V> {
         options: FnxReadOptions,
         sealing: SealedLimits,
         root_limits: RootReadLimits,
+    ) -> Result<SealedGraphView, SealedProjectionOpenError> {
+        Self::open_prism_sealed_projection_build(
+            cx,
+            query_cx,
+            vfs,
+            path,
+            keys,
+            options,
+            sealing,
+            root_limits,
+            ImmediateSealedBuild,
+        )
+        .await
+    }
+
+    /// Injected-filesystem cooperative equivalent of
+    /// `open_prism_sealed_projection_cooperative`, with identical source
+    /// authentication, projection bytes, limits and recovery refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_prism_sealed_projection_cooperative_with_vfs(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        options: FnxReadOptions,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+        quantum: NonZeroUsize,
+    ) -> Result<SealedGraphView, SealedProjectionOpenError> {
+        Self::open_prism_sealed_projection_build(
+            cx,
+            query_cx,
+            vfs,
+            path,
+            keys,
+            options,
+            sealing,
+            root_limits,
+            CooperativeSealedBuild(quantum),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_prism_sealed_projection_build<B: SealedBuild>(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        options: FnxReadOptions,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+        mut build: B,
     ) -> Result<SealedGraphView, SealedProjectionOpenError> {
         query_cx
             .with_restriction_async(async {
@@ -207,19 +294,21 @@ impl<V: Vfs + Clone> Database<V> {
                 // Properties and history used only to select the directory are
                 // no longer retained while incoming/projection indexes are built.
                 drop(patches);
-                SealedGraphView::build(
-                    query_cx,
-                    &partition,
-                    &vertices,
-                    SealedProjectionSpec {
-                        as_of,
-                        selection: options.selection,
-                        projection: options.projection,
-                    },
-                    options.projection_limits,
-                )
-                .map_err(SealedReadError::Projection)
-                .map_err(SealedProjectionOpenError::Read)
+                build
+                    .build(
+                        query_cx,
+                        &partition,
+                        &vertices,
+                        SealedProjectionSpec {
+                            as_of,
+                            selection: options.selection,
+                            projection: options.projection,
+                        },
+                        options.projection_limits,
+                    )
+                    .await
+                    .map_err(SealedReadError::Projection)
+                    .map_err(SealedProjectionOpenError::Read)
             })
             .await
     }
@@ -510,7 +599,7 @@ impl<V: Vfs + Clone> Database<V> {
         // host such as a lab task can await it.
         cx.with_restriction_async(async {
             let graph = self
-                .prepare_fnx_sealed(cx, call, &options, sealing, false)
+                .prepare_fnx_sealed(cx, call, &options, sealing, false, ImmediateSealedBuild)
                 .await?;
             finish_sealed_read(cx, call, &graph, options, memory)
         })
@@ -540,8 +629,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// Use the pinned runtime's yield primitive between bounded kernel/scalar
     /// steps, including invisible-incidence scans and result-row conversion.
     /// This reuses the SAME pinned-source preparation as execute_fnx_sealed.
-    /// Preparation (sealing, compaction, projection and incoming-index building)
-    /// still has synchronous CPU stages; this is not an end-to-end poll-time
+    /// Projection and incoming-index construction also yield. Source admission,
+    /// sealing and compaction still have synchronous CPU stages; this is not an end-to-end poll-time
     /// bound, external-memory operator, or capability-authorization entrypoint.
     /// Existing entrypoints keep their synchronous mode and kernel identifiers.
     #[allow(clippy::too_many_arguments)]
@@ -556,7 +645,14 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction_async(async {
             let graph = self
-                .prepare_fnx_sealed(cx, call, &options, sealing, true)
+                .prepare_fnx_sealed(
+                    cx,
+                    call,
+                    &options,
+                    sealing,
+                    true,
+                    CooperativeSealedBuild(quantum),
+                )
                 .await?;
             let result = call
                 .execute_sealed_cooperative(
@@ -577,13 +673,14 @@ impl<V: Vfs + Clone> Database<V> {
     /// The pinned-source preparation both sealed paths share: binding checks,
     /// then the sealed projection. A cooperative call also refuses an
     /// algorithm without a cooperative kernel before any source access.
-    async fn prepare_fnx_sealed(
+    async fn prepare_fnx_sealed<B: SealedBuild>(
         &self,
         cx: &QueryCx,
         call: &FnxCallSpec,
         options: &FnxReadOptions,
         sealing: SealedLimits,
         cooperative: bool,
+        build: B,
     ) -> Result<fgdb_prism::SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
         cx.checkpoint().map_err(Error::Cancelled)?;
         if cooperative && !call.supports_cooperative_sealed_execution() {
@@ -592,7 +689,9 @@ impl<V: Vfs + Clone> Database<V> {
             ));
         }
         supported_sealed_call(call, options.projection.directedness)?;
-        self.prism_sealed_projection_at(
+        let mut root_limits = RootReadLimits::default();
+        root_limits.max_incidences = root_limits.max_incidences.max(sealing.max_incidences);
+        self.prism_sealed_projection_build(
             cx,
             options.as_of,
             options.selection,
@@ -600,6 +699,8 @@ impl<V: Vfs + Clone> Database<V> {
             options.projection_limits,
             options.source_limits,
             sealing,
+            root_limits,
+            build,
         )
         .await
     }
@@ -656,6 +757,65 @@ impl<V: Vfs + Clone> Database<V> {
         sealing: SealedLimits,
         root_limits: RootReadLimits,
     ) -> Result<SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
+        self.prism_sealed_projection_build(
+            cx,
+            as_of,
+            selection,
+            spec,
+            limits,
+            source_limits,
+            sealing,
+            root_limits,
+            ImmediateSealedBuild,
+        )
+        .await
+    }
+
+    /// Prepare a reusable compressed graph with cooperative directory,
+    /// incoming-index and raw-incidence construction. The source image still
+    /// uses the ordinary synchronous compactor/encoder. Completed graphs share
+    /// the exact same cache key as immediate preparation; scheduling grants no
+    /// extra source, projection, memory or publication allowance.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prism_sealed_projection_cooperative_at(
+        &self,
+        cx: &QueryCx,
+        as_of: Option<CommitSeq>,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+        quantum: NonZeroUsize,
+    ) -> Result<SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
+        self.prism_sealed_projection_build(
+            cx,
+            as_of,
+            selection,
+            spec,
+            limits,
+            source_limits,
+            sealing,
+            root_limits,
+            CooperativeSealedBuild(quantum),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prism_sealed_projection_build<B: SealedBuild>(
+        &self,
+        cx: &QueryCx,
+        as_of: Option<CommitSeq>,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+        mut build: B,
+    ) -> Result<SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(Error::Cancelled)?;
             let view = self.read_session().map_err(Error::Read)?;
@@ -711,18 +871,20 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
                 .map_err(SealedReadError::Seal)?;
             view.check_sealed_source(&partition, as_of)?;
-            let graph = SealedGraphView::build(
-                cx,
-                &partition,
-                &vertices,
-                SealedProjectionSpec {
-                    as_of,
-                    selection,
-                    projection: spec,
-                },
-                limits,
-            )
-            .map_err(SealedReadError::Projection)?;
+            let graph = build
+                .build(
+                    cx,
+                    &partition,
+                    &vertices,
+                    SealedProjectionSpec {
+                        as_of,
+                        selection,
+                        projection: spec,
+                    },
+                    limits,
+                )
+                .await
+                .map_err(SealedReadError::Projection)?;
             cx.checkpoint().map_err(Error::Cancelled)?;
             cache.remember(
                 &view.snapshot,

@@ -318,9 +318,10 @@ keep their separate Prism admissions. This is not a larger-than-memory seal pipe
 With --buffered, source frames use --buffer-memory-bytes and source admission uses
 --buffer-source-bytes; --max-work-units bounds source admission and each scan.
 --sealed-quantum <positive integer> opts into a supported cooperative compressed
-kernel, yielding between bounded traversal/scalar steps. Unsupported cooperative
-procedures refuse before opening storage. Image construction and projection still
-contain synchronous stages; the quantum is not an end-to-end poll-time bound.
+kernel and projection preparation, yielding between bounded traversal/scalar steps.
+Unsupported cooperative procedures refuse before opening storage. Source admission,
+vertex selection and image construction still contain synchronous stages; the quantum
+is not an end-to-end poll-time bound.
 The native --max-snapshot-records, --max-result-rows, --max-work-units and
 --max-scratch-entries flags are refused with standalone --sealed; --buffered permits
 only --max-work-units from that list. Use explicit --sealed-* limits for the kernel.

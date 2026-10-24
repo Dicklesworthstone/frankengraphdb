@@ -6,8 +6,8 @@
 use super::{BufferedReadError, BufferedReadView};
 use crate::gql_exec::source::SourceEvent;
 use crate::query::{
-    ProjectionRequest, SealedProjectionRequest, SealedProjectionSource, prism_source_control,
-    push_prism_staged,
+    CooperativeSealedBuild, ImmediateSealedBuild, ProjectionRequest, SealedBuild,
+    SealedProjectionRequest, SealedProjectionSource, prism_source_control, push_prism_staged,
 };
 use asupersync::fs::Vfs;
 use fgdb_prism::{
@@ -24,6 +24,7 @@ use fgdb_strata::tiered::edge_scan::{
 };
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CommitSeq, QueryCx, VId};
+use std::num::NonZeroUsize;
 
 type Cancel = Box<asupersync::error::Error>;
 type Error = FnxReadError<BufferedReadError, Cancel>;
@@ -180,6 +181,65 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         sealing: SealedLimits,
         max_source_incidences: usize,
     ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
+        self.prism_sealed_projection_build(
+            cx,
+            as_of,
+            selection,
+            spec,
+            limits,
+            source_limits,
+            sealing,
+            max_source_incidences,
+            ImmediateSealedBuild,
+        )
+        .await
+    }
+
+    /// Prepare the same reusable compressed projection with bounded yields in
+    /// directory copying, incoming-index construction and raw projection scans.
+    /// Source admission, compaction and image encoding retain synchronous
+    /// stages. Only a completed graph enters this owner's cache; cancellation
+    /// or future drop leaves the admitted reader and its limits intact.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prism_sealed_projection_cooperative_at(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+        quantum: NonZeroUsize,
+    ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
+        self.prism_sealed_projection_build(
+            cx,
+            as_of,
+            selection,
+            spec,
+            limits,
+            source_limits,
+            sealing,
+            max_source_incidences,
+            CooperativeSealedBuild(quantum),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prism_sealed_projection_build<B: SealedBuild>(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+        mut build: B,
+    ) -> Result<SealedGraphView, FnxSealedReadError<BufferedReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
             let relation = selection.relation.ok_or(FnxSealedReadError::Projection(
@@ -243,18 +303,20 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             {
                 return Err(FnxSealedReadError::SourceMismatch);
             }
-            let graph = SealedGraphView::build(
-                cx,
-                &partition,
-                &vertices,
-                SealedProjectionSpec {
-                    as_of,
-                    selection,
-                    projection: spec,
-                },
-                limits,
-            )
-            .map_err(FnxSealedReadError::Projection)?;
+            let graph = build
+                .build(
+                    cx,
+                    &partition,
+                    &vertices,
+                    SealedProjectionSpec {
+                        as_of,
+                        selection,
+                        projection: spec,
+                    },
+                    limits,
+                )
+                .await
+                .map_err(FnxSealedReadError::Projection)?;
             self.sealed_cache
                 .remember(cx, request, &graph)
                 .map_err(FnxReadError::Cancelled)?;

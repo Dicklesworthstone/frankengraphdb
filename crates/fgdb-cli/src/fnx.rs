@@ -502,16 +502,33 @@ pub(super) async fn run_sealed(
         max_incidences: prepared.source_incidences,
         ..RootReadLimits::default()
     };
-    let graph = Database::open_prism_sealed_projection(
-        open_cx,
-        cx,
-        &options.db,
-        keys,
-        prepared.read,
-        sealing,
-        root_limits,
-    )
-    .await
+    let graph = match prepared.quantum {
+        Some(quantum) => {
+            Database::open_prism_sealed_projection_cooperative(
+                open_cx,
+                cx,
+                &options.db,
+                keys,
+                prepared.read,
+                sealing,
+                root_limits,
+                quantum,
+            )
+            .await
+        }
+        None => {
+            Database::open_prism_sealed_projection(
+                open_cx,
+                cx,
+                &options.db,
+                keys,
+                prepared.read,
+                sealing,
+                root_limits,
+            )
+            .await
+        }
+    }
     .map_err(|error| match error {
         SealedProjectionOpenError::Open(error) => super::open_failure(error),
         SealedProjectionOpenError::Read(error) => super::execution_failure(error),
