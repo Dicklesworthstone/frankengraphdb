@@ -3261,6 +3261,12 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             .prepare_read(cx, query, vec![("min".into(), WireValue::Int(99))])
             .await
             .unwrap();
+        let inline_query = "CALL { MATCH (n:Person) WHERE n.age >= $min RETURN n.name AS name } \
+                            RETURN name ORDER BY name";
+        let inline_handle = owner
+            .prepare_read(cx, inline_query, vec![("min".into(), WireValue::Int(99))])
+            .await
+            .unwrap();
         owner
             .execute(
                 cx,
@@ -3283,6 +3289,27 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             ["C", "D", "E", "F"].map(|name| vec![text(name)])
         );
         assert!(matches!(answer.outcome, Outcome::Rows { seq: 1 }));
+        assert_eq!(
+            owner
+                .execute_prepared(cx, inline_handle, vec![("min".into(), WireValue::Int(3))])
+                .await
+                .unwrap(),
+            answer,
+            "prepared CALL must bind the live graph and current arguments"
+        );
+        assert_eq!(
+            owner
+                .execute(
+                    cx,
+                    ExecuteMode::Read,
+                    inline_query,
+                    vec![("min".into(), WireValue::Int(3))],
+                )
+                .await
+                .unwrap(),
+            answer,
+            "eager and prepared CALL preserve the same rows, order and sequence"
+        );
         assert_eq!(
             server_code(
                 owner
@@ -3324,6 +3351,14 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             .await
             .unwrap();
         assert_eq!(answer.rows, [vec![text("F")]]);
+        assert_eq!(
+            owner
+                .execute_prepared(cx, inline_handle, vec![("min".into(), WireValue::Int(6))])
+                .await
+                .unwrap(),
+            answer,
+            "CALL body parameters must rebind without preparing again"
+        );
         // This is a structural text operand. Its spelling cannot create a
         // second statement, substitute catalog names, or alter the template.
         let exact_name = owner
@@ -3377,16 +3412,32 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
             ..grant(Rights::Read)
         });
         owner.refresh_authority(cx, narrowed).await.unwrap();
-        assert_eq!(
-            server_code(
-                owner
-                    .execute_prepared(cx, handle, vec![("min".into(), WireValue::Int(1))])
-                    .await
-                    .unwrap_err()
-            ),
-            ErrorCode::Statement,
-            "even narrowing discards every old compiled template"
+        for stale in [handle, inline_handle] {
+            assert_eq!(
+                server_code(
+                    owner
+                        .execute_prepared(cx, stale, vec![("min".into(), WireValue::Int(1))])
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Statement,
+                "even narrowing discards every old compiled template"
+            );
+        }
+        let masked_inline = owner
+            .prepare_read(cx, inline_query, vec![("min".into(), WireValue::Int(1))])
+            .await
+            .unwrap();
+        assert!(
+            owner
+                .execute_prepared(cx, masked_inline, vec![("min".into(), WireValue::Int(1))])
+                .await
+                .unwrap()
+                .rows
+                .is_empty(),
+            "the CALL body cannot read age after its field authority is removed"
         );
+        owner.release_prepared(cx, masked_inline).await.unwrap();
         let visible = owner
             .prepare_read(cx, "MATCH (n) RETURN n.name AS name ORDER BY name", vec![])
             .await
