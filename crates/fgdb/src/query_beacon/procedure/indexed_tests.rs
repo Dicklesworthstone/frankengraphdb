@@ -781,6 +781,11 @@ fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_resca
                 panic!("CALL aggregate must retain its relational input: {statement}");
             };
             let bound = prepared.bind_relation_parameters(&parameters).unwrap();
+            // UNWIND carries the yielded element to the ordinary element
+            // reader; it introduces no explicit or implied graph pattern.
+            // All other suffixes here bind node through the graph source.
+            let graph_input = !suffix.starts_with("UNWIND");
+            assert_eq!(prepared.graph_source_count(), usize::from(graph_input));
             let incumbent = unseeded_aggregate(&db, &c.query(), &bound, basis, policy()).unwrap();
             let actual = db
                 .execute_graph_set_aggregate_governed(&c.query(), &bound, policy())
@@ -790,11 +795,23 @@ fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_resca
                 assert_eq!(actual.value[0].values()[0].as_count(), Some(6));
             }
             assert_eq!(actual.rows.result_rows, incumbent.rows.result_rows);
-            assert_eq!(incumbent.rows.snapshot_records, 64, "{statement}");
-            assert_eq!(actual.rows.snapshot_records, 3, "{statement}");
-            assert!(actual.evaluator.work_units < incumbent.evaluator.work_units);
+            assert_eq!(
+                incumbent.rows.snapshot_records,
+                if graph_input { 64 } else { 0 },
+                "{statement}"
+            );
+            assert_eq!(
+                actual.rows.snapshot_records,
+                if graph_input { 3 } else { 0 },
+                "{statement}"
+            );
+            if graph_input {
+                assert!(actual.evaluator.work_units < incumbent.evaluator.work_units);
+            } else {
+                assert_eq!(actual, incumbent, "no graph-source speedup is claimed");
+            }
             let mut exact = policy();
-            exact.rows = fgdb_gql::GqlExecutionBudget::new(3, 100);
+            exact.rows = fgdb_gql::GqlExecutionBudget::new(if graph_input { 3 } else { 0 }, 100);
             exact.evaluator = fgdb_gql::GlaExecutionLimits::new(
                 actual.evaluator.work_units,
                 actual.evaluator.scratch_entries,
@@ -810,8 +827,20 @@ fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_resca
                     .unwrap(),
                 actual,
             );
-            assert!(unseeded_aggregate(&db, &c.query(), &bound, basis, exact).is_err());
-            exact.rows = fgdb_gql::GqlExecutionBudget::new(2, 100);
+            if graph_input {
+                assert!(unseeded_aggregate(&db, &c.query(), &bound, basis, exact).is_err());
+            } else {
+                assert_eq!(
+                    unseeded_aggregate(&db, &c.query(), &bound, basis, exact).unwrap(),
+                    actual
+                );
+            }
+            exact.rows = if graph_input {
+                fgdb_gql::GqlExecutionBudget::new(2, 100)
+            } else {
+                // A source-free result still owns its final row allowance.
+                fgdb_gql::GqlExecutionBudget::new(0, 0)
+            };
             assert!(
                 db.execute_graph_set_aggregate_governed(&c.query(), &bound, exact)
                     .is_err(),
