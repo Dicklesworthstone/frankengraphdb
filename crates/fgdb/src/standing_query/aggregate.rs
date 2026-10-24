@@ -18,9 +18,9 @@ use fgdb_delta_types::zset::aggregate::IncrementalAggregate;
 use fgdb_delta_types::{
     DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet, ZSetEvent,
 };
-use fgdb_gql::algebra::{GlaOperator, ValueProjection, VertexPredicate};
+use fgdb_gql::algebra::{GlaOperator, GraphPathFunction, ValueProjection, VertexPredicate};
 use fgdb_gql::{GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate};
-use fgdb_types::{CanonicalScalar, CommitSeq, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -29,7 +29,15 @@ use std::sync::Arc;
 #[derive(Debug, Default, PartialEq)]
 struct VertexState {
     labels: BTreeSet<LabelId>,
-    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
+}
+
+type EdgeProperties = BTreeMap<PropertyKeyId, CanonicalPropertyValue>;
+
+#[derive(Clone, Copy)]
+struct EdgeBinding<'a> {
+    id: EId,
+    props: Option<&'a EdgeProperties>,
 }
 
 pub(crate) struct StandingQuery {
@@ -69,6 +77,21 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
     };
     1 + bytes.div_ceil(64)
 }
+/// Retained units of a stored value: a scalar's own, or a List's or Map's
+/// node, each key's bytes and every nested value (fgdb-k3nub).
+fn stored_units(value: &CanonicalPropertyValue) -> usize {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => scalar_units(scalar),
+        CanonicalPropertyValue::List(list) => list.values().iter().fold(1usize, |units, value| {
+            units.saturating_add(stored_units(value))
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().fold(1usize, |units, entry| {
+            units
+                .saturating_add(entry.key().as_str().len().div_ceil(64))
+                .saturating_add(stored_units(entry.value()))
+        }),
+    }
+}
 fn eligible(query: &PreparedGraphAggregate) -> bool {
     // A complete relational schema is NOT permission to maintain only its
     // first graph leaf. Relational definitions need a dependency-owned source.
@@ -77,6 +100,36 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
         && aggregate_functions_eligible(query)
         && (eligible_flat_input(query) || edge::supports_scoped(query))
 }
+/// Bound one charged source operation by the actual admitted maintainer's
+/// vertex frame. Output columns may hide source bindings and cannot establish
+/// this bound. Keep source splitting and shape admission identical to
+/// prepare_registered_aggregate; an unknown shape supplies no tighter bound.
+pub(in crate::standing_query) fn subscription_input_width(
+    definition: &PreparedGraphAggregate,
+) -> Option<usize> {
+    let source = if definition.has_incremental_output_transform() {
+        Some(definition.incremental_source_definition()?)
+    } else {
+        None
+    };
+    let definition = source.as_ref().unwrap_or(definition);
+    if !eligible(definition) {
+        return None;
+    }
+    if let Some(state) = edge::State::for_definition(definition) {
+        Some(state.binding_width())
+    } else if eligible_flat_input(definition)
+        && matches!(
+            definition.input_pattern().plan().operators().first(),
+            Some(GlaOperator::ScanVertices)
+        )
+    {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
     query
         .aggregates()
@@ -92,8 +145,15 @@ fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
             | GraphAggregateFunction::AverageInt
             | GraphAggregateFunction::AverageIntDistinct => {
                 aggregate.argument_column().is_some_and(|column| {
-                    query.incremental_input_column_type(column)
-                        == Some(fgdb_gql::GraphSetColumnType::Scalar)
+                    query
+                        .incremental_input_column_type(column)
+                        .is_some_and(|kind| {
+                            matches!(
+                                kind,
+                                fgdb_gql::GraphSetColumnType::Scalar
+                                    | fgdb_gql::GraphSetColumnType::Stored
+                            )
+                        })
                 })
             }
             _ => false,
@@ -137,10 +197,30 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::SelectBoolean { expression }
                 if expression.supports_vertex_bindings(width as usize) => {}
+            GlaOperator::CapturePath {
+                start, segments, ..
+            } if width == 2
+                && start.ordinal() == 0
+                && segments.len() == 1
+                && segments[0].ordinal() == 1 => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
-                if columns.iter().any(|column| !matches!(column,
-                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() < width)) { return false; }
+                if columns.iter().any(|column| match column {
+                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } => {
+                        slot.ordinal() >= width
+                    }
+                    ValueProjection::EdgeProperty { capture, .. }
+                    | ValueProjection::Path {
+                        capture,
+                        function: GraphPathFunction::Edge,
+                    } if width == 2 => !operators[..position].iter().any(|operator| {
+                        matches!(operator, GlaOperator::CapturePath { capture: bound, .. }
+                                if bound == capture)
+                    }),
+                    _ => true,
+                }) {
+                    return false;
+                }
             }
             GlaOperator::OrderByValues
             | GlaOperator::Limit {
@@ -177,6 +257,11 @@ fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
             _ => false,
         })
 }
+fn needs_edge_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
+    query.input_pattern().value_columns().iter().any(|column| {
+        matches!(column, ValueProjection::EdgeProperty { key: actual, .. } if *actual == key)
+    })
+}
 fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
     query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))
 }
@@ -197,7 +282,7 @@ fn state_from(
     for (key, value) in &row.props {
         meter.charge(ZSetEvent::Work)?;
         if needs_property(query, *key) {
-            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
             state.props.insert(*key, value.clone());
         }
     }
@@ -273,7 +358,7 @@ impl StandingQuery {
                 }
                 for (key, value) in &state.props {
                     meter.charge(ZSetEvent::Work)?;
-                    meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                    meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                     next.props.insert(*key, value.clone());
                 }
                 Some(next)
@@ -318,7 +403,7 @@ impl StandingQuery {
                     for (key, value) in props {
                         meter.charge(ZSetEvent::Work)?;
                         if needs_property(&self.definition, *key) {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                             state.props.insert(*key, value.clone());
                         }
                     }
@@ -366,7 +451,7 @@ impl StandingQuery {
                     }
                     match after {
                         Some(value) => {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                             state.props.insert(*property, value.clone());
                         }
                         None => {
@@ -539,7 +624,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(StandingQueryError::Maintenance)?;
                     for (_, value) in &row.props {
                         meter
-                            .units(ZSetEvent::ScratchEntry, scalar_units(value))
+                            .units(ZSetEvent::ScratchEntry, stored_units(value))
                             .map_err(StandingQueryError::Maintenance)?;
                     }
                 }
@@ -584,6 +669,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .seed(
                             &query.definition,
                             &row.entry,
+                            &row.props,
                             &query.vertices,
                             &mut updates,
                             &mut meter,

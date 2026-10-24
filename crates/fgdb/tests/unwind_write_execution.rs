@@ -153,11 +153,17 @@ fn repeated_keys_commit_once_and_survive_reopen() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(VId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(30))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(30).into())
+            ]
         );
         assert_eq!(
             db.vertex(VId(11)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(20))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(20).into())
+            ]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -202,7 +208,10 @@ fn transaction_entry_stages_without_publishing_and_sees_its_outer_prefix() {
         assert!(db.vertices().unwrap().is_empty());
         assert_eq!(
             transaction.vertex(&db, VId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(30))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(30).into())
+            ]
         );
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
@@ -383,11 +392,17 @@ fn late_arithmetic_failure_has_original_row_coordinates_and_publishes_no_prefix(
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(100))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(100).into())
+            ]
         );
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(200))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(200).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

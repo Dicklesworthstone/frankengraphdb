@@ -226,6 +226,11 @@ mod limited_snapshot_admission_tests {
             Ok(None)
         }
 
+        fn gql_edge_at(&self, _: EId, _: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+            self.point_reads.set(self.point_reads.get() + 1);
+            Ok(None)
+        }
+
         fn gql_vertices_at(&self, _: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
             self.vertex_reads.set(self.vertex_reads.get() + 1);
             Ok(vec![])

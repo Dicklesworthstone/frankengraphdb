@@ -353,8 +353,10 @@ fn canonical_nested_values_full_width_ids_and_large_distinct_support_remain_exac
         let query = any_definition(distinct);
         let rows = z(values.iter().cloned().map(|value| (one(value), 2)));
         let state = seed(query, &rows);
+        // The input's explicit ORDER BY uses openCypher orderability
+        // (42fb01c3): vertices, then lists, then text; COLLECT skips NULL.
         let mut expected = Vec::new();
-        for value in [&values[3], &values[1], &values[2]] {
+        for value in [&values[1], &values[2], &values[3]] {
             expected.extend(std::iter::repeat_n(
                 value.clone(),
                 if distinct { 1 } else { 2 },
@@ -513,7 +515,7 @@ fn unproved_sequences_refuse_but_complete_definition_and_other_aggregate_profile
     )
     .unwrap();
     assert!(matches!(
-        Operator::new(query, &[GraphSetColumnType::Scalar; 6]),
+        Operator::new(query, &[GraphSetColumnType::Stored; 6]),
         Err(GroupBuildError::UnsupportedAggregate { aggregate: 0 })
     ));
     let definition = definition(false, true, false);

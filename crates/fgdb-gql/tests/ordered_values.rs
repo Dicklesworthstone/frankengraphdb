@@ -5,7 +5,7 @@ use fgdb_gql::algebra::{
     GraphValueOrder, GraphValueRow, PreparedGraphPattern,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cmp::Ordering;
 
 fn wide() -> GqlQueryPolicy {
@@ -60,18 +60,94 @@ fn compare(a: &[GraphValue], b: &[GraphValue], order: &[GraphValueOrder]) -> Ord
 }
 
 #[test]
+fn mixed_numeric_keys_use_secondary_keys_before_canonical_row_ties() {
+    use fgdb_types::CanonicalF64;
+    let scores = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Float(CanonicalF64::new(3.2)),
+        CanonicalScalar::ucs_basic_text("z").unwrap(),
+        CanonicalScalar::Bool(false),
+        CanonicalScalar::Null,
+    ]
+    .map(CanonicalPropertyValue::from);
+    let ties =
+        [2, 1, 0, 0, 0, 0, 0].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
+    for (descending, expected) in [
+        (false, [4, 5, 1, 0, 3, 2, 6]),
+        (true, [2, 3, 1, 0, 5, 4, 6]),
+    ] {
+        for offset in 0..=7 {
+            for count in [None, Some(0), Some(1), Some(3)] {
+                let query = pattern(
+                    true,
+                    offset,
+                    count,
+                    &[
+                        GraphValueOrder {
+                            column: 1,
+                            descending,
+                            nulls_first: false,
+                        },
+                        GraphValueOrder::ascending(2),
+                    ],
+                );
+                for reversed in [false, true] {
+                    let mut input: Vec<_> = (0..7).map(VId).collect();
+                    if reversed {
+                        input.reverse();
+                    }
+                    let result = query
+                        .plan()
+                        .execute_governed_with_properties(
+                            7,
+                            input,
+                            [],
+                            |_, _| Ok::<_, ()>(true),
+                            |id, key| {
+                                Ok(Some(if key == PropertyKeyId(1) {
+                                    &scores[id.0 as usize]
+                                } else {
+                                    &ties[id.0 as usize]
+                                }))
+                            },
+                            wide(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    let actual: Vec<_> = result
+                        .value
+                        .iter()
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap().0)
+                        .collect();
+                    let wanted: Vec<_> = expected
+                        .into_iter()
+                        .skip(offset as usize)
+                        .take(count.unwrap_or(u64::MAX) as usize)
+                        .collect();
+                    assert_eq!(actual, wanted);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn every_small_ordered_page_matches_full_sort_and_whole_row_distinctness() {
     let ids = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
     let choices = [
         CanonicalScalar::Null,
         CanonicalScalar::Int(-9),
         CanonicalScalar::Int(7),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let ties = [
         CanonicalScalar::Bool(true),
         CanonicalScalar::Bool(false),
         CanonicalScalar::Bool(true),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let input = [ids[2], ids[0], ids[1], ids[0], ids[2]];
     for code in 0..27 {
         let scores = [
@@ -101,8 +177,8 @@ fn every_small_ordered_page_matches_full_sort_and_whole_row_distinctness() {
                                         ids.iter().position(|candidate| candidate == id).unwrap();
                                     vec![
                                         GraphValue::Vertex(*id),
-                                        GraphValue::Scalar((*scores[at]).clone()),
-                                        GraphValue::Scalar(ties[at].clone()),
+                                        GraphValue::Scalar(scores[at].as_scalar().unwrap().clone()),
+                                        GraphValue::Scalar(ties[at].as_scalar().unwrap().clone()),
                                     ]
                                 })
                                 .collect();
@@ -246,7 +322,7 @@ fn ordering_preserves_optional_null_bindings_and_parallel_occurrences() {
         .with_duplicates()
         .with_order_by(&[GraphValueOrder::descending(1)])
         .unwrap();
-    let score = CanonicalScalar::Int(9);
+    let score = CanonicalPropertyValue::from(CanonicalScalar::Int(9));
     let result = query
         .plan()
         .execute_governed_with_properties(
@@ -279,7 +355,7 @@ fn ordering_preserves_optional_null_bindings_and_parallel_occurrences() {
 
 #[test]
 fn ordered_reads_keep_source_failures_even_when_zero_or_full_pages_discard_rows() {
-    let scalar = CanonicalScalar::Int(1);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
     for count in [Some(0), Some(1)] {
         let query = pattern(false, 0, count, &[GraphValueOrder::ascending(0)]);
         let mut reads = 0;
@@ -315,7 +391,8 @@ fn ranked_pages_share_exact_limits_and_every_interruption_checkpoint() {
         CanonicalScalar::Int(4),
         CanonicalScalar::Int(2),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let ids = [VId(0), VId(1), VId(2), VId(3), VId(1)];
     let mut calls = 0;
     let measured = query

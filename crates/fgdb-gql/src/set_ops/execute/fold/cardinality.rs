@@ -17,12 +17,25 @@ pub(super) use amount::Amount;
 pub(super) fn constant(value: &GraphSetValue) -> bool {
     match value {
         GraphSetValue::Column(_) => false,
-        GraphSetValue::Literal(_) | GraphSetValue::Value(_) => true,
+        GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) | GraphSetValue::Value(_) => true,
         GraphSetValue::Integer(expression) => expression.referenced_columns().next().is_none(),
         GraphSetValue::List(values) => values.iter().all(constant),
         GraphSetValue::Index { list, index } => constant(list) && constant(index),
         GraphSetValue::Size(list) => constant(list),
         GraphSetValue::In { value, list } => constant(value) && constant(list),
+        GraphSetValue::Equal { left, right } | GraphSetValue::Ordered { left, right, .. } => {
+            constant(left) && constant(right)
+        }
+        GraphSetValue::Temporal { argument, .. } | GraphSetValue::Function { argument, .. } => {
+            constant(argument)
+        }
+        // A draw keys on its row's ordinal: never one value for every row.
+        GraphSetValue::Random { .. } => false,
+        GraphSetValue::Case { arms, otherwise } => {
+            arms.iter()
+                .all(|(condition, value)| constant(condition) && constant(value))
+                && otherwise.as_deref().is_none_or(constant)
+        }
         // An element is fixed by its comprehension's list (fgdb-20foe).
         GraphSetValue::Local(_) => true,
         GraphSetValue::Comprehension { list, filter, map } => {
@@ -48,6 +61,10 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
             values.iter().all(constant) && guard.as_deref().is_none_or(constant)
         }
         GraphSetValue::MapGet { map, .. } | GraphSetValue::Keys(map) => constant(map),
+        GraphSetValue::MapOverlay { base, values, .. } => {
+            constant(base) && values.iter().all(constant)
+        }
+        GraphSetValue::Let { values, body } => values.iter().all(constant) && constant(body),
     }
 }
 
@@ -55,7 +72,10 @@ pub(super) fn total_projection(projection: &[GraphSetProjection]) -> bool {
     projection.iter().all(|column| {
         matches!(
             column.value(),
-            GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
+            GraphSetValue::Column(_)
+                | GraphSetValue::Literal(_)
+                | GraphSetValue::TypedNull(_)
+                | GraphSetValue::Value(_)
         )
     })
 }
@@ -72,6 +92,17 @@ pub(super) fn constant_unwind_size<E, C, Checkpoint>(
 where
     Checkpoint: FnMut() -> Result<(), C>,
 {
+    // range() counts from its bounds as UNWIND streams it (fgdb-85aal),
+    // never from a materialized list that the list bound would cap.
+    if let GraphSetValue::Range { start, end, step } = value {
+        let members = projection::constant_range_members(
+            (start, end, step.as_deref()),
+            column,
+            &mut |event| meter.event(event),
+        )
+        .map_err(|error| projected(error, 0))?;
+        return Ok(Amount::from_u128(members));
+    }
     let value = projection::evaluate_value(value, &GraphValueRow::unit(), column, &mut |event| {
         meter.event(event)
     })
@@ -110,6 +141,7 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
+                ..
             } => total_projection(projection) && input.has_factorized_cardinality(),
             SetNode::Scope(input) => input.has_factorized_cardinality(),
             _ => false,
@@ -156,12 +188,16 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    let size = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    let size = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()
+    {
         // Complete the original scoped inputs before cardinality reduction.
         // Pure equality runs count by range length; residuals evaluate borrowed
         // candidates. Neither path allocates a joined row or repeats a source.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
+        let right = match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+            Some(rows) => rows,
+            None => run(right, source, meter, operand)?,
+        };
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         let mut size = Amount::ZERO;
         selected_cross::count_with_context(
@@ -212,6 +248,7 @@ where
                 input,
                 projection,
                 quantifier: GraphSetQuantifier::All,
+                ..
             } if total_projection(projection) => {
                 // Checked aliases and already-admitted literal values cannot fail
                 // semantically. Their unused copies and sort may be eliminated.
@@ -224,7 +261,7 @@ where
                 // DISTINCT, filters, computed projections and dynamic UNWIND.
                 // Its page has already been applied; do not apply it twice.
                 let mut size = Amount::ZERO;
-                visit(query, source, meter, operand, &mut |_, meter| {
+                visit(query, source, meter, operand, &mut |_, _, meter| {
                     meter.event(GlaExecutionEvent::Work)?;
                     size = size.add(Amount::ONE);
                     Ok(())

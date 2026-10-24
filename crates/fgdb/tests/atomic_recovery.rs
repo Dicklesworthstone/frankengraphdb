@@ -106,7 +106,8 @@ fn marker_boundary_recovers_both_relations_or_neither_including_torn_tail() {
             if tear {
                 fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
             }
-            let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            let mut reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            reopened.ensure_delta_window(&cx, basis).await.unwrap();
             let expected_seq = CommitSeq(basis.0 + u64::from(committed));
             assert_eq!(reopened.frontier().unwrap(), expected_seq, "{name}");
             assert_eq!(
@@ -232,4 +233,394 @@ fn oversized_group_cannot_publish_an_independently_valid_group() {
         assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());
     });
     assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod capsule_recovery {
+    use super::*;
+    use fgdb::{
+        CAPSULE_OBJECT_KIND, CapsuleRecoveryError, DatabaseState, DerivedPublicationStage,
+        OpenError,
+    };
+    use fgdb_chronicle::commit::restore::CapsuleRestoreError;
+    use fgdb_chronicle::commit::{CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator};
+    use fgdb_chronicle::identity::{
+        CipherDescriptor, EncodingDescriptor, IdentifiedObject, VerificationOutcome,
+    };
+    use fgdb_chronicle::marker::EffectSource;
+    use fgdb_chronicle::symbolize::{RecoveryTarget, encode_object, source_symbol_count};
+    use fgdb_chronicle::transfer::{BondedPull, DonorId, PullLimits, VerifiedObject};
+    use fgdb_types::ObjectId;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn directory(name: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fgdb-capsule-recovery-{}-{epoch}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn capsule_path(path: &Path, oid: ObjectId) -> PathBuf {
+        let hex: String = oid.0.iter().map(|byte| format!("{byte:02x}")).collect();
+        path.join(CAPSULE_DIR).join(format!("{hex}.capsule"))
+    }
+
+    // A real authenticated transfer, with a donor DEK and encoding different
+    // from local capsule storage. No test constructor can forge VerifiedObject.
+    fn authenticated(
+        plaintext: &[u8],
+        namespace: DatabaseSecurityNamespaceId,
+        kind: u16,
+    ) -> VerifiedObject {
+        let keys = keys();
+        let donor_dek = [0xb7; 32];
+        let identified = IdentifiedObject::new(keys.k_oid(), namespace, kind, &[], plaintext);
+        let protected = identified
+            .protect(
+                &donor_dek,
+                CipherDescriptor {
+                    object_kind: kind,
+                    canonical_plaintext_len: plaintext.len() as u64,
+                    codec_profile: 0,
+                    compressed_len: plaintext.len() as u64,
+                    data_crypto_profile: 1,
+                    dek_id: [17; 16],
+                    object_nonce: [29; 24],
+                    object_tag_len: 16,
+                },
+                plaintext,
+            )
+            .unwrap();
+        let len = protected.protected_bytes().len();
+        let encoding = protected.encode(EncodingDescriptor {
+            fec_profile: 1,
+            transfer_length: len as u64,
+            oti_common: 0,
+            oti_scheme: 0,
+            symbol_size: 512,
+            source_block_count: 1,
+            symbol_auth_profile: 1,
+        });
+        let records = encode_object(
+            &encoding,
+            protected.protected_bytes(),
+            kind,
+            0,
+            4,
+            &donor_dek,
+        )
+        .unwrap();
+        let mut pull = BondedPull::new(
+            &encoding,
+            RecoveryTarget {
+                k_oid: keys.k_oid(),
+                namespace,
+                object_id: encoding.object_id(),
+                canonical_header: &[],
+                protected_len: len,
+            },
+            &donor_dek,
+            &[DonorId(1), DonorId(2)],
+            PullLimits::default(),
+        )
+        .unwrap();
+        for request in pull.schedule(source_symbol_count(len, 512)).unwrap() {
+            pull.accept(
+                request.donor,
+                &records[request.esi as usize],
+                &mut Vec::new(),
+            )
+            .unwrap();
+        }
+        pull.try_recover(&mut Vec::new()).unwrap().unwrap()
+    }
+
+    async fn last_capsule(cx: &CommitCx, path: &Path) -> VerifiedObject {
+        let coordinator = CommitCoordinator::open(cx, path, keys().capsule_keys())
+            .await
+            .unwrap();
+        let EffectSource::Local { capsule_ref, .. } = &coordinator
+            .chain()
+            .entries()
+            .last()
+            .unwrap()
+            .marker
+            .effect_source;
+        let oid = *capsule_ref;
+        let bytes = coordinator
+            .read_capsule(cx, oid, &mut Vec::new())
+            .await
+            .unwrap();
+        let recovered = authenticated(&bytes, keys().namespace, CAPSULE_OBJECT_KIND);
+        assert_eq!(recovered.object_id(), oid);
+        assert_ne!(
+            recovered.encoding().encoding_id().0,
+            keys()
+                .capsule_keys()
+                .seal(&bytes)
+                .unwrap()
+                .descriptor
+                .encoding_id,
+        );
+        recovered
+    }
+
+    #[test]
+    fn authenticated_capsules_recover_the_required_suffix_and_normal_writes() {
+        let ((), report) = run_async_under_lab(0xa703_0101, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for missing in [false, true] {
+                let path = directory(if missing { "missing" } else { "damaged" });
+                let mut db = seeded(&cx, &path).await;
+                let basis = db.frontier().unwrap();
+                let before = db.vertices().unwrap();
+                let mut write = WriteBatch::new(R);
+                write.create_vertex(VId(4), vec![], vec![(P, CanonicalScalar::Int(44))]);
+                write.add_edge(EId(40), VId(3), VId(4), vec![]);
+                assert!(
+                    db.write_with_publication_failure(
+                        &cx,
+                        write,
+                        DerivedPublicationStage::FoldCommittedTemplate,
+                    )
+                    .await
+                    .is_err()
+                );
+                assert!(matches!(
+                    db.state(),
+                    DatabaseState::NeedsAuthoritativeRecovery(_)
+                ));
+                drop(db);
+                let recovered = last_capsule(&cx, &path).await;
+                let capsule = capsule_path(&path, recovered.object_id());
+                let markers = std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap();
+                if missing {
+                    std::fs::rename(&capsule, capsule.with_extension("lost-fixture")).unwrap();
+                } else {
+                    // The entire framed container is unusable: local FEC
+                    // cannot supply the lost capsule from surviving symbols.
+                    std::fs::write(&capsule, b"no surviving capsule symbols").unwrap();
+                }
+                assert!(Database::open(&cx, &path, keys()).await.is_err());
+                assert!(
+                    Database::open_restoring_capsules(&cx, &path, keys(), &[])
+                        .await
+                        .is_err(),
+                    "capsule verification cannot replace ordinary suffix admission"
+                );
+                let objects = [recovered];
+                let mut restored = if missing {
+                    Database::open_restoring_capsules_with_vfs(
+                        &cx,
+                        asupersync::fs::UnixVfs::new(),
+                        &path,
+                        keys(),
+                        &objects,
+                    )
+                    .await
+                    .unwrap()
+                } else {
+                    Database::open_restoring_capsules(&cx, &path, keys(), &objects)
+                        .await
+                        .unwrap()
+                };
+                let committed = CommitSeq(basis.0 + 1);
+                assert_eq!(restored.frontier().unwrap(), committed);
+                assert_eq!(restored.vertices_at(basis).unwrap(), before);
+                assert!(restored.vertex(VId(4)).unwrap().is_some());
+                assert!(restored.edge(EId(40)).unwrap().is_some());
+                restored.ensure_delta_window(&cx, basis).await.unwrap();
+                assert_eq!(restored.delta_since(basis).unwrap().count(), 1);
+                assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
+                assert!(restored.crypto_verification_events().iter().any(|event| {
+                    event.object_kind == CAPSULE_OBJECT_KIND
+                        && event.outcome == VerificationOutcome::Accepted
+                }));
+                assert!(matches!(
+                    Database::open(&cx, &path, keys()).await,
+                    Err(OpenError::Commit(
+                        fgdb_chronicle::CommitError::WriterAlreadyOpen
+                    ))
+                ));
+                let mut next = WriteBatch::new(R);
+                next.create_vertex(VId(5), vec![], vec![]);
+                let next_seq = restored.write(&cx, next).await.unwrap();
+                assert_eq!(next_seq, CommitSeq(committed.0 + 1));
+                let vertices = restored.vertices().unwrap();
+                let edges = restored.edges().unwrap();
+                drop(restored);
+                let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+                assert_eq!(reopened.frontier().unwrap(), next_seq);
+                assert_eq!(reopened.vertices().unwrap(), vertices);
+                assert_eq!(reopened.edges().unwrap(), edges);
+                drop(reopened);
+                let rebuilt = Database::open_rebuilding(&cx, &path, keys()).await.unwrap();
+                assert_eq!(rebuilt.frontier().unwrap(), next_seq);
+                assert_eq!(rebuilt.vertices().unwrap(), vertices);
+                assert_eq!(rebuilt.edges().unwrap(), edges);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn capsule_recovery_preflights_the_whole_batch_and_excludes_other_writers() {
+        let ((), report) = run_async_under_lab(0xa703_0102, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let path = directory("admission");
+            drop(seeded(&cx, &path).await);
+            let recovered = last_capsule(&cx, &path).await;
+            let capsule = capsule_path(&path, recovered.object_id());
+            let markers = std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap();
+            let held = Database::open(&cx, &path, keys()).await.unwrap();
+            let damaged = b"unrecoverable committed capsule";
+            std::fs::write(&capsule, damaged).unwrap();
+            assert!(matches!(
+                Database::open_restoring_capsules(
+                    &cx,
+                    &path,
+                    keys(),
+                    std::slice::from_ref(&recovered),
+                )
+                .await,
+                Err(CapsuleRecoveryError::Open(OpenError::Commit(
+                    fgdb_chronicle::CommitError::WriterAlreadyOpen
+                )))
+            ));
+            assert_eq!(std::fs::read(&capsule).unwrap(), damaged);
+            drop(held);
+
+            let mut other_plaintext = recovered.plaintext().to_vec();
+            other_plaintext.push(1);
+            let invalid = [
+                authenticated(
+                    recovered.plaintext(),
+                    DatabaseSecurityNamespaceId([0xee; 32]),
+                    CAPSULE_OBJECT_KIND,
+                ),
+                authenticated(
+                    recovered.plaintext(),
+                    keys().namespace,
+                    CAPSULE_OBJECT_KIND + 1,
+                ),
+                authenticated(&other_plaintext, keys().namespace, CAPSULE_OBJECT_KIND),
+            ];
+            for (case, invalid) in invalid.into_iter().enumerate() {
+                let invalid_id = invalid.object_id();
+                let objects = [
+                    authenticated(recovered.plaintext(), keys().namespace, CAPSULE_OBJECT_KIND),
+                    invalid,
+                ];
+                let error = Database::open_restoring_capsules(&cx, &path, keys(), &objects)
+                    .await
+                    .unwrap_err();
+                let CapsuleRecoveryError::Capsule { object_id, source } = error else {
+                    panic!("wrong admission error: {error:?}");
+                };
+                assert_eq!(object_id, invalid_id);
+                assert!(matches!(
+                    (case, source),
+                    (0, CapsuleRestoreError::WrongNamespace)
+                        | (1, CapsuleRestoreError::UnsupportedPayload)
+                        | (2, CapsuleRestoreError::UnreferencedObject(_))
+                ));
+                assert_eq!(
+                    std::fs::read(&capsule).unwrap(),
+                    damaged,
+                    "an invalid later object must refuse before the valid first repair"
+                );
+                assert!(!capsule_path(&path, invalid_id).exists());
+                assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
+            }
+            let repaired = Database::open_restoring_capsules(
+                &cx,
+                &path,
+                keys(),
+                std::slice::from_ref(&recovered),
+            )
+            .await
+            .unwrap();
+            assert_eq!(repaired.frontier().unwrap(), CommitSeq::FIRST);
+            assert_eq!(repaired.vertices().unwrap().len(), 3);
+            // This root already covers the marker, so ordinary checkpoint
+            // replay reads zero capsules. Restoration's verification evidence
+            // still belongs to the returned database handle.
+            assert!(!repaired.crypto_verification_events().is_empty());
+            assert_ne!(std::fs::read(&capsule).unwrap(), damaged);
+            assert_eq!(std::fs::read(path.join(COMMIT_LOG_NAME)).unwrap(), markers);
+            drop(repaired);
+            let reopened = Database::open_restoring_capsules(&cx, &path, keys(), &[])
+                .await
+                .unwrap();
+            assert_eq!(reopened.vertices().unwrap().len(), 3);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn capsule_recovery_authenticates_the_database_before_replacing_any_bytes() {
+        let ((), report) = run_async_under_lab(0xa703_0103, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let path = directory("wrong-key");
+            drop(seeded(&cx, &path).await);
+            let recovered = last_capsule(&cx, &path).await;
+            let capsule = capsule_path(&path, recovered.object_id());
+            let damaged = b"unrecoverable committed capsule";
+            std::fs::write(&capsule, damaged).unwrap();
+            for foreign_namespace in [false, true] {
+                let correct = keys();
+                let wrong = if foreign_namespace {
+                    DatabaseKeys::new(
+                        *correct.k_oid(),
+                        DatabaseSecurityNamespaceId([0xee; 32]),
+                        *correct.dek(),
+                    )
+                } else {
+                    DatabaseKeys::new(*correct.k_oid(), correct.namespace, [0xee; 32])
+                };
+                let error = Database::open_restoring_capsules(
+                    &cx,
+                    &path,
+                    wrong,
+                    std::slice::from_ref(&recovered),
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(
+                    (foreign_namespace, error),
+                    (
+                        false,
+                        CapsuleRecoveryError::Open(OpenError::WrongDek { .. })
+                    ) | (
+                        true,
+                        CapsuleRecoveryError::Open(OpenError::ForeignSlot { .. })
+                    )
+                ));
+                assert_eq!(std::fs::read(&capsule).unwrap(), damaged);
+            }
+            let absent = directory("absent");
+            assert!(matches!(
+                Database::open_restoring_capsules(
+                    &cx,
+                    &absent,
+                    keys(),
+                    std::slice::from_ref(&recovered),
+                )
+                .await,
+                Err(CapsuleRecoveryError::Open(OpenError::NotADatabase { .. }))
+            ));
+            assert!(!absent.exists());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }

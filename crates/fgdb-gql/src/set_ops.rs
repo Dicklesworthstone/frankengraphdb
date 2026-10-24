@@ -2,28 +2,48 @@
 //!
 //! Operands keep their own DISTINCT, ordering and page. Set equality is over
 //! the entire canonical row (null equals null here, unlike WHERE). Column
-//! positions and vertex/scalar domains must agree; output names come from the
-//! left operand. This is the bounded materialized implementation, not a spill
-//! engine, incremental derivative, or full GQL conformance claim.
+//! positions must agree, and each column keeps its common domain: equal
+//! concrete domains remain concrete, Any stays open, and different concrete
+//! domains refuse. Output names come from the left operand. This is the bounded
+//! materialized implementation, not a spill engine, incremental derivative,
+//! or full GQL conformance claim.
 
 mod aggregate;
 mod execute;
-pub(crate) use execute::finish_owned_projection;
+pub(crate) use aggregate::{WriteReturnGroup, WriteReturnGroupSpec};
+pub(crate) use execute::{
+    finish_owned_aggregate, finish_owned_projection, finish_owned_tail, owned_head_policy,
+    sort_canonical_values,
+};
 mod filter;
 mod incremental;
 mod join;
 mod merge;
 mod procedure;
-mod projection;
+pub(crate) mod projection;
+pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
-pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
-pub use projection::{
-    GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
+pub(crate) use procedure::WithOwnedRows;
+pub(crate) use procedure::{
+    BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource, WithSeededPatterns,
+};
+pub use procedure::{
+    GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementReads, WithProcedures,
 };
 pub(crate) use projection::{
-    ProjectionFailure, evaluate_membership, evaluate_value, map_keys, range_values, slice_bounds,
+    ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
+    evaluate_order, evaluate_value, evaluate_value_reading, map_keys, no_element_reads,
+    overlay_map, range_member_count, range_values, slice_bounds, temporal_arithmetic,
+    temporal_field, temporal_field_name, temporal_field_scratch_entries, timestamp_text,
+    value_function,
+};
+pub use projection::{
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
+    GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
 };
 
 use crate::algebra::{
@@ -56,17 +76,27 @@ pub enum GraphSetColumnType {
     Edges,
     Edge,
     List,
+    /// Every canonical native value, including maps, lists and graph elements.
+    /// Combining this open domain with a concrete one never narrows it.
     Any,
+    /// A stored property value (fgdb-k3nub, fgdb-kr8j1): a scalar, or a
+    /// stored List or Map, never a graph element at any depth. A property
+    /// column has this domain; every consumer that admits a Scalar column
+    /// admits it too, and a scalar-only operator still refuses a collection
+    /// at run time with its own typed error. Scalar keeps its strict domain.
+    Stored,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
     fn from(column: &ValueProjection) -> Self {
         use crate::algebra::GraphPathFunction;
         match column {
             ValueProjection::Vertex { .. } => Self::Vertex,
-            ValueProjection::Property { .. }
-            | ValueProjection::EdgeProperty { .. }
-            | ValueProjection::Type { .. } => Self::Scalar,
-            ValueProjection::Labels { .. } => Self::List,
+            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Stored,
+            ValueProjection::Type { .. } => Self::Scalar,
+            ValueProjection::Labels { .. } | ValueProjection::Collected { .. } => Self::List,
+            ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
+                Self::Any
+            }
             ValueProjection::Path { function, .. } => match function {
                 GraphPathFunction::Value => Self::Path,
                 GraphPathFunction::Length => Self::Scalar,
@@ -75,25 +105,93 @@ impl From<&ValueProjection> for GraphSetColumnType {
                 GraphPathFunction::Edge => Self::Edge,
                 GraphPathFunction::Labels => Self::List,
                 GraphPathFunction::Type => Self::Scalar,
+                GraphPathFunction::Properties => Self::Any,
             },
         }
     }
 }
 impl GraphSetColumnType {
+    pub(crate) const fn parameter_domain(kind: crate::GqlParameterType) -> Self {
+        match kind {
+            crate::GqlParameterType::List => Self::List,
+            crate::GqlParameterType::Map => Self::Any,
+            _ => Self::Scalar,
+        }
+    }
+
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::Vertex => 0,
+            Self::Scalar => 1,
+            Self::Path => 2,
+            Self::Vertices => 3,
+            Self::Edges => 4,
+            Self::Edge => 5,
+            Self::List => 6,
+            Self::Any => 7,
+            Self::Stored => 8,
+        }
+    }
+
+    /// Whether this column may be read as a scalar operand: a Scalar column,
+    /// or a stored property value, whose collections refuse at run time.
+    #[must_use]
+    pub(crate) const fn is_scalar_like(self) -> bool {
+        matches!(self, Self::Scalar | Self::Stored)
+    }
+
+    /// The common checked domain of two set-operand columns. Any already
+    /// admits every native value, so it remains open when paired with a known
+    /// domain. A stored property value widens a Scalar column it is paired
+    /// with, and is itself widened to Any by a List column, whose lists may
+    /// hold graph elements. Other different concrete domains still refuse;
+    /// this changes schema admission only, never canonical equality, values or
+    /// numeric coercion.
+    ///
+    /// Native and maintained set compilers share this rule. Apply it to the
+    /// complete declared schemas before inspecting any rows, including empty
+    /// or all-NULL operands. The result must remain the output domain for all
+    /// later updates and consumers; currently observed values cannot narrow it.
+    /// This does not admit a source, grant capabilities, or make unsupported
+    /// operators maintainable.
+    #[must_use]
+    pub fn common_set_domain(self, other: Self) -> Option<Self> {
+        if self == Self::Any || other == Self::Any {
+            Some(Self::Any)
+        } else if self == other {
+            Some(self)
+        } else if self.is_scalar_like() && other.is_scalar_like() {
+            Some(Self::Stored)
+        } else if matches!(
+            (self, other),
+            (Self::Stored, Self::List) | (Self::List, Self::Stored)
+        ) {
+            Some(Self::Any)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn accepts(self, value: &crate::algebra::GraphValue) -> bool {
         use crate::algebra::GraphValue;
         self == Self::Any
             || value.is_null()
-            || matches!(
-                (self, value),
-                (Self::Vertex, GraphValue::Vertex(_))
-                    | (Self::Scalar, GraphValue::Scalar(_))
-                    | (Self::Path, GraphValue::Path(_))
-                    | (Self::Vertices, GraphValue::Vertices(_))
-                    | (Self::Edges, GraphValue::Edges(_))
-                    | (Self::Edge, GraphValue::Edge(_))
-                    | (Self::List, GraphValue::List(_))
-            )
+            || match (self, value) {
+                (Self::Stored, GraphValue::Scalar(_)) => true,
+                (Self::Stored, GraphValue::List(_) | GraphValue::Map { .. }) => {
+                    value.is_stored_value()
+                }
+                _ => matches!(
+                    (self, value),
+                    (Self::Vertex, GraphValue::Vertex(_))
+                        | (Self::Scalar, GraphValue::Scalar(_))
+                        | (Self::Path, GraphValue::Path(_))
+                        | (Self::Vertices, GraphValue::Vertices(_))
+                        | (Self::Edges, GraphValue::Edges(_))
+                        | (Self::Edge, GraphValue::Edge(_))
+                        | (Self::List, GraphValue::List(_))
+                ),
+            }
     }
 }
 
@@ -123,7 +221,44 @@ pub enum GraphSetBuildError {
 }
 impl core::fmt::Display for GraphSetBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph set definition: {self:?}")
+        match self {
+            Self::JoinInputSchema { side } => {
+                write!(f, "join input {side} does not have the checked schema")
+            }
+            Self::TooManyOperands { limit, observed } => {
+                write!(f, "set operation has {observed} operands, limit {limit}")
+            }
+            Self::TooDeep { limit, observed } => {
+                write!(f, "query nests {observed} levels deep, limit {limit}")
+            }
+            Self::ColumnCount { left, right } => write!(
+                f,
+                "set operation operands return {left} and {right} columns; they must match"
+            ),
+            Self::ColumnType {
+                column,
+                left,
+                right,
+            } => write!(
+                f,
+                "set operation column {column} combines {left} with {right}, which have no common type"
+            ),
+        }
+    }
+}
+impl core::fmt::Display for GraphSetColumnType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Vertex => "a vertex",
+            Self::Scalar => "a scalar",
+            Self::Path => "a path",
+            Self::Vertices => "a vertex list",
+            Self::Edges => "an edge list",
+            Self::Edge => "an edge",
+            Self::List => "a list",
+            Self::Any => "any value",
+            Self::Stored => "a stored property value",
+        })
     }
 }
 impl core::error::Error for GraphSetBuildError {}
@@ -155,6 +290,12 @@ pub enum GraphSetExecutionError<E> {
     ProcedureUnavailable {
         operand: usize,
     },
+    /// A host advertised factors but supplied no source for a checked request.
+    PatternFactorsUnavailable {
+        operand: usize,
+    },
+    /// An owned-row leaf reached a host that supplies no owned rows.
+    OwnedRowsUnavailable,
 }
 impl<E> GraphSetExecutionError<E> {
     /// Preserve relational failures while translating only the host source.
@@ -178,6 +319,10 @@ impl<E> GraphSetExecutionError<E> {
             Self::ProcedureUnavailable { operand } => {
                 GraphSetExecutionError::ProcedureUnavailable { operand }
             }
+            Self::PatternFactorsUnavailable { operand } => {
+                GraphSetExecutionError::PatternFactorsUnavailable { operand }
+            }
+            Self::OwnedRowsUnavailable => GraphSetExecutionError::OwnedRowsUnavailable,
         }
     }
 }
@@ -204,6 +349,15 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
                 write!(
                     f,
                     "set operand {operand} calls a procedure this host does not run"
+                )
+            }
+            Self::OwnedRowsUnavailable => {
+                f.write_str("a write tail reached a host without its head rows")
+            }
+            Self::PatternFactorsUnavailable { operand } => {
+                write!(
+                    f,
+                    "set operand {operand} promised graph factors but supplied none"
                 )
             }
         }
@@ -234,6 +388,12 @@ enum SetNode {
     },
     /// A procedure's rows, supplied by the host (Appendix C `ProcedureCall`).
     ProcedureCall(Box<PreparedProcedureCall>),
+    /// A write's RETURN head, owned and already charged by the write, under
+    /// its WITH tail (`SET ... WITH n WHERE ... RETURN`). The executing host
+    /// supplies the rows through `GraphSetSource::owned`; no read builds one.
+    Owned {
+        preserve_order: bool,
+    },
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
@@ -252,6 +412,9 @@ enum SetNode {
         input: Box<PreparedGraphSet>,
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
+        /// A compiler-owned output projection after ranking removes private
+        /// sort cells without canonicalizing the selected occurrence sequence.
+        preserve_order: bool,
     },
     Binary {
         operation: GraphSetOperation,
@@ -314,6 +477,32 @@ fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
     }
 }
 impl PreparedGraphSet {
+    /// A write head's owned rows under its WITH tail: the schema only. The
+    /// executing write supplies the rows (`GraphSetSource::owned`).
+    pub(crate) fn owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
+        Self {
+            node: SetNode::Owned {
+                preserve_order: false,
+            },
+            columns,
+            types,
+            operands: 0,
+            depth: 1,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        }
+    }
+
+    /// External row inputs retain source occurrence order, like UNWIND.
+    pub(crate) fn ordered_owned(columns: Vec<String>, types: Vec<GraphSetColumnType>) -> Self {
+        let mut input = Self::owned(columns, types);
+        input.node = SetNode::Owned {
+            preserve_order: true,
+        };
+        input
+    }
+
     /// A zero-column, one-row relation with no graph source admission.
     #[must_use]
     pub fn singleton() -> Self {
@@ -347,7 +536,7 @@ impl PreparedGraphSet {
         }
         let depth = self.depth + 1;
         check_depth(depth).map_err(Error::SetBuild)?;
-        projection::validate_name(&name, column)?;
+        projection::validate_binding_name(&name, column)?;
         if self.columns.contains(&name) {
             return Err(Error::DuplicateName { column });
         }
@@ -384,8 +573,28 @@ impl PreparedGraphSet {
         namespace: String,
         name: String,
         arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_with_projection(
+            namespace, name, arguments, names, outputs, vertices, None,
+        )
+    }
+
+    /// A procedure call with a catalog-bound graph projection. The projection
+    /// narrows the host's authorized snapshot; source, output and argument
+    /// checks are the same as [`Self::procedure_call`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn procedure_call_with_projection(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
         if !matches!(self.node, SetNode::Values)
@@ -414,15 +623,27 @@ impl PreparedGraphSet {
         for (column, argument) in arguments.iter().enumerate() {
             projection::value_type(argument, &[], column)?;
         }
+        // Named arguments name every argument, each once.
+        if !names.is_empty() {
+            if names.len() != arguments.len() {
+                return Err(Error::Empty);
+            }
+            for (column, argument) in names.iter().enumerate() {
+                projection::validate_binding_name(argument, column)?;
+                if names[..column].contains(argument) {
+                    return Err(Error::DuplicateName { column });
+                }
+            }
+        }
         let mut columns = Vec::with_capacity(outputs.len());
-        let mut names = Vec::with_capacity(outputs.len());
+        let mut output_names = Vec::with_capacity(outputs.len());
         for (column, (output, alias)) in outputs.into_iter().enumerate() {
-            projection::validate_name(&alias, column)?;
+            projection::validate_binding_name(&alias, column)?;
             if columns.contains(&alias) {
                 return Err(Error::DuplicateName { column });
             }
             columns.push(alias);
-            names.push(output);
+            output_names.push(output);
         }
         let operands = self.operands + 1;
         if operands > MAX_GRAPH_SET_OPERANDS {
@@ -437,7 +658,9 @@ impl PreparedGraphSet {
                 namespace,
                 name,
                 arguments,
-                outputs: names,
+                names,
+                graph_projection,
+                outputs: output_names,
                 vertices,
             })),
             columns,
@@ -495,11 +718,11 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            // Procedure rows are canonically sorted on arrival, like a pattern.
-            SetNode::Pattern(_)
-            | SetNode::ProcedureCall(_)
-            | SetNode::Aggregate(_)
-            | SetNode::Join { .. } => false,
+            // Procedure rows are canonically sorted on arrival, like a pattern,
+            // unless the procedure itself defines a ranked output order (`hybrid.*`).
+            SetNode::ProcedureCall(call) => call.preserves_row_order(),
+            SetNode::Owned { preserve_order } => *preserve_order,
+            SetNode::Pattern(_) | SetNode::Aggregate(_) | SetNode::Join { .. } => false,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
@@ -519,8 +742,10 @@ impl PreparedGraphSet {
         check_depth(self.depth.saturating_add(ancestors))
     }
 
-    /// Combine exact, position-compatible relations. Heterogeneous canonical
-    /// scalar kinds remain distinct; there is no implicit numeric coercion.
+    /// Combine exact, position-compatible relations. A column with the open Any
+    /// domain widens the corresponding output column to Any; different concrete
+    /// domains refuse. Heterogeneous canonical scalar kinds remain distinct;
+    /// there is no implicit value conversion or numeric coercion.
     pub fn combine(
         self,
         operation: GraphSetOperation,
@@ -542,18 +767,20 @@ impl PreparedGraphSet {
                 right: right.types.len(),
             });
         }
+        let mut types = Vec::with_capacity(self.types.len());
         for (column, (&left, &right)) in self.types.iter().zip(&right.types).enumerate() {
-            if left != right {
-                return Err(GraphSetBuildError::ColumnType {
-                    column,
-                    left,
-                    right,
-                });
-            }
+            types.push(
+                left.common_set_domain(right)
+                    .ok_or(GraphSetBuildError::ColumnType {
+                        column,
+                        left,
+                        right,
+                    })?,
+            );
         }
         Ok(Self {
             columns: self.columns.clone(),
-            types: self.types.clone(),
+            types,
             operands,
             depth,
             node: SetNode::Binary {
@@ -656,6 +883,15 @@ impl PreparedGraphSet {
                 bytes.extend_from_slice(&definition);
             }
             SetNode::Values => bytes.push(5),
+            SetNode::Owned {
+                preserve_order: false,
+            } => bytes.push(11),
+            SetNode::Owned {
+                preserve_order: true,
+            } => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:set:ordered-owned:v1\0");
+            }
             SetNode::ProcedureCall(call) => {
                 bytes.push(10);
                 call.append_transcript(bytes);
@@ -708,12 +944,20 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier,
+                preserve_order,
             } => {
-                bytes
-                    .extend_from_slice(&[3, u8::from(*quantifier == GraphSetQuantifier::Distinct)]);
+                bytes.extend_from_slice(&[
+                    if *preserve_order { 11 } else { 3 },
+                    u8::from(*quantifier == GraphSetQuantifier::Distinct),
+                ]);
                 input.append_transcript(bytes);
                 projection::append_transcript(projection, bytes);
             }
+        }
+        if !self.order.is_empty() {
+            // Sorting semantics are part of the logical definition. Empty
+            // order keys still mean the unchanged canonical row contract.
+            bytes.extend_from_slice(b"fgdb:set-orderability:v1\0");
         }
         bytes.extend_from_slice(&(self.order.len() as u64).to_be_bytes());
         for key in &self.order {
@@ -747,8 +991,37 @@ impl PreparedGraphSet {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut source;
+        let mut source = PatternSource { patterns };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed` plus the host's element property reader
+    /// (fgdb-xnd7x) and no procedure host: a mutation's input relation
+    /// (fgdb-694ga), whose CALL sources stay refused.
+    pub(crate) fn execute_governed_reading<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let mut source = WithElementReads {
+            source: PatternSource { patterns },
+            elements,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
@@ -760,22 +1033,149 @@ impl PreparedGraphSet {
     pub fn execute_governed_with_procedures<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        patterns: impl FnMut(
+        mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        procedures: impl FnMut(
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut procedures: impl FnMut(
             &PreparedProcedureCall,
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
         let mut source = WithProcedures {
             patterns,
             procedures,
         };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed_with_procedures` plus the host's element property
+    /// reader (fgdb-xnd7x). `x.key` over a vertex or edge that an expression
+    /// produced reads `elements(element, key)` at the same pinned cut and
+    /// under the same authorization as `patterns`. Without this entry such a
+    /// read stays a typed error.
+    pub fn execute_governed_with_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
+        let mut source = WithElementReads {
+            source: WithProcedures {
+                patterns,
+                procedures,
+            },
+            elements,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed_with_elements` plus the host's seeded reader for a
+    /// single-root vertex pattern that a leading bag binds by identity
+    /// (fgdb-2acff). `seeded(pattern, seeds, allowance)` follows
+    /// [`GraphSetSource::seeded_pattern`]: `None` declines the shape and the
+    /// unchanged `patterns` leaf runs. Results equal the unseeded execution;
+    /// only the admitted records and work differ.
+    pub fn execute_governed_with_seeded_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            &[fgdb_types::VId],
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
+        let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
+        let mut source = WithSeededPatterns {
+            source: WithElementReads {
+                source: WithProcedures {
+                    patterns,
+                    procedures,
+                },
+                elements,
+            },
+            seeded,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// A write tail over its head's owned rows. The tail holds row stages
+    /// over one `SetNode::Owned` leaf and never a graph source.
+    pub(crate) fn execute_over_owned<E, C>(
+        &self,
+        rows: Vec<GraphValueRow>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        struct OwnedRows(Option<Vec<GraphValueRow>>);
+        impl<E, C> GraphSetSource<E, C> for OwnedRows {
+            fn pattern(
+                &mut self,
+                _: &PreparedGraphPattern<GraphValueRow>,
+                _: GqlQueryPolicy,
+            ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+                unreachable!("a write tail reads no graph source")
+            }
+            fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+                self.0.take()
+            }
+        }
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        execute::execute(self, policy, &mut OwnedRows(Some(rows)), checkpoint)
     }
 
     /// The executor over any trusted source, for relational consumers (a
@@ -783,10 +1183,29 @@ impl PreparedGraphSet {
     pub(crate) fn execute_with_source<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: &mut impl GraphSetSource<E, C>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        source: &mut dyn GraphSetSource<E, C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, source, checkpoint)
+    }
+
+    /// Whether any source of this relation reads the graph: a pattern or a
+    /// procedure call. Owned rows and literal values read nothing.
+    #[must_use]
+    pub fn reads_graph(&self) -> bool {
+        match &self.node {
+            SetNode::Pattern(_) | SetNode::ProcedureCall(_) => true,
+            SetNode::Values | SetNode::Owned { .. } => false,
+            SetNode::Aggregate(summary) => summary.input().reads_graph(),
+            SetNode::Unwind { input, .. }
+            | SetNode::Scope(input)
+            | SetNode::Filter { input, .. }
+            | SetNode::Project { input, .. } => input.reads_graph(),
+            SetNode::CrossJoin { left, right }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => left.reads_graph() || right.reads_graph(),
+        }
     }
 
     /// Whether any source of this relation is a procedure call.
@@ -794,7 +1213,7 @@ impl PreparedGraphSet {
     pub fn calls_procedure(&self) -> bool {
         match &self.node {
             SetNode::ProcedureCall(_) => true,
-            SetNode::Pattern(_) | SetNode::Values => false,
+            SetNode::Pattern(_) | SetNode::Values | SetNode::Owned { .. } => false,
             SetNode::Aggregate(summary) => summary.input().calls_procedure(),
             SetNode::Unwind { input, .. }
             | SetNode::Scope(input)
@@ -806,5 +1225,405 @@ impl PreparedGraphSet {
                 left.calls_procedure() || right.calls_procedure()
             }
         }
+    }
+
+    /// The row-by-row pull of this relation, when it has one (fgdb-7xqxb):
+    /// `Project ALL` over one vertex-rooted pattern without relationships,
+    /// with no order or page at either level. The first output cell is the
+    /// root vertex itself; every other cell is a column, a bound constant or
+    /// integer arithmetic over columns.
+    ///
+    /// The vertex scan visits strictly increasing identities, and each row
+    /// leads with its own identity. Its visitation order is therefore exactly
+    /// the canonical row order the eager projection sorts into, and no two
+    /// rows can tie. Any other shape returns None: there is no pull fallback.
+    #[must_use]
+    pub fn row_pull(&self) -> Option<GraphSetRowPull> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        let (pull, GraphSetQuantifier::All) = self.vertex_projection()? else {
+            return None;
+        };
+        let GraphSetValue::Column(column) = *pull.projection.first()?.value() else {
+            return None;
+        };
+        if !matches!(
+            pull.pattern.value_columns().get(column),
+            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+        ) {
+            return None;
+        }
+        Some(pull)
+    }
+
+    /// The ordered pull of this relation, when it has one (fgdb-7xqxb): the
+    /// same checked projection over one vertex-rooted pattern as
+    /// [`Self::row_pull`], with this relation's ALL/DISTINCT, ORDER BY and
+    /// page returned as the external sort's tail. Without ORDER BY, the
+    /// tail specifies the ordinary canonical whole-row order, NULL first.
+    ///
+    /// The caller projects every scanned row with [`GraphSetRowPull::project`]
+    /// and sorts the complete projected bag by the tail. DISTINCT removes
+    /// equal complete projected rows only after sorting and before the page;
+    /// it never deduplicates source rows or skips a fallible projection.
+    /// Every evaluated cell is visible. Ties then break on
+    /// the whole typed row, as the eager projection's canonical sort followed
+    /// by its stable ORDER BY does, so no output cell needs to lead with the
+    /// root. The pattern's own rows must lead with the root vertex, or
+    /// project no cell. The scan then numbers source rows exactly as the
+    /// eager path numbers its canonically sorted input.
+    #[must_use]
+    pub fn ordered_row_pull(&self) -> Option<(GraphSetRowPull, crate::scan_stream::ScanSortTail)> {
+        let (pull, quantifier) = self.vertex_projection()?;
+        let columns = pull.pattern.value_columns();
+        if !columns.is_empty()
+            && !matches!(
+                columns.first(),
+                Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+            )
+        {
+            return None;
+        }
+        let tail = crate::scan_stream::ScanSortTail::for_relation(
+            pull.projection.len(),
+            self.order.clone(),
+            quantifier,
+            self.offset,
+            self.count,
+        )?;
+        Some((pull, tail))
+    }
+
+    /// A projection over one vertex-rooted, relationship-free pattern with
+    /// no inner order or page, whose every cell a pull can evaluate: a column,
+    /// a bound constant or integer arithmetic over columns.
+    /// The consumer, not this accessor, owns the returned quantifier.
+    fn vertex_projection(&self) -> Option<(GraphSetRowPull, GraphSetQuantifier)> {
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let operators = pattern.plan().operators();
+        let roots = operators
+            .iter()
+            .filter(|operator| matches!(operator, crate::algebra::GlaOperator::ScanVertices))
+            .count();
+        if roots != 1
+            || !matches!(
+                operators.first(),
+                Some(crate::algebra::GlaOperator::ScanVertices)
+            )
+            || pattern.plan().reads_edges()
+        {
+            return None;
+        }
+        if projection.is_empty()
+            || !projection.iter().all(|cell| {
+                matches!(
+                    cell.value(),
+                    GraphSetValue::Column(_)
+                        | GraphSetValue::Literal(_)
+                        | GraphSetValue::Value(_)
+                        | GraphSetValue::TypedNull(_)
+                        | GraphSetValue::Integer(_)
+                )
+            })
+        {
+            return None;
+        }
+        Some((
+            GraphSetRowPull {
+                pattern: pattern.clone(),
+                projection: projection.clone(),
+            },
+            *quantifier,
+        ))
+    }
+}
+
+/// A relation that pulls row by row (PreparedGraphSet::row_pull): one
+/// vertex-rooted source pattern and the projection each of its rows takes.
+#[derive(Clone)]
+pub struct GraphSetRowPull {
+    pattern: PreparedGraphPattern<GraphValueRow>,
+    projection: Vec<GraphSetProjection>,
+}
+
+impl core::fmt::Debug for GraphSetRowPull {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphSetRowPull")
+            .field("columns", &self.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl GraphSetRowPull {
+    /// The source pattern whose native cursor supplies the input rows.
+    #[must_use]
+    pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.pattern
+    }
+
+    /// Project one source row exactly as the eager projection does.
+    /// - `ordinal` numbers the source rows from zero.
+    /// - Every evaluation event goes to `control`.
+    /// - An arithmetic failure becomes `arithmetic(column, error)`, as the
+    ///   eager path's Projection error. Its row is the caller's ordinal.
+    pub fn project<E>(
+        &self,
+        row: &GraphValueRow,
+        ordinal: u64,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+        arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        GraphSetProjection::evaluate_numbered_row_with_control(
+            row,
+            ordinal,
+            &self.projection,
+            control,
+            &mut projection::no_element_reads,
+            arithmetic,
+        )
+    }
+}
+
+#[cfg(test)]
+mod pulled_projection_tests {
+    use super::*;
+    use crate::algebra::{GraphValue, GraphValueOrder};
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    fn input(text: &str) -> PreparedGraphSet {
+        PreparedGraphSet::from(
+            PreparedGraphText::prepare(text, |kind, name: &str| {
+                (kind == GraphSymbolKind::Property && name == "p")
+                    .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn relational_sort_tails_pin_quantifiers_windows_and_canonical_null_order() {
+        use crate::scan_stream::ScanSortTail;
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            for width in [1, crate::algebra::MAX_PATTERN_VERTICES] {
+                for (offset, count) in [(0, None), (0, Some(0)), (u64::MAX, Some(1))] {
+                    let tail =
+                        ScanSortTail::for_relation(width, Vec::new(), quantifier, offset, count)
+                            .unwrap();
+                    let expected: Vec<_> = (0..width)
+                        .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
+                        .collect();
+                    assert_eq!(tail.order(), expected);
+                    assert_eq!(
+                        (tail.evaluation_width(), tail.visible_width()),
+                        (width, width)
+                    );
+                    assert_eq!(tail.distinct(), quantifier == GraphSetQuantifier::Distinct);
+                    assert_eq!((tail.offset(), tail.count()), (offset, count));
+                }
+            }
+            let keys = vec![
+                GraphValueOrder::descending(1),
+                GraphValueOrder::ascending(0),
+            ];
+            let tail = ScanSortTail::for_relation(2, keys.clone(), quantifier, 1, Some(3)).unwrap();
+            assert_eq!(tail.order(), keys);
+            for (width, keys) in [
+                (0, Vec::new()),
+                (crate::algebra::MAX_PATTERN_VERTICES + 1, Vec::new()),
+                (2, vec![GraphValueOrder::ascending(2)]),
+                (2, vec![GraphValueOrder::ascending(0); 2]),
+            ] {
+                assert!(ScanSortTail::for_relation(width, keys, quantifier, 0, Some(0)).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_pull_keeps_every_projected_occurrence_for_the_existing_sorter() {
+        let source = input("MATCH (n) RETURN n AS id,n.p AS p");
+        let source_bytes = source.incremental_pattern().unwrap().canonical_bytes();
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            let query = source
+                .clone()
+                .project(
+                    vec![
+                        GraphSetProjection::new("p", GraphSetValue::Column(1)),
+                        GraphSetProjection::new(
+                            "marker",
+                            GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                        ),
+                    ],
+                    quantifier,
+                )
+                .unwrap()
+                .with_page(1, Some(2));
+            let frozen = query.canonical_bytes();
+            let (pull, tail) = query.ordered_row_pull().unwrap();
+            assert_eq!(query.canonical_bytes(), frozen);
+            assert_eq!(pull.pattern().canonical_bytes(), source_bytes);
+            assert_eq!(tail.distinct(), quantifier == GraphSetQuantifier::Distinct);
+            assert_eq!((tail.offset(), tail.count()), (1, Some(2)));
+            let mut events = 0;
+            let mut projected = Vec::new();
+            for (ordinal, value) in [9, -4, 9].into_iter().enumerate() {
+                let row = GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(ordinal as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(value)),
+                ]);
+                projected.push(
+                    pull.project(
+                        &row,
+                        ordinal as u64,
+                        &mut |_| {
+                            events += 1;
+                            Ok::<_, ()>(())
+                        },
+                        |_, _| (),
+                    )
+                    .unwrap(),
+                );
+            }
+            assert!(events > 0);
+            assert_eq!(projected.len(), 3);
+            assert_eq!(projected[0], projected[2]);
+            assert_eq!(
+                projected[1].values(),
+                &[
+                    GraphValue::Scalar(CanonicalScalar::Int(-4)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_sort_admission_never_widens_unordered_or_unproved_source_profiles() {
+        let source = input("MATCH (n) RETURN n AS id,n.p AS p");
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            let identity = source
+                .clone()
+                .project(
+                    vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
+                    quantifier,
+                )
+                .unwrap();
+            assert_eq!(
+                identity.row_pull().is_some(),
+                quantifier == GraphSetQuantifier::All
+            );
+            assert!(identity.ordered_row_pull().is_some());
+            for child in [
+                source.clone().with_page(0, Some(0)),
+                source.clone().with_page(1, None),
+                source.clone().nested().unwrap(),
+                input("MATCH (n) RETURN n.p AS p,n AS id"),
+            ] {
+                let query = child
+                    .project(
+                        vec![GraphSetProjection::new("first", GraphSetValue::Column(0))],
+                        quantifier,
+                    )
+                    .unwrap()
+                    .with_page(0, Some(0));
+                assert!(query.ordered_row_pull().is_none());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod column_domain_tests {
+    use super::GraphSetColumnType;
+    use crate::algebra::GraphValue;
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    /// fgdb-kr8j1: a property column is Stored. It admits a scalar or a stored
+    /// List or Map, nested ones included, and refuses a graph element at any
+    /// depth. Scalar keeps its exact shape, so a spilled or copied Scalar
+    /// column still refuses a collection.
+    #[test]
+    fn a_stored_column_admits_stored_collections_and_never_an_element() {
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+        let map = |entries: Vec<(&str, GraphValue)>| {
+            GraphValue::map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value))
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let stored = [
+            int(1),
+            list(vec![]),
+            list(vec![int(1), list(vec![int(2)])]),
+            map(vec![("a", int(1)), ("b", list(vec![int(2)]))]),
+        ];
+        for value in &stored {
+            assert!(GraphSetColumnType::Stored.accepts(value), "{value:?}");
+        }
+        for element in [
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Edge(EId(1)),
+            list(vec![GraphValue::Vertex(VId(1))]),
+            list(vec![list(vec![GraphValue::Edge(EId(1))])]),
+            map(vec![("a", GraphValue::Vertex(VId(1)))]),
+        ] {
+            assert!(!GraphSetColumnType::Stored.accepts(&element), "{element:?}");
+        }
+        assert!(GraphSetColumnType::Scalar.accepts(&stored[0]));
+        for collection in &stored[1..] {
+            assert!(
+                !GraphSetColumnType::Scalar.accepts(collection),
+                "{collection:?}"
+            );
+        }
+        assert!(!GraphSetColumnType::Vertex.accepts(&list(vec![])));
+        assert!(!GraphSetColumnType::List.accepts(&int(1)));
+    }
+
+    /// A set operand pairing keeps Scalar strict, widens Scalar with Stored
+    /// to Stored, and Stored with List to Any. Elements never pair with it.
+    #[test]
+    fn set_operands_widen_a_stored_column_only_to_a_domain_holding_both() {
+        use GraphSetColumnType as T;
+        for (left, right, common) in [
+            (T::Scalar, T::Scalar, Some(T::Scalar)),
+            (T::Scalar, T::Stored, Some(T::Stored)),
+            (T::Stored, T::Scalar, Some(T::Stored)),
+            (T::Stored, T::Stored, Some(T::Stored)),
+            (T::Stored, T::List, Some(T::Any)),
+            (T::List, T::Stored, Some(T::Any)),
+            (T::Stored, T::Any, Some(T::Any)),
+            (T::Scalar, T::List, None),
+            (T::Stored, T::Vertex, None),
+            (T::Edge, T::Stored, None),
+        ] {
+            assert_eq!(left.common_set_domain(right), common, "{left:?} {right:?}");
+        }
+        assert!(T::Stored.is_scalar_like() && T::Scalar.is_scalar_like());
+        assert!(!T::Any.is_scalar_like() && !T::List.is_scalar_like());
+        assert_ne!(T::Stored.tag(), T::Scalar.tag());
     }
 }

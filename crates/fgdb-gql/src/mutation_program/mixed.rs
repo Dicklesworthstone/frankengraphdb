@@ -2,7 +2,9 @@
 //! meter and existing per-statement kernels. The database adapter supplies the
 //! SAME private workspace rollback guard; no matcher, writer or commit lives here.
 
+mod edge_upsert_batch;
 mod merges;
+mod vertex_upsert_batch;
 
 use super::*;
 use crate::insertion::{
@@ -84,8 +86,11 @@ impl From<PreparedGraphDelete> for GraphWriteStatement {
 /// The host must also distinguish separate program invocations. Rollback never
 /// rewinds an external allocator or licenses reusing an already-issued identity.
 /// A vertex MERGE creation requests Vertex { row: 0, vertex: 0 } exactly once;
-/// an edge MERGE requests Edge { row: 0, edge: 0 }. Matched and NoInput branches
-/// never call the allocator.
+/// a plain edge MERGE requests Edge { row: pair_ordinal, edge: 0 } for each
+/// missing distinct endpoint pair, ordered canonically. Matched pairs retain
+/// their ordinal but never allocate, so requested row slots may have gaps.
+/// Bulk edge upserts use the original MATCH occurrence index. Explicit singular
+/// adapters retain row zero; NoInput never calls the allocator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWriteIdentityRequest {
     pub statement: usize,
@@ -122,6 +127,7 @@ impl GraphWriteProgramPolicy {
             self.max_created_vertices,
             self.max_created_edges,
         )
+        .with_mutation_limit(self.mutations.max_effects)
     }
     #[must_use]
     pub const fn vertex_merge_policy(self) -> GraphVertexMergePolicy {
@@ -153,8 +159,22 @@ pub enum GraphWriteStepStats {
     Insert(GraphInsertStats),
     VertexMerge(GraphVertexMergeStats),
     VertexUpsert(GraphVertexUpsertStats),
+    /// All distinct resolved vertex targets, including an actionless branch.
+    /// The meter separately derives modified-target visits and checks the
+    /// complete per-target action product. A creation is not a MATCH row.
+    VertexUpsertBatch {
+        stats: GraphVertexUpsertStats,
+        target_vertices: u64,
+    },
     EdgeMerge(GraphEdgeMergeStats),
     EdgeUpsert(GraphEdgeUpsertStats),
+    /// Occurrence-preserving ON/SET execution. The host separately counts the
+    /// distinct relationships with actions; duplicate occurrences still spend
+    /// their complete action allowance, but do not invent distinct targets.
+    EdgeUpsertBatch {
+        stats: crate::GraphEdgeUpsertBatchStats,
+        target_edges: u64,
+    },
     Delete(GraphDeleteStats),
 }
 #[derive(Debug)]
@@ -310,7 +330,7 @@ pub struct GraphWriteProgramStats {
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     /// Distinct updated/deleted vertex visits summed over statements, including
-    /// one visit for each nonempty selected vertex-upsert action branch.
+    /// one visit per distinct target of a nonempty vertex-upsert action branch.
     /// Relationship-property actions do not count as vertex visits.
     pub target_vertex_visits: u64,
     /// Distinct updated/deleted edge visits summed over statements.
@@ -331,10 +351,15 @@ impl GraphWriteProgramStats {
 
 /// Source-ordered mixed graph writes across relation coordinates. Later MATCH
 /// and MERGE steps observe successful earlier creations, updates and deletes in
-/// the canonical transaction overlay.
+/// the canonical transaction overlay. The native UNWIND compiler can instead
+/// mark a closed vertex-update program whose inputs must all be evaluated
+/// against its entry overlay before any of its updates are staged.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
+    frozen_vertex_update_input: bool,
+    frozen_vertex_upsert_input: bool,
+    frozen_edge_merge_input: bool,
 }
 impl core::fmt::Debug for PreparedGraphWriteProgram {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -370,6 +395,9 @@ impl PreparedGraphWriteProgram {
         }
         Ok(Self {
             statements: statements.into_boxed_slice(),
+            frozen_vertex_update_input: false,
+            frozen_vertex_upsert_input: false,
+            frozen_edge_merge_input: false,
         })
     }
     #[must_use]
@@ -377,9 +405,175 @@ impl PreparedGraphWriteProgram {
         &self.statements
     }
 
+    /// All selections and assignment values in this program use the entry
+    /// transaction overlay. Its vertex field updates then apply in input order.
+    /// This provenance is only issued by the native UNWIND compiler: for an
+    /// update that feeds its own MATCH, and for a constant update that cannot
+    /// (freeze_constant_vertex_update_input). Ordinary mixed programs,
+    /// including MERGE and disjoint row updates, stay sequential.
+    #[must_use]
+    pub const fn freezes_vertex_update_input(&self) -> bool {
+        self.frozen_vertex_update_input
+    }
+
+    pub(crate) fn freeze_vertex_update_input(&mut self) -> bool {
+        if self.statements.len() <= 1
+            || !self.statements.iter().all(|statement| {
+                matches!(statement, GraphWriteStatement::Mutation(input)
+                    if input.is_vertex_update_only())
+            })
+        {
+            return false;
+        }
+        self.frozen_vertex_update_input = true;
+        true
+    }
+
+    /// The caller proves from the resolved definition that no assignment
+    /// writes a field or label the statement's MATCH reads (fgdb-2l3pt). When
+    /// every assignment also writes a bound constant, each row selects and
+    /// assigns exactly what sequential execution would, and ordered staging
+    /// keeps the last write to a field, so freezing is a physical choice only.
+    /// Any other program is left sequential.
+    pub(crate) fn freeze_constant_vertex_update_input(&mut self) -> bool {
+        self.statements.iter().all(|statement| {
+            matches!(statement, GraphWriteStatement::Mutation(input)
+                if input.writes_only_constants())
+        }) && self.freeze_vertex_update_input()
+    }
+
+    /// Every statement is one vertex MERGE or upsert of a single template
+    /// whose MERGE keys are pairwise distinct and whose actions, if any,
+    /// write constant values to neither a key property (other than its own
+    /// key value, as `SET n += row` does) nor a key label (fgdb-2l3pt). A
+    /// plain MERGE has no actions at all. No row can then
+    /// match a vertex another row creates or changes, so evaluating each MERGE
+    /// against the entry overlay and staging all rows once in input order is
+    /// the sequential program's result. A physical execution choice only: the
+    /// transcript, receipts and every answer equal sequential execution.
+    #[must_use]
+    pub const fn freezes_vertex_upsert_input(&self) -> bool {
+        self.frozen_vertex_upsert_input
+    }
+
+    pub(crate) fn freeze_vertex_upsert_input(&mut self) -> bool {
+        use crate::GraphVertexUpsertAction;
+        if self.statements.len() <= 1 || self.frozen_vertex_update_input {
+            return false;
+        }
+        let mut shape: Option<(
+            Vec<fgdb_delta_types::LabelId>,
+            Vec<fgdb_delta_types::PropertyKeyId>,
+        )> = None;
+        let mut keys = std::collections::BTreeSet::new();
+        for statement in &self.statements {
+            let (merge, upsert) = match statement {
+                GraphWriteStatement::VertexMerge(merge) => (merge, None),
+                GraphWriteStatement::VertexUpsert(upsert) => (upsert.merge(), Some(upsert)),
+                _ => return false,
+            };
+            let Some(key) = merge.equality_key() else {
+                return false;
+            };
+            let names: Vec<_> = key.properties.iter().map(|(name, _)| *name).collect();
+            match &shape {
+                Some((labels, properties)) if *labels == key.labels && *properties == names => {}
+                Some(_) => return false,
+                None => shape = Some((key.labels.clone(), names.clone())),
+            }
+            for action in upsert.into_iter().flat_map(|upsert| {
+                upsert
+                    .on_match()
+                    .iter()
+                    .chain(upsert.on_create())
+                    .chain(upsert.after())
+            }) {
+                let safe = match action {
+                    // `MERGE (n {id: row.id}) SET n += row` rewrites the key
+                    // with its own value: the chosen vertex already holds it,
+                    // so no later row's MERGE can observe a change.
+                    GraphVertexUpsertAction::SetProperty {
+                        key: written,
+                        value,
+                    } => {
+                        !names.contains(written)
+                            || key.properties.iter().any(|(name, bytes)| {
+                                name == written
+                                    && crate::algebra::equality_value_bytes(value.value())
+                                        .as_deref()
+                                        == Some(bytes.as_slice())
+                            })
+                    }
+                    GraphVertexUpsertAction::SetStored { key: written, .. } => {
+                        !names.contains(written)
+                    }
+                    GraphVertexUpsertAction::SetLabel { label, .. } => !key.labels.contains(label),
+                    // Reads the target's own state, which another row's staged
+                    // effects do not change but this row's earlier ones do.
+                    GraphVertexUpsertAction::SetExpression { .. } => false,
+                };
+                if !safe {
+                    return false;
+                }
+            }
+            if !keys.insert(key) {
+                return false;
+            }
+        }
+        self.frozen_vertex_upsert_input = true;
+        true
+    }
+
+    /// Every statement is a directed relationship MERGE of one shape whose
+    /// two endpoints are independent equality-keyed vertex scans, and the
+    /// endpoint key tuples are pairwise distinct (fgdb-2l3pt). A row's
+    /// candidate endpoint pairs then belong to no other row, so no row's
+    /// existence check can see another row's new relationship, and endpoint
+    /// selections read no relationship at all: evaluating every MERGE
+    /// against the entry overlay and staging once in input order is the
+    /// sequential program's result. A physical choice only, like the others.
+    #[must_use]
+    pub const fn freezes_edge_merge_input(&self) -> bool {
+        self.frozen_edge_merge_input
+    }
+
+    pub(crate) fn freeze_edge_merge_input(&mut self) -> bool {
+        if self.statements.len() <= 1
+            || self.frozen_vertex_update_input
+            || self.frozen_vertex_upsert_input
+        {
+            return false;
+        }
+        let mut shape = None;
+        let mut keys = std::collections::BTreeSet::new();
+        for statement in &self.statements {
+            let GraphWriteStatement::EdgeMerge(merge) = statement else {
+                return false;
+            };
+            let Some(key) = merge.endpoint_key() else {
+                return false;
+            };
+            let current = (
+                merge.relation(),
+                key.shape().map(|(labels, keys)| (labels.to_vec(), keys)),
+            );
+            match &shape {
+                Some(known) if *known == current => {}
+                Some(_) => return false,
+                None => shape = Some(current),
+            }
+            if !keys.insert(key) {
+                return false;
+            }
+        }
+        self.frozen_edge_merge_input = true;
+        true
+    }
+
     // Transfer bound definitions into an admitted batch without deep-cloning
     // each record's program a second time.
     pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> {
+        debug_assert!(!self.frozen_vertex_update_input);
         self.statements
     }
 
@@ -387,7 +581,11 @@ impl PreparedGraphWriteProgram {
     /// a durable operation ID, identity-allocation log or commit acknowledgment.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:mixed-write-program:v1\0".to_vec();
+        let mut bytes = if self.frozen_vertex_update_input {
+            b"fgdb:mixed-write-program:frozen-unwind-vertex-updates:v1\0".to_vec()
+        } else {
+            b"fgdb:mixed-write-program:v1\0".to_vec()
+        };
         bytes.extend_from_slice(&(self.statements.len() as u64).to_be_bytes());
         for statement in &self.statements {
             let (kind, value) = match statement {
@@ -407,7 +605,8 @@ impl PreparedGraphWriteProgram {
     }
 
     /// TRUSTED workspace seam: stage must retain read observations, use the
-    /// existing kernels, expose each successful prefix to the next step and
+    /// existing kernels, expose each successful prefix to the next step (or
+    /// freeze all inputs when freezes_vertex_update_input() is set) and
     /// restore the starting workspace on any error or unwind. This callback
     /// cannot make an arbitrary external writer atomic. WriteTxn implements
     /// these obligations using the existing private MutationProgramWorkspace.
@@ -462,7 +661,7 @@ impl PreparedGraphWriteProgram {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
                     meter
                         .common
-                        .absorb(statement, input.actions().len(), stats)?;
+                        .absorb(statement, input.maximum_effects_per_binding(), stats)?;
                 }
                 (GraphWriteStatement::Insert(input), GraphWriteStepStats::Insert(stats)) => {
                     meter.absorb_insert(statement, input, stats)?;
@@ -476,6 +675,15 @@ impl PreparedGraphWriteProgram {
                 ) => {
                     meter.absorb_vertex_upsert(statement, input, stats)?;
                 }
+                (
+                    GraphWriteStatement::VertexUpsert(input),
+                    GraphWriteStepStats::VertexUpsertBatch {
+                        stats,
+                        target_vertices,
+                    },
+                ) => {
+                    meter.absorb_vertex_upsert_batch(statement, input, stats, target_vertices)?;
+                }
                 (GraphWriteStatement::EdgeMerge(_), GraphWriteStepStats::EdgeMerge(stats)) => {
                     meter.absorb_edge_merge(statement, stats)?;
                 }
@@ -484,6 +692,15 @@ impl PreparedGraphWriteProgram {
                     GraphWriteStepStats::EdgeUpsert(stats),
                 ) => {
                     meter.absorb_edge_upsert(statement, input, stats)?;
+                }
+                (
+                    GraphWriteStatement::EdgeUpsert(input),
+                    GraphWriteStepStats::EdgeUpsertBatch {
+                        stats,
+                        target_edges,
+                    },
+                ) => {
+                    meter.absorb_edge_upsert_batch(statement, input, stats, target_edges)?;
                 }
                 (GraphWriteStatement::Delete(input), GraphWriteStepStats::Delete(stats)) => {
                     meter.absorb_delete(statement, input, stats)?;

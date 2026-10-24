@@ -10,6 +10,7 @@ enum Kind {
     Null,
     Integer,
     Float,
+    Decimal,
     Boolean,
     Text,
     Dynamic,
@@ -41,6 +42,20 @@ impl Kind {
         } else {
             self.merge(other)
         }
+    }
+    // CASE/COALESCE may retain different numeric kinds without converting
+    // either result. Keep a numeric representative while checking all arms;
+    // returning Dynamic too early would accidentally admit a later Boolean.
+    // This does not relax comparison admission or emit an arithmetic cast.
+    fn merge_numeric_result(self, other: Self) -> Option<Self> {
+        self.merge_comparison(other).or_else(|| {
+            matches!(
+                (self, other),
+                (Self::Decimal, Self::Integer | Self::Float)
+                    | (Self::Integer | Self::Float, Self::Decimal)
+            )
+            .then_some(Self::Decimal)
+        })
     }
 }
 struct Node {
@@ -89,6 +104,7 @@ fn prepare_root(
             | Op::Truth(_)
             | Op::Scalar(_)
             | Op::ScalarColumn(_)
+            | Op::IdentityColumn { .. }
             | Op::Local(_) => 0,
             Op::Unary(_)
             | Op::IsNull(_)
@@ -99,17 +115,26 @@ fn prepare_root(
             | Op::CharLength
             | Op::ToText
             | Op::ToInteger
+            | Op::ToBoolean
+            | Op::Numeric(_)
             | Op::Matches(_) => 1,
             Op::Binary(_)
             | Op::Coalesce
             | Op::Compare(_)
             | Op::And
             | Op::Or
+            | Op::Xor
             | Op::Concat
+            | Op::Power
+            | Op::Atan2
             | Op::StartsWith
             | Op::EndsWith
-            | Op::Contains => 2,
-            Op::Case | Op::Substring => 3,
+            | Op::Contains
+            | Op::SubstringFrom
+            | Op::CypherSubstringToEnd
+            | Op::Left
+            | Op::Right => 2,
+            Op::Case | Op::Substring | Op::CypherSubstring | Op::Replace => 3,
             Op::InList { members } => members.checked_add(1).ok_or_else(missing)?,
             Op::SimpleCase { alternatives } => {
                 if *alternatives == 0 {
@@ -130,15 +155,26 @@ fn prepare_root(
             if !integer_root && matches!(op, Op::Unary(_) | Op::Binary(_)) {
                 if !matches!(
                     nodes[child].kind,
-                    Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
+                    Kind::Null | Kind::Integer | Kind::Float | Kind::Decimal | Kind::Dynamic
                 ) {
+                    return Err(wrong());
+                }
+                continue;
+            }
+            if matches!(op, Op::Numeric(_)) {
+                if !matches!(
+                    nodes[child].kind,
+                    Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
+                ) && !(matches!(op, Op::Numeric(GraphNumericFunction::ToFloat))
+                    && nodes[child].kind == Kind::Text)
+                {
                     return Err(wrong());
                 }
                 continue;
             }
             let expected = match op {
                 Op::Unary(_) | Op::Binary(_) => Some(Kind::Integer),
-                Op::Not | Op::And | Op::Or => Some(Kind::Boolean),
+                Op::Not | Op::And | Op::Or | Op::Xor => Some(Kind::Boolean),
                 Op::Case if position == 0 => Some(Kind::Boolean),
                 Op::Upper
                 | Op::Lower
@@ -148,8 +184,14 @@ fn prepare_root(
                 | Op::StartsWith
                 | Op::EndsWith
                 | Op::Contains
-                | Op::Matches(_) => Some(Kind::Text),
-                Op::Substring => Some(if position == 0 {
+                | Op::Matches(_)
+                | Op::Replace => Some(Kind::Text),
+                Op::Substring
+                | Op::SubstringFrom
+                | Op::CypherSubstring
+                | Op::CypherSubstringToEnd
+                | Op::Left
+                | Op::Right => Some(if position == 0 {
                     Kind::Text
                 } else {
                     Kind::Integer
@@ -161,25 +203,34 @@ fn prepare_root(
             }
         }
         // Keep checking exact domains even if another member is dynamic/null.
+        // Outside an integer root, result branches mixing numeric kinds merge
+        // to Dynamic: each row keeps its kind, with no implicit decimal cast.
+        // Non-numeric members still refuse. Integer roots stay strict.
         let merge_positions = |positions: &[usize],
                                numeric_comparison: bool|
          -> Result<Kind, GraphIntegerBuildError> {
             let mut known = Kind::Null;
             let mut dynamic = false;
+            let mut mixed = false;
             for &position in positions {
                 let kind = child_kind(position);
                 if kind == Kind::Dynamic {
                     dynamic = true;
                 } else {
+                    let merged = known.merge(kind);
                     known = if numeric_comparison {
                         known.merge_comparison(kind)
+                    } else if merged.is_none() && !integer_root {
+                        let numeric = known.merge_numeric_result(kind);
+                        mixed |= numeric.is_some();
+                        numeric
                     } else {
-                        known.merge(kind)
+                        merged
                     }
                     .ok_or_else(wrong)?;
                 }
             }
-            Ok(if dynamic && known == Kind::Null {
+            Ok(if mixed || (dynamic && known == Kind::Null) {
                 Kind::Dynamic
             } else {
                 known
@@ -191,37 +242,61 @@ fn prepare_root(
                 CanonicalScalar::Null => Kind::Null,
                 CanonicalScalar::Int(_) => Kind::Integer,
                 CanonicalScalar::Float(_) => Kind::Float,
+                CanonicalScalar::Decimal(_) => Kind::Decimal,
                 CanonicalScalar::Bool(_) => Kind::Boolean,
                 CanonicalScalar::Text(_) => Kind::Text,
+                // A temporal parameter is resolved per row like a property
+                // load: arithmetic and comparison check it when they run
+                // (fgdb-txbg9).
+                CanonicalScalar::Date(_)
+                | CanonicalScalar::LocalTime(_)
+                | CanonicalScalar::Time(_)
+                | CanonicalScalar::LocalDateTime(_)
+                | CanonicalScalar::Timestamp(_)
+                | CanonicalScalar::Duration(_) => Kind::Dynamic,
                 _ => return Err(wrong()),
             },
             Op::ScalarColumn(_) | Op::Local(_) => Kind::Dynamic,
+            // id() is an Int, elementId() its decimal text (fgdb-j687q).
+            Op::IdentityColumn { text: true, .. } => Kind::Text,
+            Op::IdentityColumn { text: false, .. } => Kind::Integer,
             Op::Unary(_) | Op::Binary(_) if !integer_root => {
                 if matches!(op, Op::Binary(GraphIntegerBinary::NullIf)) {
                     child_kind(0)
                 } else if children
                     .iter()
+                    .any(|&child| nodes[child].kind == Kind::Decimal)
+                {
+                    Kind::Decimal
+                } else if children
+                    .iter()
                     .any(|&child| nodes[child].kind == Kind::Float)
                 {
                     Kind::Float
+                } else if children
+                    .iter()
+                    .any(|&child| nodes[child].kind == Kind::Dynamic)
+                {
+                    // Property arithmetic may produce Decimal or temporal
+                    // values as well as Int/Float. Do not narrow a later
+                    // comparison or conditional based on unobserved data.
+                    Kind::Dynamic
                 } else {
                     Kind::Integer
                 }
             }
             Op::Coalesce => merge_positions(&[0, 1], false)?,
             Op::Case => merge_positions(&[1, 2], false)?,
+            // Equality, and IN and simple CASE, which are made of it, answer
+            // between any two kinds: values of different domains are unequal
+            // (fgdb-v6ku6). Only an ordering requires comparable kinds.
+            Op::Compare(IntegerComparison::Equal | IntegerComparison::NotEqual)
+            | Op::InList { .. } => Kind::Boolean,
             Op::Compare(_) => {
                 merge_positions(&[0, 1], true)?;
                 Kind::Boolean
             }
-            Op::InList { .. } => {
-                merge_positions(&(0..arity).collect::<Vec<_>>(), true)?;
-                Kind::Boolean
-            }
             Op::SimpleCase { alternatives } => {
-                let mut candidates = vec![0];
-                candidates.extend((0..*alternatives).map(|arm| 1 + 2 * arm));
-                merge_positions(&candidates, true)?;
                 let mut results: Vec<_> = (0..*alternatives).map(|arm| 2 + 2 * arm).collect();
                 results.push(arity - 1);
                 merge_positions(&results, false)?
@@ -231,13 +306,26 @@ fn prepare_root(
             | Op::Not
             | Op::And
             | Op::Or
+            | Op::Xor
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains
-            | Op::Matches(_) => Kind::Boolean,
-            Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
-                Kind::Text
-            }
+            | Op::Matches(_)
+            | Op::ToBoolean => Kind::Boolean,
+            Op::Upper
+            | Op::Lower
+            | Op::Trim
+            | Op::Substring
+            | Op::SubstringFrom
+            | Op::CypherSubstring
+            | Op::CypherSubstringToEnd
+            | Op::Left
+            | Op::Right
+            | Op::Replace
+            | Op::Concat
+            | Op::ToText => Kind::Text,
+            Op::Numeric(GraphNumericFunction::Sign) => Kind::Integer,
+            Op::Numeric(_) | Op::Power | Op::Atan2 => Kind::Float,
             _ => Kind::Integer,
         };
         let numeric_arithmetic = !integer_root
@@ -246,9 +334,24 @@ fn prepare_root(
         // Retain dynamic numeric possibilities separately from the known-kind
         // admission above. An integer fallback cannot narrow a dynamic property
         // load, but a Boolean/text fallback still refuses an arithmetic use.
+        // This flag also selects decimal and temporal scalar dispatch.
         let may_float = match op {
             Op::ScalarColumn(_) | Op::Local(_) => true,
-            Op::Scalar(value) => matches!(value.value(), CanonicalScalar::Float(_)),
+            // A temporal literal or parameter takes the dynamic arithmetic
+            // path too, where temporal arithmetic runs (fgdb-txbg9).
+            Op::Scalar(value) => matches!(
+                value.value(),
+                CanonicalScalar::Float(_)
+                    | CanonicalScalar::Decimal(_)
+                    | CanonicalScalar::Date(_)
+                    | CanonicalScalar::LocalTime(_)
+                    | CanonicalScalar::Time(_)
+                    | CanonicalScalar::LocalDateTime(_)
+                    | CanonicalScalar::Timestamp(_)
+                    | CanonicalScalar::Duration(_)
+            ),
+            Op::Numeric(GraphNumericFunction::Sign) => false,
+            Op::Numeric(_) | Op::Power | Op::Atan2 => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
             Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
@@ -287,7 +390,15 @@ fn prepare_root(
         // from the result kind: CHAR_LENGTH still consumes text.
         for (position, &child) in children.iter().enumerate() {
             let integer_operand = matches!(op, Op::Unary(_) | Op::Binary(_))
-                || matches!(op, Op::Substring) && position != 0;
+                || matches!(
+                    op,
+                    Op::Substring
+                        | Op::SubstringFrom
+                        | Op::CypherSubstring
+                        | Op::CypherSubstringToEnd
+                        | Op::Left
+                        | Op::Right
+                ) && position != 0;
             if integer_operand {
                 let normalized = match &nodes[child].op {
                     Op::ScalarColumn(column) if !numeric_arithmetic => Some(Op::Column(*column)),
@@ -376,6 +487,8 @@ fn prepare_root(
                     Op::CharLength => Some(Instruction::CharLength),
                     Op::ToText => Some(Instruction::ToText),
                     Op::ToInteger => Some(Instruction::ToInteger),
+                    Op::ToBoolean => Some(Instruction::ToBoolean),
+                    Op::Numeric(function) => Some(Instruction::Numeric(*function)),
                     Op::Matches(regex) => Some(Instruction::Matches(regex.clone())),
                     _ => None,
                 };
@@ -393,10 +506,17 @@ fn prepare_root(
                     Op::Compare(op) => Some(Instruction::Compare(*op)),
                     Op::And => Some(Instruction::And),
                     Op::Or => Some(Instruction::Or),
+                    Op::Xor => Some(Instruction::Xor),
                     Op::Concat => Some(Instruction::Concat),
+                    Op::Power => Some(Instruction::Power),
+                    Op::Atan2 => Some(Instruction::Atan2),
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
                     Op::Contains => Some(Instruction::Contains),
+                    Op::SubstringFrom => Some(Instruction::SubstringFrom),
+                    Op::CypherSubstringToEnd => Some(Instruction::CypherSubstringToEnd),
+                    Op::Left => Some(Instruction::Left),
+                    Op::Right => Some(Instruction::Right),
                     _ => None,
                 };
                 if let Some(op) = binary {
@@ -408,13 +528,19 @@ fn prepare_root(
                 match &node.op {
                     Op::Column(column) => code.push(Instruction::Column(*column)),
                     Op::ScalarColumn(column) => code.push(Instruction::ScalarColumn(*column)),
+                    Op::IdentityColumn { column, text } => code.push(Instruction::IdentityColumn {
+                        column: *column,
+                        text: *text,
+                    }),
                     Op::Local(offset) => code.push(Instruction::Local(*offset)),
                     Op::Scalar(value) => code.push(Instruction::Scalar(value.clone())),
                     Op::Literal(value) => code.push(Instruction::Literal(*value)),
                     Op::Truth(value) => code.push(Instruction::Truth(*value)),
-                    Op::Substring | Op::InList { .. } => {
+                    Op::Substring | Op::CypherSubstring | Op::Replace | Op::InList { .. } => {
                         tasks.push(Task::Emit(match &node.op {
                             Op::InList { members } => Instruction::InList { members: *members },
+                            Op::Replace => Instruction::Replace,
+                            Op::CypherSubstring => Instruction::CypherSubstring,
                             _ => Instruction::Substring,
                         }));
                         tasks.extend(node.children.iter().rev().map(|&child| Task::Visit(child)));
@@ -445,17 +571,26 @@ fn prepare_root(
                     | Op::Compare(_)
                     | Op::And
                     | Op::Or
+                    | Op::Xor
                     | Op::Upper
                     | Op::Lower
                     | Op::Trim
                     | Op::CharLength
                     | Op::ToText
                     | Op::ToInteger
+                    | Op::ToBoolean
+                    | Op::Numeric(_)
                     | Op::Matches(_)
                     | Op::Concat
+                    | Op::Power
+                    | Op::Atan2
                     | Op::StartsWith
                     | Op::EndsWith
-                    | Op::Contains => unreachable!("operator emitted above"),
+                    | Op::Contains
+                    | Op::SubstringFrom
+                    | Op::CypherSubstringToEnd
+                    | Op::Left
+                    | Op::Right => unreachable!("operator emitted above"),
                 }
             }
             Task::Emit(op) => code.push(op),
@@ -702,7 +837,7 @@ mod tests {
             vec![
                 floating(1.0),
                 Op::Truth(Some(true)),
-                Op::Compare(IntegerComparison::Equal),
+                Op::Compare(IntegerComparison::Less),
             ],
             vec![
                 Op::ScalarColumn(0),
@@ -711,18 +846,12 @@ mod tests {
                 Op::Literal(Some(1)),
                 Op::Binary(GraphIntegerBinary::Add),
             ],
-            vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
+            vec![floating(1.0), Op::Truth(Some(true)), Op::Coalesce],
             vec![
                 Op::Truth(Some(true)),
                 floating(1.0),
-                Op::Literal(Some(1)),
+                Op::Truth(Some(false)),
                 Op::Case,
-            ],
-            vec![
-                Op::ScalarColumn(0),
-                floating(1.0),
-                Op::Truth(Some(true)),
-                Op::InList { members: 2 },
             ],
         ] {
             assert!(matches!(
@@ -730,21 +859,102 @@ mod tests {
                 Err(GraphIntegerBuildError::OperandType { .. })
             ));
         }
+        // fgdb-v6ku6: `=`, `<>`, IN and simple CASE answer across domains,
+        // as openCypher does: values of different domains are unequal.
+        for (ops, expected) in [
+            (
+                vec![
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::Compare(IntegerComparison::Equal),
+                ],
+                Some(false),
+            ),
+            (
+                vec![
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::Compare(IntegerComparison::NotEqual),
+                ],
+                Some(true),
+            ),
+            (
+                vec![
+                    Op::Truth(Some(true)),
+                    floating(1.0),
+                    Op::Truth(Some(true)),
+                    Op::InList { members: 2 },
+                ],
+                Some(true),
+            ),
+            (
+                vec![
+                    Op::Literal(Some(1)),
+                    Op::Truth(Some(true)),
+                    Op::Literal(None),
+                    Op::InList { members: 2 },
+                ],
+                None,
+            ),
+        ] {
+            assert_eq!(scalar_value(&ops, &[]), boolean_scalar(expected));
+        }
+        assert_eq!(
+            value(&[
+                Op::Literal(Some(1)),
+                Op::Truth(Some(true)),
+                Op::Column(usize::MAX),
+                Op::Literal(Some(7)),
+                Op::SimpleCase { alternatives: 1 }
+            ]),
+            Some(7)
+        );
+        // Owner ruling 2026-10-09 (fgdb-0g2ou): an Integer/Float result mix
+        // is a per-row dynamic value in a scalar root, as in openCypher, and
+        // stays refused in an integer root.
+        for ops in [
+            vec![floating(1.0), Op::Literal(Some(1)), Op::Coalesce],
+            vec![
+                Op::Truth(Some(true)),
+                floating(1.0),
+                Op::Literal(Some(1)),
+                Op::Case,
+            ],
+        ] {
+            assert!(prepare_scalar(&ops).is_ok());
+            assert!(matches!(
+                prepare(&ops),
+                Err(GraphIntegerBuildError::OperandType { .. })
+            ));
+        }
         assert!(matches!(
             prepare(&[floating(1.0)]),
             Err(GraphIntegerBuildError::OperandType { .. })
         ));
+        let row = [GraphValue::Scalar(CanonicalScalar::Bool(true))];
+        for (comparison, expected) in [
+            (IntegerComparison::Equal, false),
+            (IntegerComparison::NotEqual, true),
+        ] {
+            let comparison =
+                prepare_scalar(&[Op::ScalarColumn(0), floating(1.0), Op::Compare(comparison)])
+                    .unwrap();
+            assert_eq!(
+                comparison
+                    .evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                CanonicalScalar::Bool(expected)
+            );
+        }
+        // An ordering across domains remains a typed error, never a guess.
         let comparison = prepare_scalar(&[
             Op::ScalarColumn(0),
             floating(1.0),
-            Op::Compare(IntegerComparison::Equal),
+            Op::Compare(IntegerComparison::Less),
         ])
         .unwrap();
         assert!(matches!(
-            comparison.evaluate_scalar_with_control(
-                &[GraphValue::Scalar(CanonicalScalar::Bool(true))],
-                &mut |_| Ok::<_, ()>(())
-            ),
+            comparison.evaluate_scalar_with_control(&row, &mut |_| Ok::<_, ()>(())),
             Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
                 kind: GraphIntegerErrorKind::IncompatibleOperands,
                 ..

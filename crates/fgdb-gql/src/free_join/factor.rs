@@ -9,8 +9,12 @@
 //! it does not manufacture RunSlice leases, path DAGs, or spill capabilities.
 
 use super::execute::{GroupScan, driver, probe};
-use super::{FreeJoin, FreeJoinPlan, JoinVariable, MultiplicityOverflow, TrieCursor, TrieRelation};
+use super::{
+    FreeJoin, FreeJoinCursor, FreeJoinPlan, JoinVariable, MultiplicityOverflow, TrieCursor,
+    TrieRelation,
+};
 use crate::GlaExecutionEvent;
+use core::num::NonZeroUsize;
 use core::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,4 +562,404 @@ fn fill<K: Clone, E>(
         }
     }
     Ok(())
+}
+
+/// Bounded columnar flattening directly from a live join producer. Unlike
+/// [`FactorizedCursor`], this does not first build a complete factor tree or
+/// require its total cardinality to fit in u128. It retains one binding and a
+/// plan-sized mixed-radix occurrence counter between calls.
+///
+/// A successful batch owns at most the requested number of rows. A refusal
+/// publishes none of that batch, releases the producer, and permanently
+/// poisons this cursor; previously returned batches remain valid. These are
+/// the existing logical GLA admissions, not allocator-byte or spill guarantees.
+pub struct FreeJoinBatchCursor<'a, K: Ord + Clone + 'a, T: TrieRelation<K> + 'a> {
+    input: FreeJoinCursor<'a, K, T>,
+    variables: &'a [JoinVariable],
+    positions: Vec<usize>,
+    pending: bool,
+    failed: bool,
+}
+
+impl<K: Ord + Clone, T: TrieRelation<K>> core::fmt::Debug for FreeJoinBatchCursor<'_, K, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FreeJoinBatchCursor")
+            .field("pending", &self.pending)
+            .field("failed", &self.failed)
+            .field("values", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<K: Ord + Clone, T: TrieRelation<K>> FreeJoin<'_, K, T> {
+    /// Prepare a source-free columnar producer in this join's physical order.
+    /// Each call to `next_batch` is an explicit bag-flattening boundary. SQL/GQL
+    /// ordering, byte admission and publication guards remain the host's job.
+    #[must_use]
+    pub fn batch_cursor(&self) -> FreeJoinBatchCursor<'_, K, T> {
+        FreeJoinBatchCursor {
+            input: self.cursor(),
+            variables: self.plan.variables(),
+            positions: Vec::new(),
+            pending: false,
+            failed: false,
+        }
+    }
+}
+
+impl<K: Ord + Clone, T: TrieRelation<K>> FreeJoinBatchCursor<'_, K, T> {
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.input.is_finished() && !self.pending
+    }
+
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Release the current binding and occurrence counter without looking
+    /// ahead, even when the current bag has an overflowing total cardinality.
+    pub fn close(&mut self) {
+        self.input.close();
+        self.positions = Vec::new();
+        self.pending = false;
+    }
+
+    /// Produce at most `max_rows` occurrences, carrying a partly consumed bag
+    /// into the next call. A nonzero request distinguishes exhaustion (`None`)
+    /// from a valid zero-column batch. No next binding is requested merely to
+    /// discover whether a full batch happens to be the last one.
+    pub fn next_batch<E>(
+        &mut self,
+        max_rows: NonZeroUsize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<FactorizedColumns<K>>, FactorizedReadError<E>> {
+        if self.failed {
+            return Err(FactorizedReadError::Failed);
+        }
+        if self.is_finished() {
+            return Ok(None);
+        }
+        match self.read_batch(max_rows.get(), control) {
+            Ok(batch) => {
+                if self.input.is_finished() {
+                    self.close();
+                }
+                Ok(batch)
+            }
+            Err(error) => {
+                self.failed = true;
+                self.close();
+                Err(FactorizedReadError::Control(error))
+            }
+        }
+    }
+
+    fn read_batch<E>(
+        &mut self,
+        max_rows: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<FactorizedColumns<K>>, E> {
+        control(GlaExecutionEvent::Work)?;
+        let mut batch = FactorizedColumns {
+            variables: Vec::new(),
+            columns: Vec::new(),
+            rows: 0,
+        };
+        while batch.rows < max_rows {
+            if !self.pending {
+                let Some(binding) = self.input.next_binding(control)? else {
+                    break;
+                };
+                let factors = binding.multiplicity_factors();
+                if factors.contains(&0) {
+                    continue;
+                }
+                // Every binding has one factor per declared relation. Once
+                // admitted, these digits are reused; a completed bag leaves
+                // them all at zero. No keys or factors are cloned here.
+                for _ in self.positions.len()..factors.len() {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    self.positions.push(0);
+                }
+                debug_assert_eq!(self.positions.len(), factors.len());
+                self.pending = true;
+            }
+            let binding = self.input.current_binding();
+            if batch.rows == 0 {
+                for &variable in self.variables {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    batch.variables.push(variable);
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    batch.columns.push(Vec::new());
+                }
+            }
+            control(GlaExecutionEvent::Work)?;
+            for (column, value) in batch.columns.iter_mut().zip(binding.values()) {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                column.push(value.clone());
+            }
+            batch.rows += 1;
+            self.pending = false;
+            for (position, &factor) in self
+                .positions
+                .iter_mut()
+                .zip(binding.multiplicity_factors())
+                .rev()
+            {
+                control(GlaExecutionEvent::Work)?;
+                // A live digit is below its positive usize factor, so the
+                // increment cannot overflow even when the factor is MAX.
+                *position += 1;
+                if *position < factor {
+                    self.pending = true;
+                    break;
+                }
+                *position = 0;
+            }
+        }
+        Ok((batch.rows != 0).then_some(batch))
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crate::free_join::{ColumnarCursor, ColumnarTrie, JoinVariable as V};
+
+    fn limit(rows: usize) -> NonZeroUsize {
+        NonZeroUsize::new(rows).unwrap()
+    }
+
+    fn rows(batch: &FactorizedColumns<i64>) -> Vec<Vec<i64>> {
+        (0..batch.row_count())
+            .map(|at| batch.columns().iter().map(|column| column[at]).collect())
+            .collect()
+    }
+
+    fn inputs(plan: &FreeJoinPlan, data: &[Vec<Vec<i64>>]) -> Vec<ColumnarTrie<i64>> {
+        data.iter()
+            .enumerate()
+            .map(|(at, rows)| {
+                ColumnarTrie::new(
+                    &plan.schemas[at],
+                    plan.required_order(at).unwrap(),
+                    rows.clone(),
+                    19,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_batch_size_preserves_bag_occurrences_and_physical_columns() {
+        let plan = FreeJoinPlan::binary(vec![V(1), V(0)], vec![V(2), V(1)]).unwrap();
+        let left = vec![vec![2, 10], vec![2, 10], vec![3, 11]];
+        let right = vec![
+            vec![20, 2],
+            vec![20, 2],
+            vec![20, 2],
+            vec![21, 2],
+            vec![22, 3],
+        ];
+        // Independent occurrence-by-occurrence natural join, not a trie or
+        // multiplicity counter. The physical order here is [1, 0, 2].
+        let mut expected = Vec::new();
+        for a in &left {
+            for b in &right {
+                if a[0] == b[1] {
+                    expected.push(vec![a[0], a[1], b[0]]);
+                }
+            }
+        }
+        expected.sort();
+        let data = inputs(&plan, &[left, right]);
+        let join = FreeJoin::new(&plan, &data).unwrap();
+        for size in 1..=12 {
+            let mut cursor = join.batch_cursor();
+            let mut actual = Vec::new();
+            while let Some(batch) = cursor
+                .next_batch(limit(size), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+            {
+                assert_eq!(batch.variables(), &[V(1), V(0), V(2)]);
+                assert!((1..=size).contains(&batch.row_count()));
+                assert!(
+                    batch
+                        .columns()
+                        .iter()
+                        .all(|column| column.len() == batch.row_count())
+                );
+                actual.extend(rows(&batch));
+            }
+            assert_eq!(actual, expected, "batch size {size}");
+            assert!(cursor.is_finished());
+            assert!(!cursor.is_failed());
+            assert_eq!(cursor.positions.capacity(), 0);
+            assert!(
+                cursor
+                    .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("exhausted") })
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn overflowing_nullary_bags_can_still_produce_finite_batches() {
+        let plan = FreeJoinPlan::generic(vec![Vec::new(); 5], Vec::new()).unwrap();
+        let data: Vec<ColumnarTrie<i64>> = (0..5)
+            .map(|_| {
+                ColumnarTrie::new_weighted(
+                    &[],
+                    &[],
+                    vec![(Vec::new(), usize::MAX)],
+                    19,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap()
+            })
+            .collect();
+        let join = FreeJoin::new(&plan, &data).unwrap();
+        let materialized = join.factorize(&mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(materialized.cardinality(), Err(MultiplicityOverflow));
+        assert!(matches!(materialized.cursor(), Err(MultiplicityOverflow)));
+        let mut cursor = join.batch_cursor();
+        for count in [3, 1, 7] {
+            let batch = cursor
+                .next_batch(limit(count), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch.row_count(), count);
+            assert!(batch.variables().is_empty());
+            assert!(batch.columns().is_empty());
+        }
+        assert!(!cursor.is_finished());
+        cursor.close();
+        assert_eq!(cursor.positions.capacity(), 0);
+        assert!(
+            cursor
+                .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("closed") })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn late_batch_refusals_publish_nothing_and_keep_earlier_batches_valid() {
+        let plan = FreeJoinPlan::binary(vec![V(0)], vec![V(1)]).unwrap();
+        let data = inputs(
+            &plan,
+            &[
+                vec![vec![1], vec![1], vec![2]],
+                vec![vec![7], vec![8], vec![8]],
+            ],
+        );
+        let join = FreeJoin::new(&plan, &data).unwrap();
+        let mut complete = join.batch_cursor();
+        let first = complete
+            .next_batch(limit(4), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        let expected_first = vec![vec![1, 7], vec![1, 7], vec![1, 8], vec![1, 8]];
+        assert_eq!(rows(&first), expected_first);
+        let mut events = 0;
+        let second = complete
+            .next_batch(limit(4), &mut |_| {
+                events += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rows(&second),
+            vec![vec![1, 8], vec![1, 8], vec![2, 7], vec![2, 8]]
+        );
+        let last = complete
+            .next_batch(limit(4), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows(&last), vec![vec![2, 8]]);
+        for refusal in 0..events {
+            let mut cursor = join.batch_cursor();
+            let delivered = cursor
+                .next_batch(limit(4), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            let mut at = 0;
+            let result = cursor.next_batch(limit(4), &mut |_| {
+                let current = at;
+                at += 1;
+                if current == refusal { Err(()) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(FactorizedReadError::Control(()))));
+            assert_eq!(rows(&delivered), expected_first);
+            assert!(cursor.is_failed());
+            assert!(cursor.is_finished());
+            assert_eq!(cursor.positions.capacity(), 0);
+            assert!(matches!(
+                cursor.next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("poisoned") }),
+                Err(FactorizedReadError::Failed)
+            ));
+        }
+    }
+
+    #[test]
+    fn first_batch_refusal_precedes_sources_and_unit_is_not_end_of_stream() {
+        struct PoisonSource;
+        impl TrieRelation<i64> for PoisonSource {
+            type Cursor<'a> = ColumnarCursor<'a, i64>;
+
+            fn attribute_order(&self) -> &[V] {
+                &[V(0)]
+            }
+
+            fn cursor(&self) -> Self::Cursor<'_> {
+                panic!("a refused batch must not open a source")
+            }
+        }
+        let plan = FreeJoinPlan::generic(vec![vec![V(0)]], vec![V(0)]).unwrap();
+        let data = [PoisonSource];
+        let join = FreeJoin::new(&plan, &data).unwrap();
+        let mut cursor = join.batch_cursor();
+        let mut events = Vec::new();
+        assert!(matches!(
+            cursor.next_batch(limit(5), &mut |event| {
+                events.push(event);
+                Err::<(), _>("cancelled")
+            }),
+            Err(FactorizedReadError::Control("cancelled"))
+        ));
+        assert_eq!(events, vec![GlaExecutionEvent::Work]);
+        assert_eq!(cursor.positions.capacity(), 0);
+
+        let unit = FreeJoinPlan::generic(Vec::new(), Vec::new()).unwrap();
+        let data: Vec<ColumnarTrie<i64>> = Vec::new();
+        let join = FreeJoin::new(&unit, &data).unwrap();
+        let mut cursor = join.batch_cursor();
+        let batch = cursor
+            .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows(&batch), vec![Vec::<i64>::new()]);
+        assert!(
+            cursor
+                .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
+
+        let empty_plan = FreeJoinPlan::generic(vec![vec![V(0)]], vec![V(0)]).unwrap();
+        let data = inputs(&empty_plan, &[Vec::new()]);
+        let join = FreeJoin::new(&empty_plan, &data).unwrap();
+        assert!(
+            join.batch_cursor()
+                .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

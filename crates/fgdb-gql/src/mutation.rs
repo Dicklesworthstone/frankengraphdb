@@ -7,31 +7,42 @@
 //! The embedded adapter submits them through ordinary WriteTxn preparation.
 
 mod collect;
+mod query;
 mod relational;
+
+pub use query::{
+    GraphMutationQueryBatch, GraphMutationQueryBuildError, GraphMutationQueryError,
+    PreparedGraphMutationQuery,
+};
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
 };
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_MUTATION_ACTIONS: usize = 256;
 
+/// The most elements one matched path holds (TCK Delete3): each pattern edge
+/// is at most one walk of the longest admitted hop count, and every hop adds
+/// one relationship and one node to the start node.
+const MAX_GRAPH_PATH_ELEMENTS: u128 =
+    2 * crate::algebra::MAX_PATTERN_EDGES as u128 * crate::MAX_GRAPH_WALK_HOPS as u128 + 1;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationValue {
-    /// Position of a scalar property in the selection's immutable output schema.
+    /// Position of a scalar or list property in the immutable selection schema.
     Column(usize),
     /// A checked canonical operand; clones share its bounded encoded storage.
     Literal(GqlScalarParameter),
     /// Checked canonical scalar bytecode over the same frozen selection row.
     /// All column references are validated before storage execution begins.
     Expression(GraphIntegerExpression),
-    /// A composite read value over the same row: a list index, a map entry
-    /// (`row.name`), size(), IN, a list quantifier or reduce(). The shared
-    /// row evaluator computes it; only a scalar result is a property value,
-    /// and any other result is a typed refusal, never a truncation.
+    /// A composite read value over the same row. The shared row evaluator
+    /// computes it; a scalar or bounded list of written values can be stored.
+    /// Maps and graph elements at any depth refuse, never truncate.
     Composite(crate::GraphSetValue),
 }
 impl core::fmt::Debug for GraphMutationValue {
@@ -52,27 +63,109 @@ pub enum GraphMutationAction {
         target: usize,
         key: PropertyKeyId,
     },
+    /// openCypher `SET n = {...}`: unset every property `target` carries
+    /// that `keep` does not name. `current` is the target's frozen property
+    /// map (a Properties column), whose names resolve through the selection's
+    /// reverse catalog; its property names must be injective. The kept keys'
+    /// values are ordinary SetProperty actions of the same statement.
+    ClearProperties {
+        target: usize,
+        current: usize,
+        keep: Vec<PropertyKeyId>,
+    },
     SetLabel {
         target: usize,
         label: LabelId,
         present: bool,
     },
     /// Explicit cascade request, subject to the storage engine's write rules.
-    /// A non-detaching DELETE is intentionally not represented by this variant.
+    /// A non-detaching DELETE is never represented by this variant.
     DetachDelete {
         target: usize,
     },
+    /// Non-detaching DELETE of a vertex or relationship. The write host must
+    /// prove that no live relationship stays incident to a deleted vertex
+    /// once this statement's own relationship deletions are applied; it never
+    /// turns into a cascade. Plain and detaching deletes do not mix in one
+    /// statement.
+    Delete {
+        target: usize,
+    },
+    /// DELETE or DETACH DELETE of a value each input row computes (TCK
+    /// Delete5): `friends[$i]`, `map.key`, `m.key.key[0]` after a WITH. The
+    /// value is a vertex, a relationship, a path (each of its elements, as for
+    /// a path column) or NULL, which deletes nothing; any other value refuses
+    /// when it runs. DETACH takes a vertex's remaining relationships with it
+    /// and deletes a relationship as a plain DELETE does. No target column:
+    /// the value reads the row.
+    DeleteValue {
+        value: crate::GraphSetValue,
+        detach: bool,
+    },
 }
 impl GraphMutationAction {
-    fn target(&self) -> usize {
+    /// The element column an action targets; a computed delete has none.
+    fn target(&self) -> Option<usize> {
         match self {
             Self::SetProperty { target, .. }
             | Self::RemoveProperty { target, .. }
+            | Self::ClearProperties { target, .. }
             | Self::SetLabel { target, .. }
-            | Self::DetachDelete { target } => *target,
+            | Self::DetachDelete { target }
+            | Self::Delete { target } => Some(*target),
+            Self::DeleteValue { .. } => None,
         }
     }
+
+    const fn deletes(&self) -> bool {
+        matches!(
+            self,
+            Self::DetachDelete { .. } | Self::Delete { .. } | Self::DeleteValue { .. }
+        )
+    }
+
+    const fn detaches(&self) -> bool {
+        matches!(
+            self,
+            Self::DetachDelete { .. } | Self::DeleteValue { detach: true, .. }
+        )
+    }
 }
+/// One private column of a mutation RETURN input row (`SET ... RETURN`).
+/// Rows are the statement's own selection, so each MATCH occurrence returns
+/// exactly once, in selection order, before any later projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphMutationBinding {
+    /// A selection column as frozen before the statement: an element
+    /// identity, a path, a metadata value or a scalar no action can change.
+    Input(usize),
+    /// `target.key` as it stands after the statement. The statement's own
+    /// assignment to that element field wins (REMOVE reads NULL); otherwise
+    /// the frozen pre-statement value in `current` is returned. Simultaneous
+    /// assignments are conflict-checked, so the value is one per element,
+    /// never an order-dependent choice. Reading an element the statement
+    /// deletes is refused, and a NULL OPTIONAL target reads NULL.
+    Property {
+        target: usize,
+        key: PropertyKeyId,
+        current: usize,
+    },
+    /// The target's complete post-statement property map. `current` holds
+    /// the frozen admitted map, and the selection plan's reverse catalog
+    /// names every final assignment merged into it. REMOVE omits a field;
+    /// SET retains its scalar or list, including canonical NULL. A NULL OPTIONAL
+    /// target returns NULL; a deleted target or unmapped assignment refuses.
+    /// Edge maps with DETACH DELETE are refused at preparation because an
+    /// incident edge can disappear through a vertex's cascade.
+    Properties { target: usize, current: usize },
+    /// `labels(target)` after the statement: the frozen `labels()` value in
+    /// `current` with this statement's own SET/REMOVE label actions applied,
+    /// in the label-identity order every `labels()` read uses. The selection
+    /// plan's reverse catalog names each label; a NULL OPTIONAL target reads
+    /// NULL and a deleted target refuses.
+    Labels { target: usize, current: usize },
+}
+
 impl core::fmt::Debug for GraphMutationAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("GraphMutationAction([REDACTED])")
@@ -97,16 +190,54 @@ pub enum GraphMutationBuildError {
         column: usize,
     },
     /// A composite value that does not fit the selection schema or can never
-    /// be a scalar property value.
+    /// be a scalar or list property value.
     ValueExpression {
         action: usize,
         kind: Option<crate::GraphSetProjectionError>,
     },
     MixedDeletionAndUpdates,
+    /// DELETE and DETACH DELETE in one statement: a cascade would have to
+    /// be part of the plain delete's incidence proof.
+    MixedDeleteModes,
 }
 impl core::fmt::Display for GraphMutationBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph mutation definition: {self:?}")
+        match self {
+            Self::RequiresSingleGraphSource => {
+                f.write_str("a mutation requires exactly one graph source")
+            }
+            Self::RelationalInput(error) => error.fmt(f),
+            Self::EmptyActions => {
+                f.write_str("a mutation requires at least one SET, REMOVE or DELETE action")
+            }
+            Self::TooManyActions { limit, observed } => {
+                write!(f, "mutation has {observed} actions, limit {limit}")
+            }
+            Self::TargetColumn { action, column } => write!(
+                f,
+                "mutation action {action} targets column {column}, which is not an element it can change"
+            ),
+            Self::ValueColumn { action, column } => write!(
+                f,
+                "mutation action {action} reads column {column}, which is not an assignable value"
+            ),
+            Self::ValueExpression { action, kind } => {
+                write!(
+                    f,
+                    "mutation action {action} assigns a value that cannot be stored"
+                )?;
+                match kind {
+                    Some(kind) => write!(f, ": {kind}"),
+                    None => Ok(()),
+                }
+            }
+            Self::MixedDeletionAndUpdates => {
+                f.write_str("one statement cannot both delete and update")
+            }
+            Self::MixedDeleteModes => {
+                f.write_str("one statement cannot mix DELETE and DETACH DELETE")
+            }
+        }
     }
 }
 impl core::error::Error for GraphMutationBuildError {}
@@ -126,8 +257,23 @@ pub enum GraphMutationError<E> {
         action: usize,
         error: GraphIntegerError,
     },
-    /// A composite value produced a list, map or graph element for a property.
+    /// A value cannot be a written property: a map, graph element, or a list
+    /// containing one or exceeding the native collection bounds. The legacy
+    /// variant name is retained for existing callers.
     NonScalarValue {
+        row: usize,
+        action: usize,
+    },
+    /// A computed DELETE target is not a vertex, relationship, path or NULL
+    /// (TCK Delete5).
+    NonElementDelete {
+        row: usize,
+        action: usize,
+    },
+    /// A SET or REMOVE target read from a dynamically typed column holds a
+    /// value that is not a node or relationship, or a label target holds a
+    /// relationship. NULL is never one: it changes nothing.
+    NonElementTarget {
         row: usize,
         action: usize,
     },
@@ -140,6 +286,30 @@ pub enum GraphMutationError<E> {
     EffectLimit {
         limit: u64,
         observed: u128,
+    },
+    /// A RETURN binding read a property of an element this statement deletes.
+    DeletedElementRead {
+        row: usize,
+        binding: usize,
+    },
+    /// A complete-map RETURN binding did not receive a bounded property map.
+    InvalidPropertyMap {
+        row: usize,
+        binding: usize,
+    },
+    /// A final assignment has no name in the trusted reverse catalog.
+    UnmappedProperty {
+        row: usize,
+        binding: usize,
+    },
+    /// A plain DELETE target vertex keeps at least one live incident
+    /// relationship in the exact transaction overlay. IDs remain redacted.
+    IncidentRelationships,
+    /// A post-statement `labels()` read met a label the trusted reverse
+    /// catalog does not name, or a frozen name it cannot resolve.
+    UnmappedLabel {
+        row: usize,
+        binding: usize,
     },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
@@ -159,9 +329,17 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::NonScalarValue { row, action } => {
                 write!(
                     f,
-                    "mutation row {row} action {action}: not a scalar property value"
+                    "mutation row {row} action {action}: not a scalar property value or bounded stored list"
                 )
             }
+            Self::NonElementDelete { row, action } => write!(
+                f,
+                "mutation row {row} action {action}: DELETE of a value that is not a node, relationship or path"
+            ),
+            Self::NonElementTarget { row, action } => write!(
+                f,
+                "mutation row {row} action {action}: SET or REMOVE of a value that is not a node or relationship, or a label of a relationship"
+            ),
             Self::ConflictingAssignment {
                 first_row,
                 first_action,
@@ -174,6 +352,25 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::EffectLimit { limit, observed } => {
                 write!(f, "mutation effect limit exceeded: {observed} > {limit}")
             }
+            Self::DeletedElementRead { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: property of an element this statement deletes"
+            ),
+            Self::InvalidPropertyMap { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: invalid property map"
+            ),
+            Self::UnmappedProperty { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: unmapped property"
+            ),
+            Self::IncidentRelationships => {
+                f.write_str("DELETE target keeps an incident relationship; use DETACH DELETE")
+            }
+            Self::UnmappedLabel { row, binding } => write!(
+                f,
+                "mutation RETURN row {row} binding {binding}: unmapped label"
+            ),
         }
     }
 }
@@ -215,17 +412,28 @@ pub struct GraphMutationStats {
     pub effects: u64,
 }
 
+/// `value` is a stored property value (fgdb-k3nub): a scalar, canonical
+/// NULL included, or a List; `None` removes the property.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationIntent {
     Property {
         vertex: VId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     EdgeProperty {
         edge: EId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
+    },
+    /// A bounded non-scalar written value. The collector currently emits
+    /// lists only; scalar assignments and removals retain the existing arms.
+    /// Adapters must stage this through their ordinary stored-property writer
+    /// with the same before/after authorization and rollback as scalar fields.
+    StoredProperty {
+        target: ElementId,
+        key: PropertyKeyId,
+        value: CanonicalPropertyValue,
     },
     Label {
         vertex: VId,
@@ -234,6 +442,14 @@ pub enum GraphMutationIntent {
     },
     DetachDelete {
         vertex: VId,
+    },
+    /// Non-detaching vertex deletion. The host proves the vertex is isolated
+    /// once this statement's `DeleteEdge` intents apply.
+    Delete {
+        vertex: VId,
+    },
+    DeleteEdge {
+        edge: EId,
     },
 }
 impl core::fmt::Debug for GraphMutationIntent {
@@ -266,7 +482,10 @@ impl GraphMutationBatch {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphMutation {
-    selection: PreparedGraphPattern<GraphValueRow>,
+    /// The graph source. `None` only for a chain step over the previous
+    /// write's rows (fgdb-cpny9), whose input relation reads its one owned
+    /// leaf and never the graph.
+    selection: Option<PreparedGraphPattern<GraphValueRow>>,
     input_relation: Option<crate::PreparedGraphSet>,
     columns: Vec<GraphSetColumnType>,
     relation: RelationId,
@@ -281,20 +500,85 @@ impl core::fmt::Debug for PreparedGraphMutation {
     }
 }
 impl PreparedGraphMutation {
+    /// Closed profile used by the UNWIND clause-at-a-time adapter. Every
+    /// target must be a resolved vertex column and every action a field update;
+    /// deletions and relationship updates need different staging contracts.
+    pub(crate) fn is_vertex_update_only(&self) -> bool {
+        self.actions.iter().all(|action| {
+            !action.deletes()
+                && action.target().and_then(|target| self.columns.get(target))
+                    == Some(&GraphSetColumnType::Vertex)
+        })
+    }
+
+    /// Every assignment writes a bound constant (a literal or an argument) or
+    /// a label, or removes a field. No right-hand side reads the selected
+    /// row, so no earlier input row's staged effects can change its value.
+    pub(crate) fn writes_only_constants(&self) -> bool {
+        self.actions.iter().all(|action| {
+            matches!(
+                action,
+                GraphMutationAction::SetProperty {
+                    value: GraphMutationValue::Literal(_),
+                    ..
+                } | GraphMutationAction::RemoveProperty { .. }
+                    | GraphMutationAction::SetLabel { .. }
+            )
+        })
+    }
+
+    /// Bound the program's field-intent statistics from the resolved definition.
+    /// A complete-map replacement expands its clear action to at most every
+    /// unkept catalog key: the collector refuses a property name absent from
+    /// this same injective catalog. A path delete proposes one effect per
+    /// element of its path, and so may a computed delete, whose value may be a
+    /// path. Ordinary actions keep their one-intent bound.
+    pub(crate) fn maximum_effects_per_binding(&self) -> usize {
+        let maximum: u128 = self
+            .actions
+            .iter()
+            .map(|action| match action {
+                GraphMutationAction::ClearProperties { keep, .. } => self
+                    .selection
+                    .as_ref()
+                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
+                    .map_or(0, |catalog| {
+                        catalog
+                            .properties
+                            .keys()
+                            .filter(|key| !keep.contains(key))
+                            .count() as u128
+                    }),
+                GraphMutationAction::DeleteValue { .. } => MAX_GRAPH_PATH_ELEMENTS,
+                GraphMutationAction::Delete { .. } | GraphMutationAction::DetachDelete { .. }
+                    if action.target().and_then(|target| self.columns.get(target))
+                        == Some(&GraphSetColumnType::Path) =>
+                {
+                    MAX_GRAPH_PATH_ELEMENTS
+                }
+                _ => 1,
+            })
+            .sum();
+        // At most MAX_GRAPH_MUTATION_ACTIONS usize-sized catalogs fit this
+        // u128 sum. A materialized proposal has at most usize::MAX intents,
+        // so capping to that length cannot admit an impossible larger count.
+        maximum.min(usize::MAX as u128) as usize
+    }
+
     /// The caller supplies the existing WriteBatch relation coordinate. It is
     /// never guessed from a MATCH relation, a result value, or an ambient catalog.
-    /// Property targets are vertex or edge columns; assignment inputs are scalar.
+    /// Property targets are vertex or edge columns; inputs are written values.
     /// Deletion and updates cannot be mixed in one simultaneous statement.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>,
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
-        Self::prepare_input(selection, None, relation, actions)
+        Self::prepare_input(Some(selection), None, relation, actions)
     }
 
     fn prepare_input(
-        selection: PreparedGraphPattern<GraphValueRow>,
+        selection: Option<PreparedGraphPattern<GraphValueRow>>,
         input_relation: Option<crate::PreparedGraphSet>,
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
@@ -308,43 +592,118 @@ impl PreparedGraphMutation {
                 observed: actions.len(),
             });
         }
-        let columns: Vec<_> = match &input_relation {
-            Some(input) => input.column_types().to_vec(),
-            None => selection
+        let columns: Vec<_> = match (&input_relation, &selection) {
+            (Some(input), _) => input.column_types().to_vec(),
+            (None, Some(selection)) => selection
                 .value_columns()
                 .iter()
                 .map(GraphSetColumnType::from)
                 .collect(),
+            (None, None) => return Err(GraphMutationBuildError::RequiresSingleGraphSource),
         };
-        let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
+        let deleting = actions[0].deletes();
+        let detaching = actions[0].detaches();
         for (at, action) in actions.iter().enumerate() {
-            let target = action.target();
-            let valid_target = match action {
-                GraphMutationAction::SetProperty { .. }
-                | GraphMutationAction::RemoveProperty { .. } => matches!(
-                    columns.get(target),
+            // A computed delete's value may be an element, a path or NULL;
+            // which one is known only when it runs (TCK Delete5).
+            if let GraphMutationAction::DeleteValue { value, .. } = action {
+                let refused = |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
+                let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
+                    .map_err(|kind| refused(Some(kind)))?;
+                if !matches!(
+                    kind,
+                    GraphSetColumnType::Vertex
+                        | GraphSetColumnType::Edge
+                        | GraphSetColumnType::Path
+                        | GraphSetColumnType::Any
+                ) {
+                    return Err(refused(None));
+                }
+            }
+            // A path is a delete target: its elements (TCK Delete3). SET and
+            // REMOVE of a property or label also take a dynamically typed
+            // column (an UNWIND element); the collector checks each value it
+            // holds when it runs (NonElementTarget).
+            let valid_target = match (action, action.target().map(|target| columns.get(target))) {
+                (GraphMutationAction::DeleteValue { .. }, _) => true,
+                (
+                    GraphMutationAction::SetProperty { .. }
+                    | GraphMutationAction::RemoveProperty { .. },
+                    Some(kind),
+                ) => matches!(
+                    kind,
+                    Some(
+                        GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::Any
+                    )
+                ),
+                (GraphMutationAction::ClearProperties { .. }, Some(kind)) => matches!(
+                    kind,
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
-                GraphMutationAction::SetLabel { .. } | GraphMutationAction::DetachDelete { .. } => {
-                    columns.get(target) == Some(&GraphSetColumnType::Vertex)
-                }
+                (GraphMutationAction::Delete { .. }, Some(kind)) => matches!(
+                    kind,
+                    Some(
+                        GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::Path
+                    )
+                ),
+                (GraphMutationAction::DetachDelete { .. }, Some(kind)) => matches!(
+                    kind,
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Path)
+                ),
+                (GraphMutationAction::SetLabel { .. }, Some(kind)) => matches!(
+                    kind,
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                ),
+                (_, None) => false,
             };
             if !valid_target {
                 return Err(GraphMutationBuildError::TargetColumn {
                     action: at,
-                    column: target,
+                    column: action.target().unwrap_or(usize::MAX),
                 });
+            }
+            if let GraphMutationAction::ClearProperties { current, .. } = action {
+                // The frozen property map, read by name through the reverse
+                // catalog: one name per property identity, or a removal could
+                // land on the wrong key.
+                let injective = selection
+                    .as_ref()
+                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
+                    .is_some_and(|catalog| {
+                        let mut names = std::collections::BTreeSet::new();
+                        catalog.properties.values().all(|name| names.insert(name))
+                    });
+                if columns.get(*current) != Some(&GraphSetColumnType::Any) || !injective {
+                    return Err(GraphMutationBuildError::ValueColumn {
+                        action: at,
+                        column: *current,
+                    });
+                }
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
                 let check = |column: usize| {
-                    if columns.get(column) == Some(&GraphSetColumnType::Scalar) {
+                    if columns
+                        .get(column)
+                        .is_some_and(|kind| kind.is_scalar_like())
+                    {
                         Ok(())
                     } else {
                         Err(GraphMutationBuildError::ValueColumn { action: at, column })
                     }
                 };
                 match value {
-                    GraphMutationValue::Column(column) => check(*column)?,
+                    GraphMutationValue::Column(column) => {
+                        if !matches!(
+                            columns.get(*column),
+                            Some(GraphSetColumnType::List | GraphSetColumnType::Any)
+                        ) {
+                            check(*column)?;
+                        }
+                    }
                     GraphMutationValue::Expression(expression) => {
                         for column in expression.referenced_columns() {
                             check(column)?;
@@ -356,14 +715,19 @@ impl PreparedGraphMutation {
                             |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
                         let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
                             .map_err(|kind| refused(Some(kind)))?;
-                        if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                        if !(kind.is_scalar_like()
+                            || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any))
+                        {
                             return Err(refused(None));
                         }
                     }
                 }
             }
-            if deleting != matches!(action, GraphMutationAction::DetachDelete { .. }) {
+            if deleting != action.deletes() {
                 return Err(GraphMutationBuildError::MixedDeletionAndUpdates);
+            }
+            if deleting && detaching != action.detaches() {
+                return Err(GraphMutationBuildError::MixedDeleteModes);
             }
         }
         Ok(Self {
@@ -377,8 +741,16 @@ impl PreparedGraphMutation {
     #[must_use]
     /// Actual graph source for the trusted reader. Actions address the completed
     /// input_relation schema when present, not this leaf's private columns.
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        &self.selection
+    /// `None` for a chain step over the previous write's rows.
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        self.selection.as_ref()
+    }
+    /// The selection's label and property names, when it carries them. A
+    /// chain step over owned rows has none.
+    pub(crate) fn reverse_catalog(&self) -> Option<&crate::graph_text::ReverseSymbolCatalog> {
+        self.selection
+            .as_ref()
+            .and_then(|selection| selection.plan().reverse_catalog.as_deref())
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -403,7 +775,71 @@ impl PreparedGraphMutation {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
-        collect::execute(self, policy, source, checkpoint)
+        self.execute_governed_over(None, policy, source, checkpoint)
+    }
+
+    /// A chain step's write (fgdb-cpny9): `owned` are the rows the previous
+    /// write of the statement returned, read by the input relation's one
+    /// owned leaf. `None` is [`Self::execute_governed`].
+    pub fn execute_governed_over<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute(self, policy, None, owned, source, None, checkpoint)
+            .map(|(batch, _)| batch)
+    }
+
+    /// [`Self::execute_governed`] with the host's element property reader
+    /// (fgdb-694ga). `x.key` of an element the input relation or a
+    /// right-hand side computes (`WITH collect(n) AS ns UNWIND ns AS m SET
+    /// m.q = m.p * 3`) reads `elements(element, key)` at the statement's
+    /// frozen selection cut, under the same authorization as `source`.
+    /// `Ok(None)` is an absent property. Without a reader that read stays a
+    /// typed error. The reader retains its point witnesses and never observes
+    /// this statement's own proposed assignments.
+    pub fn execute_governed_reading<E, C>(
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        self.execute_governed_over_reading(None, policy, source, elements, checkpoint)
+    }
+
+    /// [`Self::execute_governed_reading`] over a chain's owned input.
+    /// Owned identities are not new authority: the host must admit them under
+    /// the same scope as the graph source before any field is read.
+    pub fn execute_governed_over_reading<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute(
+            self,
+            policy,
+            None,
+            owned,
+            source,
+            Some(&mut elements),
+            checkpoint,
+        )
+        .map(|(batch, _)| batch)
     }
 
     /// Application transcript, not a durable format or authorization permit.
@@ -411,12 +847,20 @@ impl PreparedGraphMutation {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:graph-mutation:v1\0".to_vec();
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        let input = self.selection.canonical_bytes();
-        bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(&input);
+        // A chain step over owned rows has no graph source: its length is
+        // u64::MAX, which no encoded selection reaches.
+        match &self.selection {
+            Some(selection) => {
+                let input = selection.canonical_bytes();
+                bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&input);
+            }
+            None => bytes.extend_from_slice(&u64::MAX.to_be_bytes()),
+        }
         bytes.extend_from_slice(&(self.actions.len() as u64).to_be_bytes());
         for action in &self.actions {
-            bytes.extend_from_slice(&(action.target() as u64).to_be_bytes());
+            let target = action.target().map_or(u64::MAX, |target| target as u64);
+            bytes.extend_from_slice(&target.to_be_bytes());
             match action {
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     bytes.push(0);
@@ -452,12 +896,29 @@ impl PreparedGraphMutation {
                     bytes.push(1);
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
+                GraphMutationAction::ClearProperties { current, keep, .. } => {
+                    bytes.push(5);
+                    bytes.extend_from_slice(&(*current as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(keep.len() as u64).to_be_bytes());
+                    for key in keep {
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                    }
+                }
                 GraphMutationAction::SetLabel { label, present, .. } => {
                     bytes.push(2);
                     bytes.extend_from_slice(&label.0.to_be_bytes());
                     bytes.push(u8::from(*present));
                 }
                 GraphMutationAction::DetachDelete { .. } => bytes.push(3),
+                GraphMutationAction::Delete { .. } => bytes.push(4),
+                GraphMutationAction::DeleteValue { value, detach } => {
+                    bytes.push(6);
+                    bytes.push(u8::from(*detach));
+                    let mut encoded = Vec::new();
+                    value.append_canonical_bytes(&mut encoded);
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
             }
         }
         if let Some(relation) = &self.input_relation {

@@ -74,10 +74,22 @@ impl PreparedGraphSet {
         fn shape(query: &PreparedGraphSet) -> (bool, bool) {
             let (nested_window, positional_source) = match &query.node {
                 SetNode::Pattern(_) => (false, false),
-                // This new row-domain reducer has no admitted standing
-                // derivative yet. A window cannot make it transparent.
-                // Neither has a procedure call's relation.
-                SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => (true, true),
+                // Grouping completes and canonicalizes its output. Input
+                // sequence requirements belong to the separately compiled
+                // child; an outer window cannot erase that child admission.
+                SetNode::Aggregate(_) => (false, false),
+                // The executor admits and canonically sorts procedure rows
+                // exactly like pattern rows. A page can preserve that order;
+                // the host must still admit the complete CALL derivative.
+                SetNode::ProcedureCall(_) => (false, false),
+                SetNode::Owned { .. } => (true, true),
+                // Hidden-key output preserves a sequence no longer expressible
+                // by its visible cells. An inherited canonical window would
+                // select different occurrences; the ranked proof refuses it.
+                SetNode::Project {
+                    preserve_order: true,
+                    ..
+                } => (true, true),
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
                 | SetNode::Project { input, .. } => shape(input),
@@ -121,6 +133,21 @@ impl PreparedGraphSet {
         self.split_incremental_window()
     }
 
+    /// Borrow one intermediate group over its COMPLETE relational input.
+    /// The host must independently admit that input and the native group
+    /// kernel, then retain the checked ordinary-row derivative. This accessor
+    /// never exposes an executable first-leaf substitute. Every outer order
+    /// or page, including LIMIT zero, must be peeled by its own window owner.
+    pub fn incremental_group(&self) -> Option<&PreparedGraphSetAggregate> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Aggregate(summary) => Some(summary),
+            _ => None,
+        }
+    }
+
     /// Borrow a complete bound pattern leaf without erasing a relational page
     /// or order wrapped around it. The pattern's OWN DISTINCT/order/page remain
     /// part of the returned definition. A set wrapper canonicalizes those
@@ -132,6 +159,22 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
+            _ => None,
+        }
+    }
+
+    /// Borrow a procedure leaf with no runtime arguments, preserving its
+    /// catalog-bound graph projection and complete YIELD metadata. Hosts must
+    /// still validate the procedure, graph laws and derivative independently.
+    /// Nonempty argument programs, including named envelopes, are not erased;
+    /// they remain unsupported by this zero-argument accessor. An outer order
+    /// or page must be peeled by its own owner, including LIMIT zero.
+    pub fn incremental_procedure(&self) -> Option<&PreparedProcedureCall> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::ProcedureCall(call) if call.arguments.is_empty() => Some(call),
             _ => None,
         }
     }
@@ -172,6 +215,7 @@ impl PreparedGraphSet {
                 input,
                 projection,
                 quantifier,
+                ..
             } => Some((input, projection, *quantifier)),
             _ => None,
         }
@@ -401,6 +445,7 @@ mod tests {
             input: child,
             projection: vec![],
             quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
         };
         unavailable(&projected);
     }

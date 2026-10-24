@@ -12,6 +12,16 @@
 //!   coordinate, in order, runs a nearest-neighbour search over those numeric
 //!   properties (`--metric l2|cosine|dot`, default l2; exact unless
 //!   `--ann <ef_search>` asks for the approximate HNSW walk);
+//! - `--vector-encoding packed --vector-property <embedding>` instead reads
+//!   one packed property, as written by `--param e=vector:<x,y,...>`. Its
+//!   bytes must contain exactly one finite little-endian f32 per query
+//!   coordinate. The CLI never guesses an encoding from dimensions or the
+//!   first stored value;
+//! - `--vector-encoding coordinates-rounded`, the default, rounds finite stored
+//!   integers, floats and decimals once to the nearest f32 (fgdb-ekic6).
+//!   Distances describe that projection, not the original numbers; overflow
+//!   refuses and underflow is permitted. `--vector-encoding coordinates` opts
+//!   into exact admission, refusing any value f32 cannot hold exactly.
 //! - both lanes together run the exact reciprocal-rank fusion of the two
 //!   candidate sets (`--candidates <n>` per lane, default `--k`), which is
 //!   NOT an exhaustive hybrid answer;
@@ -21,18 +31,25 @@
 //!   `--expand-direction out|in|both`, default out; `--include-seeds
 //!   true|false`, default false), fused as a third reciprocal-rank lane
 //!   (`--graph-candidates`, default `--candidates`; `--graph-weight`,
-//!   default 1) with the text and/or vector lanes it needs. The expansion
+//!   default 1) with any requested text/vector lanes. With neither, it runs
+//!   graph-only retrieval without projecting properties or creating an index.
+//!   Zero hops plus `--include-seeds true` returns admitted seeds, including
+//!   isolates, without opening edge cursors. The expansion
 //!   reads the indexed incidence of the vertices it reaches, so its cost
 //!   follows the reached neighbourhood, not the whole selected edge set;
 //! - `--k <n>` bounds the hits (default 10), `--vertex-label <label>`
 //!   restricts the corpus and `--as-of <seq>` pins a committed sequence.
+//! - `--eligible <vid,...>` restricts result endpoints before candidate limits.
+//!   Omission is unrestricted; an empty string selects no results. Corpus
+//!   statistics and graph/ANN transit still use the whole selected corpus.
 //!
-//! The index is built for this one call from the selected generation, so a
-//! result always describes exactly the reported `seq`.
+//! Requested text/vector indexes are built for this one call. Graph-only
+//! retrieval uses topology at the same cut; every result describes the reported
+//! `seq`. All modes retain native work, staging and output limits.
 use super::{Failure, Options, float_text, render_rows};
 use fgdb::EmbeddedReadView;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
-use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
+use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search, VectorEncoding};
 use fgdb_beacon::{
     DistanceMetric, EditDistance, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
     IndexConfig, TextMatch, VectorSearch,
@@ -52,11 +69,13 @@ pub(super) struct SearchFlags {
     max_expansions: Option<usize>,
     vector: Option<Vec<f32>>,
     vector_properties: Vec<String>,
+    vector_encoding: Option<VectorEncoding>,
     metric: Option<DistanceMetric>,
     ann: Option<usize>,
     k: Option<usize>,
     candidates: Option<u32>,
     vertex_label: Option<String>,
+    eligible: Option<Vec<VId>>,
     as_of: Option<CommitSeq>,
     expand_from: Option<Vec<VId>>,
     expand_relation: Option<String>,
@@ -71,19 +90,25 @@ pub(super) struct SearchFlags {
 /// `--max-expansions` says otherwise. Beacon refuses a query that exceeds it.
 const DEFAULT_MAX_EXPANSIONS: usize = 64;
 
+/// Bound ingress occurrences before allocating the sorted membership set.
+/// Duplicate IDs count toward this limit even though membership is a set.
+const MAX_ELIGIBLE_IDS: usize = 100_000;
+
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 19] = [
+    pub(super) const FLAGS: [&str; 21] = [
         "--text",
         "--text-property",
         "--text-match",
         "--max-expansions",
         "--vector",
         "--vector-property",
+        "--vector-encoding",
         "--metric",
         "--ann",
         "--k",
         "--candidates",
         "--vertex-label",
+        "--eligible",
         "--as-of",
         "--expand-from",
         "--expand-relation",
@@ -156,6 +181,19 @@ impl SearchFlags {
                 self.vector_properties.push(value.to_owned());
                 Ok(())
             }
+            "--vector-encoding" => {
+                let encoding = match value {
+                    "coordinates" => VectorEncoding::Coordinates,
+                    "coordinates-rounded" => VectorEncoding::CoordinatesRoundedF32,
+                    "packed" => VectorEncoding::PackedF32Le,
+                    _ => {
+                        return Err(Failure::usage(
+                            "--vector-encoding is coordinates, coordinates-rounded or packed",
+                        ));
+                    }
+                };
+                once(&mut self.vector_encoding, encoding, flag)
+            }
             "--metric" => {
                 let metric = match value {
                     "l2" => DistanceMetric::SquaredEuclidean,
@@ -173,6 +211,31 @@ impl SearchFlags {
                 once(&mut self.candidates, n, flag)
             }
             "--vertex-label" => once(&mut self.vertex_label, value.to_owned(), flag),
+            "--eligible" => {
+                let mut ids = Vec::new();
+                if !value.trim().is_empty() {
+                    for raw in value.split(',') {
+                        if ids.len() == MAX_ELIGIBLE_IDS {
+                            return Err(Failure::usage(format!(
+                                "--eligible accepts at most {MAX_ELIGIBLE_IDS} vertex identities",
+                            )));
+                        }
+                        let raw = raw.trim();
+                        if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(Failure::usage(
+                                "--eligible is comma-separated unsigned decimal vertex identities",
+                            ));
+                        }
+                        let id = raw.parse::<u128>().map_err(|_| {
+                            Failure::usage("--eligible vertex identities must fit in u128")
+                        })?;
+                        ids.push(VId(id));
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                once(&mut self.eligible, ids, flag)
+            }
             "--as-of" => {
                 let seq = value
                     .parse()
@@ -180,14 +243,21 @@ impl SearchFlags {
                 once(&mut self.as_of, CommitSeq(seq), flag)
             }
             "--expand-from" => {
-                let seeds = value
-                    .split(',')
-                    .map(|raw| {
-                        raw.trim().parse::<u128>().map(VId).map_err(|_| {
-                            Failure::usage("--expand-from is comma-separated vertex identities")
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                // Admit occurrences before allocation, even duplicate seeds.
+                // Reuse the native expansion ceiling; zero hops and an empty
+                // endpoint filter must not turn ingress into an unbounded list.
+                let limit = ExpansionLimits::default().max_seed_ids;
+                let mut seeds = Vec::new();
+                for raw in value.split(',') {
+                    if seeds.len() == limit {
+                        return Err(Failure::usage(format!(
+                            "--expand-from accepts at most {limit} seed identities",
+                        )));
+                    }
+                    seeds.push(raw.trim().parse::<u128>().map(VId).map_err(|_| {
+                        Failure::usage("--expand-from is comma-separated vertex identities")
+                    })?);
+                }
                 once(&mut self.expand_from, seeds, flag)
             }
             "--expand-relation" => once(&mut self.expand_relation, value.to_owned(), flag),
@@ -234,6 +304,9 @@ impl SearchFlags {
 
 /// The lane(s) requested, owning the query text and coordinates.
 enum Lanes {
+    /// Only GraphHybridQuery may construct this neutral text/vector input.
+    /// The complete graph request is validated before opening storage.
+    GraphOnly(ExactHybridQuery<'static>),
     Text(String, TextMatch),
     Vector(Vec<f32>, VectorSearch),
     Hybrid {
@@ -266,6 +339,7 @@ pub(super) struct Prepared {
     /// Per-lane candidate depth of a fused search (`--candidates`, default k).
     candidates: u32,
     graph: Option<GraphLane>,
+    eligible: Option<Vec<VId>>,
 }
 
 fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyId, Failure> {
@@ -278,6 +352,7 @@ fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyI
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let flags = &options.search;
     let k = flags.k.unwrap_or(10);
+    let encoding = flags.vector_encoding.unwrap_or_default();
     let text = match (&flags.text, &flags.text_property) {
         (Some(query), Some(name)) => Some((query.clone(), property(name, &options.properties)?)),
         (None, None) => None,
@@ -289,10 +364,21 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     };
     let vector = match (&flags.vector, flags.vector_properties.is_empty()) {
         (Some(coordinates), false) => {
-            if coordinates.len() != flags.vector_properties.len() {
-                return Err(Failure::usage(
-                    "--vector needs exactly one --vector-property per coordinate",
-                ));
+            match encoding {
+                VectorEncoding::Coordinates | VectorEncoding::CoordinatesRoundedF32
+                    if coordinates.len() != flags.vector_properties.len() =>
+                {
+                    return Err(Failure::usage(
+                        "--vector needs exactly one --vector-property per coordinate; \
+                         use --vector-encoding packed for one packed embedding property",
+                    ));
+                }
+                VectorEncoding::PackedF32Le if flags.vector_properties.len() != 1 => {
+                    return Err(Failure::usage(
+                        "--vector-encoding packed needs exactly one --vector-property",
+                    ));
+                }
+                _ => {}
             }
             let keys = flags
                 .vector_properties
@@ -314,13 +400,11 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     if vector.is_none() && (flags.metric.is_some() || flags.ann.is_some()) {
         return Err(Failure::usage("--metric and --ann need --vector"));
     }
+    if vector.is_none() && flags.vector_encoding.is_some() {
+        return Err(Failure::usage("--vector-encoding needs --vector"));
+    }
     let graph = match (&flags.expand_from, flags.max_hops) {
         (Some(seeds), Some(max_hops)) => {
-            if text.is_none() && vector.is_none() {
-                return Err(Failure::usage(
-                    "the graph lane fuses with --text and/or --vector",
-                ));
-            }
             let relation = flags
                 .expand_relation
                 .as_ref()
@@ -413,10 +497,17 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             });
     let index = IndexConfig {
         vector: vector.as_ref().map(|(coordinates, _)| {
-            HnswConfig::new(
+            let config = HnswConfig::new(
                 coordinates.len(),
                 flags.metric.unwrap_or(DistanceMetric::SquaredEuclidean),
-            )
+            );
+            // The index lives for this one call: an exact search never reads
+            // HNSW links, so do not build them (fgdb-43k4t).
+            if flags.ann.is_some() {
+                config
+            } else {
+                config.exact_only()
+            }
         }),
         ..IndexConfig::default()
     };
@@ -429,6 +520,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                 .as_ref()
                 .map(|(_, keys)| keys.clone())
                 .unwrap_or_default(),
+            encoding,
         },
         index,
         policy: ReadPolicy::default(),
@@ -444,9 +536,16 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         (Some((text, _)), None) => Lanes::Text(text, text_mode),
         (None, Some((vector, _))) => Lanes::Vector(vector, vector_mode),
         (None, None) => {
-            return Err(Failure::usage(
-                "search needs --text with --text-property, --vector with --vector-property, or both",
-            ));
+            let graph = graph.as_ref().ok_or_else(|| {
+                Failure::usage(
+                    "search needs --text with --text-property, --vector with --vector-property, \
+                     or --expand-from with an explicit --max-hops",
+                )
+            })?;
+            let query = GraphHybridQuery::graph_only(k, graph.candidates, graph.weight, 60)
+                .map_err(Failure::usage)?;
+            read.validate_graph_only(query).map_err(Failure::usage)?;
+            Lanes::GraphOnly(query.retrieval)
         }
     };
     Ok(Prepared {
@@ -455,12 +554,18 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         k,
         candidates,
         graph,
+        eligible: flags.eligible.clone(),
     })
 }
 
 impl Prepared {
-    fn search(&self) -> Search<'_> {
-        match &self.lanes {
+    /// Only index-backed lanes can become a Search. Never manufacture an
+    /// empty text/vector query to make topology-only input fit that interface.
+    fn search(&self) -> Result<Search<'_>, Failure> {
+        Ok(match &self.lanes {
+            Lanes::GraphOnly(_) => {
+                return Err(Failure::usage("graph-only search requires graph expansion"));
+            }
             Lanes::Text(query, mode) => Search::Text {
                 query,
                 k: self.k,
@@ -487,7 +592,7 @@ impl Prepared {
                 text_mode: *text_mode,
                 profile: ExactRrfProfile::default(),
             }),
-        }
+        })
     }
 
     /// The text/vector part of a graph-fused search. A lane that was not
@@ -496,6 +601,7 @@ impl Prepared {
         let profile =
             |vector: u16, text: u16| ExactRrfProfile::new(60, vector, text).map_err(Failure::usage);
         Ok(match &self.lanes {
+            Lanes::GraphOnly(query) => *query,
             Lanes::Text(query, mode) => ExactHybridQuery {
                 vector: &[],
                 text: query,
@@ -548,6 +654,12 @@ pub(super) fn run(
     let mut read = prepared.read.clone();
     let seq = read.as_of.unwrap_or(view.frontier());
     read.as_of = Some(seq);
+    let eligible = |id| {
+        prepared
+            .eligible
+            .as_ref()
+            .is_none_or(|ids| ids.binary_search(&id).is_ok())
+    };
     if let Some(graph) = &prepared.graph {
         let query = GraphHybridQuery {
             retrieval: prepared.retrieval()?,
@@ -566,7 +678,7 @@ pub(super) fn run(
         // reached vertices only; semantics are the whole-graph API's, which
         // tests/cli_robot.rs keeps as its oracle.
         let hits = view
-            .beacon_search_graph_indexed(cx, &read, query, expansion)
+            .beacon_search_graph_indexed_filtered(cx, &read, query, expansion, eligible)
             .map_err(Failure::query)?;
         let columns: Vec<String> = [
             "vertex",
@@ -599,7 +711,7 @@ pub(super) fn run(
         return render_rows(&columns, cells, seq.0, "searched", robot, out);
     }
     let rows = view
-        .beacon_search(cx, &read, prepared.search())
+        .beacon_search_filtered(cx, &read, prepared.search()?, eligible)
         .map_err(Failure::query)?;
     let (columns, cells): (&[&str], Vec<Vec<String>>) = match &rows {
         Rows::Text(hits) => (
@@ -673,3 +785,500 @@ fn rank(value: Option<u32>, robot: bool) -> String {
         (None, false) => "NULL".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgdb_beacon::{BeaconIndex, IndexDocument, WorkBudget};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, bytes::BoundedBytes};
+
+    fn options(parts: &[&str]) -> Options {
+        let mut args = vec![
+            "--db",
+            "unused",
+            "--key-file",
+            "unused",
+            "--property",
+            "x=1",
+            "--property",
+            "y=2",
+            "--property",
+            "embedding=3",
+            "--property",
+            "bio=4",
+            "--label",
+            "Document=1",
+        ];
+        args.extend_from_slice(parts);
+        crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "search",
+        )
+        .expect("search arguments")
+    }
+
+    fn bytes(value: Vec<u8>) -> CanonicalPropertyValue {
+        CanonicalScalar::Bytes(BoundedBytes::new(value).unwrap()).into()
+    }
+
+    fn vector_request(encoding: &str, metric: &str) -> Prepared {
+        let properties: &[&str] = if encoding == "packed" {
+            &["--vector-property", "embedding"]
+        } else {
+            &["--vector-property", "x", "--vector-property", "y"]
+        };
+        let mut parts = vec![
+            "--vector",
+            "1,0",
+            "--vector-encoding",
+            encoding,
+            "--metric",
+            metric,
+            "--k",
+            "4",
+        ];
+        parts.extend_from_slice(properties);
+        prepare(&options(&parts)).expect("vector request")
+    }
+
+    #[test]
+    fn packed_flag_binds_one_property_without_changing_query_dimensions_or_mode() {
+        for ann in [false, true] {
+            let mut parts = vec![
+                "--vector",
+                "1,2,3",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--metric",
+                "cosine",
+                "--as-of",
+                "7",
+                "--eligible",
+                "2,1,2",
+                "--vertex-label",
+                "Document",
+            ];
+            if ann {
+                parts.extend_from_slice(&["--ann", "32"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
+            assert_eq!(request.read.projection.vector, [PropertyKeyId(3)]);
+            assert_eq!(request.read.index.vector.as_ref().unwrap().dimensions, 3);
+            assert_eq!(request.read.as_of, Some(CommitSeq(7)));
+            assert_eq!(request.read.vertex_label, Some(LabelId(1)));
+            assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
+            let vector = match request.search().unwrap() {
+                Search::Vector { query, mode, .. } => Some((query, mode)),
+                _ => None,
+            };
+            let (query, mode) = vector.expect("expected vector search");
+            assert_eq!(query, [1.0, 2.0, 3.0]);
+            assert_eq!(
+                matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
+                ann
+            );
+            assert!(request.read.config_for(request.search().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn packed_encoding_is_explicit_and_invalid_projection_shapes_refuse() {
+        // Per-coordinate properties round once to f32 by default (fgdb-ekic6).
+        let default = prepare(&options(&["--vector", "1", "--vector-property", "x"])).unwrap();
+        assert_eq!(
+            default.read.projection.encoding,
+            VectorEncoding::CoordinatesRoundedF32
+        );
+        let exact = prepare(&options(&[
+            "--vector",
+            "1",
+            "--vector-property",
+            "x",
+            "--vector-encoding",
+            "coordinates",
+        ]))
+        .unwrap();
+        assert_eq!(exact.read.projection.encoding, VectorEncoding::Coordinates);
+        for parts in [
+            vec!["--vector", "1,2", "--vector-property", "embedding"],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec!["--vector", "1,2", "--vector-encoding", "packed"],
+            vec![
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "coordinates",
+            ],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "unknown",
+                "--vector-encoding",
+                "packed",
+            ],
+        ] {
+            let error = prepare(&options(&parts))
+                .err()
+                .expect("invalid search must refuse");
+            assert_eq!(error.code, 2, "{}", error.message);
+        }
+        for invalid in ["auto", "f64", "PACKED", ""] {
+            assert!(
+                SearchFlags::default()
+                    .set("--vector-encoding", invalid)
+                    .is_err()
+            );
+        }
+        let mut flags = SearchFlags::default();
+        flags.set("--vector-encoding", "packed").unwrap();
+        assert!(flags.set("--vector-encoding", "coordinates").is_err());
+    }
+
+    #[test]
+    fn packed_projection_uses_native_finite_exact_length_admission() {
+        let request = vector_request("packed", "l2");
+        let config = request.read.config_for(request.search().unwrap()).unwrap();
+        for value in [
+            CanonicalScalar::Int(1).into(),
+            bytes(vec![]),
+            bytes(vec![0; 7]),
+            bytes(vec![0; 9]),
+            bytes([f32::NAN.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
+            bytes([f32::INFINITY.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
+        ] {
+            assert!(
+                request
+                    .read
+                    .projection
+                    .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100),)
+                    .is_err()
+            );
+        }
+        for value in [
+            None,
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
+        ] {
+            let document = request
+                .read
+                .projection
+                .project(
+                    VId(1),
+                    &config,
+                    |_| value.as_ref(),
+                    &mut WorkBudget::new(100),
+                )
+                .unwrap();
+            assert!(document.vector.is_none());
+        }
+        let value = bytes([2.0_f32.to_le_bytes(), (-3.0_f32).to_le_bytes()].concat());
+        let document = request
+            .read
+            .projection
+            .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100))
+            .unwrap();
+        assert_eq!(document.vector, Some(vec![2.0, -3.0]));
+        assert!(
+            request
+                .read
+                .projection
+                .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(0),)
+                .is_err(),
+            "packed decoding must retain the native work budget"
+        );
+    }
+
+    fn native_hits(request: &Prepared) -> Rows {
+        let config = request.read.config_for(request.search().unwrap()).unwrap();
+        let documents: Vec<IndexDocument> = [[6_i16, 0], [2, 0], [3, 2], [2, 0]]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, coordinates)| {
+                let properties = BTreeMap::from([
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::Int(i64::from(coordinates[0])).into(),
+                    ),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::Int(i64::from(coordinates[1])).into(),
+                    ),
+                    (
+                        PropertyKeyId(3),
+                        bytes(
+                            coordinates
+                                .into_iter()
+                                .flat_map(|value| f32::from(value).to_le_bytes())
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                request
+                    .read
+                    .projection
+                    .project(
+                        VId(u128::try_from(ordinal).unwrap() + 1),
+                        &config,
+                        |key| properties.get(&key),
+                        &mut WorkBudget::new(1_000),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let snapshot = BeaconIndex::build(config, documents, &mut WorkBudget::new(100_000))
+            .unwrap()
+            .snapshot();
+        request
+            .search()
+            .unwrap()
+            .execute(&snapshot, &mut WorkBudget::new(100_000))
+            .unwrap()
+    }
+
+    #[test]
+    fn packed_search_matches_coordinate_ids_order_and_scores_for_every_metric() {
+        for metric in ["l2", "cosine", "dot"] {
+            assert_eq!(
+                native_hits(&vector_request("packed", metric)),
+                native_hits(&vector_request("coordinates", metric)),
+                "metric={metric}",
+            );
+        }
+        let hits = match native_hits(&vector_request("packed", "l2")) {
+            Rows::Vector(hits) => Some(hits),
+            _ => None,
+        }
+        .expect("expected vector hits");
+        assert_eq!(
+            hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [VId(2), VId(4), VId(3), VId(1)]
+        );
+        assert_eq!(
+            hits.iter().map(|hit| hit.distance).collect::<Vec<_>>(),
+            [1.0, 1.0, 8.0, 25.0]
+        );
+    }
+
+    #[test]
+    fn packed_encoding_reaches_hybrid_and_graph_retrieval_without_changing_fusion() {
+        for graph in [false, true] {
+            let mut parts = vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector",
+                "1,0",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--k",
+                "2",
+                "--candidates",
+                "4",
+            ];
+            if graph {
+                parts.extend_from_slice(&["--expand-from", "1", "--max-hops", "2"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
+            assert_eq!(request.graph.is_some(), graph);
+            assert!(request.read.config_for(request.search().unwrap()).is_ok());
+            let query = request.retrieval().unwrap();
+            assert_eq!(query.vector, [1.0, 0.0]);
+            assert_eq!(query.text, "graph");
+            assert_eq!(query.k, 2);
+            assert_eq!((query.vector_candidates, query.text_candidates), (4, 4));
+        }
+    }
+
+    #[test]
+    fn eligibility_distinguishes_omission_empty_and_full_width_membership() {
+        let mut flags = SearchFlags::default();
+        assert!(flags.eligible.is_none());
+        flags
+            .set("--eligible", &format!("{}, 0, 7, 7", u128::MAX))
+            .unwrap();
+        assert_eq!(flags.eligible, Some(vec![VId(0), VId(7), VId(u128::MAX)]));
+        assert!(flags.set("--eligible", "7").is_err());
+        for empty in ["", "   "] {
+            let mut flags = SearchFlags::default();
+            flags.set("--eligible", empty).unwrap();
+            assert_eq!(flags.eligible, Some(Vec::new()));
+        }
+        for invalid in [
+            "-1",
+            "+1",
+            "1.0",
+            "1,,2",
+            ",1",
+            "1,",
+            "null",
+            "340282366920938463463374607431768211456",
+        ] {
+            assert!(
+                SearchFlags::default().set("--eligible", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn eligibility_bounds_occurrences_before_duplicate_reduction() {
+        let at_limit = std::iter::repeat_n("7", MAX_ELIGIBLE_IDS)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut flags = SearchFlags::default();
+        flags.set("--eligible", &at_limit).unwrap();
+        assert_eq!(flags.eligible, Some(vec![VId(7)]));
+        let too_many = format!("{at_limit},7");
+        assert!(SearchFlags::default().set("--eligible", &too_many).is_err());
+    }
+
+    #[test]
+    fn rounded_encoding_reaches_the_projection_and_retains_exact_search_options() {
+        for ann in [false, true] {
+            let mut parts = vec![
+                "--vector",
+                "0.1,0.2",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "coordinates-rounded",
+                "--as-of",
+                "7",
+                "--eligible",
+                "2,1",
+                "--vertex-label",
+                "Document",
+            ];
+            if ann {
+                parts.extend_from_slice(&["--ann", "32"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::CoordinatesRoundedF32
+            );
+            assert_eq!(
+                request.read.projection.vector,
+                [PropertyKeyId(1), PropertyKeyId(2)]
+            );
+            assert_eq!(request.read.as_of, Some(CommitSeq(7)));
+            assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
+            assert_eq!(request.read.vertex_label, Some(LabelId(1)));
+            let Search::Vector { query, mode, .. } = request.search().unwrap() else {
+                panic!("vector search");
+            };
+            assert_eq!(query, [0.1_f32, 0.2_f32]);
+            assert_eq!(
+                matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
+                ann
+            );
+            let config = request.read.config_for(request.search().unwrap()).unwrap();
+            let value = fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Float(
+                fgdb_types::CanonicalF64::new(0.1),
+            ));
+            let document = request
+                .read
+                .projection
+                .project(
+                    VId(1),
+                    &config,
+                    |_| Some(&value),
+                    &mut WorkBudget::new(1000),
+                )
+                .unwrap();
+            assert_eq!(document.vector, Some(vec![0.1_f32, 0.1_f32]));
+        }
+        for metric in ["l2", "cosine", "dot"] {
+            assert_eq!(
+                native_hits(&vector_request("coordinates-rounded", metric)),
+                native_hits(&vector_request("coordinates", metric)),
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_encoding_checks_dimensions_and_cannot_be_a_text_only_option() {
+        for parts in [
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "x",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
+            vec![
+                "--vector",
+                "1",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
+        ] {
+            assert_eq!(
+                prepare(&options(&parts)).err().expect("invalid shape").code,
+                2
+            );
+        }
+        let mut flags = SearchFlags::default();
+        flags
+            .set("--vector-encoding", "coordinates-rounded")
+            .unwrap();
+        assert!(flags.set("--vector-encoding", "packed").is_err());
+    }
+}
+
+#[cfg(test)]
+#[path = "search/graph_only_tests.rs"]
+mod graph_only_tests;

@@ -11,18 +11,37 @@ use std::cmp::Ordering;
 // resolve from query_spool/, as a mod.rs's would. Name them explicitly.
 #[path = "sort/canonical.rs"]
 mod canonical;
+#[path = "sort/difference.rs"]
+mod difference;
 #[path = "sort/prepared.rs"]
 mod prepared;
+// Exact aggregate delivery reuses the difference cursor's external merge.
+pub(in crate::query::view::spool) use difference::Merge;
+pub use difference::NativeSpoolDifference;
+pub use prepared::PreparedBufferedOrder;
+pub(crate) use prepared::ordered_input;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
-struct Work<'a> {
-    cx: &'a QueryCx,
-    used: u64,
-    limit: u64,
+// External aggregate argument support uses typed equality on a selected tuple,
+// not complete-row equality or the result layer's numeric-equivalence domain.
+pub(super) fn equal_columns(
+    left: &[u8],
+    right: &[u8],
+    selected: &[GraphValueOrder],
+    columns: usize,
+    work: &mut Work<'_>,
+) -> Result<bool> {
+    canonical::equal_columns(left, right, selected, columns, work)
+}
+
+pub(super) struct Work<'a> {
+    pub(super) cx: &'a QueryCx,
+    pub(super) used: u64,
+    pub(super) limit: u64,
 }
 impl Work<'_> {
-    fn charge(&mut self, units: usize) -> Result<()> {
+    pub(super) fn charge(&mut self, units: usize) -> Result<()> {
         self.cx
             .with_restriction(|| self.cx.checkpoint())
             .map_err(SpillError::Interrupted)?;
@@ -39,6 +58,49 @@ impl Work<'_> {
         }
         self.used = attempted;
         Ok(())
+    }
+}
+
+/// Private semantic comparison seam. The physical sorter still owns every
+/// run, allocation, merge and byte charge. Aggregate callers retain their exact
+/// numeric domains and cumulative evaluator while supplying this comparison.
+pub(super) trait FrameOrder {
+    type Error: From<NativeSpoolError> + From<SpillError>;
+
+    fn admit(&mut self, columns: usize) -> core::result::Result<(), Self::Error>;
+    fn validate(
+        &mut self,
+        row: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> core::result::Result<(), Self::Error>;
+    fn compare(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> core::result::Result<Ordering, Self::Error>;
+}
+
+struct CanonicalOrder<'a>(&'a [GraphValueOrder]);
+impl FrameOrder for CanonicalOrder<'_> {
+    type Error = NativeSpoolError;
+
+    fn admit(&mut self, columns: usize) -> Result<()> {
+        validate_order(self.0, columns)
+    }
+    fn validate(&mut self, row: &[u8], columns: usize, work: &mut Work<'_>) -> Result<()> {
+        canonical::validate(row, columns, work)
+    }
+    fn compare(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        columns: usize,
+        work: &mut Work<'_>,
+    ) -> Result<Ordering> {
+        canonical::compare(left, right, self.0, columns, work)
     }
 }
 
@@ -83,6 +145,19 @@ impl<T> ChargedVec<T> {
 struct Run {
     pages: PagedSpillRun,
     rows: u64,
+}
+
+// At most one completed run per binary level. Stack order is source order,
+// oldest first, and levels strictly decrease from bottom to top. A level k
+// covers 2^k adjacent initial runs (the last may have fewer rows).
+struct PendingRun {
+    run: Run,
+    level: u32,
+    in_destination: bool,
+}
+
+fn catalog_slots(initial_runs: u64) -> usize {
+    (u64::BITS - initial_runs.max(1).leading_zeros()) as usize
 }
 
 // Interleave two positions over ONE file without cloning a file handle or
@@ -174,13 +249,19 @@ impl NativeResultSpool {
     /// the second return value is additional logical sort work, not I/O/latency.
     ///
     /// Exactly `run_rows` rows (except the last run) are retained for fallible
-    /// in-place heapsort. Pairwise merge passes retain two row heads, two cached
-    /// input pages and one output page, not an entire run. All frame buffers and
-    /// vector capacities use their file's MemoryPool. Run metadata is O(initial
-    /// runs), explicitly capped by max_runs and charged before source demand.
+    /// in-place heapsort. Adjacent equal-size runs merge as they are produced;
+    /// a charged binary-level stack retains O(log(initial runs)) run handles,
+    /// never two input-proportional catalogs. max_runs still caps the TOTAL
+    /// initial runs, not the live stack depth, and is checked before reading.
+    /// Merges retain two row heads, two input pages and one output page. Run
+    /// generation releases its row vector and cached input page before merging.
+    /// All frame buffers and vector capacities use their file's MemoryPool.
     /// Hosts should give both files children of a common pool for a total cap.
     /// Minimum headroom must cover row buffers, page buffers, writer metadata
-    /// and the two catalogs; choosing oversized run_rows can refuse admission.
+    /// and the level stack; choosing oversized run_rows can refuse admission.
+    /// Releasing generation buffers may reallocate a row vector and reread a
+    /// boundary page per initial run. This is a memory tradeoff, not a latency
+    /// promise. The spill files' own metadata and quotas retain their limits.
     ///
     /// Source and destination must be distinct, exclusively owned scratch
     /// files. Passes alternate between them, always APPENDING. A final copy, if
@@ -196,21 +277,58 @@ impl NativeResultSpool {
     /// authenticates before use; unread corrupt pages cannot enter comparisons.
     /// There is no eager fallback, new storage authority, Warden grant, spill
     /// for the decoded graph, or full larger-than-memory query-engine claim.
+    ///
+    /// Type-erased like the spool and commit chokepoints (fgdb-a5y6m): a
+    /// caller's `Send` proof stops at `dyn Future + Send` instead of
+    /// descending the whole run/merge chain, which the aggregate finish and
+    /// ordered spill paths otherwise pushed past the recursion limit.
     #[allow(clippy::too_many_arguments)]
-    pub async fn sort_into<A, B>(
-        &self,
-        cx: &QueryCx,
-        source: &mut SpillFile<A>,
-        destination: &mut SpillFile<B>,
-        order: &[GraphValueOrder],
+    pub fn sort_into<'a, A, B>(
+        &'a self,
+        cx: &'a QueryCx,
+        source: &'a mut SpillFile<A>,
+        destination: &'a mut SpillFile<B>,
+        order: &'a [GraphValueOrder],
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
         max_work_units: u64,
-    ) -> Result<(Self, u64)>
+    ) -> crate::SendFuture<'a, Result<(Self, u64)>>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+    {
+        Box::pin(async move {
+            self.sort_with(
+                cx,
+                source,
+                destination,
+                &mut CanonicalOrder(order),
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_work_units,
+            )
+            .await
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn sort_with<A, B, O: FrameOrder + Send>(
+        &self,
+        cx: &QueryCx,
+        source: &mut SpillFile<A>,
+        destination: &mut SpillFile<B>,
+        order: &mut O,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_work_units: u64,
+    ) -> core::result::Result<(Self, u64), O::Error>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        O::Error: Send,
     {
         cx.with_restriction_async(self.sort_inner(
             cx,
@@ -221,33 +339,72 @@ impl NativeResultSpool {
             max_runs,
             page_bytes,
             max_work_units,
+            0,
         ))
         .await
     }
 
+    // Buffered native intake has already spent encoding work. Continue that
+    // SAME allowance, preserving the original limit in every reported refusal.
+    // Ordinary sort_into/sort_with begin at zero and keep their public contract.
     #[allow(clippy::too_many_arguments)]
-    async fn sort_inner<A, B>(
-        &self,
-        cx: &QueryCx,
-        source: &mut SpillFile<A>,
-        destination: &mut SpillFile<B>,
-        order: &[GraphValueOrder],
+    pub(super) fn sort_continuing<'a, A, B>(
+        &'a self,
+        cx: &'a QueryCx,
+        source: &'a mut SpillFile<A>,
+        destination: &'a mut SpillFile<B>,
+        order: &'a [GraphValueOrder],
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
         max_work_units: u64,
-    ) -> Result<(Self, u64)>
+        prior_work: u64,
+    ) -> crate::SendFuture<'a, Result<(Self, u64)>>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'a,
+    {
+        Box::pin(async move {
+            cx.with_restriction_async(self.sort_inner(
+                cx,
+                source,
+                destination,
+                &mut CanonicalOrder(order),
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_work_units,
+                prior_work,
+            ))
+            .await
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn sort_inner<A, B, O: FrameOrder + Send>(
+        &self,
+        cx: &QueryCx,
+        source: &mut SpillFile<A>,
+        destination: &mut SpillFile<B>,
+        order: &mut O,
+        run_rows: usize,
+        max_runs: usize,
+        page_bytes: usize,
+        max_work_units: u64,
+        prior_work: u64,
+    ) -> core::result::Result<(Self, u64), O::Error>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+        O::Error: Send,
     {
         let mut work = Work {
             cx,
-            used: 0,
+            used: prior_work,
             limit: max_work_units,
         };
         work.charge(1)?;
-        validate_order(order, self.columns.len())?;
+        order.admit(self.encoded_columns)?;
         if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
             return Err(SpillError::InvalidLimits.into());
         }
@@ -257,29 +414,38 @@ impl NativeResultSpool {
             return Err(NativeSpoolError::SortRunLimit {
                 required,
                 limit: max_runs,
-            });
+            }
+            .into());
         }
-        let count = usize::try_from(required).map_err(|_| SpillError::SizeOverflow)?;
         let pool = source.memory_pool().clone();
-        let mut current = ChargedVec::<Run>::new(&pool, cx, count)?;
-        let mut next = ChargedVec::<Run>::new(&pool, cx, count.div_ceil(2))?;
-        let capacity =
-            usize::try_from(self.row_count().min(width)).map_err(|_| SpillError::SizeOverflow)?;
-        {
-            let mut rows = ChargedVec::<TrackedBytes>::new(&pool, cx, capacity)?;
-            let mut input = self.reader(source);
-            let mut remaining = self.row_count();
-            loop {
+        let slots = catalog_slots(required);
+        let mut pending = ChargedVec::<PendingRun>::new(&pool, cx, slots)?;
+        // Unlike a borrowed reader, this position can lend either scratch file
+        // to a merge between pulls. Original pages are immutable; every resume
+        // still uses their original run handle, offset and authentication.
+        let mut input = Input::new(
+            Run {
+                pages: self.run.clone(),
+                rows: self.row_count(),
+            },
+            self.max_row_bytes,
+        );
+        let mut remaining = self.row_count();
+        for _ in 0..required {
+            let mut completed = {
+                let capacity =
+                    usize::try_from(remaining.min(width)).map_err(|_| SpillError::SizeOverflow)?;
+                let mut rows = ChargedVec::<TrackedBytes>::new(&pool, cx, capacity)?;
                 for _ in 0..remaining.min(width) {
                     work.charge(1)?;
                     let row = input
-                        .next_row(cx)
+                        .next(source, cx)
                         .await?
                         .ok_or(NativeSpoolError::IncompleteCursor)?;
-                    canonical::validate(row.as_ref(), self.columns.len(), &mut work)?;
+                    order.validate(row.as_ref(), self.encoded_columns, &mut work)?;
                     rows.values.push(row);
                 }
-                heap_sort(&mut rows.values, order, self.columns.len(), &mut work)?;
+                heap_sort(&mut rows.values, order, self.encoded_columns, &mut work)?;
                 let rows_written = rows.values.len() as u64;
                 let mut writer = destination.paged_writer(cx, page_bytes)?;
                 for row in &rows.values {
@@ -287,59 +453,69 @@ impl NativeResultSpool {
                 }
                 work.charge(1)?;
                 let pages = writer.finish(cx).await?;
-                current.values.push(Run {
-                    pages,
-                    rows: rows_written,
-                });
                 remaining -= rows_written;
-                rows.values.clear();
-                if remaining == 0 {
-                    break;
+                PendingRun {
+                    run: Run {
+                        pages,
+                        rows: rows_written,
+                    },
+                    level: 0,
+                    in_destination: true,
                 }
-            }
-            if input.next_row(cx).await?.is_some() || input.state() != ScanState::Exhausted {
-                return Err(NativeSpoolError::IncompleteCursor);
-            }
-        }
-        let mut in_destination = true;
-        while current.values.len() > 1 {
-            work.charge(1)?;
-            if in_destination {
-                merge_pass(
-                    destination,
+            };
+            input.page = None; // no generation payload survives into merging
+            while pending
+                .values
+                .last()
+                .is_some_and(|left| left.level == completed.level)
+            {
+                let left = pending.values.pop().expect("checked pending run");
+                completed = merge_pending(
                     source,
-                    &current.values,
-                    &mut next.values,
+                    destination,
+                    left,
+                    completed,
                     self.max_row_bytes,
                     page_bytes,
                     order,
-                    self.columns.len(),
-                    &mut work,
-                )
-                .await?;
-            } else {
-                merge_pass(
-                    source,
-                    destination,
-                    &current.values,
-                    &mut next.values,
-                    self.max_row_bytes,
-                    page_bytes,
-                    order,
-                    self.columns.len(),
+                    self.encoded_columns,
                     &mut work,
                 )
                 .await?;
             }
-            current.values.clear();
-            std::mem::swap(&mut current, &mut next);
-            in_destination = !in_destination;
+            // A logic regression must refuse, not grow an uncharged catalog.
+            if pending.values.len() >= slots {
+                return Err(NativeSpoolError::IncompleteCursor.into());
+            }
+            pending.values.push(completed);
         }
-        let mut final_run = current
+        if remaining != 0 || input.next(source, cx).await?.is_some() {
+            return Err(NativeSpoolError::IncompleteCursor.into());
+        }
+        drop(input);
+        // Fold the unpaired right suffix into its older left neighbor. This
+        // preserves the original adjacent-run merge tree and left-first ties,
+        // including non-power-of-two counts and a short final initial run.
+        let mut completed = pending
             .values
             .pop()
             .ok_or(NativeSpoolError::IncompleteCursor)?;
-        if !in_destination {
+        while let Some(left) = pending.values.pop() {
+            completed = merge_pending(
+                source,
+                destination,
+                left,
+                completed,
+                self.max_row_bytes,
+                page_bytes,
+                order,
+                self.encoded_columns,
+                &mut work,
+            )
+            .await?;
+        }
+        let mut final_run = completed.run;
+        if !completed.in_destination {
             final_run = merge_pair(
                 source,
                 destination,
@@ -348,18 +524,19 @@ impl NativeResultSpool {
                 self.max_row_bytes,
                 page_bytes,
                 order,
-                self.columns.len(),
+                self.encoded_columns,
                 &mut work,
             )
             .await?;
         }
         if final_run.rows != self.row_count() || final_run.pages.len() != self.encoded_len() {
-            return Err(NativeSpoolError::IncompleteCursor);
+            return Err(NativeSpoolError::IncompleteCursor.into());
         }
         work.charge(1)?;
         Ok((
             Self {
                 columns: Arc::clone(&self.columns),
+                encoded_columns: self.encoded_columns,
                 snapshot: self.snapshot,
                 kind: self.kind,
                 rows: self.rows,
@@ -385,54 +562,137 @@ async fn write_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pass<A, B>(
+async fn merge_pending<A, B, O: FrameOrder + Send>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
-    runs: &[Run],
-    output: &mut Vec<Run>,
+    left: PendingRun,
+    mut right: PendingRun,
     max_row_bytes: usize,
     page_bytes: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()>
+) -> core::result::Result<PendingRun, O::Error>
 where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    O::Error: Send,
 {
-    debug_assert!(output.is_empty() && output.capacity() >= runs.len().div_ceil(2));
-    for pair in runs.chunks(2) {
+    // A final unpaired suffix may reside in the opposite file. Move only the
+    // right suffix to the left run's file, never swap semantic operand order.
+    // The ordinary authenticated single-run copy retains append-only quotas.
+    if left.in_destination != right.in_destination {
         work.charge(1)?;
-        output.push(
+        right.run = if left.in_destination {
             merge_pair(
                 source,
                 destination,
-                &pair[0],
-                pair.get(1),
+                &right.run,
+                None,
                 max_row_bytes,
                 page_bytes,
                 order,
                 columns,
                 work,
             )
-            .await?,
-        );
+            .await?
+        } else {
+            merge_pair(
+                destination,
+                source,
+                &right.run,
+                None,
+                max_row_bytes,
+                page_bytes,
+                order,
+                columns,
+                work,
+            )
+            .await?
+        };
     }
-    Ok(())
+    work.charge(1)?;
+    let run = if left.in_destination {
+        merge_pair(
+            destination,
+            source,
+            &left.run,
+            Some(&right.run),
+            max_row_bytes,
+            page_bytes,
+            order,
+            columns,
+            work,
+        )
+        .await?
+    } else {
+        merge_pair(
+            source,
+            destination,
+            &left.run,
+            Some(&right.run),
+            max_row_bytes,
+            page_bytes,
+            order,
+            columns,
+            work,
+        )
+        .await?
+    };
+    Ok(PendingRun {
+        run,
+        level: left.level + 1,
+        in_destination: !left.in_destination,
+    })
+}
+
+/// Type-erased because both merge callers cross it once per pair: a caller's
+/// `Send` proof stops at `dyn Future + Send` instead of descending through
+/// the run readers and the paged writer, which the aggregate finish and the
+/// ordered spill paths otherwise pushed past the recursion limit.
+#[allow(clippy::too_many_arguments)]
+fn merge_pair<'a, 'w, A, B, O: FrameOrder + Send>(
+    source: &'a mut SpillFile<A>,
+    destination: &'a mut SpillFile<B>,
+    left: &'a Run,
+    right: Option<&'a Run>,
+    max_row_bytes: usize,
+    page_bytes: usize,
+    order: &'a mut O,
+    columns: usize,
+    work: &'a mut Work<'w>,
+) -> crate::SendFuture<'a, core::result::Result<Run, O::Error>>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    O::Error: Send,
+    'w: 'a,
+{
+    Box::pin(merge_pair_inner(
+        source,
+        destination,
+        left,
+        right,
+        max_row_bytes,
+        page_bytes,
+        order,
+        columns,
+        work,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn merge_pair<A, B>(
+async fn merge_pair_inner<A, B, O: FrameOrder>(
     source: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     left: &Run,
     right: Option<&Run>,
     max_row_bytes: usize,
     page_bytes: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<Run>
+) -> core::result::Result<Run, O::Error>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
@@ -454,8 +714,7 @@ where
         work.charge(1)?;
         let take_left = match (&a, &b) {
             (Some(a), Some(b)) => {
-                canonical::compare(a.as_ref(), b.as_ref(), order, columns, work)?
-                    != Ordering::Greater
+                order.compare(a.as_ref(), b.as_ref(), columns, work)? != Ordering::Greater
             }
             (Some(_), None) => true,
             _ => false,
@@ -472,7 +731,7 @@ where
         }
     }
     if rows != expected {
-        return Err(NativeSpoolError::IncompleteCursor);
+        return Err(NativeSpoolError::IncompleteCursor.into());
     }
     work.charge(1)?;
     Ok(Run {
@@ -483,12 +742,12 @@ where
 
 // A fallible, allocation-free sort rather than swallowing control failures in
 // std's infallible comparator. Refusal stops immediately and publishes no run.
-fn heap_sort(
+fn heap_sort<O: FrameOrder>(
     rows: &mut [TrackedBytes],
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()> {
+) -> core::result::Result<(), O::Error> {
     let len = rows.len();
     for root in (0..len / 2).rev() {
         sift(rows, root, len, order, columns, work)?;
@@ -500,34 +759,28 @@ fn heap_sort(
     }
     Ok(())
 }
-fn sift(
+fn sift<O: FrameOrder>(
     rows: &mut [TrackedBytes],
     mut root: usize,
     end: usize,
-    order: &[GraphValueOrder],
+    order: &mut O,
     columns: usize,
     work: &mut Work<'_>,
-) -> Result<()> {
+) -> core::result::Result<(), O::Error> {
     while root < end / 2 {
         let mut child = root * 2 + 1;
         if child + 1 < end
-            && canonical::compare(
+            && order.compare(
                 rows[child].as_ref(),
                 rows[child + 1].as_ref(),
-                order,
                 columns,
                 work,
             )? == Ordering::Less
         {
             child += 1;
         }
-        if canonical::compare(
-            rows[root].as_ref(),
-            rows[child].as_ref(),
-            order,
-            columns,
-            work,
-        )? != Ordering::Less
+        if order.compare(rows[root].as_ref(), rows[child].as_ref(), columns, work)?
+            != Ordering::Less
         {
             break;
         }
@@ -541,3 +794,7 @@ fn sift(
 #[cfg(test)]
 #[path = "sort/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sort/leveled_tests.rs"]
+mod leveled_tests;

@@ -349,6 +349,18 @@ impl PreparedTemporalGraphAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphTemporalTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, resolve)
+    }
+
+    /// Prepare with the host's complete resolver, including its pinned tzdb
+    /// and reverse catalog. The selected aggregate compiler owns resolution;
+    /// this wrapper must not reduce the resolver to a symbol-only closure.
+    /// The child's canonical transcript retains the timezone artifact identity.
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl crate::GraphSymbolResolver,
+    ) -> Result<Self, GraphTemporalTextError> {
         let (start, end, selector) = locate(statement)?;
         let selector_offset = match &selector {
             SequenceSelector::Parameter { offset, .. } => *offset,
@@ -400,18 +412,20 @@ impl PreparedTemporalGraphAggregateText {
             .any(|token| token.word("WITH"));
         let inner = if pipeline {
             AggregateTemplate::Pipeline(
-                PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+                PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
                     &blanked,
                     &inner_declarations,
                     resolve,
                 )?,
             )
         } else {
-            AggregateTemplate::Direct(PreparedGraphAggregateText::prepare_with_parameter_types(
-                &blanked,
-                &inner_declarations,
-                resolve,
-            )?)
+            AggregateTemplate::Direct(
+                PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                    &blanked,
+                    &inner_declarations,
+                    resolve,
+                )?,
+            )
         };
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
@@ -634,5 +648,108 @@ mod tests {
             );
             assert_eq!(calls.get(), 0, "{source}");
         }
+    }
+
+    struct ObservedResolver<'a> {
+        zones: &'a Cell<usize>,
+        catalog: &'a Cell<usize>,
+    }
+
+    impl crate::GraphSymbolResolver for ObservedResolver<'_> {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+
+        fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+            self.zones.set(self.zones.get() + 1);
+            None
+        }
+
+        fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+            self.catalog.set(self.catalog.get() + 1);
+            Some(crate::ReverseSymbolCatalog::new())
+        }
+    }
+
+    #[test]
+    fn temporal_aggregates_forward_resolver_without_reopening_it_when_binding() {
+        for source in [
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN SUM(n.p) AS total",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH n.p AS p RETURN SUM(p) AS total",
+        ] {
+            let zones = Cell::new(0);
+            let catalog = Cell::new(0);
+            let template =
+                PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                    source,
+                    &[("at", GqlParameterType::UInt64)],
+                    ObservedResolver {
+                        zones: &zones,
+                        catalog: &catalog,
+                    },
+                )
+                .unwrap();
+            assert!(
+                zones.get() > 0,
+                "the aggregate compiler must see the host resolver"
+            );
+            let before = (zones.get(), catalog.get());
+            for at in [8, 9] {
+                let bound = template
+                    .bind_parameters(&GqlParameters::new().with_uint64("at", at).unwrap())
+                    .unwrap();
+                assert_eq!(bound.as_of(), CommitSeq(at));
+            }
+            assert_eq!((zones.get(), catalog.get()), before);
+        }
+    }
+
+    #[test]
+    fn resolver_entrypoint_preserves_closure_transcripts_and_parameter_contracts() {
+        for source in [
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN SUM(n.p) AS total",
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH n.p AS p RETURN SUM(p) AS total",
+        ] {
+            let declarations = [("at", GqlParameterType::UInt64)];
+            let original = PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
+                source,
+                &declarations,
+                symbols,
+            )
+            .unwrap();
+            let resolved =
+                PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                    source,
+                    &declarations,
+                    symbols,
+                )
+                .unwrap();
+            assert_eq!(
+                original.canonical_template_bytes(),
+                resolved.canonical_template_bytes()
+            );
+            assert_eq!(original.parameter_schema(), resolved.parameter_schema());
+            assert_eq!(original.output_slots(), resolved.output_slots());
+            assert_eq!(original.template_operators(), resolved.template_operators());
+        }
+    }
+
+    #[test]
+    fn invalid_temporal_declarations_do_not_open_the_resolver() {
+        let zones = Cell::new(0);
+        let catalog = Cell::new(0);
+        let result = PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN COUNT(*) AS total",
+            &[("at", GqlParameterType::Int64)],
+            ObservedResolver {
+                zones: &zones,
+                catalog: &catalog,
+            },
+        );
+        assert!(matches!(
+            result.unwrap_err().kind,
+            GraphTemporalTextErrorKind::ConflictingParameterType
+        ));
+        assert_eq!((zones.get(), catalog.get()), (0, 0));
     }
 }

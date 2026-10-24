@@ -4,9 +4,10 @@ use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, SchemaEpoch};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{GqlParameterValue, GqlQueryPolicy, GqlScalarParameter};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,6 +59,22 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "secret") => Some(GraphSymbol::Property(SECRET)),
         _ => None,
     }
+}
+fn update_rows(rows: &[(i64, i64)]) -> GqlParameters {
+    GqlParameters::new()
+        .with_list(
+            "rows",
+            rows.iter()
+                .map(|&(a, b)| {
+                    GraphValue::map(vec![
+                        ("a".into(), GraphValue::Scalar(CanonicalScalar::Int(a))),
+                        ("b".into(), GraphValue::Scalar(CanonicalScalar::Int(b))),
+                    ])
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap()
 }
 fn authorization(error: &Fault) -> Option<Error> {
     let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(error);
@@ -138,11 +155,15 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
             ),
             (2, 1)
         );
-        assert_eq!(
-            receipt.steps()[0].created_vertices(),
-            Some(&[VId(1), VId(2)][..])
+        // a and b take engine vertex counters 1 and 2 in occurrence order; the
+        // relationship takes engine edge counter 1.
+        let (a, b) = (
+            crate::write_txn::engine_vertex(&keys(), 1),
+            crate::write_txn::engine_vertex(&keys(), 2),
         );
-        assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[VId(1)][..]));
+        let edge = crate::write_txn::engine_edge(&keys(), 1);
+        assert_eq!(receipt.steps()[0].created_vertices(), Some(&[a, b][..]));
+        assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[a][..]));
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, before.0 + 1);
         assert_eq!(
@@ -150,10 +171,13 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
             Some(fgdb_types::EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq })
         );
         assert_eq!(
-            db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(21))]
+            db.vertex(a).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(10).into()),
+                (Q, CanonicalScalar::Int(21).into())
+            ]
         );
-        assert!(db.edge(EId(1)).unwrap().is_none());
+        assert!(db.edge(edge).unwrap().is_none());
         assert!(!calls.is_empty());
         assert!(
             calls.values().all(|count| *count == 1),
@@ -338,7 +362,7 @@ fn expiry_in_a_catalog_callback_is_not_misreported_as_unknown_symbol() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1)),
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1)),
                 "preparation cannot reserve a graph identity"
             );
             assert_eq!(txn.outstanding_obligations(), 0);
@@ -384,7 +408,7 @@ fn malformed_or_late_unbound_text_never_stages_its_valid_prefix() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -435,7 +459,12 @@ fn string_parameters_remain_data_and_write_only_creation_remains_usable() {
             }
         ));
         assert_eq!(db.vertices().unwrap().len(), 1);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, value)]);
+        // The one created vertex takes engine vertex counter 1 of this handle.
+        let created = crate::write_txn::engine_vertex(&keys(), 1);
+        assert_eq!(
+            db.vertex(created).unwrap().unwrap().props,
+            vec![(P, value.into())]
+        );
         let before = db.frontier().unwrap();
         let error = db
             .query_write_authorized(
@@ -507,14 +536,14 @@ fn masked_selection_and_forbidden_noop_tails_use_authorized_native_staging() {
         assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[VId(10)][..]));
         assert_eq!(
             db.vertex(VId(20)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2))]
+            vec![(P, CanonicalScalar::Int(2).into())]
         );
         assert!(
             db.vertex(VId(10))
                 .unwrap()
                 .unwrap()
                 .props
-                .contains(&(SECRET, CanonicalScalar::Int(7)))
+                .contains(&(SECRET, CanonicalScalar::Int(7).into()))
         );
         let before = (db.frontier().unwrap(), db.vertices().unwrap());
         let error = db
@@ -537,6 +566,242 @@ fn masked_selection_and_forbidden_noop_tails_use_authorized_native_staging() {
         assert_eq!(authorization(&error), Some(Error::ScopeDenied));
         assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
         assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_unwind_keeps_entry_matches_masked_fields_and_durable_receipts() {
+    lab(0xaaf1, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = crate::WriteBatch::new(R);
+        seed.create_vertex(
+            VId(10),
+            vec![L],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Int(9)),
+                (SECRET, CanonicalScalar::Int(7)),
+            ],
+        );
+        seed.create_vertex(
+            VId(20),
+            vec![HIDDEN],
+            vec![
+                (P, CanonicalScalar::Int(2)),
+                (SECRET, CanonicalScalar::Int(8)),
+            ],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let before = db.frontier().unwrap();
+        let authority = authority();
+        let mut scope = grant();
+        scope.labels = Scope::only([L]);
+        scope.properties = Scope::only([P, Q]);
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let result = db
+            .query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                "UNWIND $rows AS row MATCH (n {p:row.a}) \
+                 SET n.p=row.b, n.q=CASE WHEN n.secret IS NULL THEN 42 ELSE 0 END",
+                &update_rows(&[(1, 2), (2, 3)]),
+                symbols,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        let QueryResult::Write {
+            receipt,
+            completion,
+        } = result
+        else {
+            panic!("write receipt")
+        };
+        assert_eq!(receipt.stats().completed_statements, 2);
+        assert_eq!(receipt.stats().target_vertex_visits, 1);
+        assert_eq!(receipt.stats().mutation_effects, 2);
+        assert_eq!(receipt.steps().len(), 2);
+        assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[VId(10)][..]));
+        assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[][..]));
+        let seq = db.frontier().unwrap();
+        assert_eq!(seq.0, before.0 + 1);
+        assert_eq!(
+            completion,
+            Some(fgdb_types::EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq })
+        );
+        assert_eq!(
+            db.vertex(VId(10)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(42).into()),
+                (SECRET, CanonicalScalar::Int(7).into()),
+            ]
+        );
+        assert_eq!(
+            db.vertex(VId(20)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (SECRET, CanonicalScalar::Int(8).into()),
+            ]
+        );
+        let vertices = db.vertices().unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.frontier().unwrap(), seq);
+        assert_eq!(reopened.vertices().unwrap(), vertices);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_unwind_bound_session_swaps_identities_without_result_allowance() {
+    lab(0xaaf2, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = crate::WriteBatch::new(R);
+        seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(20), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+        db.write(&commit, seed).await.unwrap();
+        let before = db.frontier().unwrap();
+        let (stats, completion) = {
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let bound = session
+                .bind_unwind_batch(
+                    &query,
+                    "UNWIND $rows AS row MATCH (n:Visible {p:row.a}) SET n.p=row.b",
+                    &update_rows(&[(1, 2), (2, 1)]),
+                )
+                .unwrap();
+            assert_eq!(bound.argument_sets(), 2);
+            session
+                .execute_bound_batch_stats(&query, &bound)
+                .await
+                .unwrap()
+        };
+        assert_eq!(stats.completed_statements, 2);
+        assert_eq!(stats.target_vertex_visits, 2);
+        assert_eq!(stats.mutation_effects, 2);
+        let seq = db.frontier().unwrap();
+        assert_eq!(seq.0, before.0 + 1);
+        assert_eq!(
+            completion,
+            fgdb_types::EmbeddedTxnCompletion::WriteCommitted { commit_seq: seq }
+        );
+        assert_eq!(
+            db.vertex(VId(10)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(2).into())]
+        );
+        assert_eq!(
+            db.vertex(VId(20)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1).into())]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn frozen_unwind_authorizes_original_noop_fields_and_label_scope_at_the_input_row() {
+    lab(0xaaf3, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let mut scope = grant();
+        scope.labels = Scope::only([L]);
+        scope.properties = Scope::only([P, Q]);
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = crate::WriteBatch::new(R);
+        seed.create_vertex(
+            VId(10),
+            vec![L],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (SECRET, CanonicalScalar::Int(7)),
+            ],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        for (tail, rows, expected_row) in [
+            ("SET n.p=row.b, n.secret=7", [(1, 2), (1, 3)], 0),
+            ("SET n.p=row.b, n.secret=7", [(99, 2), (1, 3)], 1),
+            ("SET n.p=row.b REMOVE n:Visible", [(1, 2), (1, 3)], 0),
+        ] {
+            let text =
+                format!("/* café */ UNWIND $rows AS row MATCH (n:Visible {{p:row.a}}) {tail}");
+            let error = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &text,
+                    &update_rows(&rows),
+                    symbols,
+                    R,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}");
+            let Fault::BatchProgram {
+                location: Some(location),
+                source:
+                    fgdb_gql::GraphWriteProgramError::Program(
+                        fgdb_gql::GraphMutationProgramError::Statement { statement, .. },
+                    ),
+            } = error
+            else {
+                panic!("original batch row diagnostic: {error:?}")
+            };
+            assert_eq!(statement, expected_row);
+            assert_eq!(
+                (location.argument_set, location.statement),
+                (expected_row, 0)
+            );
+            assert_eq!(location.span.end, text.len());
+            assert!(text.is_char_boundary(location.span.start));
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
     });
 }
 

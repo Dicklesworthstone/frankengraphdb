@@ -3,6 +3,7 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, redacted, selection, stage};
+use fgdb_delta_types::RelationId;
 use fgdb_gql::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
     GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
@@ -187,6 +188,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut execution,
                     returning,
                 )?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -235,8 +237,36 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             },
         )
     })?;
-    let mut stats = proposal.stats();
-    let (vertices, edges) = proposal.into_target_parts();
+    let stats = proposal.stats();
+    complete(
+        transaction,
+        database,
+        query_cx,
+        deletion.relation(),
+        stats,
+        proposal.into_target_parts(),
+        policy,
+        scope,
+        execution,
+        returning,
+    )
+}
+
+// The one non-detaching completion once a collector has frozen sorted typed
+// targets: a plain DELETE statement, or a mutation's plain DELETE actions.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    query_cx: &QueryCx,
+    relation: RelationId,
+    mut stats: GraphDeleteStats,
+    (vertices, edges): (Vec<VId>, Vec<EId>),
+    policy: GraphDeletePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphDeleteStats, Vec<VId>, Vec<EId>), Fault> {
     if (!vertices.is_empty() && !(scope.sees_all_incidence() && scope.sees_all_fields()))
         || (!edges.is_empty() && !scope.sees_all_properties())
     {
@@ -315,7 +345,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             execution,
             GlaExecutionEvent::ScratchEntry,
         )?;
-        let mut batch = WriteBatch::new(deletion.relation());
+        let mut batch = WriteBatch::new(relation);
         batch.delete_edge(*edge);
         for row in batch.rows {
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;
@@ -329,7 +359,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             execution,
             GlaExecutionEvent::ScratchEntry,
         )?;
-        let mut batch = WriteBatch::new(deletion.relation());
+        let mut batch = WriteBatch::new(relation);
         batch.delete_vertex(*vertex);
         for row in batch.rows {
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;

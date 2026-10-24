@@ -4,9 +4,11 @@ use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GqlScalarParameter, GraphSymbol, GraphSymbolKind,
-    PreparedGraphEdgeMergeText,
+    GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteStepReceipt,
+    PreparedGraphEdgeMergeText, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
@@ -286,9 +288,11 @@ fn ambiguous_pairs_parallel_eids_and_null_endpoints_never_allocate_or_commit() {
                 ),
                 before
             );
+            // The probe took edge counter 1; the refused merge took none.
+            assert_eq!(reserved, crate::write_txn::engine_edge(&keys(), 1));
             assert_eq!(
                 db.allocate_identity(&query, request).unwrap(),
-                ElementId::Edge(EId(reserved.0 + 1))
+                ElementId::Edge(crate::write_txn::engine_edge(&keys(), 2))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -443,7 +447,7 @@ fn rights_relation_creation_fields_and_receipt_limits_refuse_before_publication(
             assert_eq!(authorization(error), Error::ScopeDenied);
             let basic = merge();
             let fields = PreparedGraphEdgeMerge::prepare(
-                basic.selection().clone(),
+                basic.selection().expect("a MATCH-prefixed MERGE").clone(),
                 S,
                 basic.source_column(),
                 basic.destination_column(),
@@ -466,10 +470,11 @@ fn rights_relation_creation_fields_and_receipt_limits_refuse_before_publication(
                     || NOW,
                 )
                 .await;
-            if matched {
-                assert_eq!(result.unwrap().1, GraphEdgeMergeOutcome::Matched(EId(21)));
-            } else {
-                assert_eq!(authorization(result.unwrap_err()), Error::ScopeDenied);
+            // The map is an existence predicate (fgdb-at06q): a hidden key
+            // would let its stored value decide the match, so it refuses
+            // before selection whether or not a visible edge exists.
+            assert_eq!(authorization(result.unwrap_err()), Error::ScopeDenied);
+            if !matched {
                 let error = db
                     .execute_graph_edge_merge_authorized(
                         &txn,
@@ -697,5 +702,418 @@ fn shared_native_collector_retains_negative_edge_conflict_witnesses() {
         assert!(db.edge(EId(80)).unwrap().is_none());
         assert!(db.edge(EId(81)).unwrap().is_some());
         assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+}
+
+async fn seed_multiple_pairs(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool) {
+    let mut batch = WriteBatch::new(R);
+    for id in 1..=4 {
+        batch.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(10))]);
+    }
+    // Five MATCH occurrences select three pairs. The middle pair already has
+    // an S edge; duplicate occurrences of each missing pair must create once.
+    for (eid, src, dst) in [(11, 1, 2), (12, 1, 2), (13, 1, 3), (14, 3, 4), (15, 3, 4)] {
+        batch.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+    }
+    if hidden {
+        for id in [8, 9] {
+            batch.create_vertex(
+                VId(id),
+                vec![HIDDEN],
+                vec![(SECRET, CanonicalScalar::Int(99))],
+            );
+        }
+        for (eid, src, dst) in [(81, 1, 8), (82, 8, 2), (83, 8, 9), (84, 8, 9)] {
+            batch.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    // The MERGE map {p: 7} is a match predicate (fgdb-at06q): edge 21 matches
+    // on its visible p and keeps its hidden SECRET unchanged.
+    let mut existing = WriteBatch::new(S);
+    existing.add_edge(
+        EId(21),
+        VId(1),
+        VId(3),
+        vec![
+            (P, CanonicalScalar::Int(7)),
+            (SECRET, CanonicalScalar::Int(101)),
+        ],
+    );
+    if hidden {
+        for (eid, src, dst) in [(91, 8, 9), (92, 8, 9), (93, 1, 8)] {
+            existing.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+        }
+    }
+    db.write(cx, existing).await.unwrap();
+    if hidden {
+        let mut unrelated = WriteBatch::new(H);
+        for eid in [41, 42] {
+            unrelated.add_edge(EId(eid), VId(1), VId(2), vec![]);
+        }
+        db.write(cx, unrelated).await.unwrap();
+    }
+}
+
+fn multiple_pair_program(statements: usize) -> PreparedGraphWriteProgram {
+    let merge = definition("MATCH (a:Visible)-[:R]->(b:Visible) MERGE (a)-[:S {p: 7}]->(b)");
+    PreparedGraphWriteProgram::prepare((0..statements).map(|_| merge.clone().into()).collect())
+        .unwrap()
+}
+
+fn multiple_pair_policy() -> GraphWriteProgramPolicy {
+    GraphWriteProgramPolicy::new(policy().query, 0, 0, 2)
+}
+
+#[test]
+fn authorized_multi_pair_merge_masks_sources_and_preserves_existing_middle_pair() {
+    lab(0xab08, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        // Three distinct pairs cost three delivered rows, even with five MATCH
+        // occurrences and only two creations.
+        let token = authority
+            .issue_at(&grant(), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxRows(3))
+            .unwrap();
+        let program = multiple_pair_program(1);
+        let mut visible_stats = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed_multiple_pairs(&mut db, &commit, hidden).await;
+            let before = db.frontier().unwrap();
+            let vertices = db.vertices().unwrap();
+            let existing = db.edge(EId(21)).unwrap().unwrap();
+            let (receipt, completion) = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &program,
+                    multiple_pair_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.stats().selection.result_rows, 5);
+            assert_eq!(receipt.stats().created_edges, 2);
+            assert_eq!(receipt.stats().created_vertices, 0);
+            assert_eq!(receipt.steps().len(), 1);
+            let first = crate::write_txn::engine_edge(&keys(), 1);
+            let last = crate::write_txn::engine_edge(&keys(), 2);
+            assert_eq!(
+                receipt.steps(),
+                &[GraphWriteStepReceipt::EdgeMergeBatch {
+                    outcomes: vec![
+                        GraphEdgeMergeOutcome::Created(first),
+                        GraphEdgeMergeOutcome::Matched(EId(21)),
+                        GraphEdgeMergeOutcome::Created(last),
+                    ],
+                    created: vec![first, last],
+                }]
+            );
+            for (eid, src, dst) in [(first, VId(1), VId(2)), (last, VId(3), VId(4))] {
+                let edge = db.edge(eid).unwrap().unwrap();
+                assert_eq!(
+                    (edge.entry.src, edge.entry.relation, edge.entry.dst),
+                    (src, S, dst)
+                );
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7).into())]);
+            }
+            assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, existing.props);
+            assert_eq!(db.vertices().unwrap(), vertices);
+            let sequence = db.frontier().unwrap();
+            assert_eq!(sequence.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: sequence
+                }
+            );
+            visible_stats.push(receipt.stats());
+
+            // Repeating the same program sees all three existing edges without
+            // consuming creation allowance or publishing another marker.
+            let edges = db.edges().unwrap();
+            let mut matched_policy = multiple_pair_policy();
+            matched_policy.max_created_edges = 0;
+            let (receipt, completion) = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &program,
+                    matched_policy,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.stats().created_edges, 0);
+            assert_eq!(
+                receipt.steps()[0].merged_edges(),
+                Some(
+                    &[
+                        GraphEdgeMergeOutcome::Matched(first),
+                        GraphEdgeMergeOutcome::Matched(EId(21)),
+                        GraphEdgeMergeOutcome::Matched(last),
+                    ][..]
+                )
+            );
+            assert_eq!(receipt.steps()[0].created_edges(), Some(&[][..]));
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::ReadClosed { .. }
+            ));
+            assert_eq!(db.frontier().unwrap(), sequence);
+            assert_eq!(db.edges().unwrap(), edges);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        // Hidden endpoints, hidden parallel relationships and unrelated edge
+        // types do not change the counted selection or existence domain.
+        assert_eq!(visible_stats[0], visible_stats[1]);
+    });
+}
+
+#[test]
+fn authorized_multi_pair_merge_late_row_refusal_discards_every_staged_edge() {
+    lab(0xab09, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        // The first case refuses after staging both new edges. The second also
+        // accepts a complete earlier step before its repeated matched receipts
+        // exceed the same permit's cumulative row allowance.
+        for (statements, rows) in [(1, 2), (2, 5)] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed_multiple_pairs(&mut db, &commit, true).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let program = multiple_pair_program(statements);
+            let limited = token.attenuate(Restriction::MaxRows(rows)).unwrap();
+            let error = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &limited,
+                    "main",
+                    &program,
+                    multiple_pair_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            match error {
+                GraphWriteProgramError::EdgeMerge {
+                    statement,
+                    source:
+                        GqlQueryError::Source(GraphEdgeMergeError::Source(
+                            WriteTxnError::Authorization(Error::LimitExceeded(
+                                LimitDimension::Rows,
+                            )),
+                        )),
+                } => assert_eq!(statement, statements - 1),
+                other => panic!("expected late receipt refusal, got {other:?}"),
+            }
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+            // Both missing pairs were actually visited: their reserved engine
+            // identities remain spent despite the complete workspace rollback.
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                    .unwrap(),
+                ElementId::Edge(crate::write_txn::engine_edge(&keys(), 3)),
+            );
+            let (receipt, completion) = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &program,
+                    multiple_pair_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.stats().created_edges, 2);
+            assert_eq!(receipt.stats().completed_statements, statements);
+            assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { .. }
+            ));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+fn returning(text: &str) -> PreparedGraphEdgeMergeQuery {
+    let resolve = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Property, "secret") => Some(GraphSymbol::Property(SECRET)),
+        _ => symbols(kind, name),
+    };
+    fgdb_gql::PreparedGraphEdgeMergeQueryText::prepare(text, R, resolve)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+}
+/// The authorization refusal a MERGE RETURN fault carries, if it is one.
+fn query_authorization(error: QueryFault) -> Option<Error> {
+    match error {
+        GqlQueryError::Source(GraphEdgeMergeQueryError::Merge(GraphEdgeMergeError::Source(
+            WriteTxnError::Authorization(error),
+        ))) => Some(error),
+        _ => None,
+    }
+}
+
+/// fgdb-at06q: MERGE ... RETURN under a capability. An undirected MERGE whose
+/// pattern runs against the stored edge matches it rather than creating a
+/// duplicate, a hidden property reads NULL, endpoint and MATCH properties are
+/// the visible ones, and every selected row yields its row. A MERGE map naming
+/// a hidden key refuses before publication. A miss commits its edge and
+/// returns it.
+#[test]
+fn authorized_merge_return_masks_hidden_fields_and_matches_either_orientation() {
+    lab(0xab0a, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let cells = |result: &GqlQueryExecution<GraphValueRow>| {
+            result
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, true, true).await;
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        // Edge 21 runs 1 -> 2; the pattern names it from b (2) to a (1).
+        let (stats, result, completion) = db
+            .execute_graph_edge_merge_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &returning(
+                    "MATCH (a:Visible)-[:R]->(b:Visible) MERGE (b)-[r:S]-(a) \
+                     RETURN r, r.secret AS hidden, startNode(r) AS s, endNode(r).p AS q, a.p AS ap",
+                ),
+                policy().with_creation_limit(0),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_edges, 0);
+        let row = vec![
+            GraphValue::Edge(EId(21)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Vertex(VId(1)),
+            int(20),
+            int(10),
+        ];
+        // Both selected R edges (11, 12) name the same pair: two rows.
+        assert_eq!(cells(&result), vec![row.clone(), row]);
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+
+        let error = db
+            .execute_graph_edge_merge_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &returning(
+                    "MATCH (a:Visible)-[:R]->(b:Visible) MERGE (a)-[r:S {secret: 101}]->(b) \
+                     RETURN r",
+                ),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(query_authorization(error), Some(Error::ScopeDenied));
+        assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, true, false).await;
+        let (stats, result, completion) = db
+            .execute_graph_edge_merge_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &returning(
+                    "MATCH (a:Visible)-[:R]->(b:Visible) MERGE (a)-[r:S {p: 3}]->(b) \
+                     RETURN r.p AS p",
+                ),
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_edges, 1);
+        assert_eq!(cells(&result), vec![vec![int(3)], vec![int(3)]]);
+        // A created relationship commits, at the new frontier.
+        let frontier = db.frontier().unwrap();
+        assert!(
+            matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq == frontier
+            ),
+            "{completion:?}"
+        );
+        let created: Vec<_> = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.relation == S)
+            .collect();
+        assert_eq!(created.len(), 1);
+        assert_eq!(
+            (created[0].entry.src, created[0].entry.dst),
+            (VId(1), VId(2))
+        );
+        assert_eq!(created[0].props, vec![(P, CanonicalScalar::Int(3).into())]);
+        assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

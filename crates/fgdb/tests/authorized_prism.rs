@@ -446,9 +446,35 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
             },
         )
         .unwrap();
-        // Every clock sample is a work charge except authentication, four
-        // admitted-node charges, and the final row charge. No stage resets it.
-        let work = clocks - 6;
+        // The exact signed work is the smallest MaxWork that admits the call;
+        // no stage resets it. Every clock sample beside authentication, four
+        // admitted-node charges and the final row charge charges at least one
+        // unit. Kernel units are charged in runs (fgdb-62mzm), so a sample may
+        // charge more than one and the total is found by bisection.
+        let admits = |work| {
+            db.call_fnx_authorized(
+                &cx,
+                &issuer,
+                &token.attenuate(Restriction::MaxWork(work)).unwrap(),
+                BRANCH,
+                CC,
+                &FnxParameters::new(),
+                opt,
+                || 100,
+            )
+            .is_ok()
+        };
+        let (mut low, mut high) = (0, clocks * 64);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if admits(middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let work = low;
+        assert!(work >= clocks - 6, "work {work}, clock samples {clocks}");
         let exact_work = token.attenuate(Restriction::MaxWork(work)).unwrap();
         read(&db, &cx, &issuer, &exact_work, CC, opt);
         let short = token.attenuate(Restriction::MaxWork(work - 1)).unwrap();
@@ -767,111 +793,121 @@ fn historical_winners_cannot_resurrect_a_hidden_successor_even_after_compaction(
 fn every_source_builder_kernel_and_delivery_clock_observes_expiry_and_retirement() {
     let ((), report) = run_async_under_lab(0x5ec0_3006, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let cx = c.query();
         let db = database(&c.commit(), true).await;
-        for empty in [false, true] {
-            let issuer = authority(307 + u64::from(empty), NS);
-            let token = issuer.issue_at(&grant(), 100).unwrap();
-            let mut opt = options(Directedness::Undirected);
-            if empty {
-                opt.selection.vertex_label = Some(LabelId(99));
-            }
-            let mut calls = 0;
-            let expected = db
-                .call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        calls += 1;
-                        100
-                    },
-                )
-                .unwrap();
-            assert_eq!(expected.is_empty(), empty);
-            assert!(calls > 10);
-            for stop in 1..=calls {
-                let mut seen = 0;
-                let error = db
+        // Exercise every observed public phase. PageRank's physical arithmetic
+        // must still sample fresh authorization time when ordinary work shares
+        // its clock sample across 128 charges; triangles keep their prior law.
+        for (text, interval) in [(TRIANGLES, 1), (CALLS[0], 128)] {
+            let cx = c
+                .query()
+                .with_host_clock_interval(std::num::NonZeroU32::new(interval).unwrap());
+            for empty in [false, true] {
+                let issuer = authority(307 + u64::from(empty), NS);
+                let token = issuer.issue_at(&grant(), 100).unwrap();
+                let mut opt = options(Directedness::Undirected);
+                if empty {
+                    opt.selection.vertex_label = Some(LabelId(99));
+                }
+                let mut calls = 0;
+                let expected = db
                     .call_fnx_authorized(
                         &cx,
                         &issuer,
                         &token,
                         BRANCH,
-                        TRIANGLES,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || {
+                            calls += 1;
+                            100
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(expected.is_empty(), empty);
+                assert!(calls > 0, "{text}, empty={empty}");
+                if text == TRIANGLES || !empty {
+                    assert!(calls > 10, "exercise live phases: {text}, empty={empty}");
+                }
+                for stop in 1..=calls {
+                    let mut seen = 0;
+                    let error = db
+                        .call_fnx_authorized(
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            text,
+                            &FnxParameters::new(),
+                            opt,
+                            || {
+                                seen += 1;
+                                if seen == stop { 1000 } else { 100 }
+                            },
+                        )
+                        .unwrap_err();
+                    authorization(error, Error::Expired);
+                    assert_eq!(seen, stop, "no successful-prefix continuation after expiry");
+                }
+                let mut seen = 0;
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
                         &FnxParameters::new(),
                         opt,
                         || {
                             seen += 1;
-                            if seen == stop { 1000 } else { 100 }
+                            if seen == 2 { 99 } else { 100 }
                         },
                     )
-                    .unwrap_err();
-                authorization(error, Error::Expired);
-                assert_eq!(seen, stop, "no successful-prefix continuation after expiry");
+                    .unwrap_err(),
+                    Error::ClockWentBackwards,
+                );
+                assert_eq!(read(&db, &cx, &issuer, &token, text, opt), expected);
+                let mut seen = 0;
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || {
+                            seen += 1;
+                            if seen == calls {
+                                issuer.retire();
+                            }
+                            100
+                        },
+                    )
+                    .unwrap_err(),
+                    Error::AuthorityRetired,
+                );
+                assert_eq!(
+                    seen, calls,
+                    "retire at final delivery, even for an empty result"
+                );
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || 100,
+                    )
+                    .unwrap_err(),
+                    Error::AuthorityRetired,
+                );
             }
-            let mut seen = 0;
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        seen += 1;
-                        if seen == 2 { 99 } else { 100 }
-                    },
-                )
-                .unwrap_err(),
-                Error::ClockWentBackwards,
-            );
-            assert_eq!(read(&db, &cx, &issuer, &token, TRIANGLES, opt), expected);
-            let mut seen = 0;
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        seen += 1;
-                        if seen == calls {
-                            issuer.retire();
-                        }
-                        100
-                    },
-                )
-                .unwrap_err(),
-                Error::AuthorityRetired,
-            );
-            assert_eq!(
-                seen, calls,
-                "retire at final delivery, even for an empty result"
-            );
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || 100,
-                )
-                .unwrap_err(),
-                Error::AuthorityRetired,
-            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -1014,6 +1050,117 @@ fn threshold(high: u64, mut admits: impl FnMut(u64) -> bool) -> u64 {
         }
     }
     low
+}
+
+#[test]
+fn prepared_pagerank_preserves_crossed_signed_and_native_work_refusals() {
+    use fgdb_gql::{
+        GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryPolicy, GraphSymbolKind,
+    };
+
+    let ((), report) = run_async_under_lab(0x5ec0_3102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let issuer = authority(312, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        const CEILING: u64 = 4096;
+        let run = |signed_work, native_work| -> Failure {
+            let result = (|| {
+                let token = token.attenuate(Restriction::MaxWork(signed_work)).unwrap();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        |_: GraphSymbolKind, _: &str| None,
+                        GqlQueryPolicy::new(100, 100, native_work, 10_000),
+                        || 100,
+                    )
+                    .map_err(FnxReadError::Cancelled)?;
+                let prepared = session.prepare_fnx(
+                    &cx,
+                    "CALL fnx.pagerank(0.85,1,1e-12,true) YIELD vertex,score",
+                    &FnxParameters::new(),
+                    options(Directedness::Directed),
+                )?;
+                session.execute_fnx(&cx, &prepared)
+            })();
+            result.unwrap_err()
+        };
+        let completed_iteration = |error: &Failure| {
+            matches!(
+                error,
+                FnxReadError::Execution(FnxExecutionError::NotConverged {
+                    max_iterations: 1,
+                    witness,
+                }) if witness.nodes_touched == 4 && witness.edges_scanned == 4
+            )
+        };
+        let native_refusal = |error: Failure, limit| {
+            let FnxReadError::Cancelled(QueryError::Pattern(GqlQueryError::Evaluator(observed))) =
+                error
+            else {
+                panic!("expected native work refusal at {limit}, got {error:?}");
+            };
+            assert_eq!(
+                observed,
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed: u128::from(limit) + 1,
+                }
+            );
+        };
+        // Observe each meter's exact total through the public prepared call.
+        // The witness proves that these thresholds pass admission and reach
+        // the end of the first iteration over four vertices and four arcs.
+        let signed_total = threshold(CEILING, |work| {
+            let error = run(work, CEILING);
+            if completed_iteration(&error) {
+                true
+            } else {
+                authorization(error, Error::LimitExceeded(LimitDimension::Work));
+                false
+            }
+        });
+        let native_total = threshold(CEILING, |work| {
+            let error = run(CEILING, work);
+            if completed_iteration(&error) {
+                true
+            } else {
+                native_refusal(error, work);
+                false
+            }
+        });
+
+        // NotConverged immediately follows the final four-unit delta run.
+        // The session then charges three signed-only checkpoints: its live
+        // post-action check and the two delivery checks for the typed error.
+        let signed_entry = signed_total - 3 - 4;
+        let native_entry = native_total - 4;
+        assert!(
+            native_entry > (4 + 4) * (1 + 1),
+            "past estimated-work admission"
+        );
+        let native_limit = native_entry + 1;
+        native_refusal(run(CEILING, native_limit), native_limit);
+        authorization(
+            run(signed_entry + 3, CEILING),
+            Error::LimitExceeded(LimitDimension::Work),
+        );
+        // Native refuses at delta unit two; signed would refuse at four.
+        // Its remaining third unit pays the session's post-error live check.
+        // Charging the whole signed run before native work gets this wrong.
+        native_refusal(run(signed_entry + 3, native_limit), native_limit);
+        // When both first refuse at unit two, the signed charge comes first.
+        authorization(
+            run(signed_entry + 1, native_limit),
+            Error::LimitExceeded(LimitDimension::Work),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 /// FG-INV-20 noninterference over analytics (fgdb-2qm4o). The physically
@@ -1211,6 +1358,178 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
             ),
             Err(QueryError::Authorization(_))
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-luq0b: a named selection uses the same capability-protected analytics
+/// source. Selecting a forbidden relation cannot reveal it, and an explicitly
+/// selected hidden weight is absent before its payload is inspected.
+#[test]
+fn named_projection_applies_authority_before_relation_and_weight_selection() {
+    let ((), report) = run_async_under_lab(0x5ec0_3071, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let issuer = authority(309, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Label, "Person") => {
+                Some(fgdb_gql::GraphSymbol::Label(LabelId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Relation, "hidden") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(2)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "private") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+            }
+            _ => None,
+        };
+        let db = simple_database(&c.commit(), true).await;
+        let oracle = simple_database(&c.commit(), false).await;
+        for text in [
+            "CALL fnx.single_source_shortest_path_length(\
+             args => [1], label => 'Person', direction => 'directed') \
+             YIELD vertex, distance RETURN vertex, distance ORDER BY vertex",
+            "CALL fnx.single_source_shortest_path_length(\
+             args => [1], relation => 'hidden') \
+             YIELD vertex, distance RETURN vertex, distance ORDER BY vertex",
+        ] {
+            let masked = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                masked,
+                oracle.query(&cx, text, &params, symbols, policy).unwrap(),
+                "{text}",
+            );
+            assert_ne!(
+                masked,
+                db.query(&cx, text, &params, symbols, policy).unwrap(),
+                "the unmasked control must distinguish the hidden relation",
+            );
+        }
+        let db = database(&c.commit(), true).await;
+        let oracle = database(&c.commit(), false).await;
+        let text = "CALL fnx.single_source_dijkstra_path_length(\
+                    args => [1], weight => 'private', missing => 'zero', \
+                    parallel => 'min', self_loops => 'drop') \
+                    YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
+        let masked = db
+            .query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            masked,
+            oracle.query(&cx, text, &params, symbols, policy).unwrap(),
+        );
+        assert!(
+            db.query(&cx, text, &params, symbols, policy).is_err(),
+            "the unmasked Boolean weight must be refused",
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn inline_projection_is_applied_inside_the_capability_and_before_weight_inspection() {
+    let ((), report) = run_async_under_lab(0x5ec0_3072, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let oracle = database(&c.commit(), false).await;
+        let issuer = authority(310, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let tight = token.attenuate(Restriction::MaxNodes(2)).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Label, "Person") => {
+                Some(fgdb_gql::GraphSymbol::Label(LabelId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "weight") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "secret") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+            }
+            _ => None,
+        };
+        let queries = [
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {weight:'weight', missing:'reject', parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {labels:['Person'], relations:['R'], weight:'weight', missing:'reject', \
+              parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {weight:'secret', missing:'unit', parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             label=>'Person', relation=>'R', weight=>'weight', missing=>'reject', \
+             parallel=>'min', self_loops=>'drop', args=>[1,NULL,true]) \
+             YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+        ];
+        for query in queries {
+            let expected = oracle.query(&cx, query, &params, symbols, policy).unwrap();
+            let actual = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    query,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{query}");
+            assert!(matches!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &tight,
+                    BRANCH,
+                    query,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(
+                    LimitDimension::Nodes
+                )))
+            ));
+        }
+        // Without the capability's induced mask, malformed hidden weights are
+        // observable to this control and correctly fail numeric admission.
+        assert!(db.query(&cx, queries[0], &params, symbols, policy).is_err());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

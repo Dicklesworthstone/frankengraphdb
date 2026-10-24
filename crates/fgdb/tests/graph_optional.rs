@@ -16,7 +16,8 @@ use fgdb_gql::{
     GqlBudgetDimension, GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -185,7 +186,7 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], split: bool) -> Vec<Plai
                     .iter()
                     .find(|(key, _)| *key == SCORE)
                     .map(|(_, value)| value);
-                if let Some(CanonicalScalar::Int(score)) = value
+                if let Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(score))) = value
                     && *score >= 5
                 {
                     rows.push((

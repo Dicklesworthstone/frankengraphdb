@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 103
+registry_epoch = 104
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3114,11 +3114,11 @@ identity_class = "logical"
 reference_semantics = "weak_digest"
 construction_order = 30
 role_predicate = "true"
-retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1 in format V3, .v4 in format V4; fgdb-6lyc, fgdb-d5vo4): comparison only, verified on decode, never a reachability edge"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1 in format V3, .v4 in format V4, .v5 in format V5; fgdb-6lyc, fgdb-d5vo4, fgdb-5gzaa): comparison only, verified on decode, never a reachability edge"
 version_status = "active"
 max_size_bytes = 32
 digest_class = "transcript"
-transcript_recipe = "V3: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc). V4: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v4 over graph, branch, partition, published_at, then per list (blocks, then vertex patches) its total count, each full segment's (canonical_segment_digest, first_seq, last_seq) and the inline tail's (id, first_seq, last_seq), big-endian (root_logical_digest_v4, fgdb-d5vo4)"
+transcript_recipe = "V3: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc). V4: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v4 over graph, branch, partition, published_at, then per list (blocks, then vertex patches) its total count, each full segment's (canonical_segment_digest, first_seq, last_seq) and the inline tail's (id, first_seq, last_seq), big-endian (root_logical_digest_v4, fgdb-d5vo4). V5: the V4 transcript under domain fgdb.strata.root-logical-digest.v5, with each list's full index segments' (canonical_index_digest, first_seq, last_seq) before its named full segments, which are then only those after the last full index segment (root_logical_digest_segmented, fgdb-5gzaa)"
 
 [[field]]
 containing_schema = "DeltaPartitionRoot"
@@ -3131,7 +3131,7 @@ reference_semantics = "strong"
 target_schema_id = "DeltaRootSegment"
 construction_order = 30
 role_predicate = "true"
-retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the block list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. blocks then holds only the tail after them"
+retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the block list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. blocks then holds only the tail after them. Format V5 (fgdb-5gzaa): only the full segments after the last full index segment in block_index_segments"
 version_status = "active"
 max_size_bytes = 80
 
@@ -3146,9 +3146,126 @@ reference_semantics = "strong"
 target_schema_id = "DeltaRootSegment"
 construction_order = 30
 role_predicate = "true"
-retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the vertex-patch list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. vertex_patches then holds only the tail after them"
+retention_and_cut_rule = "format V4 (fgdb-d5vo4): the full 256-reference segments chunking the vertex-patch list in order, each named with its canonical_segment_digest and span; strong while this root is published or retained. vertex_patches then holds only the tail after them. Format V5 (fgdb-5gzaa): only the full segments after the last full index segment in patch_index_segments"
 version_status = "active"
 max_size_bytes = 80
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000a
+stable_name = "block_index_segments"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaRootIndexSegment"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V5 (fgdb-5gzaa): the full index segments, each naming 16 consecutive full block segments in order, named with canonical_index_digest and span; strong while this root is published or retained. block_segments then holds only the full segments after them"
+version_status = "active"
+max_size_bytes = 80
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000b
+stable_name = "patch_index_segments"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaRootIndexSegment"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V5 (fgdb-5gzaa): the full index segments, each naming 16 consecutive full vertex-patch segments in order, named with canonical_index_digest and span; strong while this root is published or retained. patch_segments then holds only the full segments after them"
+version_status = "active"
+max_size_bytes = 80
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0001
+stable_name = "graph"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this index segment binds, equal to its root's and to every segment it names; lives/dies with the index segment"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0002
+stable_name = "branch"
+exact_wire_type = "id128"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this index segment binds, equal to its root's and to every segment it names; lives/dies with the index segment"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0003
+stable_name = "partition"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "the partition coordinate this index segment binds, equal to its root's and to every segment it names; lives/dies with the index segment"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0004
+stable_name = "class"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "which root list this index segment chunks: 0 blocks, 1 vertex patches; every segment it names has the same class"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0005
+stable_name = "segments"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeltaRootSegment"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "exactly 16 consecutive full segments of one root list in order, each named with its canonical_segment_digest and span; strong while a published or retained root names this index segment"
+version_status = "active"
+max_size_bytes = 80
+
+[[field]]
+containing_schema = "DeltaRootIndexSegment"
+field_tag = 0x0006
+stable_name = "canonical_index_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the index segment's logical content (fgdb.strata.root-index-segment-logical-digest.v1, fgdb-5gzaa): the root binds it; verified on decode, never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-index-segment-logical-digest.v1 over graph, branch, partition, class, segment count then ordered (canonical_segment_digest, first_seq, last_seq), big-endian (index_logical_digest, fgdb-5gzaa)"
 
 [[field]]
 containing_schema = "DeltaRootSegment"

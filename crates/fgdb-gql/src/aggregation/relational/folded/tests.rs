@@ -66,6 +66,83 @@ fn execute(
 fn materialized(query: &PreparedGraphAggregate, values: &[Option<i64>]) -> Execution {
     query.execute_relational_materialized(wide(), source(values), || Ok(()))
 }
+
+#[test]
+fn folded_outputs_retain_the_source_reader_through_ranking_and_limit_zero() {
+    use crate::{GraphElementKey, WithElementReads};
+    use std::cell::Cell;
+
+    let input = [None, Some(-2), Some(3), Some(3)];
+    for hidden in [false, true] {
+        let query = definition(&[Some(2), None], true, 0, hidden.then_some(0))
+            .with_output_projection(vec![
+                GraphSetProjection::new(
+                    "external",
+                    GraphSetValue::MapGet {
+                        map: Box::new(GraphSetValue::Value(GraphValue::Vertex(VId(u128::MAX)))),
+                        key: "p".into(),
+                        property: GraphElementKey::Property(PropertyKeyId(1)),
+                    },
+                ),
+                GraphSetProjection::new("count", GraphSetValue::Column(1)),
+            ])
+            .unwrap()
+            .with_distinct_output(true);
+        assert!(query.folded_definition().is_some());
+        for fail in [false, true] {
+            let run = |folded: bool| {
+                let reads = Cell::new(0);
+                let host = WithElementReads {
+                    source: source(&input),
+                    elements: |element, key| {
+                        assert_eq!(element, ElementId::Vertex(VId(u128::MAX)));
+                        assert_eq!(key, PropertyKeyId(1));
+                        reads.set(reads.get() + 1);
+                        if fail && reads.get() == 3 {
+                            Err("last group property refused")
+                        } else {
+                            Ok(Some(CanonicalScalar::Int(17).into()))
+                        }
+                    },
+                };
+                let result = if folded {
+                    query.execute_relational_with_source(wide(), host, || Ok(()))
+                } else {
+                    query.execute_relational_materialized(wide(), host, || Ok(()))
+                };
+                (result.map(|result| result.value), reads.get())
+            };
+            let expected = run(false);
+            assert_eq!(run(true), expected);
+            // Three source-key groups survive HAVING. DISTINCT, ranking and
+            // even a zero-row page cannot suppress one group's property read.
+            assert_eq!(expected.1, 3);
+            if fail {
+                assert!(matches!(
+                    expected.0,
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        "last group property refused"
+                    )))
+                ));
+            } else if hidden {
+                assert!(expected.0.unwrap().is_empty());
+            } else {
+                let rows = expected.0.unwrap();
+                assert_eq!(rows.len(), 2);
+                assert!(rows.iter().all(|row| {
+                    row.values()[0].as_value().and_then(GraphValue::as_scalar)
+                        == Some(&CanonicalScalar::Int(17))
+                }));
+                let mut counts: Vec<_> = rows
+                    .iter()
+                    .map(|row| row.values()[1].as_count().unwrap())
+                    .collect();
+                counts.sort_unstable();
+                assert_eq!(counts, [2, 4]);
+            }
+        }
+    }
+}
 fn definition(
     values: &[Option<i64>],
     grouped: bool,

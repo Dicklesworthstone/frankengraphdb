@@ -8,7 +8,8 @@ use fgdb_beacon::{
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
 };
 
 type Options = ReadOptions<PropertyKeyId, LabelId>;
@@ -197,8 +198,11 @@ fn scalar_and_frontier_refusals_cannot_fall_back_or_return_a_prefix() {
             db.beacon_search(&c.query(), &invalid, searches()[0]),
             Err(ReadError::Read(_))
         ));
+        // Overflows f32: invalid under every numeric encoding, including the
+        // default rounding (fgdb-ekic6).
         let mut bad = WriteBatch::new(RelationId(1));
-        bad.set_vertex_property(VId(3), X, Some(CanonicalScalar::Int(16_777_217)));
+        let overflow = CanonicalScalar::Float(CanonicalF64::new(f64::MAX));
+        bad.set_vertex_property(VId(3), X, Some(overflow));
         db.write(&c.commit(), bad).await.unwrap();
         assert!(matches!(
             db.beacon_search(&c.query(), &options(), searches()[1]),

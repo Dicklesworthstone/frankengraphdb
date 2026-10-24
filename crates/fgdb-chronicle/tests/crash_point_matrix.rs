@@ -37,7 +37,10 @@ use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{
     CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, MAX_ENTRY_BODY,
 };
-use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
+use fgdb_chronicle::marker::{
+    ChainError, CommitMarker, EffectSource, HeadUpdate, IdentityCounters,
+    MARKER_FLAG_IDENTITY_COUNTERS, MarkerChain,
+};
 use fgdb_crypto::Digest;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
@@ -105,6 +108,7 @@ fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker 
         resource_effect_digest: digest(6),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 
@@ -250,6 +254,10 @@ fn fully_populated_marker() -> CommitMarker {
         resource_effect_digest: Digest([0xaa; 32]),
         payload_availability_certificate_oid: Some(ObjectId([0xbb; 32])),
         flags: u32::MAX,
+        identity_counters: Some(IdentityCounters {
+            vertex: 0x0102_0304_0506_0708,
+            edge: u64::MAX,
+        }),
     }
 }
 
@@ -289,6 +297,75 @@ fn trailing_bytes_after_a_marker_are_refused() {
         fgdb_chronicle::marker::decode_canonical(&bytes).is_none(),
         "a durable format must refuse bytes it does not understand rather than \
          silently ignore them"
+    );
+}
+
+/// The identity counters are an additive-minor field (fgdb-hxgm1 channel 2).
+/// A marker without them encodes exactly the pre-field layout, which ends at
+/// `flags`. A marker with them differs only in bit 0 of `flags` plus the two
+/// big-endian counters appended after it. So every marker written before the
+/// field existed still decodes, with no counters.
+#[test]
+fn identity_counters_append_after_flags_and_a_marker_without_them_keeps_its_layout() {
+    let counters = IdentityCounters {
+        vertex: 0x0a0b_0c0d_0e0f_1011,
+        edge: 7,
+    };
+    let mut without = fully_populated_marker();
+    without.flags = 0xffff_fffe;
+    without.identity_counters = None;
+    let mut with = without.clone();
+    with.flags = u32::MAX;
+    with.identity_counters = Some(counters);
+
+    let old = without
+        .canonical_bytes()
+        .expect("marker without counters encodes");
+    let new = with
+        .canonical_bytes()
+        .expect("marker with counters encodes");
+    let mut expected = old[..old.len() - 4].to_vec();
+    expected.extend_from_slice(&u32::MAX.to_be_bytes());
+    expected.extend_from_slice(&counters.vertex.to_be_bytes());
+    expected.extend_from_slice(&counters.edge.to_be_bytes());
+    assert_eq!(new, expected);
+    assert_eq!(&old[old.len() - 4..], &0xffff_fffe_u32.to_be_bytes());
+
+    let decoded = fgdb_chronicle::marker::decode_canonical(&old).expect("pre-field layout decodes");
+    assert_eq!(decoded.identity_counters, None);
+    assert_eq!(decoded, without);
+    assert_eq!(
+        fgdb_chronicle::marker::decode_canonical(&new).expect("decodes"),
+        with
+    );
+}
+
+/// Bit 0 of `flags` and the counters travel together. Either without the
+/// other would encode a transcript that decodes to a different marker, so the
+/// encoder refuses both, and so does every path that hashes a marker.
+#[test]
+fn identity_counters_and_their_flag_bit_must_agree() {
+    let mut bit_without_counters = fully_populated_marker();
+    bit_without_counters.identity_counters = None;
+    assert_eq!(
+        bit_without_counters.canonical_bytes(),
+        Err(ChainError::IdentityCountersFlagMismatch)
+    );
+    let mut counters_without_bit = fully_populated_marker();
+    counters_without_bit.flags &= !MARKER_FLAG_IDENTITY_COUNTERS;
+    assert_eq!(
+        counters_without_bit.canonical_bytes(),
+        Err(ChainError::IdentityCountersFlagMismatch)
+    );
+    // validate checks sequence and head CAS first, so make those hold for an
+    // empty chain and let the hash meet the mismatch.
+    counters_without_bit.commit_seq = 1;
+    counters_without_bit.head_updates.clear();
+    assert_eq!(
+        MarkerChain::new()
+            .validate(&counters_without_bit)
+            .map(|chained| chained.marker_oid),
+        Err(ChainError::IdentityCountersFlagMismatch)
     );
 }
 
@@ -2036,4 +2113,65 @@ mod incomplete_capsule_tests {
             assert!(log_bytes(&dir).is_empty());
         });
     }
+}
+
+/// A read-only observer scans the committed chain WITHOUT the writer lease and
+/// without repairing anything (fgdb-xxxnb): beside a live coordinator, and
+/// over a torn tail that is an append still in flight, it returns exactly the
+/// complete entries and leaves every log byte in place. Only the next lease
+/// holder repairs the tail, exactly as before.
+#[test]
+fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
+    let dir = scratch_dir("lease-free-scan");
+    under_lab(26, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_ok(&mut coordinator, cx, 1).await;
+        commit_ok(&mut coordinator, cx, 2).await;
+        let committed = log_bytes(&dir);
+        // The live coordinator still holds the lease.
+        let scanned = CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir)
+            .await
+            .expect("scan beside a live writer");
+        assert_eq!(scanned.entries(), coordinator.chain().entries());
+
+        let chain_snapshot = coordinator.chain().clone();
+        let crashed = coordinator
+            .commit_with_crash(
+                cx,
+                &capsule_bytes(3),
+                |seq, oid| marker_for(seq, oid, &chain_snapshot),
+                Some(CrashPoint::AfterMarkerBeforeD2),
+            )
+            .await;
+        assert!(crashed.is_err());
+        let written = log_bytes(&dir).len();
+        CommitCoordinator::<UnixVfs>::tear_log_tail_for_test(
+            &dir,
+            (written - committed.len()) as u64 - 4,
+        )
+        .expect("tear");
+        let torn = log_bytes(&dir);
+        assert_eq!(torn.len(), committed.len() + 4);
+
+        let scanned = CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir)
+            .await
+            .expect("scan over a torn tail");
+        let sequences: Vec<u64> = scanned
+            .entries()
+            .iter()
+            .map(|entry| entry.marker.commit_seq)
+            .collect();
+        assert_eq!(sequences, vec![1, 2]);
+        assert_eq!(log_bytes(&dir), torn, "a read-only scan repairs nothing");
+
+        drop(coordinator);
+        let recovered = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("the next lease holder repairs");
+        assert_eq!(recovered.discarded_tail_bytes(), 4);
+        assert_eq!(log_bytes(&dir), committed);
+    });
 }

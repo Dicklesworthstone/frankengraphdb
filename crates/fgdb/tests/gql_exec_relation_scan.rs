@@ -134,3 +134,112 @@ fn an_empty_graph_matches_nothing() {
         assert!(rows.is_empty(), "no edges, no destinations: {rows:?}");
     });
 }
+
+/// A type alternation `-[:R|OTHER]->` scans exactly its members (fgdb-wpteg):
+/// the union of the `:R` and `:OTHER` matches, never a third relation's,
+/// through the pinned scan and the general query surface, counted per edge.
+#[test]
+fn an_alternation_scans_exactly_its_member_relations() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
+    use fgdb_types::CanonicalScalar;
+    const THIRD: RelationId = RelationId(3);
+    let ((), report) = run_async_under_lab(0x5c_04, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let cx = &commit;
+        let mut db = Database::open_memory(cx, keys()).await.expect("opens");
+        let mut batch = WriteBatch::new(R);
+        for vid in [1, 2, 3, 5, 7, 9] {
+            batch.create_vertex(VId(vid), vec![], vec![]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(5), vec![]);
+        batch.add_edge(EId(11), VId(3), VId(2), vec![]);
+        db.write(cx, batch).await.expect("R edges commit");
+        let mut other = WriteBatch::new(OTHER);
+        other.add_edge(EId(12), VId(1), VId(9), vec![]);
+        db.write(cx, other).await.expect("OTHER edge commits");
+        let mut third = WriteBatch::new(THIRD);
+        third.add_edge(EId(13), VId(3), VId(7), vec![]);
+        db.write(cx, third).await.expect("THIRD edge commits");
+
+        let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Relation, "OTHER") => Some(GraphSymbol::Relation(OTHER)),
+            (GraphSymbolKind::Relation, "THIRD") => Some(GraphSymbol::Relation(THIRD)),
+            _ => None,
+        };
+        // The GQL text surface reads alternation (6405889e). The legacy
+        // RelationBind slice behind execute_gql has one relation per hop and
+        // never read it, so these targets go through the query surface.
+        let targets = |text: &str| -> Vec<VId> {
+            let QueryResult::Rows { rows, .. } = db
+                .query(
+                    &query,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000),
+                )
+                .expect(text)
+            else {
+                panic!("{text} is a row query");
+            };
+            let mut targets: Vec<_> = rows
+                .iter()
+                .map(|row| match &row[..] {
+                    [QueryValue::Value(GraphValue::Vertex(vid))] => *vid,
+                    _ => panic!("{text}: not one vertex cell"),
+                })
+                .collect();
+            targets.sort();
+            targets
+        };
+        assert_eq!(
+            targets("MATCH (a)-[:R|OTHER]->(b) RETURN b"),
+            vec![VId(2), VId(5), VId(9)]
+        );
+        assert_eq!(
+            targets("MATCH (a)-[:OTHER|:R|R]->(b) RETURN b"),
+            vec![VId(2), VId(5), VId(9)]
+        );
+        assert_eq!(
+            targets("MATCH (a)-[:R|OTHER|THIRD]->(b) RETURN b"),
+            targets("MATCH (a)-->(b) RETURN b")
+        );
+        // A count cell is Count, Integer or a scalar Int by executor.
+        let count = |text: &str| -> i128 {
+            let QueryResult::Rows { rows, .. } = db
+                .query(
+                    &query,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000),
+                )
+                .expect(text)
+            else {
+                panic!("{text} is a row query");
+            };
+            assert_eq!(rows.len(), 1, "{text}");
+            match &rows[0][..] {
+                [QueryValue::Count(count)] => i128::from(*count),
+                [QueryValue::Integer(count)] => *count,
+                [QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(count)))] => {
+                    i128::from(*count)
+                }
+                _ => panic!("{text}: not one count cell"),
+            }
+        };
+        assert_eq!(count("MATCH (a)-[r:R|OTHER]->(b) RETURN count(r) AS c"), 3);
+        assert_eq!(count("MATCH (a)<-[r:R|OTHER]-(b) RETURN count(*) AS c"), 3);
+        assert_eq!(count("MATCH (a)-[:R|THIRD]->(b) RETURN count(*) AS c"), 3);
+        assert_eq!(
+            count("MATCH (a)-[:R|THIRD]->(b) RETURN count(DISTINCT a) AS c"),
+            2
+        );
+    });
+    assert!(report.lab_test_passed(), "lab run failed: {report:?}");
+}

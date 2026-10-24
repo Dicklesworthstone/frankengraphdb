@@ -6,6 +6,9 @@
 //! began can confirm it. Existing in-flight appends continue normally; newly
 //! issued pipeline ranges can also confirm a read without draining the window.
 //! A healthy, quiescent quorum needs one heartbeat round, without a read-only log entry.
+//! Request-scoped read probes can independently confirm the same pending read
+//! while append windows or snapshot transfers are stalled. The host routes
+//! these authenticated, in-process probes separately from replication traffic.
 //!
 //! A read barrier establishes only a consensus data floor. The application must
 //! apply through that floor, wait for audit visibility, pin the chosen snapshot,
@@ -17,11 +20,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod download;
+mod read_probe;
 
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
     Committed, Configuration, Domain, Error as RaftError, Event, Limits, MemberId, Message, Output,
-    PersistentState, Raft, Role, SnapshotTransfer,
+    PersistentState, Raft, ReadIndexError, ReadIndexRound, Role, SnapshotTransfer,
 };
 use fgdb_types::DatabaseSecurityNamespaceId;
 
@@ -96,6 +100,7 @@ pub struct ReplicaOutput<C> {
 pub enum ReplicaError<E> {
     Raft(RaftError),
     Sequence(SequenceError<E>),
+    ReadIndex(ReadIndexError),
     CurrentTermNotCommitted,
     ReadBackpressure,
     ReadCounterExhausted,
@@ -114,6 +119,7 @@ struct PendingRead {
     index: u64,
     after_request: u64,
     confirmations: BTreeSet<MemberId>,
+    probe: ReadIndexRound,
 }
 
 /// Owns the complete output history of one Raft machine. No mutable Raft escape
@@ -236,6 +242,9 @@ impl<C: Clone + Eq> Replica<C> {
     /// its data floor BEFORE probing, and never coalesce it into an older round.
     /// Each pending read has an independent freshness watermark and voter set.
     /// A later fresh acknowledgement may safely finish several earlier reads.
+    /// After admission, read_index_probes(id) exposes an independent path when
+    /// replication cannot return a fresh append reply. Both paths share one
+    /// bounded voter tally and release at most one result for the original ID.
     pub async fn read_index<P: RaftPublisher<C>>(
         &mut self,
         publisher: &mut P,
@@ -244,6 +253,7 @@ impl<C: Clone + Eq> Replica<C> {
             return Err(ReplicaError::Raft(RaftError::NotLeader));
         }
         let state = self.raft.durable_state().map_err(ReplicaError::Raft)?;
+        let term = state.term();
         let index = state.commit_index();
         let base = state.snapshot().map_or(0, |cut| cut.index());
         let committed_term = if index == base {
@@ -261,16 +271,22 @@ impl<C: Clone + Eq> Replica<C> {
             .next_read
             .checked_add(1)
             .ok_or(ReplicaError::ReadCounterExhausted)?;
+        let probe = self.raft.begin_read_index().map_err(|error| match error {
+            ReadIndexError::Raft(error) => ReplicaError::Raft(error),
+            ReadIndexError::CurrentTermNotCommitted => ReplicaError::CurrentTermNotCommitted,
+            error => ReplicaError::ReadIndex(error),
+        })?;
         let id = ReadIndexId {
             incarnation: Arc::clone(&self.incarnation),
             serial,
         };
         let read = PendingRead {
             id: id.clone(),
-            term: state.term(),
+            term,
             index,
             after_request: self.highest_request,
             confirmations: BTreeSet::from([self.raft.id()]),
+            probe,
         };
         self.next_read = serial;
         self.reads.insert(serial, read);

@@ -21,7 +21,10 @@ pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
 pub mod cx;
+pub mod ed25519;
 pub mod poly1305;
+pub mod sha512;
+pub mod signature;
 pub mod zeroize;
 
 pub use aead::{
@@ -49,6 +52,15 @@ pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
 pub use cx::{
     CryptoCx, DeterministicEntropy, EntropyError, EntropySource, FreshObjectProtectionMaterial,
     ObjectProtectionMaterialRef, SystemEntropy,
+};
+pub use ed25519::{
+    ED25519_PUBLIC_KEY_BYTES, ED25519_SEED_BYTES, ED25519_SIGNATURE_BYTES, Ed25519Error,
+    Ed25519SigningKey, Ed25519VerifyingKey,
+};
+pub use sha512::{Sha512, sha512};
+pub use signature::{
+    ED25519_VERIFICATION_POLICY, REGISTERED_SIGNATURE_PROFILES, SIGNATURE_PROFILE_ED25519_STRICT,
+    SignatureError, SignatureProfile, registered_signature_profile, verify_signature,
 };
 
 /// The §5.1 logical-identity domain string (plan L278).

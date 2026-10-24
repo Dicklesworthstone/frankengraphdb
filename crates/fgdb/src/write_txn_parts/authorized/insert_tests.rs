@@ -1,4 +1,9 @@
 //! Public creation entry points with real tokens, collector, storage and reopen.
+// Loaded through #[path], so a child resolves beside this file, as from a
+// mod.rs: name its directory explicitly.
+#[path = "insert_tests/factors.rs"]
+mod factors;
+
 use super::*;
 use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
@@ -9,7 +14,10 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphInsertBinding, GraphSetProjection, GraphSetQuantifier,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts,
+};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 
 const R: RelationId = RelationId(1);
@@ -164,8 +172,23 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         assert_eq!(stats.selection.snapshot_records, 0);
         assert_eq!(vertices.len(), 2);
         assert_eq!(edges.len(), 3);
-        assert!(vertices.iter().all(|id| id.0 > 901));
-        assert!(edges.iter().all(|id| id.0 > 800));
+        // The explicit seeds and the retirement move no counter: a and b take
+        // vertex counters 1 and 2, and the three edges take edge counters 1-3.
+        assert_eq!(
+            vertices,
+            vec![
+                crate::write_txn::engine_vertex(&keys(), 1),
+                crate::write_txn::engine_vertex(&keys(), 2),
+            ]
+        );
+        assert_eq!(
+            edges,
+            vec![
+                crate::write_txn::engine_edge(&keys(), 1),
+                crate::write_txn::engine_edge(&keys(), 2),
+                crate::write_txn::engine_edge(&keys(), 3),
+            ]
+        );
         let seq = db.frontier().unwrap();
         assert_eq!(seq.0, frontier.0 + 1);
         assert_eq!(
@@ -186,7 +209,7 @@ fn engine_issued_multi_relation_creation_is_atomic_and_reopens() {
         assert_eq!(db.edges().unwrap(), all_edges);
         assert_eq!(
             db.vertex(vertices[0]).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(42))]
+            vec![(P, CanonicalScalar::Int(42).into())]
         );
         for (index, source, relation, destination) in [
             (0, vertices[0], R, vertices[1]),
@@ -265,7 +288,7 @@ fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
         for (id, expected) in vertices.iter().zip([3, 1, 3]) {
             assert_eq!(
                 db.vertex(*id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(expected))]
+                vec![(P, CanonicalScalar::Int(expected).into())]
             );
         }
 
@@ -331,14 +354,14 @@ fn relational_creation_preserves_write_only_authority_and_masks_graph_inputs() {
         assert_eq!(
             properties,
             vec![
-                vec![(P, CanonicalScalar::Int(1))],
-                vec![(P, CanonicalScalar::Int(3))],
-                vec![(P, CanonicalScalar::Int(3))],
+                vec![(P, CanonicalScalar::Int(1).into())],
+                vec![(P, CanonicalScalar::Int(3).into())],
+                vec![(P, CanonicalScalar::Int(3).into())],
             ]
         );
         assert_eq!(
             db.vertex(VId(900)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99))]
+            vec![(P, CanonicalScalar::Int(99).into())]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -393,8 +416,16 @@ fn forbidden_creation_tail_aborts_every_relation_and_retries_without_reusing_ids
                 )
                 .await
                 .unwrap();
-            assert!(vertices.iter().all(|id| id.0 > 2));
-            assert!(edges.iter().all(|id| id.0 > 2));
+            // The refused attempt reserved vertex counters 1-2 and edge counters
+            // 1-2 before staging refused its tail; the retry reuses none of them.
+            assert_eq!(
+                vertices,
+                vec![
+                    crate::write_txn::engine_vertex(&keys(), 3),
+                    crate::write_txn::engine_vertex(&keys(), 4),
+                ]
+            );
+            assert_eq!(edges, vec![crate::write_txn::engine_edge(&keys(), 3)]);
             assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
             assert_eq!(txn.outstanding_obligations(), baseline);
         }
@@ -514,7 +545,7 @@ fn permission_and_creation_limits_precede_identity_issuance() {
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
         }
     });
@@ -581,6 +612,111 @@ fn read_write_grant() -> Grant {
         rights: Rights::ReadWrite,
         ..grant()
     }
+}
+
+/// Visible vertices 1 and 2 joined by an R edge, plus one kind of data around
+/// vertex 1 the grant cannot see. Variant 0 adds nothing; 1 a hidden-relation
+/// edge; 2 an R edge to a hidden vertex; 3 a hidden property on vertex 1; 4 a
+/// hidden label on vertex 1; 5 a hidden property on the R edge.
+async fn creation_fixture(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, keys()).await.unwrap();
+    let mut seed = WriteBatch::new(R);
+    let labels = if hidden == 4 {
+        vec![L, HIDDEN]
+    } else {
+        vec![L]
+    };
+    let secret = |variant| {
+        if hidden == variant {
+            vec![(SECRET, CanonicalScalar::Int(9))]
+        } else {
+            vec![]
+        }
+    };
+    seed.create_vertex(VId(1), labels, secret(3));
+    seed.create_vertex(VId(2), vec![L], vec![]);
+    seed.add_edge(EId(10), VId(1), VId(2), secret(5));
+    if hidden == 2 {
+        seed.create_vertex(VId(3), vec![HIDDEN], vec![]);
+        seed.add_edge(EId(11), VId(1), VId(3), vec![]);
+    }
+    db.write(cx, seed).await.unwrap();
+    if hidden == 1 {
+        let mut other = WriteBatch::new(H);
+        other.add_edge(EId(20), VId(2), VId(1), vec![]);
+        db.write(cx, other).await.unwrap();
+    }
+    db
+}
+
+/// FG-INV-20 for creation (fgdb-4iiho item c). It moved here from the
+/// authorized WriteBatch laws with fgdb-hxgm1: authorized creation now happens
+/// only on these allocating surfaces. Creating an edge between two VISIBLE
+/// vertices has one outcome and one exact MaxWork threshold, whatever the
+/// capability cannot see around them (the six creation_fixture variants).
+#[test]
+fn matched_creation_work_threshold_ignores_hidden_data() {
+    const CEILING: u64 = 100_000;
+    lab(0xa943, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
+        let insertion = insert("MATCH (a:Visible)-[:R]->(b:Visible) INSERT (a)-[:S]->(b)");
+        let mut thresholds = Vec::new();
+        for variant in 0..=5_u8 {
+            let (mut low, mut high) = (0_u64, CEILING);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let limited = token.attenuate(Restriction::MaxWork(middle)).unwrap();
+                let mut db = creation_fixture(&commit, variant).await;
+                match db
+                    .execute_graph_insert_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &limited,
+                        "main",
+                        &insertion,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                {
+                    Ok((stats, _)) => {
+                        assert_eq!(
+                            (stats.created_vertices, stats.created_edges),
+                            (0, 1),
+                            "variant {variant}"
+                        );
+                        high = middle;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(error),
+                            Error::LimitExceeded(LimitDimension::Work),
+                            "variant {variant} at {middle}"
+                        );
+                        low = middle + 1;
+                    }
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+            assert!(
+                low < CEILING,
+                "variant {variant}: no threshold below the ceiling"
+            );
+            thresholds.push(low);
+        }
+        assert!(
+            thresholds
+                .iter()
+                .all(|threshold| *threshold == thresholds[0]),
+            "the creation threshold moved with hidden data: {thresholds:?}"
+        );
+    });
 }
 
 // Same visible graph and bag multiplicity, with optional hidden rows, fields,
@@ -658,7 +794,7 @@ fn match_insert_uses_masked_properties_and_preserves_occurrence_multiplicity() {
             for (occurrence, vertex) in vertices.iter().copied().enumerate() {
                 assert_eq!(
                     db.vertex(vertex).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(10))]
+                    vec![(P, CanonicalScalar::Int(10).into())]
                 );
                 let first = db.edge(edges[2 * occurrence]).unwrap().unwrap();
                 let second = db.edge(edges[2 * occurrence + 1]).unwrap().unwrap();
@@ -733,13 +869,16 @@ fn empty_scoped_match_closes_without_publication_or_identity_reservations() {
         );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(db.vertices().unwrap(), original);
+        // The probes took counter 1 of each kind; the empty match took none.
+        assert_eq!(before_vertex, crate::write_txn::engine_vertex(&keys(), 1));
+        assert_eq!(before_edge, crate::write_txn::engine_edge(&keys(), 1));
         assert_eq!(
             db.allocate_identity(&query, vertex_request).unwrap(),
-            ElementId::Vertex(VId(before_vertex.0 + 1))
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 2))
         );
         assert_eq!(
             db.allocate_identity(&query, edge_request).unwrap(),
-            ElementId::Edge(EId(before_edge.0 + 1))
+            ElementId::Edge(crate::write_txn::engine_edge(&keys(), 2))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -849,6 +988,58 @@ fn hidden_data_changes_neither_match_insert_work_nor_node_refusal_thresholds() {
     });
 }
 
+/// The native staging write_ordered_authorized ran before fgdb-hxgm1: the
+/// same permit, workspace, per-intent authorization and completion, without
+/// the chosen-identity refusal that path now applies first (which charges
+/// nothing). It is only the independent allowance witness below; no client
+/// surface reaches it.
+async fn native_ordered_witness(
+    db: &mut Database<MemVfs>,
+    txn_cx: &TxnCx,
+    commit_cx: &CommitCx,
+    authority: &Authority,
+    token: &CapabilityToken,
+    batches: Vec<WriteBatch>,
+) -> Result<CommitSeq, WriteTxnError> {
+    let verified = authority
+        .verify_at(token, "main", NOW)
+        .map_err(WriteTxnError::Authorization)?;
+    let permit = verified
+        .begin_write_at("main", NOW)
+        .map_err(WriteTxnError::Authorization)?;
+    commit_cx
+        .with_restriction_async(async {
+            let mut execution = Execution {
+                cx: commit_cx,
+                permit,
+                clock: || NOW,
+            };
+            execution.checkpoint()?;
+            let mut workspace = Workspace(Some(db.begin(txn_cx)?));
+            for batch in batches {
+                for row in batch.rows {
+                    execution.checkpoint()?;
+                    stage(
+                        workspace.transaction(),
+                        db,
+                        batch.relation,
+                        row,
+                        &mut execution,
+                    )?;
+                }
+            }
+            match workspace
+                .transaction()
+                .complete_controlled(db, commit_cx, None, true, || execution.checkpoint())
+                .await?
+            {
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
+                other => panic!("witness completion: {other:?}"),
+            }
+        })
+        .await
+}
+
 #[test]
 fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
     lab(0xa945, |contexts| async move {
@@ -903,17 +1094,10 @@ fn selection_and_write_share_one_node_allowance_not_two_independent_permits() {
                         outgoing.add_edge(EId(101 + 2 * occurrence), vertex, VId(2), vec![]);
                         batches.extend([create, incoming, outgoing]);
                     }
-                    match db
-                        .write_ordered_authorized(
-                            &txn,
-                            &commit,
-                            &authority,
-                            &limited,
-                            "main",
-                            batches,
-                            || NOW,
-                        )
-                        .await
+                    match native_ordered_witness(
+                        &mut db, &txn, &commit, &authority, &limited, batches,
+                    )
+                    .await
                     {
                         Ok(_) => true,
                         Err(WriteTxnError::Authorization(error)) => {
@@ -1072,14 +1256,18 @@ fn insertion_query_bills_final_rows_and_pages_without_suppressing_creations() {
             let edges = db.edges().unwrap();
             assert_eq!((vertices.len(), edges.len()), (6, 3));
             let properties: Vec<_> = vertices.iter().filter_map(|v| v.props.first()).collect();
-            assert_eq!(
-                properties,
-                vec![
-                    &(P, CanonicalScalar::Int(3)),
-                    &(P, CanonicalScalar::Int(1)),
-                    &(P, CanonicalScalar::Int(3)),
-                ]
-            );
+            // Each UNWIND row [3, 1, 3] issues its `a` and then its `b`, so row
+            // r's `a` takes vertex counter 2r + 1. vertices() is in identity order.
+            let mut created = Vec::new();
+            for (counter, p) in [(1, 3), (3, 1), (5, 3)] {
+                created.push((crate::write_txn::engine_vertex(&keys(), counter), p));
+            }
+            created.sort_by_key(|(vertex, _)| *vertex);
+            let ordered: Vec<_> = created
+                .iter()
+                .map(|(_, p)| (P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(*p))))
+                .collect();
+            assert_eq!(properties, ordered.iter().collect::<Vec<_>>());
             db.compact(&commit).await.unwrap();
             drop(db);
             let db = Database::open_with_vfs(&commit, vfs, &path, keys())
@@ -1134,7 +1322,7 @@ fn insertion_query_requires_readwrite_before_identity_allocation_even_with_limit
             assert_eq!(
                 db.allocate_identity(&query_cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }

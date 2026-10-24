@@ -1,8 +1,10 @@
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, VId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, VId,
+};
 
 fn okay<T>(result: Result<T, Failure>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
@@ -74,9 +76,204 @@ fn ordered_steps_see_the_overlay_and_publish_one_commit() {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].props,
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))]
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())]
         );
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hybrid_reads_compose_with_staged_writes_and_commit_only_after_output_admission() {
+    let ((), report) = run_async_under_lab(0x7478_6320, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let options = options(&[
+            "--property",
+            "bio=2",
+            "--write",
+            "CREATE (a:Person {p: 0, bio: 'graph memory'}), \
+                    (b:Person {p: 10, bio: 'unrelated'})",
+            "--query",
+            "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+               vector => [0], vector_properties => ['p'], label => 'Person', \
+               k => 1, candidates => 2) YIELD node \
+             RETURN node.bio AS bio",
+            "--write",
+            "MATCH (n:Person) SET n.bio = 'graph memory updated'",
+            "--query",
+            "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+               vector => [0], vector_properties => ['p'], label => 'Person', \
+               k => 10) YIELD node RETURN count(*) AS total",
+        ]);
+        for max_rows in [2, 1] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            let result = run_with_limits(
+                &mut db,
+                &contexts,
+                &options,
+                None,
+                true,
+                &mut bytes,
+                Limits {
+                    rows: max_rows,
+                    output_bytes: 100_000,
+                },
+                None,
+            )
+            .await;
+            if max_rows == 1 {
+                let error = result.expect_err("the final aggregate row exceeds delivery capacity");
+                assert_eq!(error.code, 3, "{}", error.message);
+                assert!(
+                    bytes.is_empty(),
+                    "failed search exposed a transaction prefix"
+                );
+                assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+                assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            } else {
+                okay(result);
+                let text = output(bytes);
+                assert!(
+                    text.contains(
+                        r#""statement":2,"cells":[{"type":"text","value":"graph memory"}]"#
+                    ),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(r#""statement":4,"cells":[{"type":"count","value":"2"}]"#),
+                    "{text}"
+                );
+                assert!(text.ends_with(
+                    "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":2,\"statements\":4}\n"
+                ));
+                assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
+                let vertices = db.vertices_at(CommitSeq(1)).unwrap();
+                assert_eq!(vertices.len(), 2);
+                let updated = CanonicalScalar::ucs_basic_text("graph memory updated").unwrap();
+                assert!(vertices.iter().all(|vertex| {
+                    vertex
+                        .props
+                        .contains(&(PropertyKeyId(2), updated.clone().into()))
+                }));
+            }
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn filtered_hybrid_transaction_rows_follow_savepoints_and_atomic_delivery() {
+    let ((), report) = run_async_under_lab(0x7478_6321, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = "CALL hybrid.search(text => 'graph', text_property => 'bio', \
+            vector => [0], vector_properties => ['p'], label => 'Person', \
+            seeds => [1], relation => 'R', max_hops => 2, \
+            eligible => $allowed, candidates => 1, graph_candidates => 1, k => 1) \
+            YIELD node, graph_hops, vector_rank, text_rank \
+            RETURN node.p AS p, graph_hops, vector_rank, text_rank";
+        let options = options(&[
+            "--property",
+            "bio=2",
+            "--relation",
+            "R=1",
+            "--write",
+            "MATCH (n:Person {p:3}) SET n.p = 4",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3,3]",
+            "--savepoint",
+            "selected",
+            "--write",
+            "MATCH (n:Person {p:4}) SET n.p = 9",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3]",
+            "--rollback-to",
+            "selected",
+            "--query",
+            query,
+            "--param",
+            "allowed=json:[3]",
+        ]);
+        for max_rows in [2, 1] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
+                        (
+                            PropertyKeyId(2),
+                            CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                        ),
+                    ],
+                );
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            seed.add_edge(EId(2), VId(2), VId(3), vec![]);
+            db.write(&contexts.commit(), seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut bytes = Vec::new();
+            let result = run_with_limits(
+                &mut db,
+                &contexts,
+                &options,
+                None,
+                true,
+                &mut bytes,
+                Limits {
+                    rows: max_rows,
+                    output_bytes: 100_000,
+                },
+                None,
+            )
+            .await;
+            if max_rows == 1 {
+                let error =
+                    result.expect_err("filtered rows still spend the shared delivery allowance");
+                assert_eq!(error.code, 3, "{}", error.message);
+                assert!(
+                    bytes.is_empty(),
+                    "a refused transaction exposed buffered search rows"
+                );
+                assert_eq!(db.frontier().unwrap(), basis);
+            } else {
+                okay(result);
+                let text = output(bytes);
+                let cells = r#""cells":[{"type":"int","value":"4"},{"type":"int","value":"2"},{"type":"int","value":"1"},{"type":"int","value":"1"}]"#;
+                assert_eq!(text.matches(cells).count(), 2, "{text}");
+                assert!(
+                    text.contains(&format!(r#""statement":2,{cells}"#)),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(&format!(r#""statement":7,{cells}"#)),
+                    "{text}"
+                );
+                assert!(!text.contains(r#""event":"row","statement":5"#), "{text}");
+                assert_eq!(text.matches("\"event\":\"result\"").count(), 1);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+            }
+            let vertices = db.vertices_at(db.frontier().unwrap()).unwrap();
+            let selected = vertices.iter().find(|row| row.vid == VId(3)).unwrap();
+            let expected = if max_rows == 1 { 3 } else { 4 };
+            assert!(
+                selected
+                    .props
+                    .contains(&(PropertyKeyId(1), CanonicalScalar::Int(expected).into()))
+            );
+            assert_eq!(contexts.outstanding_obligations(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -237,7 +434,9 @@ fn each_step_binds_its_own_parameters_without_text_interpolation() {
         let rows = db.vertices_at(db.frontier().unwrap()).unwrap();
         assert_eq!(
             rows[0].props[0].1,
-            CanonicalScalar::ucs_basic_text("semi; 'quote'\nnext").unwrap()
+            CanonicalScalar::ucs_basic_text("semi; 'quote'\nnext")
+                .unwrap()
+                .into()
         );
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
@@ -374,5 +573,319 @@ fn parser_refuses_unscoped_parameters_empty_steps_and_inapplicable_options() {
         args.extend(["--query".to_owned(), "MATCH (n) RETURN n".to_owned()]);
     }
     assert!(crate::parse(&args, "transaction").is_err());
-    assert!(validate_input(&[Step::new(false, "x".repeat(MAX_INPUT_BYTES + 1))]).is_err());
+    assert!(
+        validate_input(&[Step::new(StepKind::Query, "x".repeat(MAX_INPUT_BYTES + 1))]).is_err()
+    );
+}
+
+fn committed_values(db: &Database<impl Vfs + Clone>) -> Vec<i64> {
+    let mut values: Vec<_> = db
+        .vertices_at(db.frontier().unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|row| match &row.props[0].1 {
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => *value,
+            other => panic!("unexpected property {other:?}"),
+        })
+        .collect();
+    values.sort_unstable();
+    values
+}
+
+#[test]
+fn rollback_to_a_savepoint_rewinds_later_effects_and_the_rows_they_buffered() {
+    let ((), report) = run_async_under_lab(0x7478_6308, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let options = options(&[
+            "--write",
+            "CREATE (n:Person {p: 1})",
+            "--savepoint",
+            "s",
+            "--write",
+            "CREATE (n:Person {p: 2})",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--rollback-to",
+            "s",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--write",
+            "CREATE (n:Person {p: 3})",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &options, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(
+            text.contains(
+                r#""index":2,"kind":"savepoint","view":"transaction_local","basis":0,"name":"s"}"#
+            ),
+            "{text}"
+        );
+        assert!(text.contains(r#""index":5,"kind":"rollback_to""#), "{text}");
+        // Steps 3 and 4 previewed discarded effects: their records and rows go.
+        assert!(!text.contains(r#""index":3,"#), "{text}");
+        assert!(!text.contains(r#""statement":4"#), "{text}");
+        assert!(
+            text.contains(r#""statement":6,"cells":[{"type":"int","value":"1"}]"#),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches(r#""statement":6,"cells""#).count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\"kind\":\"committed\",\"basis\":0,\"seq\":1,\"count\":1,\"statements\":5}\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(committed_values(&db), vec![1, 3]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn release_keeps_effects_and_a_reused_name_shadows_until_released() {
+    let ((), report) = run_async_under_lab(0x7478_6309, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let release = options(&[
+            "--write",
+            "CREATE (n:Person {p: 1})",
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 2})",
+            "--release",
+            "a",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &release, None, false, &mut bytes).await);
+        let text = output(bytes);
+        assert!(text.contains("statement 2: savepoint a\n"), "{text}");
+        assert!(text.contains("statement 4: release a\n"), "{text}");
+        assert_eq!(committed_values(&db), vec![1, 2]);
+
+        // The younger "a" shadows the older one: the first rollback discards
+        // only p 6; once released, the next rollback reaches the older "a"
+        // and discards p 5 as well.
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let shadowed = options(&[
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 5})",
+            "--savepoint",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 6})",
+            "--rollback-to",
+            "a",
+            "--release",
+            "a",
+            "--rollback-to",
+            "a",
+            "--write",
+            "CREATE (n:Person {p: 7})",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &shadowed, None, true, &mut bytes).await);
+        assert_eq!(committed_values(&db), vec![7]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn savepoint_steps_refuse_unknown_names_parameters_and_empty_names_before_running() {
+    for tail in [
+        vec!["--write", "CREATE (n)", "--rollback-to", "a"],
+        vec!["--write", "CREATE (n)", "--release", "a"],
+        vec!["--savepoint", "a", "--release", "a", "--rollback-to", "a"],
+        vec!["--savepoint", "a", "--rollback-to", "A"],
+        vec!["--savepoint", "a", "--param", "p=int:4"],
+        vec!["--savepoint", ""],
+    ] {
+        let mut args = vec!["--db", "x", "--key-file", "y"];
+        args.extend(tail.iter().copied());
+        let refused = crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "transaction",
+        );
+        assert!(
+            matches!(&refused, Err(error) if error.code == 2),
+            "{tail:?} must be a usage error"
+        );
+    }
+    // Rolling back to a savepoint keeps it live: it can be the target again.
+    let again = options(&[
+        "--savepoint",
+        "a",
+        "--rollback-to",
+        "a",
+        "--rollback-to",
+        "a",
+    ]);
+    assert!(validate_input(&again.steps).is_ok());
+}
+
+/// A statement given to the wrong step flag names the flag it needs, as a
+/// usage error, before the transaction begins (fgdb-j72ep). Text that is
+/// neither a read nor a write keeps its own grammar error.
+#[test]
+fn a_statement_under_the_wrong_step_flag_names_the_right_one() {
+    let ((), report) = run_async_under_lab(0x7478_6340, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (parts, expected, code) in [
+            (
+                ["--query", "CREATE (n:Person {p: 1})"],
+                "a write statement: pass it with --write, not --query",
+                2,
+            ),
+            (
+                ["--query", "MATCH (n:Person) SET n.p = 2 RETURN n.p AS p"],
+                "a write statement: pass it with --write, not --query",
+                2,
+            ),
+            (
+                ["--write", "MATCH (n:Person) RETURN count(*) AS c"],
+                "a read statement: pass it with --query, not --write",
+                2,
+            ),
+            (["--write", "MATCH (n:Person) RETURN"], "", 3),
+            (["--query", "CREATE"], "", 3),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut bytes = Vec::new();
+            let error = run(&mut db, &contexts, &options(&parts), None, true, &mut bytes)
+                .await
+                .expect_err("a misrouted or invalid step refuses");
+            assert_eq!(error.code, code, "{parts:?}: {}", error.message);
+            assert!(
+                error.message.starts_with("transaction step 1: "),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.ends_with(expected),
+                "{parts:?}: {}",
+                error.message
+            );
+            assert!(bytes.is_empty());
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Every write-with-RETURN form `fgdb write` runs is also a transaction step
+/// (fgdb-j72ep): CREATE ... RETURN, MERGE ... ON MATCH / ON CREATE SET ...
+/// RETURN and MATCH ... SET ... RETURN in its inline-map and WHERE forms,
+/// each returning its row under its statement number and committing the same
+/// state, while --rollback returns no row and leaves the state unchanged.
+#[test]
+fn write_steps_with_return_run_in_a_transaction_and_roll_back_cleanly() {
+    let ((), report) = run_async_under_lab(0x7478_6341, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        okay(
+            run(
+                &mut db,
+                &contexts,
+                &options(&["--write", "CREATE (n:Person {p: 1})"]),
+                None,
+                true,
+                &mut bytes,
+            )
+            .await,
+        );
+        for (steps, rows, values) in [
+            (
+                vec![
+                    "--write",
+                    "CREATE (n:Person {p: 7}) RETURN n.p AS p",
+                    "--write",
+                    "MERGE (n:Person {p: 7}) ON MATCH SET n.p = 8 RETURN n.p AS p",
+                ],
+                vec![(1, 7), (2, 8)],
+                vec![1, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MATCH (n:Person {p: 1}) SET n.p = 2 RETURN n.p AS p",
+                ],
+                vec![(1, 2)],
+                vec![2, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MATCH (n:Person) WHERE n.p = 2 SET n.p = 3 RETURN n.p AS p",
+                ],
+                vec![(1, 3)],
+                vec![3, 8],
+            ),
+            (
+                vec![
+                    "--write",
+                    "MERGE (n:Person {p: 5}) ON CREATE SET n.p = 6 RETURN n.p AS p",
+                ],
+                vec![(1, 6)],
+                vec![3, 6, 8],
+            ),
+        ] {
+            let before = db.frontier().unwrap();
+            let mut bytes = Vec::new();
+            okay(run(&mut db, &contexts, &options(&steps), None, true, &mut bytes).await);
+            let text = output(bytes);
+            assert_eq!(
+                text.matches("\"event\":\"row\"").count(),
+                rows.len(),
+                "{text}"
+            );
+            for (statement, value) in rows {
+                let row = format!(
+                    r#""statement":{statement},"cells":[{{"type":"int","value":"{value}"}}]"#
+                );
+                assert!(text.contains(&row), "{steps:?}: {text}");
+            }
+            assert!(text.contains("\"kind\":\"committed\""), "{text}");
+            assert_eq!(db.frontier().unwrap(), CommitSeq(before.0 + 1));
+            assert_eq!(committed_values(&db), values, "{steps:?}");
+        }
+
+        let before = db.frontier().unwrap();
+        let rollback = options(&[
+            "--write",
+            "MATCH (n:Person {p: 3}) SET n.p = 4 RETURN n.p AS p",
+            "--write",
+            "MERGE (n:Person {p: 6}) ON MATCH SET n.p = 9 RETURN n.p AS p",
+            "--rollback",
+        ]);
+        let mut bytes = Vec::new();
+        okay(run(&mut db, &contexts, &rollback, None, true, &mut bytes).await);
+        let text = output(bytes);
+        assert!(text.contains("\"kind\":\"rolled_back\""), "{text}");
+        assert!(!text.contains("\"event\":\"row\""), "{text}");
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(committed_values(&db), vec![3, 6, 8]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

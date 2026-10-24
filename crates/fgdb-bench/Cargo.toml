@@ -16,3 +16,8 @@ fgdb = { path = "../fgdb" }
 fgdb-gql = { path = "../fgdb-gql" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+# The live GAPBS comparison example exercises the public production projection
+# and certified execution APIs; no comparator dependency enters shipping code.
+fgdb-prism = { path = "../fgdb-prism" }

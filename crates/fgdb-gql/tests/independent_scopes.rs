@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -48,9 +48,15 @@ fn matches(vid: VId, predicates: &[VertexPredicate]) -> bool {
     } else {
         vec![]
     };
-    predicates
-        .iter()
-        .all(|p| p.matches(&labels, &[(P, CanonicalScalar::Int(vid.0 as i64))]))
+    predicates.iter().all(|p| {
+        p.matches(
+            &labels,
+            &[(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(vid.0 as i64)),
+            )],
+        )
+    })
 }
 fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, symbols)
@@ -284,7 +290,7 @@ fn independent_optional_ignores_unrelated_nulls_and_exports_real_correlations() 
 #[test]
 fn independent_walk_scopes_keep_zero_hop_isolates_and_mixed_root_multiplicity() {
     let plan = query(
-        "MATCH (a:Root)-[:S]->(b) OPTIONAL MATCH WALK (x:Flag)-[:R*0..2]->(y) RETURN a,b,x,y",
+        "MATCH (a:Root)-[:S]->(b) OPTIONAL MATCH REPEATABLE ELEMENTS WALK (x:Flag)-[:R*0..2]->(y) RETURN a,b,x,y",
     );
     assert!(!plan.plan().scans_edges());
     assert!(plan.plan().reads_edges());
@@ -382,7 +388,8 @@ fn repeated_scans_consume_sources_once_and_share_every_limit_and_checkpoint() {
         CanonicalScalar::Int(0),
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(2),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let vertex_reads = Cell::new(0);
     let edge_reads = Cell::new(0);
     let measured = plan

@@ -1,11 +1,11 @@
-//! Foundation procedures (fgdb-lq1v6): the pinned franken_networkx catalog runs
-//! as-is over a decoded copy of the admitted projection. The kernel IS fnx, so
-//! these laws do not compare it with fnx. They check independently computed
-//! values, the VId mapping (vertex identities deliberately out of name order),
-//! admission, refusals and the certificate's kernel identity.
+//! Foundation procedures and their declared native fast paths. Every registered
+//! foundation kernel borrows the admitted CSR and is checked against pinned fnx
+//! and independent expectations.
+//! All paths keep canonical VId mapping, admission, refusals and provenance.
 
 use fgdb_prism::*;
 use fgdb_types::{CommitSeq, EId, VId, ids::ObjectId};
+use fnx_classes::Graph;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
@@ -181,12 +181,12 @@ fn centralities_and_cores_match_independently_computed_values() {
 }
 
 #[test]
-fn a_foundation_call_is_certified_with_the_foundation_kernel_and_witness() {
+fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() {
     let result = run("betweenness_centrality", &path());
     let certificate = &result.certificate;
     assert_eq!(
         certificate.execution_kernel,
-        "fnx-algorithms/betweenness_centrality"
+        "fgdb-prism/brandes-csr-source-order-v2"
     );
     assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
     assert_eq!(certificate.vertices, 4);
@@ -289,5 +289,754 @@ fn cancellation_is_observed_before_and_after_the_foundation_call() {
             matches!(result, Err(FnxExecutionError::Cancelled(observed)) if observed == stop),
             "stop {stop}"
         );
+    }
+}
+
+fn degree_bits(result: &FnxResult) -> BTreeMap<VId, u64> {
+    result
+        .rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [FnxValue::Vertex(vertex), FnxValue::Score(score)] => (*vertex, score.to_bits()),
+            _ => panic!("typed degree row required: {row:?}"),
+        })
+        .collect()
+}
+
+fn core_values(result: &FnxResult) -> BTreeMap<VId, u64> {
+    result
+        .rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [FnxValue::Vertex(vertex), FnxValue::Integer(core)] => (*vertex, *core),
+            _ => panic!("typed core row required: {row:?}"),
+        })
+        .collect()
+}
+
+/// Only the oracle needs the string-keyed graph removed from the native path.
+fn copied_graph(graph: &SnapshotGraphView) -> Graph {
+    let mut copy = Graph::strict();
+    let names = graph.nodes_ordered();
+    for &name in &names {
+        copy.add_node(name);
+    }
+    for source in 0..graph.node_count() {
+        for &target in graph.neighbors_indices(source).unwrap() {
+            if source < target {
+                copy.add_edge(names[source], names[target]).unwrap();
+            }
+        }
+    }
+    copy
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeStop {
+    Work(usize),
+    Poll(usize),
+}
+
+#[derive(Debug, Default)]
+struct NativeControl {
+    units: usize,
+    // Logical charge at each live poll, including polls during the arithmetic.
+    polls: Vec<usize>,
+    stop: Option<NativeStop>,
+    stopped: bool,
+}
+
+impl FnxMeter<NativeStop> for &mut NativeControl {
+    fn unit(&mut self) -> Result<(), NativeStop> {
+        assert!(!self.stopped, "no control call may follow a refusal");
+        self.units += 1;
+        let stop = NativeStop::Work(self.units);
+        if self.stop == Some(stop) {
+            self.stopped = true;
+            Err(stop)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn poll(&mut self) -> Result<(), NativeStop> {
+        assert!(!self.stopped, "no control call may follow a refusal");
+        self.polls.push(self.units);
+        let stop = NativeStop::Poll(self.polls.len());
+        if self.stop == Some(stop) {
+            self.stopped = true;
+            Err(stop)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn counted_foundation_call(
+    name: &str,
+    graph: &SnapshotGraphView,
+) -> Result<FnxResult, FnxExecutionError<Infallible>> {
+    use fnx_algorithms::GraphView;
+    struct Count<'a> {
+        units: &'a mut usize,
+        polls: &'a mut usize,
+    }
+    impl FnxMeter<Infallible> for Count<'_> {
+        fn unit(&mut self) -> Result<(), Infallible> {
+            *self.units += 1;
+            Ok(())
+        }
+        fn poll(&mut self) -> Result<(), Infallible> {
+            *self.polls += 1;
+            Ok(())
+        }
+    }
+    let (mut units, mut polls) = (0, 0);
+    let result = call(name).execute(
+        graph,
+        limits(1 << 30),
+        Count {
+            units: &mut units,
+            polls: &mut polls,
+        },
+    );
+    if result.is_ok() {
+        // Initial/admission/delivery units plus the former constructor's
+        // 2*n and the unchanged pre/post foundation-kernel units.
+        assert_eq!(units, 4 * graph.node_count() + 5, "{name}");
+        assert!(polls > 0, "native {name} must check live control");
+    }
+    result
+}
+
+fn assert_legacy_scores(
+    name: &str,
+    graph: &SnapshotGraphView,
+    scores: Vec<fnx_algorithms::CentralityScore>,
+    witness: fnx_algorithms::ComplexityWitness,
+) {
+    use fnx_algorithms::GraphView;
+    let actual = counted_foundation_call(name, graph).unwrap();
+    let mut expected: Vec<_> = scores
+        .into_iter()
+        .map(|score| {
+            (
+                u128::from_str_radix(&score.node, 16).unwrap(),
+                score.score.to_bits(),
+            )
+        })
+        .collect();
+    expected.sort_unstable_by_key(|&(vertex, _)| vertex);
+    let rows: Vec<_> = actual
+        .rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [FnxValue::Vertex(vertex), FnxValue::Score(score)] => (vertex.0, score.to_bits()),
+            _ => panic!("unexpected {name} row: {row:?}"),
+        })
+        .collect();
+    assert_eq!(rows.len(), graph.node_count());
+    assert_eq!(rows, expected, "{name}");
+    assert_eq!(actual.certificate.witness, witness, "{name}");
+    assert_eq!(actual.certificate.projection_digest, graph.digest());
+    assert_eq!(actual.certificate.snapshot, graph.binding());
+    assert_eq!(actual.certificate.vertices, graph.node_count());
+    assert_eq!(actual.certificate.edges, graph.edge_count());
+    assert_eq!(actual.certificate.adapter, AdapterPath::DecodedCache);
+}
+
+#[test]
+fn delegated_foundation_calls_match_legacy_constructor_bits_and_witnesses() {
+    for n in [0usize, 1, 2, 7, 65, 130] {
+        let mut vertices: Vec<u128> = (0..n)
+            .map(|i| (1u128 << 100) + (((n - i) as u128) << 64) + i as u128)
+            .collect();
+        if let Some(first) = vertices.first_mut() {
+            *first = u128::MAX;
+        }
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+        let mut edges = Vec::new();
+        for source in 0..n {
+            for target in source + 1..n.saturating_sub(1) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                if source == 0 || seed >> 61 == 0 {
+                    let edge = if seed & 1 == 0 {
+                        (vertices[source], vertices[target])
+                    } else {
+                        (vertices[target], vertices[source])
+                    };
+                    edges.push(edge);
+                }
+            }
+        }
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let reference = copied_graph(&graph);
+        macro_rules! scores {
+            ($name:literal, $function:ident) => {{
+                let expected = fnx_algorithms::$function(&reference);
+                assert_legacy_scores($name, &graph, expected.scores, expected.witness);
+            }};
+        }
+        scores!("closeness_centrality", closeness_centrality);
+        scores!("harmonic_centrality", harmonic_centrality);
+        scores!("betweenness_centrality", betweenness_centrality);
+    }
+}
+
+#[test]
+fn native_degree_and_core_match_pinned_fnx_on_every_five_vertex_topology() {
+    // Enumeration includes isolates, disconnected cores, dense ties and hubs.
+    // These identities share low halves and disagree with insertion order.
+    let vertices = [u128::MAX, 17, 1 << 127, 0, (1 << 64) | 17];
+    let pairs: Vec<_> = (0..vertices.len())
+        .flat_map(|source| ((source + 1)..vertices.len()).map(move |target| (source, target)))
+        .collect();
+    for mask in 0..(1usize << pairs.len()) {
+        let edges: Vec<_> = pairs
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, &(source, target))| (vertices[source], vertices[target]))
+            .collect();
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let copy = copied_graph(&graph);
+        let degree = fnx_algorithms::degree_centrality(&copy);
+        let core = fnx_algorithms::core_number(&copy);
+        let vertex = |name: &str| {
+            graph
+                .vertex_id(graph.get_node_index(name).unwrap())
+                .unwrap()
+        };
+        let expected_degree: BTreeMap<_, _> = degree
+            .scores
+            .into_iter()
+            .map(|entry| (vertex(&entry.node), entry.score.to_bits()))
+            .collect();
+        let expected_core: BTreeMap<_, _> = core
+            .core_numbers
+            .into_iter()
+            .map(|entry| (vertex(&entry.node), u64::try_from(entry.core).unwrap()))
+            .collect();
+        let actual_degree = run("degree_centrality", &graph);
+        let actual_core = run("core_number", &graph);
+        assert_eq!(degree_bits(&actual_degree), expected_degree, "mask {mask}");
+        assert_eq!(core_values(&actual_core), expected_core, "mask {mask}");
+        for (actual, expected) in [
+            (&actual_degree.certificate.witness, &degree.witness),
+            (&actual_core.certificate.witness, &core.witness),
+        ] {
+            assert_eq!(
+                (
+                    actual.nodes_touched,
+                    actual.edges_scanned,
+                    actual.queue_peak
+                ),
+                (
+                    expected.nodes_touched,
+                    expected.edges_scanned,
+                    expected.queue_peak
+                ),
+                "mask {mask}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_core_matches_independent_k_core_elimination_on_all_small_topologies() {
+    let vertices = [u128::MAX, 17, 1 << 127, 0, (1 << 64) | 17];
+    let n = vertices.len();
+    let pairs: Vec<_> = (0..n)
+        .flat_map(|source| ((source + 1)..n).map(move |target| (source, target)))
+        .collect();
+    for mask in 0..(1usize << pairs.len()) {
+        let mut adjacent = [[false; 5]; 5];
+        let mut edges = Vec::new();
+        for (bit, &(source, target)) in pairs.iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                adjacent[source][target] = true;
+                adjacent[target][source] = true;
+                edges.push((vertices[source], vertices[target]));
+            }
+        }
+        // Independently construct every k-core by repeated simultaneous
+        // elimination. This deliberately uses no degree ordering or buckets.
+        let mut cores = [0u64; 5];
+        for k in 1..n {
+            let mut present = [true; 5];
+            loop {
+                let removed: Vec<_> = (0..n)
+                    .filter(|&source| {
+                        present[source]
+                            && (0..n)
+                                .filter(|&target| present[target] && adjacent[source][target])
+                                .count()
+                                < k
+                    })
+                    .collect();
+                if removed.is_empty() {
+                    break;
+                }
+                for vertex in removed {
+                    present[vertex] = false;
+                }
+            }
+            for vertex in 0..n {
+                if present[vertex] {
+                    cores[vertex] = k as u64;
+                }
+            }
+        }
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let expected: BTreeMap<_, _> = vertices
+            .iter()
+            .copied()
+            .zip(cores)
+            .map(|(vertex, core)| (VId(vertex), core))
+            .collect();
+        assert_eq!(
+            core_values(&run("core_number", &graph)),
+            expected,
+            "mask {mask}"
+        );
+    }
+}
+
+#[test]
+fn native_degree_keeps_reciprocal_multiplication_and_empty_singleton_semantics() {
+    let vertices = [u128::MAX, 0, 17, 1 << 64, 1 << 127, (1 << 64) | 17];
+    let graph = view(
+        &vertices,
+        &[
+            (vertices[0], vertices[1]),
+            (vertices[0], vertices[2]),
+            (vertices[0], vertices[3]),
+        ],
+        SelfLoopPolicy::Keep,
+    );
+    let expected = 3.0_f64 * (1.0 / 5.0);
+    assert_ne!(expected.to_bits(), (3.0_f64 / 5.0).to_bits());
+    assert_eq!(
+        degree_bits(&run("degree_centrality", &graph))[&VId(u128::MAX)],
+        expected.to_bits()
+    );
+
+    let empty = view(&[], &[], SelfLoopPolicy::Keep);
+    let singleton = view(&[u128::MAX], &[], SelfLoopPolicy::Keep);
+    for name in ["degree_centrality", "core_number"] {
+        let result = run(name, &empty);
+        assert!(result.rows.is_empty());
+        assert_eq!(result.certificate.kernel_workspace_bytes, 0);
+        assert_eq!(result.certificate.witness.nodes_touched, 0);
+        assert_eq!(result.certificate.witness.edges_scanned, 0);
+        let single = run(name, &singleton);
+        assert_eq!(single.certificate.witness.nodes_touched, 1);
+        assert_eq!(single.certificate.witness.edges_scanned, 0);
+        assert_eq!(single.certificate.witness.queue_peak, 0);
+        let looped = view(
+            &[u128::MAX],
+            &[(u128::MAX, u128::MAX)],
+            SelfLoopPolicy::Keep,
+        );
+        assert!(matches!(
+            call(name).execute(&looped, limits(100), &mut NativeControl::default()),
+            Err(FnxExecutionError::SelfLoopRefused)
+        ));
+    }
+    assert_eq!(
+        degree_bits(&run("degree_centrality", &singleton)),
+        BTreeMap::from([(VId(u128::MAX), 1.0_f64.to_bits())])
+    );
+    assert_eq!(
+        core_values(&run("core_number", &singleton)),
+        BTreeMap::from([(VId(u128::MAX), 0)])
+    );
+}
+
+#[test]
+fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
+    for graph in [
+        view(&[], &[], SelfLoopPolicy::Keep),
+        view(&[u128::MAX], &[], SelfLoopPolicy::Keep),
+        path(),
+    ] {
+        for name in [
+            "degree_centrality",
+            "core_number",
+            "eigenvector_centrality",
+            "betweenness_centrality",
+            "closeness_centrality",
+            "harmonic_centrality",
+        ] {
+            let mut complete = NativeControl::default();
+            let actual = call(name)
+                .execute(&graph, limits(1 << 20), &mut complete)
+                .unwrap();
+            assert_eq!(actual, run(name, &graph), "{name}");
+            // Old copy: admission + arcs + nodes + rows + kernel boundaries +
+            // conversion + publication. Polls must not charge these again.
+            assert_eq!(complete.units, 4 * graph.node_count() + 5, "{name}");
+            for ordinal in 1..=complete.units {
+                let stop = NativeStop::Work(ordinal);
+                let mut control = NativeControl {
+                    stop: Some(stop),
+                    ..Default::default()
+                };
+                let result = call(name).execute(&graph, limits(1 << 20), &mut control);
+                assert!(
+                    matches!(result, Err(FnxExecutionError::Cancelled(observed)) if observed == stop),
+                    "{name} at {ordinal}"
+                );
+                assert_eq!(control.units, ordinal, "{name} at {ordinal}");
+                assert!(control.stopped);
+            }
+        }
+    }
+
+    let edges = [(0, 17), (17, 17)];
+    let kept = view(&[0, 17, u128::MAX], &edges, SelfLoopPolicy::Keep);
+    // The loop is in canonical row 1. Its row checkpoint precedes validation;
+    // the next row's work refusal must never overtake the self-loop refusal.
+    let loop_unit = 2 * kept.node_count() + 1 + 2;
+    for name in [
+        "degree_centrality",
+        "core_number",
+        "eigenvector_centrality",
+        "betweenness_centrality",
+        "closeness_centrality",
+        "harmonic_centrality",
+    ] {
+        for ordinal in [loop_unit, loop_unit + 1] {
+            let stop = NativeStop::Work(ordinal);
+            let mut control = NativeControl {
+                stop: Some(stop),
+                ..Default::default()
+            };
+            let result = call(name).execute(&kept, limits(1 << 20), &mut control);
+            if ordinal == loop_unit {
+                assert!(matches!(
+                    result,
+                    Err(FnxExecutionError::Cancelled(observed)) if observed == stop
+                ));
+            } else {
+                assert!(matches!(result, Err(FnxExecutionError::SelfLoopRefused)));
+            }
+            assert_eq!(control.units, loop_unit);
+        }
+        let dropped = view(&[0, 17, u128::MAX], &edges, SelfLoopPolicy::Drop);
+        assert!(
+            call(name)
+                .execute(&dropped, limits(1 << 20), &mut NativeControl::default())
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn native_distance_calls_certify_vertex_scratch_and_stop_at_every_live_poll() {
+    let n = 65;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let star: Vec<_> = (1..n)
+        .map(|target| (vertices[0], vertices[target]))
+        .collect();
+    let clique: Vec<_> = (0..n)
+        .flat_map(|source| (source + 1..n).map(move |target| (source, target)))
+        .map(|(source, target)| (vertices[source], vertices[target]))
+        .collect();
+    for (name, kernel) in [
+        (
+            "closeness_centrality",
+            "fgdb-prism/closeness-csr-batched-policy-v2",
+        ),
+        (
+            "harmonic_centrality",
+            "fgdb-prism/harmonic-csr-batched-policy-v2",
+        ),
+    ] {
+        let mut workspace = None;
+        for edges in [&[][..], star.as_slice(), clique.as_slice()] {
+            let graph = view(&vertices, edges, SelfLoopPolicy::Keep);
+            let result = run(name, &graph);
+            assert_eq!(result.certificate.execution_kernel, kernel);
+            assert_eq!(
+                result.certificate.registry_version,
+                FNX_SIGNATURE_REGISTRY_VERSION
+            );
+            // Fixed source batches need the same backing for isolates, a hub
+            // and a clique. No copied edge arrays hide in this certificate.
+            if let Some(bytes) = workspace {
+                assert_eq!(result.certificate.kernel_workspace_bytes, bytes);
+            } else {
+                workspace = Some(result.certificate.kernel_workspace_bytes);
+            }
+            assert!(result.certificate.kernel_workspace_bytes >= n * size_of::<f64>());
+        }
+        assert_eq!(
+            run(name, &view(&[], &[], SelfLoopPolicy::Keep))
+                .certificate
+                .kernel_workspace_bytes,
+            0
+        );
+
+        let graph = path();
+        let mut complete = NativeControl::default();
+        call(name)
+            .execute(&graph, limits(1 << 20), &mut complete)
+            .unwrap();
+        assert!(!complete.polls.is_empty());
+        for ordinal in 1..=complete.polls.len() {
+            let stop = NativeStop::Poll(ordinal);
+            let mut control = NativeControl {
+                stop: Some(stop),
+                ..Default::default()
+            };
+            assert!(
+                matches!(call(name).execute(&graph, limits(1 << 20), &mut control), Err(FnxExecutionError::Cancelled(observed)) if observed == stop)
+            );
+            assert_eq!(control.polls.len(), ordinal);
+            assert!(control.stopped);
+        }
+    }
+}
+
+#[test]
+fn native_eigenvector_certifies_workspace_and_keeps_live_nonconvergence_refusals() {
+    let name = "eigenvector_centrality";
+    for (graph, bytes) in [
+        (view(&[], &[], SelfLoopPolicy::Keep), 0),
+        (view(&[u128::MAX], &[], SelfLoopPolicy::Keep), 8),
+        (path(), 4 * 16),
+        (
+            view(
+                &[u128::MAX, 0, 1 << 127],
+                &[(u128::MAX, 0), (0, 1 << 127), (u128::MAX, 1 << 127)],
+                SelfLoopPolicy::Keep,
+            ),
+            3 * 16,
+        ),
+    ] {
+        let mut control = NativeControl::default();
+        let actual = call(name)
+            .execute(&graph, limits(1 << 20), &mut control)
+            .unwrap();
+        let (oracle, converged) =
+            fnx_algorithms::eigenvector_centrality_with_params(&copied_graph(&graph), 100, 1e-6);
+        assert!(converged);
+        let expected: BTreeMap<_, _> = oracle
+            .scores
+            .into_iter()
+            .map(|entry| {
+                (
+                    graph
+                        .vertex_id(graph.get_node_index(&entry.node).unwrap())
+                        .unwrap(),
+                    entry.score.to_bits(),
+                )
+            })
+            .collect();
+        assert_eq!(degree_bits(&actual), expected);
+        let certificate = &actual.certificate;
+        assert_eq!(
+            certificate.execution_kernel,
+            "fgdb-prism/eigenvector-csr-gather-v1"
+        );
+        assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
+        assert_eq!(certificate.kernel_workspace_bytes, bytes);
+        assert_eq!(certificate.witness, oracle.witness);
+        assert_eq!(control.units, 4 * graph.node_count() + 5);
+    }
+
+    // This path does not converge within the registered 100 iterations. Its
+    // bounded refusal must remain distinct from cancellation at any live poll.
+    let n = 129;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let edges: Vec<_> = vertices.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+    let (oracle, converged) =
+        fnx_algorithms::eigenvector_centrality_with_params(&copied_graph(&graph), 100, 1e-6);
+    assert!(!converged);
+    let mut complete = NativeControl::default();
+    let witness = match call(name).execute(&graph, limits(1 << 20), &mut complete) {
+        Err(FnxExecutionError::NotConverged {
+            max_iterations,
+            witness,
+        }) => {
+            assert_eq!(max_iterations, 100);
+            witness
+        }
+        other => panic!("bounded eigenvector refusal required: {other:?}"),
+    };
+    assert_eq!(witness, oracle.witness);
+    assert_eq!(witness.nodes_touched, 100 * n);
+    assert_eq!(witness.edges_scanned, 100 * 2 * (n - 1));
+    assert_eq!(witness.queue_peak, 0);
+    assert_eq!(complete.units, 3 * n + 2);
+    assert!(complete.polls.len() >= (100 * n).div_ceil(4_096));
+    assert!(complete.polls.iter().all(|&units| units == 3 * n + 2));
+    for ordinal in 1..=complete.polls.len() {
+        let stop = NativeStop::Poll(ordinal);
+        let mut control = NativeControl {
+            stop: Some(stop),
+            ..Default::default()
+        };
+        let result = call(name).execute(&graph, limits(1 << 20), &mut control);
+        assert!(
+            matches!(result, Err(FnxExecutionError::Cancelled(observed)) if observed == stop),
+            "eigenvector poll {ordinal}"
+        );
+        assert_eq!(control.polls.len(), ordinal);
+        assert_eq!(control.units, complete.polls[ordinal - 1]);
+        assert!(control.stopped);
+    }
+}
+
+#[test]
+fn native_foundation_polls_during_precharged_arithmetic_and_stops_immediately() {
+    const ARITHMETIC_RUN: usize = 4_096;
+    let n = 2 * ARITHMETIC_RUN + 7;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let edges: Vec<_> = vertices[1..]
+        .iter()
+        .map(|&target| (vertices[0], target))
+        .collect();
+    let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+    let execution_limits = FnxExecutionLimits {
+        max_result_rows: n,
+        ..limits(1 << 30)
+    };
+
+    for name in ["degree_centrality", "core_number"] {
+        let mut complete = NativeControl::default();
+        let result = call(name)
+            .execute(&graph, execution_limits, &mut complete)
+            .unwrap();
+        assert_eq!(result.rows.len(), n);
+        assert_eq!(complete.units, 4 * n + 5, "{name}");
+        // Arithmetic follows the admitted old copy phases, without additional
+        // work charges. Even one hub row must allow control to be observed.
+        let during_arithmetic = complete
+            .polls
+            .iter()
+            .filter(|&&units| units == 3 * n + 2)
+            .count();
+        assert!(
+            during_arithmetic >= n.div_ceil(ARITHMETIC_RUN),
+            "{name}: {complete:?}"
+        );
+        for ordinal in 1..=complete.polls.len() {
+            let stop = NativeStop::Poll(ordinal);
+            let mut control = NativeControl {
+                stop: Some(stop),
+                ..Default::default()
+            };
+            let result = call(name).execute(&graph, execution_limits, &mut control);
+            assert!(
+                matches!(result, Err(FnxExecutionError::Cancelled(observed)) if observed == stop),
+                "{name} poll {ordinal}"
+            );
+            assert_eq!(control.polls.len(), ordinal, "{name} poll {ordinal}");
+            assert_eq!(
+                control.units,
+                complete.polls[ordinal - 1],
+                "{name} poll {ordinal}"
+            );
+            assert!(control.stopped);
+        }
+    }
+}
+
+#[test]
+fn native_foundation_certifies_vertex_workspace_and_keeps_preflight_limits() {
+    let n = 97;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let star: Vec<_> = vertices[1..]
+        .iter()
+        .map(|&target| (vertices[0], target))
+        .collect();
+    let clique: Vec<_> = (0..n)
+        .flat_map(|source| ((source + 1)..n).map(move |target| (source, target)))
+        .map(|(source, target)| (vertices[source], vertices[target]))
+        .collect();
+    for edges in [Vec::new(), star, clique] {
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let expected_work = n + 2 * edges.len();
+        let bins = if edges.is_empty() { 1 } else { n };
+        for (name, kernel, bytes) in [
+            (
+                "degree_centrality",
+                "fgdb-prism/degree-centrality-csr-v1",
+                n * size_of::<f64>(),
+            ),
+            (
+                "core_number",
+                "fgdb-prism/core-number-bucket-csr-v1",
+                (3 * n + bins) * size_of::<usize>(),
+            ),
+        ] {
+            let result = run(name, &graph);
+            let certificate = &result.certificate;
+            assert_eq!(certificate.execution_kernel, kernel);
+            assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
+            // Star and clique have max degree n-1, yet radically different
+            // edge counts. Isolates need one bin. Native workspace must not
+            // contain the old copied arcs or a padded n-entry bucket table.
+            assert_eq!(certificate.kernel_workspace_bytes, bytes, "{name}");
+            assert_eq!(certificate.estimated_work, expected_work);
+            assert_eq!(certificate.witness.nodes_touched, n);
+            assert_eq!(certificate.witness.edges_scanned, 2 * edges.len());
+            assert_eq!(certificate.witness.queue_peak, 0);
+
+            let is_star = edges.len() == n - 1;
+            if name == "core_number" {
+                let expected = if edges.is_empty() {
+                    0
+                } else if is_star {
+                    1
+                } else {
+                    (n - 1) as u64
+                };
+                assert!(core_values(&result).values().all(|&core| core == expected));
+            } else {
+                for (vertex, bits) in degree_bits(&result) {
+                    let expected = if edges.is_empty() {
+                        0.0
+                    } else if is_star && vertex != VId(vertices[0]) {
+                        1.0 / (n - 1) as f64
+                    } else {
+                        1.0
+                    };
+                    assert_eq!(bits, expected.to_bits());
+                }
+            }
+
+            let mut control = NativeControl::default();
+            let refused = call(name).execute(&graph, limits(expected_work - 1), &mut control);
+            assert!(matches!(
+                refused,
+                Err(FnxExecutionError::LimitExceeded {
+                    resource: "estimated work", limit, requested
+                }) if limit == expected_work - 1 && requested == expected_work
+            ));
+            assert_eq!(control.units, n + 1);
+            assert!(control.polls.is_empty());
+
+            let mut control = NativeControl::default();
+            let refused = call(name).execute(
+                &graph,
+                FnxExecutionLimits {
+                    max_result_rows: n - 1,
+                    ..limits(1 << 30)
+                },
+                &mut control,
+            );
+            assert!(matches!(
+                refused,
+                Err(FnxExecutionError::LimitExceeded {
+                    resource: "result rows", limit, requested
+                }) if limit == n - 1 && requested == n
+            ));
+            assert_eq!(control.units, 1);
+            assert!(control.polls.is_empty());
+        }
     }
 }

@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -90,6 +90,9 @@ fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
         for right in &choices {
             for mask in 0..16 {
                 let values = [left.clone(), right.clone()];
+                let stored = values
+                    .clone()
+                    .map(|value| value.map(CanonicalPropertyValue::from));
                 let mut edges: Vec<_> = universe
                     .iter()
                     .enumerate()
@@ -123,7 +126,7 @@ fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
                             [],
                             edges.iter().copied(),
                             |_, _| Ok::<_, ()>(true),
-                            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+                            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
                             wide(),
                             || Ok::<_, ()>(()),
                         )
@@ -266,10 +269,18 @@ fn boolean_constants_and_keyword_named_variables_keep_null_and_identity_semantic
     ] {
         assert!(PreparedGraphText::prepare(statement, symbols).is_ok());
     }
-    for value in [
-        None,
-        Some(CanonicalScalar::Null),
-        Some(CanonicalScalar::Bool(true)),
+    // NOT keeps a missing or NULL operand UNKNOWN. A Bool is of another
+    // domain than 1 (fgdb-v6ku6): `a.n = 1` is FALSE, so NOT keeps the row.
+    for (value, kept) in [
+        (None, false),
+        (
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
+            false,
+        ),
+        (
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Bool(true))),
+            true,
+        ),
     ] {
         let pattern = query("MATCH (a) WHERE NOT (a.n=1) RETURN a");
         let result = pattern
@@ -284,7 +295,7 @@ fn boolean_constants_and_keyword_named_variables_keep_null_and_identity_semantic
                 || Ok::<_, ()>(()),
             )
             .unwrap();
-        assert!(result.value.is_empty());
+        assert_eq!(result.value.len(), usize::from(kept));
     }
 }
 
@@ -333,8 +344,8 @@ fn declared_scalar_rebinding_keeps_schema_catalog_and_prior_plans_immutable() {
                 .unwrap(),
         )
         .unwrap();
-    let status = CanonicalScalar::ucs_basic_text(payload).unwrap();
-    let enabled = CanonicalScalar::Bool(true);
+    let status = CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text(payload).unwrap());
+    let enabled = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     for (pattern, count) in [(&original, 1), (&changed, 0)] {
         let result = pattern
             .plan()
@@ -390,7 +401,8 @@ fn optional_and_exists_children_use_boolean_selection_before_match_success_and_g
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(10),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(0), R, VId(1)),
         (VId(0), R, VId(1)),
@@ -489,6 +501,352 @@ fn optional_and_exists_children_use_boolean_selection_before_match_success_and_g
     );
 }
 
+/// openCypher `v:L` in WHERE (TCK MatchWhere1 [1]): a top-level AND conjunct
+/// is the label `(v:L)` writes inline, the same plan byte for byte. Under OR,
+/// NOT or parentheses the pattern compiler refuses it, as it does a name the
+/// scope does not bind; a read's row filter takes those (the next law).
+#[test]
+fn a_where_label_conjunct_is_the_inline_label() {
+    for (conjunct, inline) in [
+        ("MATCH (a) WHERE a:L RETURN a", "MATCH (a:L) RETURN a"),
+        (
+            "MATCH (a)-[:R]->(b) WHERE b:L AND b.n > 1 RETURN a, b",
+            "MATCH (a)-[:R]->(b:L) WHERE b.n > 1 RETURN a, b",
+        ),
+        (
+            "MATCH (a) WHERE a.n = 2 AND a:L RETURN a",
+            "MATCH (a:L) WHERE a.n = 2 RETURN a",
+        ),
+    ] {
+        assert_eq!(
+            query(conjunct).canonical_bytes(),
+            query(inline).canonical_bytes(),
+            "{conjunct}"
+        );
+    }
+    for text in [
+        "MATCH (a) WHERE NOT a:L RETURN a",
+        "MATCH (a) WHERE a:L OR a.n = 1 RETURN a",
+        "MATCH (a) WHERE (a:L) RETURN a",
+        "MATCH (a) WHERE b:L RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}
+
+/// fgdb-qo3jv: under OR, NOT or parentheses, or beside a conjunct the
+/// Boolean parser reads as a compound expression, a WHERE label test is a
+/// Boolean leaf the pattern filter cannot read, and so is a relationship's
+/// `r:T` anywhere. A read's MATCH WHERE then runs as the row filter after an
+/// implicit `WITH *` (fgdb-1c29d), where `v:L` reads `'L' IN labels(v)`: the
+/// same template as writing that `WITH *`, also before a later MATCH or
+/// OPTIONAL MATCH (TCK Match7 [25]), which then joins the filtered rows. A
+/// flat conjunction keeps its inline label, byte for byte. An OPTIONAL
+/// MATCH's own WHERE belongs to its left join, so there a compound label test
+/// still refuses, as does a name no clause binds.
+#[test]
+fn a_compound_where_label_test_filters_after_an_implicit_with_star() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (pattern, predicate, tail) in [
+        ("(a)", "NOT a:L", "RETURN a"),
+        ("(a)", "a:L OR a.n = 1", "RETURN a"),
+        ("(a)", "(a:L)", "RETURN a"),
+        ("(a)", "NOT (a:L:M) AND a.n > 0", "RETURN a.n AS n"),
+        ("(a)", "a:L AND (a.n = 1 OR a.n = 2)", "RETURN a"),
+        ("(a)", "a:L AND a.n IN [1, 2]", "RETURN a"),
+        ("(a)-[r]->(b)", "r:R", "RETURN a, b"),
+        ("(a)-[r]->(b)", "r:R OR b:L", "RETURN a, b"),
+        ("(a)", "NOT (a:L)", "OPTIONAL MATCH (a)-[r:R]->(a) RETURN r"),
+        ("(a)", "a:L OR a.n = 1", "MATCH (a)-[:R]->(b) RETURN b"),
+    ] {
+        let deferred = template(&format!("MATCH {pattern} WHERE {predicate} {tail}"));
+        let explicit = template(&format!("MATCH {pattern} WITH * WHERE {predicate} {tail}"));
+        assert_eq!(deferred, explicit, "{predicate} {tail}");
+    }
+    for (conjunct, inline) in [
+        ("MATCH (a) WHERE a:L RETURN a", "MATCH (a:L) RETURN a"),
+        (
+            "MATCH (a) WHERE a.n = 2 AND a:L RETURN a.n AS n",
+            "MATCH (a:L) WHERE a.n = 2 RETURN a.n AS n",
+        ),
+        (
+            "MATCH (a) WHERE a:L AND (a)-[:R]->() RETURN a",
+            "MATCH (a:L) WHERE (a)-[:R]->() RETURN a",
+        ),
+    ] {
+        assert_eq!(template(conjunct), template(inline), "{conjunct}");
+    }
+    for text in [
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b:L OR b.n = 1 RETURN b",
+        "MATCH (a) WHERE b:L OR a.n = 1 RETURN a",
+    ] {
+        assert!(
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// openCypher `v:L` as a value (TCK Graph5, Return2 [8], fgdb-qo3jv): a
+/// vertex test compiles to exactly `'L' IN labels(v)`, a conjunction of
+/// labels to the AND of those, and a relationship test to `type(r) = 'T'`.
+/// NULL elements and names no catalog knows therefore behave as those forms
+/// do. A vertex test needs a value context, so a SET right-hand side
+/// refuses, and a row-scope name is not a graph element.
+#[test]
+fn a_label_test_value_is_label_membership_or_type_equality() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (test, spelled) in [
+        (
+            "MATCH (a) RETURN a, a:L AS result",
+            "MATCH (a) RETURN a, 'L' IN labels(a) AS result",
+        ),
+        (
+            "MATCH (a) RETURN (a:L) AS result",
+            "MATCH (a) RETURN ('L' IN labels(a)) AS result",
+        ),
+        (
+            "MATCH (a) RETURN a:L:M AS result",
+            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS result",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN r, r:R AS result",
+            "MATCH (a)-[r:R]->(b) RETURN r, type(r) = 'R' AS result",
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(m) RETURN m:L AS result",
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(m) RETURN 'L' IN labels(m) AS result",
+        ),
+        (
+            "MATCH (a) WITH a, a:L AS l RETURN a, l",
+            "MATCH (a) WITH a, 'L' IN labels(a) AS l RETURN a, l",
+        ),
+    ] {
+        assert_eq!(template(test), template(spelled), "{test}");
+    }
+    assert!(
+        fgdb_gql::PreparedGraphSetText::prepare("MATCH (a) WITH a.n AS n RETURN n:L AS x", symbols)
+            .is_err()
+    );
+    // A written label test is the same Boolean value a RETURN reads: SET
+    // stores true or false (both the CLI and the TCK runner read it back).
+    // Both spellings lower to one canonical mutation.
+    assert_eq!(
+        fgdb_gql::PreparedGraphMutationText::prepare(
+            "MATCH (a) SET a.n = a:L",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap()
+        .canonical_bytes(),
+        fgdb_gql::PreparedGraphMutationText::prepare(
+            "MATCH (a) SET a.n = 'L' IN labels(a)",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap()
+        .canonical_bytes()
+    );
+}
+
+/// openCypher binds IN tighter than comparisons, AND, OR and XOR, and looser
+/// than `+` (TCK Precedence3 [4]-[6]). The list operand of an IN therefore
+/// ends before a following Boolean operator even when it is a graph function,
+/// a name or a parameter: each unparenthesized spelling is its parenthesized
+/// one (fgdb-klah2). The list used to swallow the rest of the conjunction.
+#[test]
+fn in_ends_its_list_operand_before_boolean_operators() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (bare, grouped) in [
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) AND ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) OR 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) OR ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) AND a.n = 1 AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) AND a.n = 1 AS r",
+        ),
+        (
+            "MATCH (a) RETURN a.n = 1 AND 'L' IN labels(a) AND 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN a.n = 1 AND ('L' IN labels(a)) AND ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'n' IN keys(a) AND 'L' IN labels(a) AS r",
+            "MATCH (a) RETURN ('n' IN keys(a)) AND ('L' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) WITH a, labels(a) AS l RETURN 'L' IN l AND 'M' IN l AS r",
+            "MATCH (a) WITH a, labels(a) AS l RETURN ('L' IN l) AND ('M' IN l) AS r",
+        ),
+    ] {
+        assert_eq!(template(bare), template(grouped), "{bare}");
+        // The grouping is not vacuous: the conjunction is not one membership.
+        assert_ne!(
+            template(bare),
+            template("MATCH (a) RETURN 'L' IN labels(a) AS r"),
+            "{bare}"
+        );
+    }
+    // A lone membership and a literal list keep their reading.
+    for text in [
+        "MATCH (a) RETURN 'L' IN labels(a) AS r",
+        "MATCH (a) RETURN 1 IN [1] AND 2 IN [2] AS r",
+    ] {
+        template(text);
+    }
+}
+
+/// fgdb-dn9q3: `a.n IN $xs` with a declared List argument is the literal
+/// list's membership, member for member: three-valued, NOT outside the
+/// membership, an empty list FALSE, inside AND/OR as any predicate. A NULL
+/// argument is UNKNOWN for every vertex. A nested member refuses at binding,
+/// and the template stays bindable.
+#[test]
+fn a_list_argument_in_a_pattern_where_is_the_literal_lists_membership() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [
+        Some(CanonicalScalar::Int(1)),
+        Some(CanonicalScalar::Int(2)),
+        Some(CanonicalScalar::Int(3)),
+        Some(CanonicalScalar::Null),
+        None,
+    ]
+    .map(|value| value.map(CanonicalPropertyValue::from));
+    let rows = |pattern: &PreparedGraphPattern<GraphValueRow>| -> Vec<VId> {
+        pattern
+            .plan()
+            .execute_governed_with_properties(
+                values.len() as u64,
+                (1..=values.len()).map(|vid| VId(vid as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(values[vid.0 as usize - 1].as_ref()),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values()[0].as_vertex().unwrap())
+            .collect()
+    };
+    let calls = Cell::new(0);
+    let declared = |predicate: &str| {
+        PreparedGraphText::prepare_with_parameter_types(
+            &format!("MATCH (a) WHERE {predicate} RETURN a"),
+            &[("xs", GqlParameterType::List)],
+            |kind: GraphSymbolKind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap_or_else(|error| panic!("{predicate}: {error:?}"))
+    };
+    let list = |members: &[Option<i64>]| {
+        GqlParameters::new()
+            .with_list(
+                "xs",
+                members
+                    .iter()
+                    .map(|member| {
+                        GraphValue::Scalar(
+                            member.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap()
+    };
+    for (predicate, literal, members, expected) in [
+        (
+            "a.n IN $xs",
+            "a.n IN [1, 3, 3]",
+            &[Some(1), Some(3), Some(3)][..],
+            &[1, 3][..],
+        ),
+        (
+            "a.n NOT IN $xs",
+            "a.n NOT IN [1, 3]",
+            &[Some(1), Some(3)],
+            &[2],
+        ),
+        ("a.n IN $xs", "a.n IN [1, NULL]", &[Some(1), None], &[1]),
+        (
+            "NOT a.n IN $xs",
+            "NOT a.n IN [1, NULL]",
+            &[Some(1), None],
+            &[],
+        ),
+        ("a.n IN $xs", "a.n IN []", &[], &[]),
+        ("a.n NOT IN $xs", "a.n NOT IN []", &[], &[1, 2, 3, 4, 5]),
+        (
+            "a.n IN $xs AND a.n > 1",
+            "a.n IN [1, 2, 3] AND a.n > 1",
+            &[Some(1), Some(2), Some(3)],
+            &[2, 3],
+        ),
+        (
+            "a.n IN $xs OR a.n IS NULL",
+            "a.n IN [2] OR a.n IS NULL",
+            &[Some(2)],
+            &[2, 4, 5],
+        ),
+    ] {
+        let expected: Vec<_> = expected.iter().map(|&vid| VId(vid)).collect();
+        let template = declared(predicate);
+        assert_eq!(
+            rows(&template.bind_parameters(&list(members)).unwrap()),
+            expected,
+            "{predicate}"
+        );
+        assert_eq!(
+            rows(&query(&format!("MATCH (a) WHERE {literal} RETURN a"))),
+            expected,
+            "{literal}"
+        );
+    }
+    // One catalog call per statement: the list never re-enters resolution.
+    assert_eq!(calls.get(), 8);
+    let template = declared("a.n IN $xs");
+    let null = GqlParameters::new().with_null("xs").unwrap();
+    assert!(rows(&template.bind_parameters(&null).unwrap()).is_empty());
+    let negated = declared("a.n NOT IN $xs");
+    assert!(rows(&negated.bind_parameters(&null).unwrap()).is_empty());
+    let nested = GqlParameters::new()
+        .with_list(
+            "xs",
+            vec![GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into(),
+            )],
+        )
+        .unwrap();
+    assert!(template.bind_parameters(&nested).is_err());
+    assert_eq!(
+        rows(&template.bind_parameters(&list(&[Some(2)])).unwrap()),
+        [VId(2)]
+    );
+}
+
 #[test]
 fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolution() {
     for statement in [
@@ -552,7 +910,8 @@ fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolutio
 #[test]
 fn boolean_text_keeps_exact_controls_and_eager_errors_even_with_a_zero_page() {
     let pattern = query("MATCH (a)-[:R]->(b) WHERE a.n<b.n OR b.n IS NULL RETURN a,b LIMIT 1");
-    let values = [CanonicalScalar::Int(0), CanonicalScalar::Int(2)];
+    let values =
+        [CanonicalScalar::Int(0), CanonicalScalar::Int(2)].map(CanonicalPropertyValue::from);
     let edges = [(VId(0), R, VId(1)); 2];
     let mut total = 0;
     let measured = pattern

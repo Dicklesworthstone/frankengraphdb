@@ -24,11 +24,17 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
 pub mod aggregate;
+mod asynchronous;
+pub use asynchronous::{
+    AsyncVertexCandidate, AsyncVertexScanCursor, AsyncVertexScanEvent, AsyncVertexScanOutput,
+    AsyncVertexScanPlan, AsyncVertexScanRecord, AsyncVertexScanSource,
+    AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan,
+};
 mod output;
 mod probe;
 mod record;
@@ -72,14 +78,51 @@ pub struct VertexScanPlan<Row = VId> {
 }
 impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
-        Self::compile_with_projection(plan, Row::accepts_projection)
+        Self::compile_with_projection(plan, None, Row::accepts_projection)
+    }
+
+    /// Infallible root predicates that precede every Boolean expression and
+    /// existence probe. A source may use an exact candidate superset for one
+    /// of these predicates, but must keep the ordinary visible-row checks.
+    /// Later predicates cannot prune roots: doing so could hide an earlier
+    /// expression or probe error. Source authorization still controls which
+    /// property indexes may be consulted.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.tests
+            .iter()
+            .take_while(|test| matches!(test, Test::Predicate(_) | Test::Identity(_)))
+            .filter_map(|test| match test {
+                Test::Predicate(predicate) => Some(predicate),
+                _ => None,
+            })
+    }
+
+    /// A direct STARTS WITH conjunct in the first Boolean expression, after
+    /// only infallible root predicates. Every scalar-expression conjunct must
+    /// be a direct prefix test, so nontext values are UNKNOWN and no arithmetic
+    /// sibling can be skipped. A source must prove compatible text ordering.
+    /// Later Boolean expressions and probes are never crossed by this accessor.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        for test in self.tests.iter() {
+            match test {
+                Test::Predicate(_) | Test::Identity(_) => {}
+                Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                    return expression.starts_with_conjunct();
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.
+    // Only a compiler-checked blocking sort tail can retain hidden key cells.
     fn compile_with_projection(
         plan: &GlaPlan<Row>,
+        sort_tail: Option<&crate::scan_stream::ScanSortTail>,
         accepts_projection: impl FnOnce(&GlaOperator, &GlaOperator) -> bool,
     ) -> Result<Self, VertexScanBuildError> {
         let operators = plan.operators();
@@ -112,7 +155,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     // Audit every bound operand while taking the owned copy.
                     // A captured edge or another slot must never become a
                     // missing property on the one vertex this cursor owns.
-                    let mut local = !expression.contains_edge_property();
+                    let mut local = !expression.contains_captured_edge();
                     let expression = expression.remap(|slot| {
                         local &= slot.ordinal() == 0;
                         slot
@@ -139,7 +182,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         // A unique leading identity establishes both whole-row uniqueness and
         // order even when later cells are properties. No global set is needed.
-        if plan.visible_columns.is_some()
+        if (plan.visible_columns.is_some() && sort_tail.is_none())
             || !operators
                 .get(at)
                 .is_some_and(|order| accepts_projection(&operators[projection_at], order))
@@ -211,6 +254,80 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         Ok(true)
     }
+
+    // The synchronous and asynchronous source drivers enter this SAME row
+    // kernel. Allocation admission belongs to the host and happens only after
+    // filtering, SKIP and output-budget admission, before any projection copy.
+    fn project_record<const EMIT: bool, S, F, C, Guard>(
+        &self,
+        vid: VId,
+        row: VertexScanRow<'_>,
+        source: &S,
+        skip: &mut u64,
+        meter: &mut Meter<F>,
+        controls: (
+            impl FnOnce(&mut Meter<F>) -> ScanResult<Guard, S::Error, C>,
+            impl FnMut(VertexScanEvent) -> Result<(), S::Error>,
+        ),
+    ) -> ScanResult<Option<(Row, Guard)>, S::Error, C>
+    where
+        S: VertexScanSource,
+        F: FnMut() -> Result<(), C>,
+    {
+        let (reserve, mut observe) = controls;
+        let accepted = {
+            let metered = std::cell::RefCell::new(&mut *meter);
+            let observer = std::cell::RefCell::new(&mut observe);
+            self.accepts(
+                vid,
+                row,
+                source,
+                &mut |event| {
+                    row_event(
+                        &mut metered.borrow_mut(),
+                        &mut **observer.borrow_mut(),
+                        event,
+                    )
+                },
+                &mut || metered.borrow_mut().record(),
+            )?
+        };
+        if !accepted {
+            return Ok(None);
+        }
+        meter.event(VertexScanEvent::Work)?;
+        if *skip != 0 {
+            *skip -= 1;
+            return Ok(None);
+        }
+        if EMIT {
+            let _ = meter.next_result_count()?;
+        }
+        let guard = reserve(meter)?;
+        let value = Row::project(vid, row, &self.projection, &mut |event| {
+            row_event(meter, &mut observe, event)
+        })?;
+        if EMIT {
+            meter.emit()?;
+        } else {
+            meter.event(VertexScanEvent::Work)?;
+        }
+        Ok(Some((value, guard)))
+    }
+}
+
+fn row_event<F, E, C>(
+    meter: &mut Meter<F>,
+    observe: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+    event: VertexScanEvent,
+) -> ScanResult<(), E, C>
+where
+    F: FnMut() -> Result<(), C>,
+{
+    meter.event(event)?;
+    // Resource refusal remains a source error, never a Boolean UNKNOWN or an
+    // absent property. The logical allowance is checked before byte admission.
+    observe(event).map_err(|error| GqlQueryError::Source(VertexScanError::Source(error)))
 }
 
 /// Reuse the bound evaluator rather than interpreting a second expression
@@ -274,7 +391,8 @@ fn seek<'a, T, K: Ord, E>(
 #[derive(Clone, Copy)]
 pub struct VertexScanRow<'a> {
     pub labels: &'a [LabelId],
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 impl core::fmt::Debug for VertexScanRow<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -309,6 +427,34 @@ pub trait VertexScanSource {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<Self::Error, C>>;
+
+    /// Recheck an optional root candidate restriction against an already
+    /// resolved visible row. A scoped adapter must admit the row's authority
+    /// before calling this method and may use a poll-only control so stale
+    /// historical index entries do not consume candidate allowances.
+    /// This does not replace ordinary predicates or narrow independent probes.
+    fn root_is_candidate<C>(
+        &self,
+        _row: &VertexScanRow<'_>,
+        _control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<bool, VertexScanSourceError<Self::Error, C>> {
+        Ok(true)
+    }
+
+    /// A cooperative consumer asks for one source examination at a time.
+    /// Sources which internally filter a directory override this to return a
+    /// skipped identity instead of synchronously consuming its unread suffix.
+    /// Skips spend no candidate/result allowance. The ordinary source contract
+    /// remains the default for sources that already return one history per call.
+    fn next_vertex_step<C>(
+        &mut self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<VId>, VertexScanSourceError<Self::Error, C>> {
+        self.next_vertex(control).map(|next| match next {
+            Some(vid) => crate::scan_stream::SourceStep::Item(vid),
+            None => crate::scan_stream::SourceStep::Exhausted,
+        })
+    }
     fn vertex<'a, C>(
         &'a self,
         vid: VId,
@@ -340,7 +486,8 @@ pub trait VertexScanSource {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, VertexScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.vertex(vid, control)? else {
             return Ok(None);
         };
@@ -386,7 +533,7 @@ pub trait VertexScanSource {
     fn next_probe_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        _relation: fgdb_delta_types::RelationId,
+        _relation: crate::algebra::EdgeRelation,
         direction: crate::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -424,7 +571,7 @@ pub trait VertexScanSource {
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<
-        Option<Option<&'a CanonicalScalar>>,
+        Option<Option<&'a CanonicalPropertyValue>>,
         crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>,
     > {
         let Some(row) = self.probe_edge(eid, control)? else {
@@ -459,6 +606,9 @@ pub enum VertexScanError<E> {
     Plan(VertexScanBuildError),
     /// The source repeated or reversed an identity; no bad row is delivered.
     NonIncreasingIdentity,
+    /// Async intake must admit exactly the identity it then returns, before
+    /// resolving its payload. Missing, repeated or mismatched admission fails.
+    InvalidCandidateAdmission,
     CounterExhausted,
     /// Structural probe failure. Actual source errors remain Source(E), so
     /// native I/O classification and interruption handling stay unchanged.
@@ -472,6 +622,9 @@ impl<E: core::fmt::Display> core::fmt::Display for VertexScanError<E> {
             Self::Probe(error) => error.fmt(f),
             Self::NonIncreasingIdentity => {
                 f.write_str("vertex stream source is not strictly increasing")
+            }
+            Self::InvalidCandidateAdmission => {
+                f.write_str("vertex stream source violated candidate admission")
             }
             Self::CounterExhausted => f.write_str("vertex stream counter exhausted"),
         }
@@ -497,7 +650,10 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
 }
 impl<F> Meter<F> {
-    fn event<E, C>(&mut self, event: VertexScanEvent) -> ScanResult<(), E, C>
+    fn control<C>(
+        &mut self,
+        event: VertexScanEvent,
+    ) -> Result<(), GqlQueryError<core::convert::Infallible, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
@@ -511,6 +667,13 @@ impl<F> Meter<F> {
                 },
             )
             .map_err(GqlQueryError::Evaluator)
+    }
+    fn event<E, C>(&mut self, event: VertexScanEvent) -> ScanResult<(), E, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        self.control(event)
+            .map_err(|error| error.map_source(|never| match never {}))
     }
     fn record<E, C>(&mut self) -> ScanResult<(), E, C> {
         let count = self
@@ -629,6 +792,15 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
     where
         F: FnMut() -> Result<(), C>,
     {
+        self.advance_inner::<true, C>()
+    }
+
+    // Aggregate input is a private occurrence, not a delivered result row.
+    // Keep source, predicates and projection in this same governed loop.
+    fn advance_inner<const EMIT: bool, C>(&mut self) -> ScanResult<Option<Row>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         let meter = &mut self.meter;
         meter.event(VertexScanEvent::Work)?;
         if self.plan.empty || self.plan.count == Some(0) {
@@ -652,35 +824,16 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             let Some(record) = record else {
                 continue;
             };
-            let row = record.as_row();
-            // Probe work and candidate admission share the original meter.
-            // These callback borrows are sequential; none spans a source call.
-            let accepted = {
-                let metered = std::cell::RefCell::new(&mut *meter);
-                self.plan.accepts(
-                    vid,
-                    row,
-                    &*source,
-                    &mut |event| metered.borrow_mut().event(event),
-                    &mut || metered.borrow_mut().record(),
-                )?
-            };
-            if !accepted {
-                continue;
+            if let Some((value, ())) = self.plan.project_record::<EMIT, _, _, _, _>(
+                vid,
+                record.as_row(),
+                &*source,
+                &mut self.skip,
+                meter,
+                (|_| Ok(()), |_| Ok(())),
+            )? {
+                return Ok(Some(value));
             }
-            meter.event(VertexScanEvent::Work)?;
-            if self.skip != 0 {
-                self.skip -= 1;
-                continue;
-            }
-            // Refuse an exhausted output budget before copying any property
-            // payload; count delivery only after the whole row is complete.
-            let _ = meter.next_result_count()?;
-            let value = Row::project(vid, row, &self.plan.projection, &mut |event| {
-                meter.event(event)
-            })?;
-            meter.emit()?;
-            return Ok(Some(value));
         }
     }
 }

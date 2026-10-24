@@ -82,9 +82,22 @@ scan = [
   "docs/TRANSACTION_GQL.md",
   "docs/WORKSPACE_TOPOLOGY.md",
   "docs/atomic_relation_writes.md",
+  "docs/bolt-autocommit-writes.md",
   "docs/bounded_gla_execution.md",
   "docs/graph_patterns.md",
   "docs/FABRIC_PROTOCOL.md",
+  # Landed 2026-10-14..17 without registration (g0_claims_e2e and g0_spine_e2e
+  # red on unclaimed_prose at 1563ee5b). Each carried zero FG-<NS>-<NN> markers
+  # when admitted, so scanning them changed no verdict
+  # (fgdb-rc1017-bridge-wvze5.2).
+  "docs/REMOTE_BATCH_WRITES.md",
+  "docs/STUDIO.md",
+  "docs/VECTOR_COORDINATE_PROJECTION.md",
+  "docs/cli_graph_only_search.md",
+  # Landed 2026-10-20 in 7db8ffaa without registration; zero FG-<NS>-<NN>
+  # markers when admitted, so scanning it changes no verdict
+  # (fgdb-rc1017-bridge-wvze5.20).
+  "crates/fgdb-cli/QUERY_FED_WRITES.md",
   "crates/fgdb-beacon/README.md",
   "crates/fgdb-cli/README.md",
   "crates/fgdb-order/README.md",

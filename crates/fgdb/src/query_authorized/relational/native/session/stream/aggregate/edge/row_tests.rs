@@ -208,6 +208,44 @@ fn scoped_rows_preserve_direction_multiplicity_pages_and_masked_fields() {
 }
 
 #[test]
+fn send_edge_cursor_uses_the_same_identified_masked_source_and_retirement_fence() {
+    context!(runtime, cx, commit);
+    let db = runtime.block_on(database(&commit, true));
+    let issuer = authority();
+    let token = issuer.issue_at(&grant(), 100).unwrap();
+    let params = GqlParameters::new();
+    let mut session = db
+        .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session.prepare(&cx, ROWS, &params).unwrap();
+    let expected = session.execute(&cx, &prepared, &params).unwrap();
+    {
+        let mut cursor = session.stream_send(&cx, &prepared, &params).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        let columns = cursor.columns().to_vec();
+        let rows = cursor
+            .by_ref()
+            .map(|row| row.unwrap().values().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(native(&columns, &rows), expected);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+    }
+    {
+        let mut cursor = session.stream_send(&cx, &prepared, &params).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        issuer.retire();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Denied::AuthorityRetired)))
+        ));
+        assert!(cursor.next().is_none());
+    }
+    assert!(session.is_closed());
+}
+
+#[test]
 fn connected_rows_keep_captured_paths_and_rebind_scoped_predicates() {
     context!(runtime, cx, commit);
     let db = runtime.block_on(database(&commit, true));
@@ -223,12 +261,12 @@ fn connected_rows_keep_captured_paths_and_rebind_scoped_predicates() {
     {
         let mut cursor = session.stream(&cx, &prepared, &params).unwrap();
         let got = cells(&mut cursor);
+        // DIFFERENT EDGES: self-loop 13 cannot bind both e and f.
         let expected = [
             (10, 0, 12, 1, 3, Some(8)),
             (11, 0, 12, 1, 3, Some(8)),
             (12, 1, 13, 3, 3, None),
             (12, 1, u128::MAX, 3, u128::MAX, Some(16)),
-            (13, 3, 13, 3, 3, None),
             (13, 3, u128::MAX, 3, u128::MAX, Some(16)),
         ];
         assert_eq!(got.len(), expected.len());
@@ -292,6 +330,89 @@ fn connected_rows_keep_captured_paths_and_rebind_scoped_predicates() {
 }
 
 #[test]
+fn directed_identity_only_prefix_preserves_masks_prepared_rebinding_and_signed_rows() {
+    context!(runtime, cx, commit);
+    let db = runtime.block_on(database(&commit, true));
+    let issuer = authority();
+    let token = issuer.issue_at(&grant(), 100).unwrap();
+    let params = GqlParameters::new();
+    let mut session = db
+        .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+        .unwrap();
+    for (pattern, reverse) in [("(a)-[e:R]->(b)", false), ("(a)<-[e:R]-(b)", true)] {
+        let text = format!(
+            "MATCH {pattern} RETURN DISTINCT e AS edge,e.p AS weight,b AS target,e.hidden AS masked"
+        );
+        let prepared = session.prepare(&cx, &text, &params).unwrap();
+        let eager = session.execute(&cx, &prepared, &params).unwrap();
+        let expected: Vec<_> = VISIBLE
+            .iter()
+            .map(|&(id, from, to, weight)| {
+                vec![
+                    GraphValue::Edge(EId(id)),
+                    value(weight),
+                    GraphValue::Vertex(VId(if reverse { from } else { to })),
+                    value(None),
+                ]
+            })
+            .collect();
+        let mut cursor = session.stream_send(&cx, &prepared, &params).unwrap();
+        let actual = cursor
+            .by_ref()
+            .map(|row| row.unwrap().values().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{text}");
+        assert_eq!(native(cursor.columns(), &actual), eager);
+    }
+    let low = GqlParameters::new().with_int64("minimum", 3).unwrap();
+    let high = GqlParameters::new().with_int64("minimum", 10).unwrap();
+    let prepared = session
+        .prepare(
+            &cx,
+            "MATCH (a)-[e:R]->(b) WHERE e.p > $minimum RETURN e AS edge",
+            &low,
+        )
+        .unwrap();
+    for (parameters, expected) in [
+        (&low, vec![EId(11), EId(12), EId(u128::MAX)]),
+        (&high, vec![EId(u128::MAX)]),
+        (&low, vec![EId(11), EId(12), EId(u128::MAX)]),
+    ] {
+        assert_eq!(
+            cells(&mut session.stream(&cx, &prepared, parameters).unwrap()),
+            expected
+                .into_iter()
+                .map(|id| vec![GraphValue::Edge(id)])
+                .collect::<Vec<_>>(),
+        );
+    }
+    let mut limited = grant();
+    limited.limits.max_rows = 2;
+    let token = issuer.issue_at(&limited, 100).unwrap();
+    let mut session = db
+        .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+        .unwrap();
+    let prepared = session
+        .prepare(&cx, "MATCH (a)-[e:R]->(b) RETURN e AS edge", &params)
+        .unwrap();
+    let mut cursor = session.stream(&cx, &prepared, &params).unwrap();
+    for id in [10, 11] {
+        assert_eq!(
+            cursor.next().unwrap().unwrap().values(),
+            &[GraphValue::Edge(EId(id))]
+        );
+    }
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(QueryError::Authorization(Denied::LimitExceeded(
+            LimitDimension::Rows
+        ))))
+    ));
+    assert_eq!(cursor.state(), VertexScanState::Failed);
+    assert!(cursor.next().is_none());
+}
+
+#[test]
 fn opening_checks_owner_branch_shape_and_cut_but_does_not_scan_the_unread_graph() {
     context!(runtime, cx, commit);
     let db = runtime.block_on(database(&commit, true));
@@ -343,7 +464,7 @@ fn opening_checks_owner_branch_shape_and_cut_but_does_not_scan_the_unread_graph(
         .unwrap();
     assert!(zero.stream(&cx, &denied, &params).unwrap().next().is_none());
     for text in [
-        "MATCH (a)-[e:R]->(b) RETURN e AS edge LIMIT 0",
+        "MATCH (a)-[e:R]-(b) RETURN e AS edge LIMIT 0",
         "MATCH (a)-[e:R]->(b) RETURN a AS start,e AS edge LIMIT 0",
         "MATCH (a)-[e:R]->(b) RETURN e AS edge,a AS start ORDER BY edge DESC LIMIT 0",
     ] {

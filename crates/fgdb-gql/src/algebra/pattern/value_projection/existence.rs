@@ -38,12 +38,12 @@ impl GraphPatternBuilder {
     /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
     /// Later positive patterns cannot rebind a null. Explicit outer_vertex
     /// operands instead capture the original nullable value for predicates.
-    /// Every clause may bind fixed relationship identities. Required and
-    /// OPTIONAL clauses export them as projection captures; an OPTIONAL clause
-    /// without a witness leaves its captures null, like its vertices. EXISTS
-    /// identities serve local edge-property predicates only. No clause
-    /// correlates with an outer relationship alias. Full scoped path values
-    /// remain unsupported. EXISTS locals stay private. A complete optional witness remains a witness
+    /// Every clause may bind fixed relationships and the positive compiler's
+    /// bounded path captures. Required and OPTIONAL clauses export them;
+    /// absence leaves OPTIONAL captures null, like its vertices. Path predicates
+    /// belong to their own clause, before absence is decided. EXISTS captures
+    /// stay private. No clause correlates with an outer relationship or path
+    /// alias. A complete optional witness remains a witness
     /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
@@ -75,18 +75,6 @@ impl GraphPatternBuilder {
         let mut identities = self.identities.len();
         let mut path_captures = self.path_captures.len();
         for clause in clauses {
-            // A scoped clause may bind single relationships (exported by
-            // required/optional clauses, private to probes). Full path values
-            // and path predicates still need their own scoped output contract.
-            if clause
-                .pattern
-                .path_captures
-                .iter()
-                .any(|capture| !capture.edge_identity)
-                || !clause.pattern.path_predicates.is_empty()
-            {
-                return Err(PatternBuildError::InvalidPathCapture);
-            }
             if clause.pattern.variables.iter().any(|variable| {
                 self.path_captures
                     .iter()
@@ -168,7 +156,27 @@ impl GraphPatternBuilder {
             });
             // Only positive pattern vertices may anchor traversal. A predicate
             // capture can be null and must not suppress independent witnesses.
-            let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
+            let (outer_at, root) = if inner
+                .path_captures
+                .iter()
+                .any(|capture| !capture.edge_identity)
+            {
+                // CapturePath concatenates traversal segments in DECLARED
+                // order from the declared start. Re-rooting at a correlated
+                // destination reverses a segment; swapping a later edge also
+                // destroys a captured range's order. Keep the native root and
+                // edge order for these clauses. A shared native root can still
+                // be bound directly; other correlations are enforced at their
+                // ordinary binding slots, before any capture or path predicate.
+                // This uses the existing governed scan/expand family, not an
+                // endpoint-to-edge reconstruction or a second path evaluator.
+                let first = inner
+                    .edges
+                    .first()
+                    .map(|edge| edge.source)
+                    .or_else(|| inner.variables.iter().position(|variable| !variable.outer));
+                (first.and_then(correlation), None)
+            } else if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
                 // Captures address declared edges, not positions chosen by a
                 // correlated traversal. Preserve that identity when a later
@@ -222,8 +230,15 @@ impl GraphPatternBuilder {
             let start = operators.len();
             let optional = clause.kind == GraphMatchKind::Optional;
             let required = clause.kind == GraphMatchKind::Required;
+            let collect = clause.kind == GraphMatchKind::Collect;
             if optional {
                 operators.push(GlaOperator::Optional {
+                    group: group as u32,
+                    end: 0,
+                    slots: 0,
+                });
+            } else if collect {
+                operators.push(GlaOperator::Collect {
                     group: group as u32,
                     end: 0,
                     slots: 0,
@@ -373,6 +388,33 @@ impl GraphPatternBuilder {
                             segments: segments.into_iter().map(map).collect(),
                         });
                     }
+                    GlaOperator::SelectPathLength {
+                        capture,
+                        comparison,
+                        value,
+                    } => {
+                        operators.push(GlaOperator::SelectPathLength {
+                            capture: map_capture(capture),
+                            comparison,
+                            value,
+                        });
+                    }
+                    GlaOperator::SelectPathNull {
+                        capture,
+                        function,
+                        is_null,
+                    } => {
+                        operators.push(GlaOperator::SelectPathNull {
+                            capture: map_capture(capture),
+                            function,
+                            is_null,
+                        });
+                    }
+                    GlaOperator::DifferentEdges { segments } => {
+                        operators.push(GlaOperator::DifferentEdges {
+                            segments: segments.into_iter().map(map).collect(),
+                        });
+                    }
                     GlaOperator::SelectBoolean { expression } => {
                         operators.push(GlaOperator::SelectBoolean {
                             expression: expression.remap_elements(map, map_capture),
@@ -390,6 +432,41 @@ impl GraphPatternBuilder {
                     group: group as u32,
                 });
                 operators[start] = GlaOperator::Optional {
+                    group: group as u32,
+                    end,
+                    slots: available,
+                };
+            } else if collect {
+                // Each witness contributes its local vertex, relationship or
+                // path, at the slot or capture this clause gave it.
+                let value = clause
+                    .element
+                    .map(|name| {
+                        if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
+                            Ok(ValueProjection::Vertex {
+                                slot: map(inner_slots[at]),
+                            })
+                        } else if let Some(capture) =
+                            inner.path_captures.iter().position(|c| c.name == name)
+                        {
+                            Ok(ValueProjection::Path {
+                                capture: map_capture(capture as u32),
+                                function: if inner.path_captures[capture].edge_identity {
+                                    GraphPathFunction::Edge
+                                } else {
+                                    GraphPathFunction::Value
+                                },
+                            })
+                        } else {
+                            Err(PatternBuildError::UnknownVariable)
+                        }
+                    })
+                    .transpose()?;
+                operators.push(GlaOperator::CollectEnd {
+                    group: group as u32,
+                    value,
+                });
+                operators[start] = GlaOperator::Collect {
                     group: group as u32,
                     end,
                     slots: available,
@@ -426,11 +503,21 @@ impl GraphPatternBuilder {
                 width += available;
             }
         }
+        // A collection column reads its own Collect clause's list.
+        if columns.iter().any(|column| {
+            matches!(column, GraphColumn::Collection { clause, .. }
+                if clauses.get(*clause).map(|clause| clause.kind) != Some(GraphMatchKind::Collect))
+        }) {
+            return Err(PatternBuildError::UnknownVariable);
+        }
         let variables = scope.checked_value_columns(columns)?;
         let projection = columns
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
+                GraphColumn::Collection { .. } => ValueProjection::Collected {
+                    group: variable as u32,
+                },
                 GraphColumn::Vertex { .. } => ValueProjection::Vertex {
                     slot: scope_slots[variable],
                 },
@@ -442,11 +529,23 @@ impl GraphPatternBuilder {
                     capture: variable as u32,
                     key: *key,
                 },
-                GraphColumn::Path { function, .. } => match function {
+                GraphColumn::Path {
+                    function,
+                    variable: name,
+                    ..
+                } => match function {
                     GraphPathFunction::Labels => ValueProjection::Labels {
                         slot: scope_slots[variable],
                     },
                     GraphPathFunction::Type => ValueProjection::Type {
+                        capture: variable as u32,
+                    },
+                    GraphPathFunction::Properties if scope.variable(name).is_ok() => {
+                        ValueProjection::Properties {
+                            slot: scope_slots[variable],
+                        }
+                    }
+                    GraphPathFunction::Properties => ValueProjection::EdgeProperties {
                         capture: variable as u32,
                     },
                     _ => ValueProjection::Path {
@@ -493,14 +592,7 @@ impl GraphPatternBuilder {
         )?;
         let mut variables = Vec::new();
         for (at, column) in columns.iter().enumerate() {
-            let bytes = column.name().as_bytes();
-            if bytes.is_empty()
-                || bytes.len() > MAX_PATTERN_NAME_BYTES
-                || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-                || !bytes
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
+            if !super::super::valid_column_name(column.name()) {
                 return Err(PatternBuildError::InvalidColumnName);
             }
             if columns[..at]
@@ -514,7 +606,10 @@ impl GraphPatternBuilder {
                     variable, function, ..
                 } => match function {
                     GraphPathFunction::Labels => self.variable(variable)?,
-                    GraphPathFunction::Type => {
+                    GraphPathFunction::Properties if self.variable(variable).is_ok() => {
+                        self.variable(variable)?
+                    }
+                    GraphPathFunction::Type | GraphPathFunction::Properties => {
                         let capture = self.path_capture(variable)?;
                         if !self.path_captures[capture].edge_identity {
                             return Err(PatternBuildError::InvalidPathCapture);
@@ -541,6 +636,8 @@ impl GraphPatternBuilder {
                 GraphColumn::Vertex { variable, .. } | GraphColumn::Property { variable, .. } => {
                     self.variable(variable)?
                 }
+                // Its clause index; the clause compiler checks the kind.
+                GraphColumn::Collection { clause, .. } => *clause,
             });
         }
         Ok(variables)

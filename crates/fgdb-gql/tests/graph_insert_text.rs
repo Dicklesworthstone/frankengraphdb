@@ -8,7 +8,10 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
     PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, EId, VId};
+use fgdb_types::{
+    CanonicalDate, CanonicalList, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind,
+    EId, VId,
+};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -16,7 +19,7 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const COPY: LabelId = LabelId(9);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type ResultOf = Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>>;
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -86,7 +89,7 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         CREATE (copy:Copy {q: CASE WHEN n.p IS NOT NULL THEN n.p+$step ELSE 1/0 END,p:n.p}), \
         (n)-[:R {q:$step}]->(copy),(copy)-[:R]->(m)";
     let calls = Cell::new(0);
-    let template = PreparedGraphInsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -115,8 +118,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         (VId(2), R, VId(3)),
     ];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
     ]);
     let result = run(&query, &[VId(1), VId(2), VId(3)], &edges, &props).unwrap();
     assert_eq!(
@@ -134,8 +137,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             vertex,
             labels: vec![COPY],
             properties: vec![
-                (P, CanonicalScalar::Int(value)),
-                (Q, CanonicalScalar::Int(value + 1)),
+                (P, CanonicalScalar::Int(value).into()),
+                (Q, CanonicalScalar::Int(value + 1).into()),
             ],
         });
         expected.push(GraphInsertIntent::Edge {
@@ -143,7 +146,7 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             relation: R,
             source,
             destination: vertex,
-            properties: vec![(Q, CanonicalScalar::Int(1))],
+            properties: vec![(Q, CanonicalScalar::Int(1).into())],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_001 + row as u128 * 16),
@@ -176,7 +179,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         (VId(1), R, VId(2)),
     ];
     let query = prepare(
-        "MATCH WALK (a)-[:R*0..2]->(b) \
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) \
         CREATE (x {p:7}),(y {p:NULL}),(x)-[:R]->(y),(y)-[:R]->(x),(x)-[:R]->(x)",
     );
     let result = run(&query, &vertices, &edges, &Props::new()).unwrap();
@@ -193,7 +196,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         let y = VId(x.0 + 1);
         assert!(
             matches!(&intents[1], GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, CanonicalScalar::Null)])
+            if properties == &[(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))])
         );
         for (edge, source, destination) in [(2, x, y), (3, y, x), (4, x, x)] {
             assert!(
@@ -232,21 +235,21 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         "MATCH (n) CREATE (x {p:n.p+})",
         "MATCH (n) CREATE (x {p:TRUE+1})",
         "MATCH (n) CREATE (x {p:CASE WHEN TRUE THEN 1 ELSE missing.p END})",
-        "MATCH (n) CREATE (x {p:1}),(y {q:x.p})",
+        "MATCH (n) CREATE (y {q:x.p}),(x {p:1})",
         "CREATE (x {p:x.p})",
         "CREATE (a)-[:R]-(b)",
         "CREATE (a)<-[:R]->(b)",
         "CREATE (a)-[:R*2]->(b)",
         "MATCH (n) CREATE (n:Copy)-[:R]->(x)",
         "MATCH (n) CREATE (n {})-[:R]->(x)",
-        "CREATE (a)-[edge:R]->(b)",
-        "CREATE (a)-[:R]->(b {q:a.p})",
+        "CREATE (a)-[a:R]->(b)",
+        "CREATE (a {q:b.p})-[:R]->(b)",
         "MATCH (n) CREATE (x) RETURN x",
         "MATCH (n) CREATE (x) SET n.p=1",
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -264,7 +267,7 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
         PreparedGraphInsertText::prepare(
             &format!("MATCH (n) CREATE {declarations}"),
             R,
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             }
@@ -298,15 +301,18 @@ fn creation_relations_are_independent_of_defaults_and_catalog_key_aliases_fail_c
             },
         ]
     );
-    let alias =
-        PreparedGraphInsertText::prepare("MATCH (n) CREATE (x {p:1,q:2})", R, |kind, name| {
+    let alias = PreparedGraphInsertText::prepare(
+        "MATCH (n) CREATE (x {p:1,q:2})",
+        R,
+        |kind, name: &str| {
             if kind == GraphSymbolKind::Property {
                 Some(GraphSymbol::Property(P))
             } else {
                 symbols(kind, name)
             }
-        })
-        .unwrap_err();
+        },
+    )
+    .unwrap_err();
     assert!(matches!(
         alias.kind,
         GraphInsertTextErrorKind::Build(GraphInsertBuildError::DuplicateProperty { .. })
@@ -364,7 +370,10 @@ fn scalar_payloads_and_original_utf8_offsets_survive_binding_without_interpolati
     let batch = run(&plan, &[VId(1)], &[], &Props::new()).unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(-7))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-7))),
+        ])
     );
     assert!(!format!("{template:?} {plan:?} {batch:?}").contains(payload));
     assert!(matches!(
@@ -397,7 +406,7 @@ fn missing_optional_endpoints_are_not_silently_turned_into_partial_creations() {
         &query,
         &[VId(1)],
         &[],
-        &Props::from([((VId(1), P), CanonicalScalar::Int(2))]),
+        &Props::from([((VId(1), P), CanonicalScalar::Int(2).into())]),
     )
     .unwrap();
     assert!(
@@ -472,9 +481,21 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
     let result = result.unwrap();
     let mut expected = Vec::new();
     for (index, labels, properties) in [
-        (0, vec![COPY], vec![(P, CanonicalScalar::Int(1))]),
-        (1, vec![], vec![(P, CanonicalScalar::Int(2))]),
-        (2, vec![], vec![(P, CanonicalScalar::Int(3))]),
+        (
+            0,
+            vec![COPY],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(1)))],
+        ),
+        (
+            1,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(2)))],
+        ),
+        (
+            2,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(3)))],
+        ),
         (3, vec![], vec![]),
         (4, vec![COPY], vec![]),
     ] {
@@ -485,7 +506,12 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
         });
     }
     for (index, source, destination, properties) in [
-        (0, 100, 101, vec![(P, CanonicalScalar::Int(10))]),
+        (
+            0,
+            100,
+            101,
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(10)))],
+        ),
         (1, 102, 101, vec![]),
         (2, 101, 100, vec![]),
         (3, 100, 103, vec![]),
@@ -516,6 +542,71 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
 }
 
 #[test]
+fn consecutive_create_clauses_are_one_creation_over_shared_bindings() {
+    for (chained, joined) in [
+        (
+            "CREATE (a:Copy {p:1}), (b {p:2}) CREATE (a)-[:R]->(b), (b)-[:R]->(a)",
+            "CREATE (a:Copy {p:1}), (b {p:2}), (a)-[:R]->(b), (b)-[:R]->(a)",
+        ),
+        (
+            "INSERT (a) INSERT (b) CREATE (a)<-[:R]-(b)",
+            "CREATE (a), (b), (a)<-[:R]-(b)",
+        ),
+        (
+            "MATCH (n) CREATE (c:Copy {p:n.p}) CREATE (n)-[:R]->(c)",
+            "MATCH (n) CREATE (c:Copy {p:n.p}), (n)-[:R]->(c)",
+        ),
+    ] {
+        assert_eq!(
+            prepare(chained).canonical_bytes(),
+            prepare(joined).canonical_bytes(),
+            "{chained}"
+        );
+    }
+    // A creation without MATCH never reads the graph: a source call would
+    // surface as this Err, and the unwrap below would fail.
+    let query = prepare("CREATE (a:Copy {p:1}), (b {p:2}) CREATE (a)-[:R]->(b), (b)-[:R]->(a)");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| Err(GqlQueryError::Source(())),
+        identity,
+        || Ok(()),
+    );
+    let mut expected = vec![
+        GraphInsertIntent::Vertex {
+            vertex: VId(100),
+            labels: vec![COPY],
+            properties: vec![(P, CanonicalScalar::Int(1).into())],
+        },
+        GraphInsertIntent::Vertex {
+            vertex: VId(101),
+            labels: vec![],
+            properties: vec![(P, CanonicalScalar::Int(2).into())],
+        },
+    ];
+    for (index, source, destination) in [(0, 100, 101), (1, 101, 100)] {
+        expected.push(GraphInsertIntent::Edge {
+            edge: EId(1_000 + index),
+            relation: R,
+            source: VId(source),
+            destination: VId(destination),
+            properties: vec![],
+        });
+    }
+    assert_eq!(result.unwrap().intents(), expected);
+    // A named edge needs no RETURN; the later clause still cannot redeclare a
+    // node it reuses, and an edge name stays unique across clauses.
+    prepare("CREATE ()-[r:R {p:42}]->()");
+    for (text, at) in [
+        ("CREATE (a) CREATE (a:Copy)", 19),
+        ("CREATE ()-[r:R]->() CREATE ()-[r:R]->()", 31),
+    ] {
+        let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
+        assert_eq!(error.offset, at, "{text}: {error:?}");
+    }
+}
+
+#[test]
 fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
     let payload = "secret '}) CREATE (:Copy) --";
     let kind = CanonicalScalarKind::of(&CanonicalScalar::ucs_basic_text(payload).unwrap());
@@ -525,7 +616,7 @@ fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
         text,
         R,
         &[("payload", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -558,7 +649,10 @@ fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
     let batch = result.unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(0))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0))),
+        ])
     );
     assert_eq!(calls.get(), 4);
     assert_eq!(
@@ -609,15 +703,17 @@ fn connected_creation_caps_count_new_declarations_not_node_references() {
     let query = prepare(&format!("{text},(n0)"));
     assert_eq!(query.vertices_per_row(), MAX_GRAPH_INSERT_DECLARATIONS);
     assert_eq!(query.edges_per_row(), 0);
+    // A closed ring of n vertices declares exactly 2n: the cap itself.
+    let ring = MAX_GRAPH_INSERT_DECLARATIONS / 2;
     let mut chain = "CREATE (n0)".to_owned();
-    for index in 1..128 {
+    for index in 1..ring {
         chain.push_str(&format!("-[:R]->(n{index})"));
     }
     chain.push_str("-[:R]->(n0)");
     let query = prepare(&chain);
     assert_eq!(
         (query.vertices_per_row(), query.edges_per_row()),
-        (128, 128)
+        (ring, ring)
     );
     for too_large in [
         format!("{text},()"),
@@ -625,7 +721,7 @@ fn connected_creation_caps_count_new_declarations_not_node_references() {
         format!("{chain}-[:R]->(n0)"),
     ] {
         let calls = Cell::new(0);
-        let error = PreparedGraphInsertText::prepare(&too_large, R, |kind, name| {
+        let error = PreparedGraphInsertText::prepare(&too_large, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })
@@ -716,7 +812,7 @@ fn unwind_creation_is_the_native_relation_with_ordered_duplicate_occurrences() {
                 GraphInsertIntent::Vertex {
                     vertex: VId(100 + row as u128 * 16),
                     labels: vec![COPY],
-                    properties: vec![(P, CanonicalScalar::Int(value))],
+                    properties: vec![(P, CanonicalScalar::Int(value).into())],
                 }
             })
             .collect::<Vec<_>>()
@@ -754,24 +850,24 @@ fn multiple_unwinds_feed_computed_fields_and_row_local_creation_chains() {
                 vertex: a,
                 labels: vec![COPY],
                 properties: vec![
-                    (P, CanonicalScalar::Int(value)),
+                    (P, CanonicalScalar::Int(value).into()),
                     (
                         Q,
-                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }),
+                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }).into(),
                     ),
                 ],
             },
             GraphInsertIntent::Vertex {
                 vertex: b,
                 labels: vec![],
-                properties: vec![(P, CanonicalScalar::Int(value - 1))],
+                properties: vec![(P, CanonicalScalar::Int(value - 1).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_000 + row as u128 * 16),
                 relation: R,
                 source: a,
                 destination: b,
-                properties: vec![(P, CanonicalScalar::Int(value + 10))],
+                properties: vec![(P, CanonicalScalar::Int(value + 10).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_001 + row as u128 * 16),
@@ -790,7 +886,7 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
     use fgdb_gql::algebra::GraphValue;
     let text = "UNWIND $items AS x CREATE (:Copy {p:x,q:$offset+x})";
     let calls = Cell::new(0);
-    let template = PreparedGraphInsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -825,12 +921,18 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(9))]
+                properties: vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (Q, CanonicalScalar::Int(9).into())
+                ]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(116),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Null), (Q, CanonicalScalar::Null)]
+                properties: vec![
+                    (P, CanonicalScalar::Null.into()),
+                    (Q, CanonicalScalar::Null.into())
+                ]
             },
         ]
     );
@@ -879,10 +981,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         "UNWIND [1] AS x CREATE (x:Copy)",
         "UNWIND [1] AS x CREATE (:Copy {p:y})",
         // `x.name` is a map entry since fgdb-2jw3z slice 3, checked per row
-        // at execution (crates/fgdb/tests/map_values.rs); a map or list
-        // literal is never a property value.
+        // at execution (crates/fgdb/tests/map_values.rs); a map literal is
+        // never a property value. A list literal is a stored List since
+        // fgdb-k3nub (a_create_property_may_be_a_temporal_or_composite_value);
+        // a list PARAMETER still binds no stored List.
         "UNWIND [1] AS x CREATE (:Copy {p:{name: x}})",
-        "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
         "UNWIND $items AS x CREATE (:Copy {p:$items})",
         // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its
         // positive laws are in graph_insert_query_text.rs.
@@ -891,7 +994,7 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -906,7 +1009,7 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
             "UNWIND [1] AS x CREATE (:Copy {p:x})",
             R,
             &[("unused", GqlParameterType::Int64)],
-            |kind, name| {
+            |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             }
@@ -918,9 +1021,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
 
 #[test]
 fn every_unwind_property_is_validated_before_the_first_identity() {
+    // A list row is a stored List since fgdb-k3nub; a map row never is.
     for text in [
         "UNWIND [2,0] AS x CREATE (:Copy {p:10/x})",
-        "UNWIND [1,[2]] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,{a: 2}] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,[{a: 2}]] AS x CREATE (:Copy {p:x})",
     ] {
         let query = prepare(text);
         let result: ResultOf = query.execute_governed(
@@ -931,4 +1036,69 @@ fn every_unwind_property_is_validated_before_the_first_identity() {
         );
         assert!(result.is_err(), "{text}");
     }
+}
+
+/// A CREATE property may be any scalar the value language computes: a
+/// temporal constructor (fgdb-txbg9), or a composite operand such as size()
+/// of a list (fgdb-o5o9t), which the scalar compiler reads only through a
+/// let slot. Since fgdb-k3nub a list-valued property (a literal, a
+/// comprehension, keys()) is a stored List; a map literal still refuses
+/// where it starts.
+#[test]
+fn a_create_property_may_be_a_temporal_or_composite_value() {
+    let query =
+        prepare("CREATE (:Copy {p: date({year: 1910, month: 5, day: 6}), q: size([1, 2, 3])})");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| Err(GqlQueryError::Source(())),
+        identity,
+        || Ok(()),
+    );
+    let date = CanonicalDate::from_civil(1910, 5, 6).unwrap();
+    assert_eq!(
+        result.unwrap().intents(),
+        vec![GraphInsertIntent::Vertex {
+            vertex: VId(100),
+            labels: vec![COPY],
+            properties: vec![
+                (P, CanonicalScalar::Date(date).into()),
+                (Q, CanonicalScalar::Int(3).into()),
+            ],
+        }]
+    );
+    let int = |value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values| CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap());
+    for (text, expected) in [
+        (
+            "CREATE (:Copy {p: [x IN [1, 2] | x]})",
+            list(vec![int(1), int(2)]),
+        ),
+        (
+            "CREATE (:Copy {p: [[1], []]})",
+            list(vec![list(vec![int(1)]), list(vec![])]),
+        ),
+        (
+            "CREATE (:Copy {p: range(1, 3)})",
+            list(vec![int(1), int(2), int(3)]),
+        ),
+    ] {
+        let result: ResultOf = prepare(text).execute_governed(
+            policy(),
+            |_, _| Err(GqlQueryError::Source(())),
+            identity,
+            || Ok(()),
+        );
+        assert_eq!(
+            result.unwrap().intents(),
+            vec![GraphInsertIntent::Vertex {
+                vertex: VId(100),
+                labels: vec![COPY],
+                properties: vec![(P, expected)],
+            }],
+            "{text}"
+        );
+    }
+    let text = "CREATE (:Copy {p: {a: 1}})";
+    let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
+    assert_eq!(error.offset, 18, "{text}: {error:?}");
 }

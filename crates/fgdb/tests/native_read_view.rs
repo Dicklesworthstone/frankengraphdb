@@ -644,6 +644,246 @@ fn native_pull_rebinds_arguments_and_refuses_future_history_before_zero_limits()
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn projected_vertex_pulls_rebind_and_keep_their_original_generation() {
+    use fgdb_gql::stream::VertexScanState;
+    let ((), report) = run_async_under_lab(0x7669_650d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        for (id, value) in [(0, 4), (2, 11), (9, 7), (u128::MAX, 23)] {
+            db.write(&commit, batch(id, value)).await.unwrap();
+        }
+        let view = db.read_session().unwrap();
+        let arguments = |floor, add, value| {
+            GqlParameters::new()
+                .with_int64("floor", floor)
+                .unwrap()
+                .with_int64("add", add)
+                .unwrap()
+                .with_int64("value", value)
+                .unwrap()
+        };
+        let params = arguments(5, 3, 99);
+        let text = "MATCH (n) WHERE n.p > $floor RETURN n AS id, n.p + $add AS p, $value AS value";
+        let calls = Cell::new(0);
+        let prepared = PreparedNativeRead::prepare(text, &params, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap();
+        assert_eq!(prepared.facade_class(), NativeReadClass::Set);
+        let resolved = calls.get();
+        let rebound = arguments(10, -1, 7);
+        for (params, ids, properties, value) in [
+            (&params, vec![2, 9, u128::MAX], vec![14, 10, 26], 99),
+            (&rebound, vec![2, u128::MAX], vec![10, 22], 7),
+        ] {
+            let expected = prepared
+                .execute_in_view(&view, &cx, params, policy())
+                .unwrap();
+            let (columns, mut cursor) = prepared
+                .stream_in_view(&view, &cx, params, policy())
+                .unwrap();
+            assert_eq!(columns, ["id", "p", "value"]);
+            assert_eq!(cursor.snapshot_seq(), CommitSeq(4));
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            assert_eq!(cursor.evaluator_stats().work_units, 0);
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            let independent: Vec<_> = ids
+                .into_iter()
+                .zip(properties)
+                .map(|(id, property)| {
+                    vec![
+                        GraphValue::Vertex(VId(id)),
+                        GraphValue::Scalar(CanonicalScalar::Int(property)),
+                        GraphValue::Scalar(CanonicalScalar::Int(value)),
+                    ]
+                })
+                .collect();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                independent
+            );
+            assert_eq!(collected_values(columns, rows), expected);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
+        assert_eq!(
+            calls.get(),
+            resolved,
+            "binding and pulling do not resolve again"
+        );
+        let expected = prepared.execute(&db, &cx, &params, policy()).unwrap();
+        let (columns, mut cursor) = prepared.stream(&db, &cx, &params, policy()).unwrap();
+        drop(prepared);
+        drop(params);
+        db.write(&commit, batch(10, 100)).await.unwrap();
+        drop(view);
+        drop(db);
+        assert_eq!(
+            collected_values(columns, cursor.by_ref().collect::<Result<_, _>>().unwrap()),
+            expected
+        );
+        assert_eq!(cursor.snapshot_seq(), CommitSeq(4));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn projected_vertex_pulls_preserve_temporal_cuts_budgets_and_late_errors() {
+    use fgdb_gql::scan_stream::ScanError;
+    use fgdb_gql::stream::VertexScanState;
+    let ((), report) = run_async_under_lab(0x7669_650e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, batch(1, 4)).await.unwrap();
+        let view = db.read_session().unwrap();
+        db.write(&commit, batch(2, 0)).await.unwrap();
+        let params = GqlParameters::new()
+            .with_uint64("cut", 1)
+            .unwrap()
+            .with_int64("add", 3)
+            .unwrap();
+        let temporal = PreparedNativeRead::prepare(
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n AS id,n.p+$add AS p",
+            &params,
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(temporal.facade_class(), NativeReadClass::TemporalSet);
+        let (columns, mut cursor) = temporal.stream(&db, &cx, &params, policy()).unwrap();
+        assert_eq!(cursor.snapshot_seq(), CommitSeq(1));
+        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(projected_property(&rows[0]), 7);
+        assert_eq!(
+            collected_values(columns, rows),
+            temporal.execute(&db, &cx, &params, policy()).unwrap()
+        );
+        let future = GqlParameters::new()
+            .with_uint64("cut", 2)
+            .unwrap()
+            .with_int64("add", 3)
+            .unwrap();
+        assert!(matches!(
+            temporal.stream_in_view(&view, &cx, &future, GqlQueryPolicy::new(0, 0, 0, 0)),
+            Err(QueryError::Stream(GqlQueryError::Source(
+                fgdb_gql::stream::VertexScanError::Source(ReadError::BeyondFrontier {
+                    asked: CommitSeq(2),
+                    frontier: CommitSeq(1),
+                })
+            )))
+        ));
+
+        let empty = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(
+            "MATCH (n) RETURN n AS id,n.p+1 AS p,'payload' AS value",
+            &empty,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut cursor) = prepared.stream(&db, &cx, &empty, policy()).unwrap();
+        assert_eq!(
+            cursor
+                .by_ref()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            2
+        );
+        let rows = cursor.row_stats();
+        let evaluator = cursor.evaluator_stats();
+        let exact = [
+            rows.snapshot_records,
+            rows.result_rows,
+            evaluator.work_units,
+            evaluator.scratch_entries,
+        ];
+        assert!(exact.iter().all(|&allowance| allowance > 0));
+        for at in 0..exact.len() {
+            for shortage in [0, 1] {
+                let mut limits = exact;
+                limits[at] -= shortage;
+                let (_, mut cursor) = prepared
+                    .stream(
+                        &db,
+                        &cx,
+                        &empty,
+                        GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                    )
+                    .unwrap();
+                let result = cursor.by_ref().collect::<Result<Vec<_>, _>>();
+                if shortage == 0 {
+                    assert_eq!(result.unwrap().len(), 2);
+                    assert_eq!(cursor.row_stats(), rows);
+                    assert_eq!(cursor.evaluator_stats(), evaluator);
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(matches!(
+                        error,
+                        GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
+                    ));
+                    assert_eq!(cursor.state(), VertexScanState::Failed);
+                    let before = (cursor.row_stats(), cursor.evaluator_stats());
+                    assert!(cursor.next().is_none());
+                    assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), before);
+                }
+            }
+        }
+        let (_, mut cursor) = prepared.stream(&db, &cx, &empty, policy()).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        let before = (cursor.row_stats(), cursor.evaluator_stats());
+        cursor.close();
+        cursor.close();
+        assert_eq!(cursor.state(), VertexScanState::Closed);
+        assert!(cursor.next().is_none());
+        assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), before);
+
+        let divide = PreparedNativeRead::prepare(
+            "MATCH (n) RETURN n AS id,10/n.p AS value",
+            &empty,
+            symbols,
+        )
+        .unwrap();
+        let (_, mut cursor) = divide.stream(&db, &cx, &empty, policy()).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(ScanError::Projection {
+                row: 1,
+                column: 1,
+                ..
+            })))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+
+        for text in [
+            "MATCH (n) RETURN n.p+1 AS p",
+            "MATCH (n) RETURN n AS id,n.p+1 AS p ORDER BY p",
+            "MATCH (n) RETURN n AS id,n.p+1 AS p LIMIT 0",
+            "MATCH (n) RETURN n AS id,1 AS p UNION ALL MATCH (m) RETURN m AS id,2 AS p",
+        ] {
+            let query = PreparedNativeRead::prepare(text, &empty, symbols).unwrap();
+            assert!(
+                matches!(
+                    query.stream(&db, &cx, &empty, policy()),
+                    Err(QueryError::StreamingUnsupported { .. })
+                ),
+                "{text}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 const EXPLAINS: [&str; 2] = [
     "EXPLAIN MATCH (n) RETURN n.p AS p ORDER BY p",
     "EXPLAIN (CERTIFICATE) MATCH (n) RETURN COUNT(*) AS total, SUM(n.p) AS amount",
@@ -679,7 +919,10 @@ fn a_read_only_open_answers_like_a_full_open_and_keeps_no_writer_state() {
             .chain(EXPLAINS)
             .collect();
 
-        let full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+        let mut full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        full.ensure_delta_window(&commit, CommitSeq::ORIGIN)
             .await
             .unwrap();
         let expected: Vec<QueryResult> = texts
@@ -692,7 +935,7 @@ fn a_read_only_open_answers_like_a_full_open_and_keeps_no_writer_state() {
         assert_eq!(
             full_view.delta_since(CommitSeq(0)).unwrap().count(),
             3,
-            "a writable open retains the whole delta window"
+            "explicit materialization retains the whole delta window"
         );
         drop(full);
 
@@ -767,8 +1010,8 @@ fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
         drop(db);
 
         // Serving the slot's root would answer [4] at seq 1. The read-only
-        // open must fold the committed suffix instead, which takes a full open;
-        // that open retains the whole delta window, the full open's signature.
+        // open must fold the committed suffix instead, which takes a writable
+        // recovery. The recovered graph does not require retaining old deltas.
         let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
             .await
             .unwrap();
@@ -777,7 +1020,13 @@ fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
             view.query(&cx, text, &params, symbols, policy()).unwrap(),
             integers(&[4, 7])
         );
-        assert_eq!(view.delta_since(CommitSeq(0)).unwrap().count(), 2);
+        assert!(matches!(
+            view.delta_since(CommitSeq::ORIGIN),
+            Err(ReadError::DeltaCursorRetired {
+                retained_after: CommitSeq(2),
+                ..
+            })
+        ));
 
         // That open healed the durable root, so the next read-only open is
         // the fast path (no delta history) onto the same generation.
@@ -862,6 +1111,77 @@ fn a_read_only_views_lazy_adjacency_answers_like_a_full_open() {
         for (vid, expected) in (1..=4u128).zip(&neighbours) {
             assert_eq!(&view.neighbours(VId(vid), RelationId(1)).unwrap(), expected);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A read-only open beside a LIVE writer (fgdbd, or another process) takes no
+/// writer lease and writes nothing, so it succeeds where it used to refuse
+/// with "another commit coordinator already owns this database" (fgdb-xxxnb).
+/// While the writer's last commit is durable but its root is unpublished, the
+/// view reads the writer's last PUBLISHED generation, never a partial one;
+/// once no writer is live, the next read-only open heals as before.
+#[test]
+fn a_read_only_open_beside_a_live_writer_reads_its_last_published_generation() {
+    let ((), report) = run_async_under_lab(0x7669_650c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = committed(&commit, &[4]).await;
+        let path = vfs.database_dir();
+        let params = GqlParameters::new();
+        let text = "MATCH (n) RETURN n.p AS p ORDER BY p";
+        let mut writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            writer.write(&commit, batch(2, 7)).await.unwrap(),
+            CommitSeq(2)
+        );
+
+        // The writer holds the lease; a reader opens beside it anyway.
+        let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(view.frontier(), CommitSeq(2));
+        assert_eq!(
+            view.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7])
+        );
+
+        // Commit 3 is durable, its root unpublished, and the writer still
+        // owns the stream: only it may heal, so the reader stays on seq 2.
+        let error = writer
+            .write_with_publication_failure(
+                &commit,
+                batch(3, 11),
+                DerivedPublicationStage::PublishPartitionRoot,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WriteError::CommittedNeedsRecovery { .. }));
+        let lagging = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(lagging.frontier(), CommitSeq(2));
+        assert_eq!(lagging.partition_root(), view.partition_root());
+        assert_eq!(
+            lagging
+                .query(&cx, text, &params, symbols, policy())
+                .unwrap(),
+            integers(&[4, 7])
+        );
+
+        // With no live writer, the read-only open heals through a full open.
+        drop(writer);
+        let healed = Database::open_read_view_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(healed.frontier(), CommitSeq(3));
+        assert_eq!(
+            healed.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7, 11])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

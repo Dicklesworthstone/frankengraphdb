@@ -39,7 +39,11 @@ pub trait GroupDefinition: sealed::Sealed + Clone {
     fn supports_incremental_maintenance_with_having(&self) -> bool;
     fn having(&self) -> &[GraphAggregateFilter];
     fn having_expression(&self) -> Option<&GraphHavingExpression>;
+    /// Evaluation-column order and projected-result order are disjoint.
+    /// A nonempty projected order addresses the stored output values, not the
+    /// complete grouping keys/summaries. Full group keys still break all ties.
     fn ordering(&self) -> &[GraphAggregateOrder];
+    fn projected_ordering(&self) -> &[crate::algebra::GraphValueOrder];
     fn has_incremental_output_transform(&self) -> bool;
     fn has_incremental_ranking(&self) -> bool;
     fn incremental_output_is_distinct(&self) -> bool;
@@ -114,6 +118,10 @@ macro_rules! delegate_group_definition {
             fn ordering(&self) -> &[$crate::GraphAggregateOrder] {
                 let $this = self;
                 ($inner).ordering()
+            }
+            fn projected_ordering(&self) -> &[$crate::algebra::GraphValueOrder] {
+                let $this = self;
+                ($inner).projected_ordering()
             }
             fn has_incremental_output_transform(&self) -> bool {
                 let $this = self;

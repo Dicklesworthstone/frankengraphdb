@@ -31,6 +31,70 @@ impl<Row> PreparedGraphPattern<Row> {
     }
 }
 
+impl PreparedGraphPattern<GraphValueRow> {
+    /// Drop the captures of named relationships that nothing reads.
+    ///
+    /// `MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN count(*)` names two
+    /// relationships and reads neither. A capture only assembles a value: it
+    /// constrains no binding, so without it the plan is the plan of the same
+    /// pattern with the relationships unnamed, with the same bindings and
+    /// multiplicities. With it the plan requires identified edges, and an
+    /// aggregate over it enumerates every binding where the unnamed spelling
+    /// is answered from topology (a 2-hop count over 508k edges: 30 s against
+    /// 0.5 s).
+    ///
+    /// Only a flat positive pattern is rewritten, and only when every capture
+    /// is one fixed relationship: any path predicate, Boolean program that
+    /// reads a relationship, nested OPTIONAL or EXISTS scope, quantified atom
+    /// or projected relationship value keeps every capture, read or not.
+    #[must_use]
+    pub(crate) fn without_unread_captures(mut self) -> Self {
+        let mut captured = false;
+        for operator in &self.logical.operators {
+            match operator {
+                GlaOperator::CapturePath { segments, .. } if segments.len() == 1 => {
+                    captured = true;
+                }
+                // A Boolean program keeps them only when it reads a captured
+                // relationship, its identity or one of its properties.
+                GlaOperator::SelectBoolean { expression }
+                    if expression.contains_captured_edge() =>
+                {
+                    return self;
+                }
+                GlaOperator::CapturePath { .. }
+                | GlaOperator::VarLengthExpand { .. }
+                | GlaOperator::SelectPathLength { .. }
+                | GlaOperator::SelectPathNull { .. }
+                | GlaOperator::Probe { .. }
+                | GlaOperator::ProbeEnd { .. }
+                | GlaOperator::Optional { .. }
+                | GlaOperator::OptionalEnd { .. } => return self,
+                GlaOperator::ProjectValues { columns }
+                    if !columns.iter().all(|column| {
+                        matches!(
+                            column,
+                            ValueProjection::Vertex { .. }
+                                | ValueProjection::Property { .. }
+                                | ValueProjection::Labels { .. }
+                                | ValueProjection::Properties { .. }
+                        )
+                    }) =>
+                {
+                    return self;
+                }
+                _ => {}
+            }
+        }
+        if captured {
+            self.logical
+                .operators
+                .retain(|operator| !matches!(operator, GlaOperator::CapturePath { .. }));
+        }
+        self
+    }
+}
+
 impl GraphPatternBuilder {
     /// Project correlated vertex identities and canonical vertex properties.
     /// Aliases are unique column names; one vertex/property may appear under
@@ -43,12 +107,22 @@ impl GraphPatternBuilder {
         offset: u64,
         count: Option<u64>,
     ) -> Result<PreparedGraphPattern<GraphValueRow>, PatternBuildError> {
+        // A collection reads a Collect clause, and this pattern has none.
+        if columns
+            .iter()
+            .any(|column| matches!(column, GraphColumn::Collection { .. }))
+        {
+            return Err(PatternBuildError::UnknownVariable);
+        }
         let variables = self.checked_value_columns(columns)?;
         let (mut operators, slots) = self.compile()?;
         let projection = columns
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
+                GraphColumn::Collection { .. } => ValueProjection::Collected {
+                    group: variable as u32,
+                },
                 GraphColumn::Vertex { .. } => ValueProjection::Vertex {
                     slot: slots[variable],
                 },
@@ -60,11 +134,23 @@ impl GraphPatternBuilder {
                     capture: variable as u32,
                     key: *key,
                 },
-                GraphColumn::Path { function, .. } => match function {
+                GraphColumn::Path {
+                    function,
+                    variable: name,
+                    ..
+                } => match function {
                     GraphPathFunction::Labels => ValueProjection::Labels {
                         slot: slots[variable],
                     },
                     GraphPathFunction::Type => ValueProjection::Type {
+                        capture: variable as u32,
+                    },
+                    GraphPathFunction::Properties if self.variable(name).is_ok() => {
+                        ValueProjection::Properties {
+                            slot: slots[variable],
+                        }
+                    }
+                    GraphPathFunction::Properties => ValueProjection::EdgeProperties {
                         capture: variable as u32,
                     },
                     _ => ValueProjection::Path {
@@ -112,6 +198,152 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
+    /// with_visible_columns under DISTINCT, for hidden cells that are each a
+    /// function of a visible one (a property of a returned element). Rows
+    /// equal on the visible cells are equal on the hidden ones, so DISTINCT
+    /// over the complete row keeps the same survivors. The text compiler
+    /// refuses every other hidden cell under DISTINCT before this.
+    pub(crate) fn with_dependent_visible_columns(mut self, width: usize) -> Self {
+        assert!(width > 0 && width <= self.columns.len());
+        self.logical.visible_columns = Some(width);
+        self.columns.truncate(width);
+        self
+    }
+
+    /// The visible column holding the identity of this pattern's slot-0
+    /// vertex, when every other binding is reached from it (fgdb-2acff): one
+    /// vertex scan, or one edge scan binding slot 0 to one of its ends, then
+    /// only selections, expansions, edge uniqueness and path captures, under
+    /// the canonical unpaged tail. Restricting slot 0 to a set of identities then
+    /// keeps exactly those roots' rows, and skips no expression or probe that
+    /// could raise an error on another root: none of these operators can
+    /// fail, and no second scan starts elsewhere.
+    /// Definition-only, like the factor shape: no allocation or callback.
+    pub(crate) fn seeded_root_column(&self) -> Option<usize> {
+        let [
+            scan,
+            body @ ..,
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
+        ] = self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        let body = match body.split_last() {
+            Some((GlaOperator::Distinct, body)) => body,
+            _ => body,
+        };
+        let Some((GlaOperator::ProjectValues { columns }, matching)) = body.split_last() else {
+            return None;
+        };
+        if !matches!(
+            scan,
+            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. }
+        ) || !matching.iter().all(|operator| {
+            matches!(
+                operator,
+                GlaOperator::Select { .. }
+                    | GlaOperator::Expand { .. }
+                    | GlaOperator::VarLengthExpand { .. }
+                    | GlaOperator::DifferentEdges { .. }
+                    | GlaOperator::CapturePath { .. }
+            )
+        }) || columns
+            .iter()
+            .any(|column| matches!(column, ValueProjection::Collected { .. }))
+        {
+            return None;
+        }
+        let root = BindingSlot(0);
+        let visible = self.logical.visible_columns.unwrap_or(columns.len());
+        columns[..visible]
+            .iter()
+            .position(|column| matches!(column, ValueProjection::Vertex { slot } if *slot == root))
+    }
+
+    /// Prove the native visitation order for a vertex or uncaptured one-edge
+    /// source. Vertex scans visit root identities; edge scans visit the ordered
+    /// endpoint pair, retaining parallel-edge multiplicity. Predicates and all
+    /// original values stay in the real source. Requested identities append
+    /// after existing column addresses, before the consumer restores the order.
+    pub(crate) fn incremental_collection_source(
+        &self,
+        identity_names: Option<&[&str]>,
+    ) -> Option<(Self, Vec<usize>)> {
+        if self.logical.visible_columns.is_some() {
+            return None;
+        }
+        let [
+            scan,
+            predicates @ ..,
+            GlaOperator::ProjectValues { columns },
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
+        ] = self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        let width = match scan {
+            GlaOperator::ScanVertices if self.variable_count == 1 && self.edge_count == 0 => 1,
+            GlaOperator::ScanEdges { .. } if self.variable_count == 2 && self.edge_count == 1 => 2,
+            _ => return None,
+        };
+        if columns.is_empty()
+            || columns.len() != self.columns.len()
+            || columns.iter().any(|column| {
+                !matches!(column, ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } if slot.ordinal() < width)
+            })
+            || predicates.iter().any(|operator| match operator {
+                GlaOperator::Select { slot, .. } => slot.ordinal() >= width,
+                GlaOperator::VertexIdentity { left, right, .. }
+                | GlaOperator::CompareProperties { left, right, .. } => {
+                    left.ordinal() >= width || right.ordinal() >= width
+                }
+                GlaOperator::SelectBoolean { expression } => {
+                    !expression.supports_vertex_bindings(width as usize)
+                }
+                _ => true,
+            })
+        {
+            return None;
+        }
+        let mut source = self.clone();
+        let mut identities = Vec::new();
+        if let Some(names) = identity_names {
+            let names = names.get(..width as usize)?;
+            for (ordinal, name) in names.iter().enumerate() {
+                let identity = if let Some(column) = columns.iter().position(|column| {
+                    matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() as usize == ordinal)
+                }) {
+                    column
+                } else {
+                    let column = source.columns.len();
+                    let projection = source.logical.operators.len() - 3;
+                    let GlaOperator::ProjectValues { columns } =
+                        &mut source.logical.operators[projection]
+                    else {
+                        unreachable!("the proved source has one terminal value projection")
+                    };
+                    columns.push(ValueProjection::Vertex {
+                        slot: BindingSlot(ordinal as u32),
+                    });
+                    source.columns.push((*name).to_owned());
+                    column
+                };
+                identities.push(identity);
+            }
+        }
+        // The counted-tuple producer reserves another private COUNT column.
+        // The projection may not evade that source's complete schema bound.
+        (source.columns.len() < MAX_PATTERN_VERTICES).then_some((source, identities))
+    }
+
     /// Rank by projected column positions before applying the existing page.
     /// Nulls default to last in both directions. Canonical complete-row order
     /// breaks remaining ties; DISTINCT still compares the entire output row.
@@ -147,7 +379,7 @@ mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
     use fgdb_delta_types::PropertyKeyId;
-    use fgdb_types::{CanonicalF64, CanonicalScalar};
+    use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar};
 
     fn builder() -> GraphPatternBuilder {
         let mut b = GraphPatternBuilder::new();
@@ -187,10 +419,22 @@ mod tests {
             PatternBuildError::DuplicateProjection
         );
         assert_eq!(
-            b.prepare_values(&[GraphColumn::vertex("bad alias", "a")], 0, None)
+            b.prepare_values(&[GraphColumn::vertex("bad\nalias", "a")], 0, None)
                 .unwrap_err(),
             PatternBuildError::InvalidColumnName
         );
+        assert_eq!(
+            b.prepare_values(&[GraphColumn::vertex("", "a")], 0, None)
+                .unwrap_err(),
+            PatternBuildError::InvalidColumnName
+        );
+        // A delimited identifier or a derived openCypher name is a column name.
+        for name in ["total due", "a.title", "count(b)"] {
+            assert!(
+                b.prepare_values(&[GraphColumn::vertex(name, "a")], 0, None)
+                    .is_ok()
+            );
+        }
         assert_eq!(
             b.prepare_values(&[GraphColumn::vertex("valid", "missing")], 0, None)
                 .unwrap_err(),
@@ -249,6 +493,7 @@ mod tests {
             CanonicalScalar::Bool(true),
             CanonicalScalar::Float(CanonicalF64::new(9.0)),
         ];
+        let stored = values.clone().map(CanonicalPropertyValue::Scalar);
         let edges: Vec<_> = (0..values.len())
             .map(|at| (VId(100), RelationId(1), VId(at as u128)))
             .collect();
@@ -258,7 +503,7 @@ mod tests {
                 [],
                 edges.iter().copied(),
                 |_, _| Ok::<_, &str>(true),
-                |vid, property| Ok((property == key).then(|| &values[vid.0 as usize])),
+                |vid, property| Ok((property == key).then(|| &stored[vid.0 as usize])),
                 policy,
                 || Ok::<_, usize>(()),
             )
@@ -309,7 +554,7 @@ mod tests {
                 if vid == VId(5) {
                     Err("late projected property")
                 } else {
-                    Ok(Some(&values[vid.0 as usize]))
+                    Ok(Some(&stored[vid.0 as usize]))
                 }
             },
             GqlQueryPolicy::new(6, 0, u64::MAX, u64::MAX),
@@ -334,7 +579,8 @@ mod tests {
             .unwrap();
         assert!(!pattern.plan().scans_edges());
         assert_eq!(pattern.required_vertex_label(), None);
-        let scalar = CanonicalScalar::ucs_basic_text("value").unwrap();
+        let scalar =
+            CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("value").unwrap());
         let mut calls = 0;
         let policy = GqlQueryPolicy::new(3, 2, u64::MAX, u64::MAX);
         let expected = pattern
@@ -383,6 +629,7 @@ mod tests {
             CanonicalScalar::Int(9),
             CanonicalScalar::Float(CanonicalF64::new(9.0)),
         ];
+        let stored = values.clone().map(CanonicalPropertyValue::Scalar);
         let distinct = b
             .prepare_values(&[GraphColumn::property("value", "b", key)], 0, None)
             .unwrap();
@@ -405,7 +652,7 @@ mod tests {
                 [],
                 edges,
                 |_, _| Ok::<_, ()>(true),
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 policy,
                 || Ok::<_, ()>(()),
             )

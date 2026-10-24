@@ -14,10 +14,13 @@
 
 mod collection;
 mod distinct;
+mod spill;
 use distinct::DistinctState;
+pub use spill::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
+use crate::edge_stream::aggregate::pipeline::InputPipeline;
 use crate::{
     GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, GraphAggregateValue,
     GraphExactAverage, PreparedGraphAggregate,
@@ -58,7 +61,12 @@ impl core::error::Error for VertexAggregateBuildError {
 /// Computed collection inputs must also satisfy the ordinary row-stream order
 /// proof: their batch child sorts rows before evaluating expressions. A child
 /// with a different order refuses rather than silently reordering a list.
-/// Relational inputs still refuse. Argument DISTINCT and output DISTINCT remain
+/// Single-source WITH chains of ALL scalar projections, scopes and filters run
+/// on one admitted source record at a time, before grouping. The same checked
+/// pipeline as edge aggregation refuses intermediate DISTINCT, order, pages,
+/// fanout, additional graph readers, ordinal-dependent expressions and COLLECT.
+/// Group keys and arguments address its final schema, not the source columns.
+/// Argument DISTINCT and output DISTINCT remain
 /// separate stages on opposite sides of aggregation. Collections are metered
 /// owned results, not constant-state numeric summaries or spill-backed values.
 #[derive(Clone)]
@@ -66,6 +74,7 @@ pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
     aggregate: PreparedGraphAggregate,
     collects: bool,
+    pipeline: Option<InputPipeline>,
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
@@ -74,8 +83,7 @@ impl VertexAggregatePlan {
         }) {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
-        let aggregate = aggregate
-            .prepare_streamed_output()
+        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let collects = aggregate
             .aggregates()
@@ -90,6 +98,7 @@ impl VertexAggregatePlan {
         }
         let input = VertexScanPlan::compile_with_projection(
             aggregate.input_pattern().plan(),
+            None,
             |projection, ordering| {
                 let GlaOperator::ProjectValues { columns } = projection else {
                     return false;
@@ -107,7 +116,22 @@ impl VertexAggregatePlan {
             input,
             aggregate,
             collects,
+            pipeline,
         })
+    }
+
+    /// Leading infallible root predicates from the checked input. Sources may
+    /// use these to choose an admitted candidate superset, keeping all ordinary
+    /// visible-row checks. The relaxed aggregate input plan stays private: it
+    /// does not prove the ordering required by an ordinary row cursor.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.input.leading_root_predicates()
+    }
+
+    /// The first eligible Boolean prefix from this aggregate's input scan.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        self.input.leading_root_prefix()
     }
 
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
@@ -128,13 +152,22 @@ impl core::fmt::Debug for VertexAggregatePlan {
 }
 
 pub type VertexAggregateError<E, C> = GqlQueryError<GraphAggregateError<VertexScanError<E>>, C>;
+/// One cooperative aggregate poll: Pending, the next finished group, its
+/// error, or the end of the groups.
+pub type AggregatePoll<E> = core::task::Poll<Option<Result<GraphAggregateRow, E>>>;
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
+
+struct Accumulation {
+    groups: Groups,
+    last: Option<VId>,
+    largest_computed_key: usize,
+}
 
 /// The first demand consumes the source; subsequent demands move completed
 /// groups out in canonical result order. Plain reductions move group state;
 /// result clauses finish and validate all groups before exposing a selected page.
-/// Global empty input has one zero/null row. Grouped empty input has no rows.
+/// Global empty input has one zero/null row; grouped empty input has no rows.
 /// No partial group escapes. Source/data and group-count refusals precede ANY
 /// output; cancellation/work/scratch refusal during delivery may follow earlier
 /// complete rows, as for other pull cursors. One typed error permanently fuses
@@ -155,6 +188,7 @@ pub struct VertexAggregateCursor<S, F> {
     state: VertexScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
+    accumulating: Option<Accumulation>,
 }
 impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     pub fn new(
@@ -179,6 +213,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             state: VertexScanState::Open,
             pending: None,
             completed: None,
+            accumulating: None,
         }
     }
     #[must_use]
@@ -212,25 +247,44 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         self.source = None;
         self.pending = None;
         self.completed = None;
+        self.accumulating = None;
     }
 
-    fn accumulate<C>(&mut self) -> Result<Groups, VertexAggregateError<S::Error, C>>
+    fn accumulate<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> Result<Option<Groups>, VertexAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
         let meter = &mut self.meter;
-        meter.event(VertexScanEvent::Work).map_err(lift)?;
         let global = self.plan.aggregate.group_key_columns().is_empty();
-        let mut groups = Groups::new();
-        if global {
-            // Preserve constant-state global aggregation and its early output
-            // admission, including a zero output budget on empty input.
-            if !self.plan.aggregate.has_streamed_output_stage() {
-                let _ = meter.next_result_count().map_err(lift)?;
+        if self.accumulating.is_none() {
+            meter.event(VertexScanEvent::Work).map_err(lift)?;
+            let mut groups = Groups::new();
+            if global {
+                // Admission happens once, including a zero result allowance
+                // on empty input. Suspending never resets group or meter state.
+                if !self.plan.aggregate.has_streamed_output_stage() {
+                    let _ = meter.next_result_count().map_err(lift)?;
+                }
+                meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+                groups.insert(Vec::new(), states(&self.plan.aggregate, meter)?);
             }
-            meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-            groups.insert(Vec::new(), states(&self.plan.aggregate, meter)?);
+            self.accumulating = Some(Accumulation {
+                groups,
+                last: None,
+                largest_computed_key: 0,
+            });
         }
+        let Accumulation {
+            groups,
+            last,
+            largest_computed_key,
+        } = self
+            .accumulating
+            .as_mut()
+            .expect("initialized accumulation");
         let GlaOperator::ProjectValues { columns } = self.plan.input.projection.as_ref() else {
             unreachable!("the immutable physical plan admitted value projections");
         };
@@ -238,14 +292,18 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             .source
             .as_mut()
             .expect("uninitialized cursor owns a source");
-        let mut last = None;
-        let mut largest_computed_key = 0_usize;
         if !self.plan.input.empty {
             loop {
-                let next =
-                    flatten(source.next_vertex(&mut |event| meter.event(event))).map_err(lift)?;
-                let Some(vid) = next else {
-                    break;
+                if *remaining == 0 {
+                    return Ok(None);
+                }
+                *remaining -= 1;
+                let next = flatten(source.next_vertex_step(&mut |event| meter.event(event)))
+                    .map_err(lift)?;
+                let vid = match next {
+                    crate::scan_stream::SourceStep::Item(vid) => vid,
+                    crate::scan_stream::SourceStep::Skipped(_) => continue,
+                    crate::scan_stream::SourceStep::Exhausted => break,
                 };
                 meter.event(VertexScanEvent::Work).map_err(lift)?;
                 if last.is_some_and(|previous| vid <= previous) {
@@ -253,7 +311,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         VertexScanError::NonIncreasingIdentity,
                     )));
                 }
-                last = Some(vid);
+                *last = Some(vid);
                 meter.record().map_err(lift)?;
                 let record = flatten(source.vertex_record(vid, &mut |event| meter.event(event)))
                     .map_err(lift)?;
@@ -282,24 +340,38 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 if !accepted {
                     continue;
                 }
-                // Only computed definitions own a transient source projection.
+                // Computed and relational inputs own one source projection.
                 // The sealed collector retains ordinary property/null behavior
                 // and charges every copy; the shared VM then completes ALL
                 // computed columns before a group can see this occurrence.
-                let computed = if self.plan.aggregate.input_projection().is_some() {
+                let computed = if self.plan.aggregate.input_projection().is_some()
+                    || self.plan.pipeline.is_some()
+                {
                     let input = project_input_row::<GraphValueRow, _>(
                         vid,
                         row,
                         &self.plan.input.projection,
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
-                    Some(
+                    let projected = if let Some(pipeline) = &self.plan.pipeline {
+                        let Some(projected) = pipeline.evaluate(input, &mut |event| {
+                            meter.event(input_event(event)).map_err(lift)
+                        })?
+                        else {
+                            // FALSE/UNKNOWN rejects this record, not the scan.
+                            // The source quantum was already spent, so even an
+                            // entirely filtered source keeps yielding Pending.
+                            continue;
+                        };
+                        projected
+                    } else {
                         self.plan
                             .aggregate
                             .evaluate_streamed_input(input, &mut |event| {
                                 meter.event(input_event(event)).map_err(lift)
-                            })?,
-                    )
+                            })?
+                    };
+                    Some(projected)
                 } else {
                     None
                 };
@@ -349,7 +421,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                                 .saturating_add(value.payload_units())
                                 .saturating_add(1)
                         });
-                        largest_computed_key = largest_computed_key.max(units);
+                        *largest_computed_key = (*largest_computed_key).max(units);
                         let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
                         for _ in 0..levels
                             .saturating_mul(24)
@@ -407,7 +479,61 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         }
         // Empty grouped results have no emit() call to provide this checkpoint.
         meter.event(VertexScanEvent::Work).map_err(lift)?;
-        Ok(groups)
+        Ok(Some(
+            self.accumulating
+                .take()
+                .expect("completed accumulation")
+                .groups,
+        ))
+    }
+
+    /// Cooperatively complete at most 64 source examinations per poll before
+    /// moving one finished group. Hidden and predicate-rejected candidates
+    /// also yield; no private group or input row is emitted during accumulation.
+    /// The synchronous iterator uses this same resumable accumulator. Groups,
+    /// DISTINCT support, collections and all meters survive Pending unchanged.
+    /// Individual source callbacks, probes and completed-group selection remain
+    /// synchronous governed operations, not a wall-clock duration guarantee.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> AggregatePoll<VertexAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != VertexScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        if self.pending.is_none() && self.completed.is_none() {
+            let mut remaining = 64;
+            match self.accumulate(&mut remaining) {
+                Ok(None) => {
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                Ok(Some(groups)) => {
+                    self.source = None;
+                    if self.plan.aggregate.has_streamed_output_stage() {
+                        match self.select_output(groups) {
+                            Ok(rows) => self.completed = Some(rows.into_iter()),
+                            Err(error) => {
+                                self.state = VertexScanState::Failed;
+                                self.close();
+                                return core::task::Poll::Ready(Some(Err(error)));
+                            }
+                        }
+                    } else {
+                        self.pending = Some(groups.into_iter());
+                    }
+                }
+                Err(error) => {
+                    self.state = VertexScanState::Failed;
+                    self.close();
+                    return core::task::Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+        core::task::Poll::Ready(self.next())
     }
 
     fn finalize<C>(
@@ -430,6 +556,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             // no nonnull operand was encountered, so its answer is NULL.
             GraphAggregateRow::from_global_values(values)
         } else if self.plan.aggregate.input_projection().is_some()
+            || self.plan.pipeline.is_some()
             || self.plan.aggregate.has_streamed_output_stage()
             || self.plan.collects
         {
@@ -453,7 +580,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        if !self.plan.aggregate.ordering().is_empty()
+        if self.plan.aggregate.has_streamed_ordering()
             || self.plan.aggregate.incremental_output_is_distinct()
         {
             let mut ranking = self.plan.aggregate.streamed_group_ranking(groups.len());
@@ -523,7 +650,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
 
 // A bounded transient row, using the same sealed GLA collector as row streams.
 // The generic bound exposes its inherited projection without a second encoder.
-fn project_input_row<Row: VertexScanOutput, E>(
+fn project_input_row<Row: VertexScanOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,
@@ -532,7 +659,7 @@ fn project_input_row<Row: VertexScanOutput, E>(
     Row::project(vid, row, projection, control)
 }
 
-fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
+pub(super) fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
     match event {
         GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
         // A private projection cannot spend the public result-row allowance.
@@ -584,7 +711,11 @@ where
                 meter.event(event)
             })
             .map_err(lift)?;
-            Ok(Input::Scalar(found.map(|(_, value)| value)))
+            // A stored List or Map refuses rather than read as NULL
+            // (fgdb-k3nub).
+            let value = crate::integer_expression::stored_scalar(found.map(|(_, value)| value))
+                .map_err(GqlQueryError::from)?;
+            Ok(Input::Scalar(value))
         }
         _ => unreachable!("projection profile checked before source access"),
     }
@@ -606,7 +737,9 @@ where
     }
     Ok(states)
 }
-fn lift<E, C>(error: GqlQueryError<VertexScanError<E>, C>) -> VertexAggregateError<E, C> {
+pub(super) fn lift<E, C>(
+    error: GqlQueryError<VertexScanError<E>, C>,
+) -> VertexAggregateError<E, C> {
     error.map_source(GraphAggregateError::Source)
 }
 
@@ -651,6 +784,13 @@ pub(crate) enum NumericState {
         sum: i128,
         count: u64,
     },
+    /// A SUM/AVG after its first binary64 input: the exact sum of every
+    /// counted input, rounded once at finalization.
+    Float {
+        exact: Box<fgdb_types::ExactBinary64Sum>,
+        count: u64,
+        average: bool,
+    },
     Extreme {
         value: Option<GraphValue>,
         maximum: bool,
@@ -658,8 +798,8 @@ pub(crate) enum NumericState {
     },
 }
 impl NumericState {
-    // Order-sensitive cells need an additional physical source-order proof;
-    // keep them out of supports(), the commutative reducer admission contract.
+    // Order-sensitive cells need an additional source-order or finalization
+    // proof; keep them out of supports(), the commutative reducer contract.
     pub(crate) fn collects(function: GraphAggregateFunction) -> bool {
         matches!(
             function,
@@ -708,6 +848,27 @@ impl NumericState {
         })
     }
 
+    /// Finalize a collection whose caller has proved that canonical value
+    /// order equals its logical child's order within every group. Ordinary
+    /// source-ordered collections keep using finish_governed unchanged.
+    /// DISTINCT support retires before sorting the retained values in place;
+    /// no keys, payloads or input rows are copied for this ordering step.
+    pub(crate) fn finish_canonical_collection_governed<E>(
+        self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+    ) -> Result<GraphAggregateValue, E> {
+        let mut state = match self {
+            Self::Distinct(state) => (*state).into_numeric(),
+            state => state,
+        };
+        if let Self::Collect(values) = &mut state {
+            crate::set_ops::sort_canonical_values(values, &mut |event| {
+                control(input_event(event))
+            })?;
+        }
+        state.finish_governed(control)
+    }
+
     /// Move extrema and retire DISTINCT support. Normalization keeps the exact
     /// rational domain and the existing bounded Euclidean-work reservation.
     pub(crate) fn finish_governed<E>(
@@ -741,6 +902,24 @@ impl NumericState {
             }
             Self::Sum(None) | Self::Average { .. } => {
                 GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
+            }
+            Self::Float {
+                exact,
+                count,
+                average,
+            } => {
+                // One fixed-point division or scan, as bounded as AVG's gcd.
+                for _ in 0..128 {
+                    control(VertexScanEvent::Work)?;
+                }
+                let value = if average {
+                    exact
+                        .mean(count)
+                        .expect("a binary64 state has counted an input")
+                } else {
+                    exact.sum()
+                };
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(value)))
             }
             Self::Extreme { value, .. } => GraphAggregateValue::Value(
                 value.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
@@ -783,6 +962,22 @@ impl NumericState {
             payload_units,
         } = self
         else {
+            // The first binary64 input installs an owned exact accumulator.
+            // Admit its box before update() can allocate or replace the integer
+            // prefix. Later inputs reuse that box and must not charge it again.
+            if matches!(input, Input::Scalar(Some(CanonicalScalar::Float(_))))
+                && matches!(self, Self::Sum(_) | Self::Average { .. })
+            {
+                // Preserve arithmetic refusal before allocation admission.
+                // update() repeats this check for callers that already own
+                // their reservation; neither path may mutate on overflow.
+                if let Self::Average { count, .. } = self {
+                    count.checked_add(1).ok_or(GqlQueryError::Source(
+                        GraphAggregateError::ArithmeticOverflow { aggregate },
+                    ))?;
+                }
+                control(VertexScanEvent::ScratchEntry)?;
+            }
             return self.update(input, aggregate);
         };
         if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) {
@@ -790,48 +985,30 @@ impl NumericState {
         }
         let units = input.payload_units();
         // Keep the established global MIN/MAX kernel's admission before both
-        // canonical comparison and replacement ownership, now per group.
+        // language comparison and replacement ownership, now per group.
         for _ in 0..units.saturating_add(*payload_units) {
             control(VertexScanEvent::Work)?;
         }
-        let replace = match (value.as_ref(), &input) {
-            (None, _) => true,
-            (Some(old), Input::Vertex(next)) => {
-                // Indexing a native list can produce Any: one group may see
-                // scalars, vertices and collections from the SAME checked
-                // expression. A VId carrier is fixed-size; comparing it uses
-                // GraphValue's total order without copying a candidate payload.
-                let next = GraphValue::Vertex(*next);
-                if *maximum { &next > old } else { &next < old }
-            }
-            (Some(GraphValue::Scalar(old)), Input::Scalar(Some(next))) => {
+        let replace = match value.as_ref() {
+            None => true,
+            Some(old) => {
+                use crate::algebra::ValueRef;
+                let next = match input {
+                    Input::Vertex(value) => ValueRef::Vertex(value),
+                    Input::Scalar(Some(value)) => ValueRef::Scalar(value),
+                    Input::Value(value) => ValueRef::from(value),
+                    _ => unreachable!("MIN/MAX requires a nonnull argument, not COUNT(*)"),
+                };
+                let old = ValueRef::from(old);
+                // Keep exact typed support distinct, with a canonical tie
+                // representative independent of scan or update order.
+                let order = next.cmp_orderability(old).then_with(|| next.cmp(&old));
                 if *maximum {
-                    *next > old
+                    order.is_gt()
                 } else {
-                    *next < old
+                    order.is_lt()
                 }
             }
-            (Some(old), Input::Value(next)) => {
-                if *maximum {
-                    *next > old
-                } else {
-                    *next < old
-                }
-            }
-            (Some(old), Input::Scalar(Some(_))) => {
-                // The scalar/scalar arm above already compares real values.
-                // Here old is a DIFFERENT GraphValue variant, so only the
-                // native variant order participates. A payload-free scalar
-                // representative preserves that order without cloning text,
-                // bytes or timestamps merely to compare a losing candidate.
-                let scalar = GraphValue::Scalar(CanonicalScalar::Null);
-                if *maximum {
-                    &scalar > old
-                } else {
-                    &scalar < old
-                }
-            }
-            _ => unreachable!("MIN/MAX requires a nonnull argument, not COUNT(*)"),
         };
         if replace {
             control(VertexScanEvent::ScratchEntry)?;
@@ -863,6 +1040,14 @@ impl NumericState {
         match self {
             Self::Count(value) => *value = value.checked_add(1).ok_or_else(overflow)?,
             Self::Sum(total) => {
+                if let Input::Scalar(Some(CanonicalScalar::Float(_))) = input {
+                    *self = Self::Float {
+                        exact: Self::exact_prefix(total.unwrap_or(0)),
+                        count: u64::from(total.is_some()),
+                        average: false,
+                    };
+                    return self.update(input, aggregate);
+                }
                 let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
                     return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
                         aggregate,
@@ -876,6 +1061,17 @@ impl NumericState {
                 );
             }
             Self::Average { sum, count } => {
+                if let Input::Scalar(Some(CanonicalScalar::Float(value))) = input {
+                    let next_count = count.checked_add(1).ok_or_else(overflow)?;
+                    let mut exact = Self::exact_prefix(*sum);
+                    exact.add(*value);
+                    *self = Self::Float {
+                        exact,
+                        count: next_count,
+                        average: true,
+                    };
+                    return Ok(());
+                }
                 let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
                     return Err(GqlQueryError::Source(
                         GraphAggregateError::NonIntegerAverage { aggregate },
@@ -886,11 +1082,41 @@ impl NumericState {
                 *sum = next_sum;
                 *count = next_count;
             }
+            Self::Float {
+                exact,
+                count,
+                average,
+            } => {
+                let next_count = count.checked_add(1).ok_or_else(overflow)?;
+                match input {
+                    Input::Scalar(Some(CanonicalScalar::Int(value))) => {
+                        exact.add_integer(i128::from(*value));
+                    }
+                    Input::Scalar(Some(CanonicalScalar::Float(value))) => exact.add(*value),
+                    _ if *average => {
+                        return Err(GqlQueryError::Source(
+                            GraphAggregateError::NonIntegerAverage { aggregate },
+                        ));
+                    }
+                    _ => {
+                        return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+                            aggregate,
+                        }));
+                    }
+                }
+                *count = next_count;
+            }
             Self::Extreme { .. } | Self::Distinct(_) | Self::Collect(_) => {
                 unreachable!("value support and ownership require governed updates")
             }
         }
         Ok(())
+    }
+
+    fn exact_prefix(sum: i128) -> Box<fgdb_types::ExactBinary64Sum> {
+        let mut exact = Box::new(fgdb_types::ExactBinary64Sum::new());
+        exact.add_integer(sum);
+        exact
     }
 }
 
@@ -905,7 +1131,14 @@ where
             return None;
         }
         if self.pending.is_none() && self.completed.is_none() {
-            let result = self.accumulate();
+            let result = loop {
+                let mut remaining = usize::MAX;
+                match self.accumulate(&mut remaining) {
+                    Ok(Some(groups)) => break Ok(groups),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+            };
             // Every retained key is owned. Release the snapshot before delivery.
             self.source = None;
             match result {
@@ -921,6 +1154,7 @@ where
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => {
                     self.state = VertexScanState::Failed;
+                    self.accumulating = None;
                     return Some(Err(error));
                 }
             }

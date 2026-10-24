@@ -102,12 +102,18 @@ impl VertexScanSource for Source {
     fn next_probe_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: crate::algebra::EdgeRelation,
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
-        self.seek(endpoint, relation, direction, after, control)
+        self.seek(
+            endpoint,
+            relation.one().expect("typed fixture"),
+            direction,
+            after,
+            control,
+        )
     }
     fn probe_edge<'a, C>(
         &'a self,
@@ -171,12 +177,18 @@ impl EdgeScanSource for Source {
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: crate::algebra::EdgeRelation,
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
-        self.seek(endpoint, relation, direction, after, control)
+        self.seek(
+            endpoint,
+            relation.one().expect("typed fixture"),
+            direction,
+            after,
+            control,
+        )
     }
 }
 fn pattern(text: &str) -> crate::algebra::PreparedGraphPattern<GraphValueRow> {
@@ -410,7 +422,7 @@ fn relation_aware_defaults_preserve_exact_candidate_and_control_transcripts() {
                 Legacy
                     .next_probe_edge_for_relation(
                         VId(0),
-                        relation,
+                        relation.into(),
                         GlaDirection::Forward,
                         after,
                         &mut |e| {
@@ -427,7 +439,7 @@ fn relation_aware_defaults_preserve_exact_candidate_and_control_transcripts() {
                 Legacy
                     .next_incident_edge_for_relation(
                         VId(0),
-                        relation,
+                        relation.into(),
                         GlaDirection::Forward,
                         after,
                         &mut |e| {

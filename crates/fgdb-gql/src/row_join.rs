@@ -13,10 +13,11 @@ use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use std::sync::Arc;
 
 mod input;
+mod probe;
 use input::{Input, InputUpdate};
 
-// Side-specific NULL domains retain and validate unmatched input counts without
-// ever joining two NULLs. An ordinary key always has tag zero.
+// Side-specific non-witness domains retain unmatched inputs without joining
+// NULL or incompatible dynamic predicate keys. An ordinary key has tag zero.
 type Key = (u8, Arc<[GraphValue]>);
 type Row = Arc<GraphValueRow>;
 type Arranged = ZSet<(Key, Row)>;
@@ -34,7 +35,27 @@ pub enum RowJoinBuildError {
 }
 impl core::fmt::Display for RowJoinBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row join definition: {self:?}")
+        match self {
+            Self::EmptyInput => f.write_str("join input has no columns"),
+            Self::TooManyColumns { observed } => {
+                write!(f, "join output would have {observed} columns, too many")
+            }
+            Self::EmptyKeys => f.write_str("join requires at least one key"),
+            Self::TooManyKeys => f.write_str("join has too many keys"),
+            Self::KeyColumn { side, column } => {
+                write!(f, "join key column {column} of input {side} does not exist")
+            }
+            Self::KeyType { key } => {
+                write!(f, "join key {key} compares columns of different types")
+            }
+            Self::UnsupportedColumn { side, column } => {
+                write!(
+                    f,
+                    "join input {side} column {column} has an unsupported type"
+                )
+            }
+            Self::Predicate(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for RowJoinBuildError {}
@@ -102,11 +123,11 @@ impl RowJoinSpec {
                 let is_key = keys
                     .iter()
                     .any(|&(l, r)| column == if side == 0 { l } else { r });
+                // A vertex or edge key is its identity: a relationship carried
+                // past WITH into a later MATCH correlates as a vertex does.
                 if is_key
-                    && !matches!(
-                        kind,
-                        GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
-                    )
+                    && !kind.is_scalar_like()
+                    && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 {
                     return Err(RowJoinBuildError::UnsupportedColumn { side, column });
                 }
@@ -315,6 +336,7 @@ fn reserve_row<E>(
 }
 fn arrange<E>(
     spec: &RowJoinSpec,
+    probe: &probe::Probe<'_>,
     side: usize,
     rows: &ZSet<GraphValueRow>,
     limbs: LimbLimit,
@@ -334,13 +356,12 @@ fn arrange<E>(
             }
         }
         charge(control, ZSetEvent::ScratchEntry)?;
-        let mut values = Vec::with_capacity(spec.keys.len());
+        let mut values = Vec::with_capacity(probe.columns().len());
         let mut has_null = false;
-        for &(l, r) in &spec.keys {
-            let value = &row.values()[if side == 0 { l } else { r }];
+        for &(l, r) in probe.columns() {
+            let value = probe.copy_cell(&row.values()[if side == 0 { l } else { r }], control)?;
             has_null |= value.is_null();
-            reserve_cell(value, control)?;
-            values.push(value.clone());
+            values.push(value);
         }
         let tag = if has_null {
             if side == 0 { 1 } else { 2 }
@@ -366,7 +387,11 @@ fn arrange<E>(
 /// admission; this is not spill or a worst-case-optimal multiway join.
 /// With a residual predicate, matched pairs use the exact selected derivative;
 /// outer/presence witnesses are recomputed per row within changed key groups.
-/// That fallback can scan a group's Cartesian candidate domain but never
+/// Without explicit typed keys, a necessary ON equality may provide a private
+/// predicate-equivalence index, without rewriting either original row. The
+/// unchanged native ON still decides every candidate's truth. Predicates with
+/// no proven equality retain one candidate group. This can scan a group's
+/// Cartesian candidate domain but never
 /// materializes matched products for semi/anti or visits unrelated groups.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalRowJoin {
@@ -410,8 +435,12 @@ impl IncrementalRowJoin {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<RowJoinUpdate<'_>, RowJoinError<E>> {
         charge(control, ZSetEvent::Work)?;
-        let left = arrange(&self.spec, 0, left, limbs, control)?;
-        let right = arrange(&self.spec, 1, right, limbs, control)?;
+        // One static definition proof governs BOTH deltas and all subsequent
+        // old-row lookups. No input-dependent strategy or retry after refusal.
+        let probe = probe::Probe::new(&self.spec, control)?;
+        let left = arrange(&self.spec, &probe, 0, left, limbs, control)?;
+        let right = arrange(&self.spec, &probe, 1, right, limbs, control)?;
+        drop(probe);
         for (side, rows) in [&left, &right].into_iter().enumerate() {
             for ((key, row), weight) in rows.iter() {
                 charge(control, ZSetEvent::Work)?;
@@ -639,8 +668,8 @@ mod payload_tests {
 
     #[test]
     fn native_payload_domains_are_admitted_but_never_promoted_to_equality_keys() {
-        use GraphSetColumnType::{Any, Edge, Edges, List, Path, Scalar, Vertices};
-        for payload in [Any, Edge, Edges, List, Path, Vertices] {
+        use GraphSetColumnType::{Any, Edge, Edges, List, Path, Scalar, Vertex, Vertices};
+        for payload in [Any, Edges, List, Path, Vertices] {
             let schema = [Scalar, payload];
             assert!(RowJoinSpec::new(&schema, &schema, &[(0, 0)]).is_ok());
             assert_eq!(
@@ -650,6 +679,16 @@ mod payload_tests {
             assert_eq!(
                 RowJoinSpec::new(&[Scalar], &schema, &[(0, 1)]),
                 Err(RowJoinBuildError::UnsupportedColumn { side: 1, column: 1 })
+            );
+        }
+        // A vertex or edge is an identity, so it is an equality key on both
+        // sides (a relationship carried past WITH), never across kinds.
+        for identity in [Vertex, Edge] {
+            let schema = [Scalar, identity];
+            assert!(RowJoinSpec::new(&schema, &schema, &[(1, 1)]).is_ok());
+            assert_eq!(
+                RowJoinSpec::new(&[Scalar], &schema, &[(0, 1)]),
+                Err(RowJoinBuildError::KeyType { key: 0 })
             );
         }
     }

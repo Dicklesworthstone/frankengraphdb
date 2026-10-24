@@ -89,7 +89,7 @@ fn bag(mut n: usize) -> ZSet<GraphValueRow> {
 }
 fn seed(global: bool, having: bool, input: &ZSet<GraphValueRow>) -> Operator {
     let mut state =
-        Operator::new(definition(global, having), &[GraphSetColumnType::Scalar; 2]).unwrap();
+        Operator::new(definition(global, having), &[GraphSetColumnType::Stored; 2]).unwrap();
     state
         .prepare(input, LIMBS, None, &mut allow)
         .unwrap()
@@ -346,7 +346,7 @@ fn scalar_and_vertex_support_preserve_last_witness_and_refill_extrema() {
     let make = || {
         Operator::new(
             definition.clone(),
-            &[GraphSetColumnType::Vertex, GraphSetColumnType::Scalar],
+            &[GraphSetColumnType::Vertex, GraphSetColumnType::Stored],
         )
         .unwrap()
     };
@@ -436,12 +436,12 @@ fn changed_tuple_work_is_independent_of_unrelated_groups_and_occurrence_count() 
 #[test]
 fn complete_definition_admission_refuses_transforms_and_checks_empty_input_schema() {
     assert!(matches!(
-        Operator::new(definition(false, false), &[GraphSetColumnType::Scalar]),
+        Operator::new(definition(false, false), &[GraphSetColumnType::Stored]),
         Err(GroupBuildError::InputSchema { .. })
     ));
     let ranked = definition(false, false).with_distinct_output(true);
     assert!(matches!(
-        Operator::new(ranked, &[GraphSetColumnType::Scalar; 2]),
+        Operator::new(ranked, &[GraphSetColumnType::Stored; 2]),
         Err(GroupBuildError::UnsupportedDefinition)
     ));
     let query = PreparedGraphSetAggregate::prepare(
@@ -455,7 +455,7 @@ fn complete_definition_admission_refuses_transforms_and_checks_empty_input_schem
     // b0c3bd5f made COLLECT over an input with a proved occurrence order an
     // incrementally maintained aggregate. The UnsupportedAggregate refusal
     // branch is witnessed by value_tests.rs and collection/tests.rs.
-    assert!(Operator::new(query, &[GraphSetColumnType::Scalar; 2]).is_ok());
+    assert!(Operator::new(query, &[GraphSetColumnType::Stored; 2]).is_ok());
     let state = seed(true, false, &ZSet::new());
     assert_eq!(state.rows().len(), 1);
     assert_eq!(

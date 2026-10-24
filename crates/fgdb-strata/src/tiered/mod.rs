@@ -6,6 +6,7 @@
 //! database-wide extent routing are not implied by these component exports.
 
 pub mod buffer;
+pub mod edge_scan;
 pub mod inline;
 pub mod memory;
 pub mod sealed;

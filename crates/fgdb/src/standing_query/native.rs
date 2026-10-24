@@ -6,9 +6,11 @@ use crate::{PreparedNativeRead, QueryError, QueryResult, QueryValue};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
+mod budget;
 mod changes;
 pub use changes::{
-    NativeSubscription, SubscribeError, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+    NativeSubscription, NativeSubscriptionSetup, SubscribeError, SubscriptionBatch,
+    SubscriptionError, SubscriptionReceipt,
 };
 mod cursor;
 mod row_handle;
@@ -65,6 +67,21 @@ impl PreparedNativeRead {
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
     /// binary set/product circuits with projections, filters and UNWIND are admitted
     /// only where the existing standing engines support their bound operators.
+    /// Zero-argument connected/weakly-connected/strongly-connected component
+    /// CALLs reuse the component delta engines for one explicit relation and
+    /// all live vertices, with unit weights, collapsed parallel edges and
+    /// kept or dropped self-loops. YIELD aliases and downstream row stages retain
+    /// their native schema; unsupported projection recipes refuse.
+    /// Core-number CALLs use the existing exact affected-component maintainer
+    /// under the same projection profile with self-loops explicitly dropped.
+    /// Their checked integer rows and derivatives are retained only for native
+    /// registration; typed core-number views do not acquire a second row sink.
+    /// Triangle CALLs under the explicit undirected/unit/collapse/drop profile
+    /// maintain exact per-vertex counts, including live zero-count isolates.
+    /// The source retains linear vertex result/incidence state and consumes
+    /// signed triangle changes; it does not retain the typed triple table or
+    /// rescan it per tick. Bootstrap still materializes the initial triangle
+    /// derivative, and changed-triangle scratch remains governed by policy.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and
@@ -132,6 +149,16 @@ impl PreparedNativeRead {
                             policy,
                         );
                     }
+                    if let Some(definition) = bound.incremental_group_relation() {
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
                     let layout = Layout::Aggregate {
                         columns: prepared.columns().to_vec(),
                         slots: prepared.output_slots().to_vec(),
@@ -142,12 +169,38 @@ impl PreparedNativeRead {
                     )
                 }
                 Self::PipelineAggregate(prepared) => {
+                    if prepared.requires_relational_input() {
+                        // Zero or several graph sources bind through the
+                        // set-aggregate lane, as reads do (query_view.rs). The
+                        // single-source binder refuses them.
+                        let definition = prepared
+                            .bind_relation_parameters(params)
+                            .map_err(|e| prepare_error(QueryError::PipelineText(e)))?;
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PipelineText(e)))?;
                     if bound.input_relation().is_some() {
                         let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(bound)
                             .ok_or(StandingQueryError::Unsupported)?;
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
+                    if let Some(definition) = bound.incremental_group_relation() {
                         return set::register_group(
                             database,
                             cx,
@@ -266,13 +319,16 @@ impl<V: Vfs + Clone> Database<V> {
         cursor::open(self, cx, handle, policy)
     }
 
-    /// Pull the latest signed changes for a native row circuit or relational
-    /// group circuit, retaining compressed exact multiplicities. `after` must
+    /// Pull the latest signed changes for a native row circuit, direct graph
+    /// aggregate or relational group, retaining exact multiplicities. `after` must
     /// be the immediate predecessor of the accepted frontier, even for an
     /// empty tick. A missed tick returns DeltaGap, never an incomplete delta.
     /// None is an initialization/rebuild baseline, not an unchanged successor.
-    /// Direct graph-source aggregate cursors remain unsupported; use
-    /// standing_native_delta for their consolidated final-result changes.
+    /// Aggregate frames describe final selected results, after HAVING, output
+    /// projection, DISTINCT and paging, not changes to private group support.
+    /// Opening borrows the retained derivative without collecting a native bag.
+    /// Native-slot images can collide; use standing_native_delta when a fully
+    /// consolidated native bag is required rather than incremental delivery.
     ///
     /// Stage changes privately and integrate only after cursor exhaustion;
     /// early close or failure is incomplete delivery. This reports bag changes,

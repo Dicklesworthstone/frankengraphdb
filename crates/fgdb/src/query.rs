@@ -13,7 +13,7 @@ type Cancel = Box<asupersync::error::Error>;
 #[path = "query_aggregate_stream.rs"]
 mod aggregate_stream;
 #[path = "query_authorized.rs"]
-mod authorized;
+pub(crate) mod authorized;
 #[path = "query_beacon.rs"]
 mod beacon;
 #[path = "query_diff.rs"]
@@ -27,17 +27,35 @@ mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use authorized::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
-pub use beacon::{PinnedIndex, RefreshReport, ResidentIndex, ResidentIndexError};
+pub(crate) use beacon::procedure::{
+    EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
+    privileged_with_registry as hybrid_procedure_with_registry, refuse as hybrid_refusal,
+};
+pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
+pub(crate) use beacon::{BeaconQueryIndexes, BeaconRegistry};
+pub use beacon::{
+    MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
+    MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,
+    ResidentIndexError,
+};
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};
-pub use prism::ProcedureError;
+pub use prism::{ProcedureError, SealedProjectionOpenError};
 pub(crate) use prism::{
     bind_procedure, fnx_procedure, procedure_failure, procedure_options, procedure_rows,
+    push_staged as push_prism_staged, source_control as prism_source_control,
 };
-pub use view::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
+pub use view::{
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
+    NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
+};
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.
@@ -123,7 +141,9 @@ impl core::fmt::Display for QueryError {
             Self::Unsupported { diagnostics } => {
                 write!(f, "unsupported query construct: {}", diagnostics.join("; "))
             }
-            Self::Refused { source, .. } => write!(f, "unsupported query construct: {source}"),
+            // The furthest-progressing parser's own refusal: its byte and
+            // reason, which need not be an unsupported construct.
+            Self::Refused { source, .. } => source.fmt(f),
             Self::PatternText(e) => e.fmt(f),
             Self::SetText(e) => e.fmt(f),
             Self::PipelineText(e) => e.fmt(f),
@@ -182,6 +202,25 @@ pub enum QueryWriteError<A> {
     /// CREATE/INSERT RETURN is a single native query, not a no-result script.
     InsertText(GraphInsertTextError),
     Insert(GqlQueryError<GraphInsertQueryError<WriteTxnError, A>, Cancel>),
+    /// MATCH-selected SET/REMOVE/DETACH DELETE RETURN retains the mutation
+    /// query's preparation and execution errors, never a script fallback.
+    MutationText(GraphMutationTextError),
+    Mutation(GqlQueryError<GraphMutationQueryError<WriteTxnError>, Cancel>),
+    /// Vertex MERGE RETURN includes the selected branch, trailing actions and
+    /// post-clause result. Completion errors retain their original meaning.
+    VertexUpsertText(GraphVertexUpsertTextError),
+    VertexUpsert(GqlQueryError<GraphVertexUpsertError<WriteTxnError, A>, Cancel>),
+    /// Relationship MERGE RETURN: one row per selected row and resolved edge,
+    /// read from the staged graph (fgdb-at06q).
+    EdgeMergeText(GraphEdgeMergeTextError),
+    EdgeMerge(GqlQueryError<GraphEdgeMergeQueryError<WriteTxnError, A>, Cancel>),
+    /// Relationship ON/SET RETURN preserves every input occurrence and parallel
+    /// match, retaining native action, result and completion errors.
+    EdgeUpsertText(GraphEdgeUpsertTextError),
+    EdgeUpsert(GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, A>, Cancel>),
+    /// A chained write (fgdb-cpny9): the failing step's own family error.
+    ChainText(GraphWriteChainTextError),
+    Chain(GqlQueryError<GraphWriteChainError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -191,6 +230,16 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::Execute(e) => e.fmt(f),
             Self::InsertText(e) => e.fmt(f),
             Self::Insert(e) => e.fmt(f),
+            Self::MutationText(e) => e.fmt(f),
+            Self::Mutation(e) => e.fmt(f),
+            Self::VertexUpsertText(e) => e.fmt(f),
+            Self::VertexUpsert(e) => e.fmt(f),
+            Self::EdgeMergeText(e) => e.fmt(f),
+            Self::EdgeMerge(e) => e.fmt(f),
+            Self::EdgeUpsertText(e) => e.fmt(f),
+            Self::EdgeUpsert(e) => e.fmt(f),
+            Self::ChainText(e) => e.fmt(f),
+            Self::Chain(e) => e.fmt(f),
         }
     }
 }
@@ -202,6 +251,16 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::Execute(error) => Some(error),
             Self::InsertText(error) => Some(error),
             Self::Insert(error) => Some(error),
+            Self::MutationText(error) => Some(error),
+            Self::Mutation(error) => Some(error),
+            Self::VertexUpsertText(error) => Some(error),
+            Self::VertexUpsert(error) => Some(error),
+            Self::EdgeMergeText(error) => Some(error),
+            Self::EdgeMerge(error) => Some(error),
+            Self::EdgeUpsertText(error) => Some(error),
+            Self::EdgeUpsert(error) => Some(error),
+            Self::ChainText(error) => Some(error),
+            Self::Chain(error) => Some(error),
         }
     }
 }
@@ -219,19 +278,110 @@ impl<A> From<NativeGraphWriteBindError> for QueryWriteError<A> {
 
 // Both public write entrypoints must bind the same native query. The parser,
 // not a text rewrite, owns statement framing, scopes and parameter occurrence
-// tables. List parameters may appear only in RETURN, without any UNWIND use
-// that would otherwise infer their kind.
+// tables. Scalar and collection arguments may appear only in RETURN. Keep
+// their declared kinds, while numeric and pagination roles retain inference.
+fn write_return_declarations(params: &GqlParameters) -> Vec<(&str, GqlParameterType)> {
+    params
+        .parameter_types()
+        .filter(|(_, kind)| {
+            matches!(
+                kind,
+                GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+            )
+        })
+        .collect()
+}
+
 fn prepare_insert_return(
     text: &str,
     params: &GqlParameters,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    resolver: impl GraphSymbolResolver,
     relation: RelationId,
 ) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
-    let declarations: Vec<(&str, GqlParameterType)> = params
-        .parameter_types()
-        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List))
-        .collect();
+    let declarations = write_return_declarations(params);
     PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+/// `CREATE ... WITH ... CREATE ... [RETURN ...]` (fgdb-cpny9): every step is
+/// prepared and bound before any executes.
+fn prepare_write_chain(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphWriteChainText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_mutation_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphMutationQuery, GraphMutationTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphMutationQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_vertex_upsert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_edge_merge_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphEdgeMergeQuery, GraphEdgeMergeTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_edge_upsert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
         text,
         relation,
         &declarations,
@@ -319,13 +469,19 @@ impl<V: Vfs + Clone> Database<V> {
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
     /// allocator remain explicit, exactly as in the existing native script API.
     /// Ordinary scripts and expanded UNWIND batches share one work budget.
-    /// CREATE/INSERT RETURN produces Rows only after native transaction finish
-    /// succeeds. Writes without RETURN retain their Write receipt. A RETURN
-    /// failure is never retried as a script or as a read. Multi-statement RETURN
+    /// CREATE/INSERT, MATCH-selected mutation, vertex MERGE and relationship
+    /// MERGE RETURN produce Rows only after native transaction finish succeeds. Writes without RETURN
+    /// retain their Write receipt. Statement-specific native classifiers own
+    /// dispatch; comments, literals and names are never substring-scanned here.
+    /// A RETURN failure is never retried as a script or as a read. Multi-statement RETURN
     /// scripts are refused rather than executing a prefix and dropping rows.
     /// One bounded UNWIND MERGE/MATCH mutation binds every map row before the
     /// ordinary atomic executor starts. Its rows share the whole program budget
     /// and its errors retain input-record coordinates; no per-row commit occurs.
+    /// Relationship ON/SET RETURN preserves every MATCH occurrence and parallel
+    /// match, using one atomic bulk executor and the original allocator row IDs.
+    /// Vertex MERGE RETURN/WITH processes every matching target, or creates
+    /// one vertex when absent. Explicit unique typed entrypoints stay unique.
     #[allow(clippy::too_many_arguments)]
     // Returns once per statement/script and wraps the script execution error,
     // whose record location plus program error is deliberate (write_scripts).
@@ -337,11 +493,42 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx: &CommitCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        // A chain claims its text before CREATE RETURN, whose classifier
+        // would otherwise see the final RETURN of a multi-write statement.
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::ChainText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt, completion) = self
+                .execute_graph_write_chain_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::Chain)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: Some(completion),
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
@@ -366,7 +553,99 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
+        if PreparedGraphMutationQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::MutationText)?
+        {
+            let query = prepare_mutation_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::MutationText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_mutation_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.mutations,
+                )
+                .await
+                .map_err(QueryWriteError::Mutation)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::VertexUpsertText)?
+        {
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_vertex_upserts_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.vertex_upsert_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::VertexUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeUpsertText)?
+        {
+            let query = prepare_edge_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_edge_upserts_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.edge_upsert_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::EdgeUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeMergeText)?
+        {
+            let query = prepare_edge_merge_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeMergeText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_edge_merge_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.edge_merge_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::EdgeMerge)?;
+            return Ok(values(columns, rows.value));
+        }
+        // The resolver itself, not a closure over it: the write's temporal
+        // constructors need its pinned tzdb (fgdb-txbg9).
+        let bound = BoundNativeGraphWrite::bind_with_resolver(text, params, relation, resolver)
             .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
             .execute_graph_write_program_returning_autocommit_governed(
@@ -389,9 +668,16 @@ impl<V: Vfs + Clone> Database<V> {
 impl WriteTxn {
     /// Stage a native statement/script atomically inside this transaction.
     /// The caller alone decides when to finish the outer transaction. Explicit
-    /// CREATE/INSERT RETURN produces transaction-local Rows, not a durability
-    /// acknowledgment. Its complete result is admitted before atomic staging;
+    /// CREATE/INSERT, MATCH-selected mutation, vertex MERGE and relationship
+    /// MERGE RETURN produce transaction-local Rows, not a durability
+    /// acknowledgment. Native query
+    /// engines admit the complete result before accepting the statement;
     /// errors preserve earlier staged effects and their read dependencies.
+    /// Result pagination never limits effects or hides a failing expression.
+    /// Relationship ON/SET RETURN processes the complete occurrence bag before
+    /// projection or WITH; a late failure restores the prior staged prefix.
+    /// Returning vertex MERGE uses the same all-target semantics as the
+    /// autocommit API; output limits never choose which targets are updated.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
@@ -400,11 +686,38 @@ impl WriteTxn {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::ChainText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt) = self
+                .execute_graph_write_chain_governed(
+                    database,
+                    cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::Chain)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: None,
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
@@ -427,7 +740,86 @@ impl WriteTxn {
                 .map_err(QueryWriteError::Insert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, resolver)
+        if PreparedGraphMutationQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::MutationText)?
+        {
+            let query = prepare_mutation_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::MutationText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_mutation_query_governed(database, cx, &query, budget.mutations)
+                .map_err(QueryWriteError::Mutation)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::VertexUpsertText)?
+        {
+            let query = prepare_vertex_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::VertexUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_vertex_upserts_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.vertex_upsert_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::VertexUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeUpsertText)?
+        {
+            let query = prepare_edge_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_edge_upserts_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.edge_upsert_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::EdgeUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeMergeText)?
+        {
+            let query = prepare_edge_merge_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeMergeText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_edge_merge_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.edge_merge_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::EdgeMerge)?;
+            return Ok(values(columns, rows.value));
+        }
+        // The resolver itself, not a closure over it: the write's temporal
+        // constructors need its pinned tzdb (fgdb-txbg9).
+        let bound = BoundNativeGraphWrite::bind_with_resolver(text, params, relation, resolver)
             .map_err(QueryWriteError::from)?;
         let receipt = self
             .execute_graph_write_program_returning_governed(
@@ -457,7 +849,7 @@ mod write_return_tests {
     use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
     use std::sync::Arc;
     // Atomics, not Cell: the counters live inside lab futures, which must be Send.
-    use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const R: RelationId = RelationId(1);
     const P: PropertyKeyId = PropertyKeyId(1);
@@ -595,11 +987,14 @@ mod write_return_tests {
             for (vertex, edge, value) in [(100, 1_000, 10), (110, 1_010, 12)] {
                 assert_eq!(
                     db.vertex(VId(vertex)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(value))]
+                    vec![(P, CanonicalScalar::Int(value).into())]
                 );
                 let edge = db.edge(EId(edge)).unwrap().unwrap();
                 assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(vertex)));
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value - 3))]);
+                assert_eq!(
+                    edge.props,
+                    vec![(P, CanonicalScalar::Int(value - 3).into())]
+                );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -690,7 +1085,7 @@ mod write_return_tests {
             assert!(db.vertex(VId(101)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(102)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]
+                vec![(P, CanonicalScalar::Int(5).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -706,12 +1101,17 @@ mod write_return_tests {
             let txcx = contexts.txn();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let before = db.frontier().unwrap();
-            for text in [
-                "CREATE (n:Copy) RETURN n; CREATE (m)",
-                "CREATE (n:Copy); CREATE (m) RETURN m",
-                "MATCH (n) CREATE (copy:Copy) SET copy.p=1 RETURN copy",
+            for (text, chain) in [
+                ("CREATE (n:Copy) RETURN n; CREATE (m)", false),
+                ("CREATE (n:Copy); CREATE (m) RETURN m", false),
+                // CREATE ... SET ... RETURN is a chain step since 29157210
+                // (fgdb-cpny9); the chain parser refuses a write after it.
+                (
+                    "MATCH (n) CREATE (copy:Copy) SET copy.p=1 CREATE (x) RETURN copy",
+                    true,
+                ),
             ] {
-                let calls = AtomicI32::new(0);
+                let looked_up = std::sync::Mutex::new(Vec::new());
                 let result = db
                     .query_write(
                         &txcx,
@@ -719,8 +1119,8 @@ mod write_return_tests {
                         &commit,
                         text,
                         &GqlParameters::new(),
-                        |kind, name| {
-                            calls.fetch_add(1, Ordering::Relaxed);
+                        |kind, name: &str| {
+                            looked_up.lock().unwrap().push(name.to_owned());
                             symbols(kind, name)
                         },
                         R,
@@ -728,12 +1128,32 @@ mod write_return_tests {
                         |_| -> Result<ElementId, ()> { panic!("refused text cannot allocate") },
                     )
                     .await;
-                assert!(matches!(result, Err(QueryWriteError::InsertText(_))));
-                assert_eq!(
-                    calls.load(Ordering::Relaxed),
-                    0,
-                    "refusal precedes catalog calls: {text}"
-                );
+                let looked_up = looked_up.into_inner().unwrap();
+                if chain {
+                    assert!(
+                        matches!(result, Err(QueryWriteError::ChainText(_))),
+                        "{text}"
+                    );
+                    // A chain prepares step by step, so the label and the
+                    // SET's property key are looked up before the CREATE
+                    // after the SET is refused (measured: `Copy`, then `p`).
+                    // A lookup is a pure catalog read; nothing is written.
+                    assert_eq!(
+                        looked_up,
+                        ["Copy", "p"],
+                        "lookups that precede the refusal: {text}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(QueryWriteError::InsertText(_))),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        looked_up,
+                        Vec::<String>::new(),
+                        "refusal precedes catalog calls: {text}"
+                    );
+                }
                 assert_eq!(db.frontier().unwrap(), before);
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
@@ -778,6 +1198,222 @@ mod write_return_tests {
             ));
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_relationship_upsert_return_keeps_parameters_branches_and_rollback() {
+        let ((), report) = run_async_under_lab(0xe6e0_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let q = PropertyKeyId(2);
+            let symbols = |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(q)),
+                _ => None,
+            };
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            db.write(&commit, seed).await.unwrap();
+            let text = "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                        MERGE (a)-[r:R {q:$key}]-(b) \
+                        ON CREATE SET r.p=$initial ON MATCH SET r.p=r.p+1 \
+                        SET r.p=r.p+1 RETURN r,r.q AS key,r.p AS counter";
+            let arguments = GqlParameters::new()
+                .with_int64("key", 42)
+                .unwrap()
+                .with_int64("initial", 4)
+                .unwrap();
+            let next = AtomicU64::new(100);
+            let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
+                assert_eq!(request.statement, 0);
+                assert!(matches!(
+                    request.request,
+                    GraphInsertRequest::Edge { row: 0, edge: 0 }
+                ));
+                Ok(ElementId::Edge(EId(u128::from(
+                    next.fetch_add(1, Ordering::Relaxed),
+                ))))
+            };
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &arguments,
+                    &symbols,
+                    R,
+                    policy(1, 0, 1),
+                    &mut allocate,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows(result, &["r", "key", "counter"]),
+                vec![vec![GraphValue::Edge(EId(100)), int(42), int(5)]]
+            );
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let result = transaction
+                .query_write(
+                    &mut db,
+                    &cx,
+                    text,
+                    &arguments,
+                    &symbols,
+                    R,
+                    policy(1, 0, 0),
+                    &mut allocate,
+                )
+                .unwrap();
+            assert_eq!(
+                rows(result, &["r", "key", "counter"]),
+                vec![vec![GraphValue::Edge(EId(100)), int(42), int(7)]]
+            );
+            assert_eq!(next.load(Ordering::Relaxed), 101);
+            let digest = transaction.staged_effect_digest().unwrap();
+            let result = transaction.query_write(
+                &mut db,
+                &cx,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                 MERGE (a)-[r:R {q:99}]->(b) ON CREATE SET r.p=0 \
+                 RETURN 10/r.p AS bad LIMIT 0",
+                &GqlParameters::new(),
+                &symbols,
+                R,
+                policy(1, 0, 1),
+                &mut allocate,
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
+                    GraphEdgeUpsertQueryError::Returning(_)
+                )))
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.edges(&db).unwrap().len(), 1);
+            assert_eq!(next.load(Ordering::Relaxed), 102);
+            assert_eq!(db.frontier().unwrap(), before);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(
+                db.edge(EId(100)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (q, CanonicalScalar::Int(42).into())
+                ]
+            );
+            assert!(db.edge(EId(101)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_bulk_upsert_preserves_allocator_rows_with_tail_and_statement_rollback() {
+        let ((), report) = run_async_under_lab(0xe6e1_0010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=3 {
+                seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let calls = AtomicU64::new(0);
+            let args = GqlParameters::new().with_int64("initial", 7).unwrap();
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON CREATE SET r.p=$initial RETURN r,r.p AS p ORDER BY r",
+                    &args,
+                    symbols,
+                    R,
+                    policy(2, 0, 2),
+                    |request| -> Result<ElementId, ()> {
+                        assert_eq!(request.statement, 0);
+                        let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                            panic!("bulk upsert allocates only its missing relationships")
+                        };
+                        assert_eq!(row as u64, calls.fetch_add(1, Ordering::Relaxed));
+                        Ok(ElementId::Edge(EId(500 + row as u128)))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            assert_eq!(
+                rows(result, &["r", "p"]),
+                vec![
+                    vec![GraphValue::Edge(EId(500)), int(7)],
+                    vec![GraphValue::Edge(EId(501)), int(7)],
+                ]
+            );
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let result = transaction
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON MATCH SET r.p=r.p+1 WITH r.p AS p RETURN count(*) AS n,sum(p) AS total",
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(1, 0, 0),
+                    |_| -> Result<ElementId, ()> {
+                        panic!("matched relationships do not allocate")
+                    },
+                )
+                .unwrap();
+            assert_eq!(rows(result, &["n", "total"]), vec![vec![int(2), int(16)]]);
+            let digest = transaction.staged_effect_digest().unwrap();
+            let result = transaction.query_write(
+                &mut db,
+                &cx,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON MATCH SET r.p=0 RETURN 10/r.p AS bad LIMIT 0",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(0, 0, 0),
+                |_| -> Result<ElementId, ()> { panic!("matched relationships do not allocate") },
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
+                    GraphEdgeUpsertQueryError::Returning(_)
+                )))
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(
+                db.edge(EId(500)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(7).into())]
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            for edge in [EId(500), EId(501)] {
+                assert_eq!(
+                    db.edge(edge).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(8).into())]
+                );
+            }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

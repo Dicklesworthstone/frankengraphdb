@@ -4,7 +4,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphSymbol,
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 type Edge = (VId, RelationId, VId);
@@ -46,8 +46,11 @@ fn cycles_parallel_constraints_self_loops_and_output_aliases_match_assignments()
             _ => "-[:S]-",
         };
         for repeats in [false, true] {
+            // Two -[:S]- atoms may share an edge, and the oracle counts
+            // homomorphisms as the factorized cycle engine does: REPEATABLE
+            // ELEMENTS, not the DIFFERENT EDGES default (fgdb-vexfr).
             let head = format!(
-                "MATCH (a)-[:R]->(b){edge}(x)-[:T]->(y){edge}(b){}",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b){edge}(x)-[:T]->(y){edge}(b){}",
                 if repeats { ",(b)-[:S]->(x)" } else { "" }
             );
             // Avoid mixed undirected/directed relation mode in the repeated case.
@@ -144,8 +147,10 @@ fn cycles_parallel_constraints_self_loops_and_output_aliases_match_assignments()
     }
 }
 
+/// `n` lobes of repeated S, T and U atoms, counted as homomorphisms
+/// (REPEATABLE ELEMENTS), as the factorized engine counts them (fgdb-vexfr).
 fn lobes(n: usize, output: &str) -> String {
-    let mut text = "MATCH (a)-[:R]->(b)".to_owned();
+    let mut text = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
     for at in 0..n {
         text.push_str(&format!(",(b)-[:S]->(x{at})-[:T]->(y{at})-[:U]->(b)"));
     }
@@ -332,7 +337,7 @@ fn property_projection_keeps_each_fallible_occurrence_on_the_original_path() {
         (VId(1), RelationId(2), VId(2)),
         (VId(2), RelationId(3), VId(1)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut calls = 0;
     let result = query.execute_governed(
         4,

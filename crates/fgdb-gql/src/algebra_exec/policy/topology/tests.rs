@@ -241,6 +241,9 @@ fn scopes_reads_paths_and_nonterminal_shapes_never_enter_the_join_island() {
             start: BindingSlot(0),
             segments: vec![BindingSlot(1)],
         },
+        GlaOperator::DifferentEdges {
+            segments: vec![BindingSlot(1), BindingSlot(2)],
+        },
         GlaOperator::ScanVertices,
     ] {
         let mut operators = original.to_vec();

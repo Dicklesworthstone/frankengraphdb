@@ -130,14 +130,18 @@ fn oracle(input: &ZSet<GraphValueRow>) -> Observed {
     groups
         .into_iter()
         .map(|(key, (rows, nonnull, support))| {
+            // This full rescan is deliberately independent of the retained
+            // support tree and its zero-crossing/retraction implementation.
+            let compare =
+                |a: &&GraphValue, b: &&GraphValue| a.compare_orderability(b).then_with(|| a.cmp(b));
             (
                 vec![key],
                 vec![
                     Value::Count(rows),
                     Value::Count(nonnull),
                     Value::Count(support.len() as u64),
-                    Value::Value(support.first().cloned().unwrap_or_else(null)),
-                    Value::Value(support.last().cloned().unwrap_or_else(null)),
+                    Value::Value(support.iter().min_by(compare).cloned().unwrap_or_else(null)),
+                    Value::Value(support.iter().max_by(compare).cloned().unwrap_or_else(null)),
                 ],
             )
         })
@@ -163,8 +167,16 @@ fn all_native_domains_keep_group_keys_distinct_support_and_extrema_on_retraction
     // Remove the last witness of the current maximum, then one of two copies
     // of the minimum. Typed support must be replaced only at zero crossings.
     for value in [
-        values.iter().filter(|v| !v.is_null()).max().unwrap(),
-        values.iter().filter(|v| !v.is_null()).min().unwrap(),
+        values
+            .iter()
+            .filter(|v| !v.is_null())
+            .max_by(|a, b| a.compare_orderability(b))
+            .unwrap(),
+        values
+            .iter()
+            .filter(|v| !v.is_null())
+            .min_by(|a, b| a.compare_orderability(b))
+            .unwrap(),
     ] {
         let changes = bag(values
             .iter()
@@ -177,6 +189,46 @@ fn all_native_domains_keep_group_keys_distinct_support_and_extrema_on_retraction
                 .commit();
             assert_eq!(observed(&state), oracle(&remaining));
         }
+    }
+}
+
+#[test]
+fn semantic_extrema_refill_after_retractions_without_collapsing_numeric_identity() {
+    let float =
+        |value| GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)));
+    let key = int(0);
+    let source = bag([int(1), float(1.0), int(5), float(3.2)]
+        .into_iter()
+        .map(|value| (row(key.clone(), value), 1)));
+    let mut candidate = state(false);
+    candidate
+        .prepare(&source, LIMBS, Some(1), &mut ok)
+        .unwrap()
+        .commit();
+    let mut delivered = candidate.rows().checked_clone(LIMBS, &mut ok).unwrap();
+    let assert_extrema =
+        |candidate: &IncrementalGroupAggregate<PreparedGraphSetAggregate>, count, low, high| {
+            let values = candidate.rows().iter().next().unwrap().0.values();
+            assert_eq!(values[2], Value::Count(count));
+            assert_eq!(values[3], Value::Value(low));
+            assert_eq!(values[4], Value::Value(high));
+        };
+    assert_extrema(&candidate, 4, int(1), int(5));
+    for (value, weight, count, low, high) in [
+        (int(5), -1, 3, int(1), float(3.2)),
+        (float(3.2), -1, 2, int(1), float(1.0)),
+        (int(1), -1, 1, float(1.0), float(1.0)),
+        (int(1), 1, 2, int(1), float(1.0)),
+        (float(1.0), -1, 1, int(1), int(1)),
+    ] {
+        let changes = bag([(row(key.clone(), value), weight)]);
+        let delta = candidate
+            .prepare(&changes, LIMBS, Some(1), &mut ok)
+            .unwrap()
+            .commit();
+        delivered.integrate(&delta, LIMBS, &mut ok).unwrap();
+        assert_eq!(&delivered, candidate.rows());
+        assert_extrema(&candidate, count, low, high);
     }
 }
 
@@ -417,30 +469,45 @@ fn native_value_having_uses_the_existing_null_unknown_and_numeric_error_rules() 
             .commit();
         assert_eq!(candidate.rows().len(), usize::from(!value.is_null()));
     }
-    let expression = GraphHavingExpression::prepare(&[
-        GraphHavingOp::Truth(Some(true)),
-        GraphHavingOp::Compare {
-            left: GraphHavingOperand::Column(GraphAggregateColumn::GroupKey(0)),
-            comparison: IntegerComparison::Equal,
-            right: GraphHavingOperand::Integer(1),
-        },
-        GraphHavingOp::Or,
-    ])
-    .unwrap();
-    let def = definition(false)
-        .with_having_expression(&expression)
+    // A list against a number: an ordering is the numeric domain refusal;
+    // equality is decided, FALSE across domains (fgdb-v6ku6).
+    for (comparison, kept) in [
+        (IntegerComparison::Less, None),
+        (IntegerComparison::Equal, Some(0)),
+        (IntegerComparison::NotEqual, Some(1)),
+    ] {
+        let expression = GraphHavingExpression::prepare(&[
+            GraphHavingOp::Truth(Some(false)),
+            GraphHavingOp::Compare {
+                left: GraphHavingOperand::Column(GraphAggregateColumn::GroupKey(0)),
+                comparison,
+                right: GraphHavingOperand::Integer(1),
+            },
+            GraphHavingOp::Or,
+        ])
         .unwrap();
-    let mut candidate = IncrementalGroupAggregate::new(def, &[GraphSetColumnType::Any; 2]).unwrap();
-    assert!(matches!(
-        candidate.prepare(
+        let def = definition(false)
+            .with_having_expression(&expression)
+            .unwrap();
+        let mut candidate =
+            IncrementalGroupAggregate::new(def, &[GraphSetColumnType::Any; 2]).unwrap();
+        let prepared = candidate.prepare(
             &bag([(row(list(vec![int(1)]), int(1)), 1)]),
             LIMBS,
             None,
-            &mut ok
-        ),
-        Err(GroupError::NonIntegerHaving)
-    ));
-    assert!(candidate.rows().is_empty());
+            &mut ok,
+        );
+        match kept {
+            None => {
+                assert!(matches!(prepared, Err(GroupError::NonIntegerHaving)));
+                assert!(candidate.rows().is_empty());
+            }
+            Some(kept) => {
+                prepared.unwrap().commit();
+                assert_eq!(candidate.rows().len(), kept);
+            }
+        }
+    }
     // COLLECT's visitation order is not supplied by a bag. It remains refused.
     let collect = PreparedGraphSetAggregate::prepare(
         dynamic(),

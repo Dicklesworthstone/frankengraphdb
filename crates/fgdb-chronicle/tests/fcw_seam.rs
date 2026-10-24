@@ -65,6 +65,7 @@ fn marker_for(
         resource_effect_digest: digest(0x53),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 

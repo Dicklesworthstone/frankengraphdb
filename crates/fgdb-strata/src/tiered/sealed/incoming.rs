@@ -6,12 +6,12 @@
 //! A cursor dereferences the same immutable source image on both faces. No
 //! caller-supplied permutation or serialized index can acquire source authority.
 
-use super::image::reserved;
+use super::image::{RowScan, RowScanStep, reserved};
 use super::{
     Image, SealedAnchor, SealedEdge, SealedError, SealedPartition, SealedScanBudget,
     SealedScanStep, check_limit,
 };
-use fgdb_codec::elias_fano::{EliasFano, EntryLimit};
+use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::mem::size_of;
@@ -127,7 +127,8 @@ fn ef_bytes(count: usize, maximum: u64) -> Result<usize, SealedError> {
 impl SealedPartition {
     /// Count retained versions in one outgoing descriptor, INCLUDING invisible
     /// history. This is a low-level source-cost bound, not a visible degree or
-    /// security-filtered graph statistic.
+    /// security-filtered graph statistic. Zero outside a scoped anchor's
+    /// relation describes this image only; it does not prove graph absence.
     pub fn retained_row_len(&self, source: VId, relation: RelationId) -> usize {
         self.image
             .find_row(source, relation)
@@ -258,6 +259,8 @@ impl SealedIncomingIndex {
     }
 
     /// Retained incidence count, not a visible or authorized graph degree.
+    /// Zero outside the source anchor's relation is physical image metadata,
+    /// not proof of an empty graph row.
     pub fn retained_row_len(&self, destination: VId, relation: RelationId) -> usize {
         self.find(destination, relation)
             .map_or(0, |row| row.incidences)
@@ -298,6 +301,7 @@ impl SealedIncomingIndex {
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
         checkpoint()?;
         self.source.anchor.authorize(as_of)?;
+        self.source.anchor.check_relation(relation)?;
         let chunks = self.find(destination, relation).map_or(&[][..], |row| {
             &self.index.chunks[row.first_chunk..row.end_chunk]
         });
@@ -323,7 +327,10 @@ impl SealedIncomingIndex {
             image: &self.source.image,
             chunks,
             chunk,
-            at,
+            positions: chunks
+                .get(chunk)
+                .map(|chunk| chunk.sequential_cursor_from(at)),
+            source_row: None,
             as_of,
             finished: false,
         })
@@ -344,9 +351,21 @@ pub struct SealedIncomingCursor<'a> {
     image: &'a Image,
     chunks: &'a [EliasFano],
     chunk: usize,
-    at: usize,
+    positions: Option<EliasFanoSequentialCursor<'a>>,
+    source_row: Option<SourceRowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
+}
+
+// Incoming locators are strictly increasing source-image positions. Keep the
+// current source row and its physical decoder for parallel edges/versions, and
+// use the next descriptor's count for an adjacent-row transition. A sparse
+// jump still seeks the EF directory directly; it never scans unrelated rows.
+struct SourceRowScan<'a> {
+    index: usize,
+    start: u64,
+    end: u64,
+    scan: RowScan<'a>,
 }
 
 impl<'a> SealedIncomingCursor<'a> {
@@ -423,55 +442,35 @@ impl<'a> SealedIncomingCursor<'a> {
         if self.finished {
             return Ok(SealedScanStep::End);
         }
-        let result = self.pull(budget, checkpoint);
+        let result = self.pull::<true, E>(budget, checkpoint);
         if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
         }
         result
     }
 
-    fn pull<E: From<SealedError>>(
+    fn pull<const FILTER: bool, E: From<SealedError>>(
         &mut self,
         budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
         checkpoint()?;
-        while let Some(chunk) = self.chunks.get(self.chunk) {
+        while self.chunk < self.chunks.len() {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
             checkpoint()?;
-            let Some(position) = chunk.select(self.at) else {
+            let Some(position) = self.positions.as_mut().and_then(Iterator::next) else {
                 self.chunk += 1;
-                self.at = 0;
+                self.positions = self
+                    .chunks
+                    .get(self.chunk)
+                    .map(EliasFano::sequential_cursor);
                 continue;
             };
-            self.at += 1;
-            let row_index = self
-                .image
-                .offsets
-                .rank_le(position)
-                .checked_sub(1)
-                .ok_or(SealedError::NonCanonical)?;
-            let row = self
-                .image
-                .rows
-                .get(row_index)
-                .ok_or(SealedError::NonCanonical)?;
-            let offset = position
-                .checked_sub(
-                    self.image
-                        .offsets
-                        .select(row_index)
-                        .ok_or(SealedError::NonCanonical)?,
-                )
-                .ok_or(SealedError::NonCanonical)?;
-            let (entry, locator) = row
-                .incidence(
-                    self.image,
-                    usize::try_from(offset).map_err(|_| SealedError::SizeOverflow)?,
-                )
-                .ok_or(SealedError::NonCanonical)?;
+            let Some((entry, locator)) = self.incidence::<FILTER>(position)? else {
+                continue;
+            };
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]
@@ -486,6 +485,119 @@ impl<'a> SealedIncomingCursor<'a> {
             }
         }
         Ok(SealedScanStep::End)
+    }
+
+    fn incidence<const FILTER: bool>(
+        &mut self,
+        position: u64,
+    ) -> Result<Option<(crate::AdjacencyEntry, u32)>, SealedError> {
+        if !self
+            .source_row
+            .as_ref()
+            .is_some_and(|row| row.start <= position && position < row.end)
+        {
+            let adjacent = self.source_row.as_ref().and_then(|current| {
+                let index = current.index.checked_add(1)?;
+                let row = self.image.rows.get(index)?;
+                let end = current.end.checked_add(u64::try_from(row.len()).ok()?)?;
+                (current.end <= position && position < end).then_some((index, current.end))
+            });
+            let (index, start) = match adjacent {
+                Some(next) => next,
+                None => {
+                    let index = self
+                        .image
+                        .offsets
+                        .rank_le(position)
+                        .checked_sub(1)
+                        .ok_or(SealedError::NonCanonical)?;
+                    let start = self
+                        .image
+                        .offsets
+                        .select(index)
+                        .ok_or(SealedError::NonCanonical)?;
+                    (index, start)
+                }
+            };
+            let row = self
+                .image
+                .rows
+                .get(index)
+                .ok_or(SealedError::NonCanonical)?;
+            let end = start
+                .checked_add(u64::try_from(row.len()).map_err(|_| SealedError::SizeOverflow)?)
+                .ok_or(SealedError::SizeOverflow)?;
+            let offset = position
+                .checked_sub(start)
+                .ok_or(SealedError::NonCanonical)?;
+            self.source_row = Some(SourceRowScan {
+                index,
+                start,
+                end,
+                scan: RowScan::new(
+                    self.image,
+                    row,
+                    usize::try_from(offset).map_err(|_| SealedError::SizeOverflow)?,
+                ),
+            });
+        }
+        let current = self.source_row.as_mut().ok_or(SealedError::NonCanonical)?;
+        let offset = usize::try_from(
+            position
+                .checked_sub(current.start)
+                .ok_or(SealedError::NonCanonical)?,
+        )
+        .map_err(|_| SealedError::SizeOverflow)?;
+        if current.scan.position != offset {
+            let row = self
+                .image
+                .rows
+                .get(current.index)
+                .ok_or(SealedError::NonCanonical)?;
+            current.scan = RowScan::new(self.image, row, offset);
+        }
+        if !FILTER {
+            return current
+                .scan
+                .next()
+                .map(Some)
+                .ok_or(SealedError::NonCanonical);
+        }
+        match current
+            .scan
+            .next_or_hidden_span(self.as_of)
+            .ok_or(SealedError::NonCanonical)?
+        {
+            RowScanStep::Incidence(entry, locator) => Ok(Some((entry, locator))),
+            RowScanStep::Hidden(_) => {
+                // Only this locator has spent fuel and passed its live guard.
+                // Advance one raw incidence, never the whole source span: a
+                // yield or refusal must keep its original incoming position.
+                // Long hidden spans invalidate the neighbor decoder; short
+                // gaps advance only that decoder. Invisible CSR versions never
+                // decode edge identities or read property locators.
+                current.scan.skip_hidden(1);
+                Ok(None)
+            }
+        }
+    }
+
+    // The pre-filter streaming reader remains a same-process physical control.
+    // The positional reader in incoming_tests is the independent result oracle.
+    #[cfg(test)]
+    fn next_decoding_history<E: From<SealedError>>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        if self.finished {
+            return Ok(SealedScanStep::End);
+        }
+        let result = self.pull::<false, E>(budget, checkpoint);
+        if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
+            self.finished = true;
+        }
+        result
     }
 }
 
@@ -604,11 +716,10 @@ mod construction {
         let mut position = 0u64;
         for row in &source.image.rows {
             control.check().await?;
-            for at in 0..row.len() {
+            let mut scan = RowScan::new(&source.image, row, 0);
+            for _ in 0..row.len() {
                 control.check().await?;
-                let (entry, _) = row
-                    .incidence(&source.image, at)
-                    .ok_or(SealedError::NonCanonical)?;
+                let (entry, _) = scan.next().ok_or(SealedError::NonCanonical)?;
                 refs.push(IncidenceRef {
                     destination: entry.dst,
                     relation: entry.relation,

@@ -21,7 +21,7 @@
 //!
 //! **WHY THE AUDIT IS A TABLE AND NOT A COMMENT.** An audit written as prose in
 //! a doc comment is true on the day it is written and unfalsifiable afterwards.
-//! `every_module_has_an_audit_verdict` enumerates `src/*.rs` from disk at run
+//! `every_module_has_an_audit_verdict` enumerates `src/**/*.rs` from disk at run
 //! time, so a NEW module — a future SIMD kernel, a key-wrap routine — cannot
 //! join the crate without someone recording what its secret-dependence is. That
 //! is the completeness guard; without it this file would be decoration.
@@ -44,10 +44,12 @@ enum Verdict {
     AcceptedByDesign,
 }
 
-/// The audit table. One row per `src/*.rs`, rationale mandatory.
+/// The audit table. One row per `src/**/*.rs`, rationale mandatory.
 ///
 /// Reviewed 2026-08-04 by CalmSwan against the sources at that commit.
-const AUDIT: [(&str, Verdict, &str); 10] = [
+/// SHA-512, Ed25519 and signature-dispatch rows source-reviewed 2026-10-13.
+/// These rows do not assert that native timing/codegen or external audits ran.
+const AUDIT: [(&str, Verdict, &str); 16] = [
     (
         "lib.rs",
         Verdict::Clean,
@@ -134,6 +136,60 @@ const AUDIT: [(&str, Verdict, &str); 10] = [
          by the live w1_crypto_codegen_e2e gate. That witness covers the zeroing \
          call only; it makes no claim about copies outside the owned buffer.",
     ),
+    (
+        "sha512.rs",
+        Verdict::Clean,
+        "Eighty fixed ARX rounds and a fixed message schedule. Buffering and \
+         padding branch only on public lengths. Consuming finalization and \
+         Drop scrub the owned chaining state, block and compression schedule \
+         through existing boundaries. Source review is not compiled timing \
+         evidence; SHA-512 codegen and the external audit remain required.",
+    ),
+    (
+        "ed25519.rs",
+        Verdict::Clean,
+        "Signing uses complete Edwards addition and 256 fixed double/add \
+         rounds, selecting coordinates with masks, plus streaming SHA-512. \
+         Seed expansion and nonce/challenge material have Secret owners. \
+         Branching decode, subgroup and equation checks consume public keys \
+         and signatures only. This source verdict does not prove compiled \
+         constant-time execution or erase compiler-created copies.",
+    ),
+    (
+        "ed25519/field.rs",
+        Verdict::Clean,
+        "Canonical 16-limb field arithmetic uses bounded u64 convolution, \
+         three fixed carry passes and masked conditional subtraction. Fixed \
+         exponentiation and coordinate selection have no secret table index. \
+         Field owners and reduction/product scratch reach scrub_words; public \
+         decoding alone branches on canonicality. Pinned-codegen review is owed.",
+    ),
+    (
+        "ed25519/scalar.rs",
+        Verdict::Clean,
+        "Reduction executes 512 fixed bit rounds with mask-based order \
+         subtraction; multiplication visits every 32-by-32 byte pair. Owned \
+         outputs use Secret and native scratch is scrubbed. Canonical-S \
+         validation handles public signature bytes. No source branch or \
+         addressing choice in signing depends on the secret scalar.",
+    ),
+    (
+        "ed25519/tests.rs",
+        Verdict::Clean,
+        "RFC vectors and synthetic public test fixtures only; these tests \
+         intentionally exercise both successful and rejecting verification \
+         branches. They contain no production key authority and their presence \
+         is not a claim that the tests or a constant-time audit executed.",
+    ),
+    (
+        "signature.rs",
+        Verdict::Clean,
+        "Closed profile lookup and byte-width admission inspect public \
+         metadata only. Verification dispatches to the strict Ed25519 key \
+         constructor and cofactorless verifier, with no permissive fallback. \
+         The registry's complete widths and policy enter the release digest; \
+         it stores no signing key or secret-derived state.",
+    ),
 ];
 
 /// THE COMPLETENESS GUARD: every module in the crate has an audit verdict.
@@ -146,15 +202,23 @@ const AUDIT: [(&str, Verdict, &str); 10] = [
 fn every_module_has_an_audit_verdict() {
     let src = crate_root().join("src");
     let mut on_disk = BTreeSet::new();
-    for entry in std::fs::read_dir(&src).expect("the crate has a src directory") {
-        let path = entry.expect("readable dir entry").path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            on_disk.insert(
-                path.file_name()
-                    .expect("a file has a name")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+    let mut pending = vec![src.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("readable source directory") {
+            let entry = entry.expect("readable dir entry");
+            let kind = entry.file_type().expect("readable source file type");
+            let path = entry.path();
+            if kind.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path.strip_prefix(&src).expect("path belongs to src");
+                let name = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                on_disk.insert(name);
+            }
         }
     }
 
@@ -218,9 +282,10 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         ExternalCryptoAuditEvidence, REGISTERED_CRYPTO_PROFILE_COUNT,
         REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
         REGISTERED_OBJECT_AEAD_PROFILES, REGISTERED_PASSPHRASE_KDF_PROFILES,
-        admit_external_crypto_audit, external_crypto_audit_plan_digest,
-        registered_crypto_profile_set_digest, registered_object_aead_profile,
-        registered_passphrase_kdf_profile,
+        REGISTERED_SIGNATURE_PROFILES, admit_external_crypto_audit,
+        external_crypto_audit_plan_digest, registered_crypto_profile_set_digest,
+        registered_object_aead_profile, registered_passphrase_kdf_profile,
+        registered_signature_profile,
     };
 
     fn digest(byte: u8) -> [u8; 32] {
@@ -270,9 +335,12 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
     assert_eq!(REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, 1);
     assert_eq!(
         usize::from(REGISTERED_CRYPTO_PROFILE_COUNT),
-        REGISTERED_OBJECT_AEAD_PROFILES.len() + REGISTERED_PASSPHRASE_KDF_PROFILES.len() + 1
+        REGISTERED_OBJECT_AEAD_PROFILES.len()
+            + REGISTERED_PASSPHRASE_KDF_PROFILES.len()
+            + REGISTERED_SIGNATURE_PROFILES.len()
+            + 1
     );
-    assert_eq!(REGISTERED_CRYPTO_PROFILE_COUNT, 3);
+    assert_eq!(REGISTERED_CRYPTO_PROFILE_COUNT, 4);
 
     let resolved_aead_profiles: Vec<_> = (0..=u16::MAX)
         .filter_map(|id| registered_object_aead_profile(id).map(|profile| (id, profile)))
@@ -306,13 +374,29 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         "passphrase-KDF inventory IDs must be unique and canonically ordered"
     );
 
+    let resolved_signature_profiles: Vec<_> = (0..=u16::MAX)
+        .filter_map(|id| registered_signature_profile(id).map(|profile| (id, profile)))
+        .collect();
+    let inventoried_signature_profiles: Vec<_> = REGISTERED_SIGNATURE_PROFILES
+        .iter()
+        .copied()
+        .map(|profile| (profile.id(), profile))
+        .collect();
+    assert_eq!(resolved_signature_profiles, inventoried_signature_profiles);
+    assert!(
+        inventoried_signature_profiles
+            .windows(2)
+            .all(|rows| rows[0].0 < rows[1].0),
+        "signature inventory IDs must be unique and canonically ordered"
+    );
+
     let registered_profile_set = registered_crypto_profile_set_digest();
     assert_eq!(
         registered_profile_set,
         [
-            0xd8, 0x3b, 0xd3, 0xf4, 0xe8, 0xa5, 0x5f, 0x69, 0x7c, 0x07, 0x88, 0xaa, 0x06, 0x8c,
-            0x69, 0x32, 0xc3, 0x4d, 0x58, 0xa0, 0xf2, 0x4d, 0x46, 0x99, 0x39, 0xda, 0x81, 0x75,
-            0xe7, 0x8c, 0x84, 0x7f,
+            0xc9, 0x9e, 0x19, 0x77, 0xe7, 0x45, 0xb3, 0xad, 0xda, 0xdf, 0xa7, 0xee, 0x5c, 0x97,
+            0x3d, 0xe4, 0xcd, 0x97, 0x1a, 0xc8, 0x57, 0x65, 0x13, 0x6a, 0xfa, 0x2c, 0xfa, 0xfa,
+            0xd8, 0x12, 0xd6, 0x69,
         ],
         "profile rows, order, or canonical transcript changed without invalidating audit evidence"
     );
@@ -469,6 +553,8 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         );
     }
 
+    // The actual pre-signature three-profile golden, not an arbitrary bad
+    // digest: even otherwise exact audit pins cannot omit the new primitive.
     let stale_profile_evidence = ExternalCryptoAuditEvidence::try_new(
         AuditConclusion::Accepted,
         true,
@@ -478,7 +564,11 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         digest(5),
         digest(4),
         digest(1),
-        digest(9),
+        [
+            0xd8, 0x3b, 0xd3, 0xf4, 0xe8, 0xa5, 0x5f, 0x69, 0x7c, 0x07, 0x88, 0xaa, 0x06, 0x8c,
+            0x69, 0x32, 0xc3, 0x4d, 0x58, 0xa0, 0xf2, 0x4d, 0x46, 0x99, 0x39, 0xda, 0x81, 0x75,
+            0xe7, 0x8c, 0x84, 0x7f,
+        ],
     )
     .expect("stale audit evidence remains representable so admission can reject it");
     assert_eq!(
@@ -701,6 +791,8 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
     }
 
     let mut compiled_secret = fgdb_crypto::zeroize::Secret::new([0xa5_u8; 2]);
+    assert!(core::mem::needs_drop::<fgdb_crypto::Sha512>());
+    assert!(core::mem::needs_drop::<fgdb_crypto::Ed25519SigningKey>());
     compiled_secret.scrub();
     assert_eq!(
         compiled_secret.expose(),
@@ -1057,9 +1149,7 @@ fn secret_scrub_delegates_to_codegen_witnessed_boundary() {
                 "fn drop(&mut self) {",
                 "if owns_secret_state(self.flags) {",
                 "scrub_words32(&mut self.key_words);",
-                "for chaining_value in &mut self.cv_stack {",
-                "scrub_words32(chaining_value);",
-                "}",
+                "scrub_words32(self.cv_stack.as_flattened_mut());",
                 "}",
                 "}",
             ],

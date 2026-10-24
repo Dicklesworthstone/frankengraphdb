@@ -1,6 +1,73 @@
 # Reality Check and Bridge Plan
 
-**Latest measurement: 2026-10-04**, at `5df67f66`. `main` was red from
+**Latest audit: 2026-10-22**, local tree
+`77cad971163f2636e6c35003eb8441b291c58615`, with the fetched remote delta through
+`f0c40dc1cb371e1cc63f2d332fa4ebce537efb6d` examined separately.
+The [current section](#current-delta--2026-10-22) records the 20-goal assessment,
+fresh checks, three ambition passes, five refinement passes, and ten concrete
+Beads drafts created through `br`. **The drafts are isolated, not published to
+the shared work graph.** Disk admission and attributable tracker publication
+remain explicit limits; this is not a current engine-suite or release verdict.
+
+**Latest full runtime measurement: 2026-10-20**, at `df93ba15` (`origin/main` tip at
+16:00 −0400, 204 commits after the 2026-10-17 check at `1563ee5b`). Nine more
+uncompiled commits reached origin during the measurement; the tip re-check at
+`92e83e49` is recorded in that section. It covers:
+- the 20-row Vision Checklist, from four parallel read-only audits;
+- fmt, check, clippy and the per-package test suites on Linux;
+- all 14 runnable registered gates;
+- live CLI and `fgdbd` runs;
+- the openCypher TCK;
+- a road-ny footprint probe;
+- the work-graph state;
+- the dependency-ordered bridge, with ambition and refinement rounds applied.
+
+The finding that changes the ordering: the steering landed this time, but the
+stream that writes half of `main` does not follow it. See
+[Previous delta — 2026-10-20](#previous-delta--2026-10-20).
+
+**Evening follow-up, same day:**
+- the new advisory is fixed;
+- all-targets compile and workspace clippy are restored at the then-tip;
+- a new unregistered doc is registered;
+- the bead specs are committed to this document, so the single writer can land them.
+
+See [Evening follow-up (2026-10-20)](#evening-follow-up-2026-10-20).
+
+**Previous measurement: 2026-10-17**, at `1563ee5b` (`origin/main` tip, 274
+commits after the 2026-10-13 check at `fd2a62a3`). The section covers:
+- the 20-row Vision Checklist;
+- live CLI and `fgdbd` execution;
+- the 900k-edge scale probe re-run against 2026-10-04;
+- a full openCypher TCK run;
+- 14 registered gates and the per-package test suites;
+- the stranded-work census;
+- the dependency-ordered Bridge Plan with in-place ambition and refinement
+  rounds.
+
+The finding that changes the ordering: the 2026-10-13 steering never left this
+host. See
+[Historical delta — 2026-10-17](#historical-delta--2026-10-17-superseded-by-2026-10-20). Bead epic:
+`fgdb-rc1017-bridge-wvze5`.
+
+**Previous measurement: 2026-10-13**, at `fd2a62a3` (`main` tip, 771 commits after
+the 2026-10-04 full reality check at `08be545e` and 178 commits after the
+2026-10-12 gauntlet anchor `53ea2eef`). Covers the full 20-row Vision Checklist,
+live CLI and `fgdbd` server execution, workspace crate reachability census,
+verification registry state, and the dependency-ordered Bridge Plan with three
+in-place Ambition Rounds. It was committed only to the shared worktree's local
+`main` on 2026-10-16 and landed on origin by the 2026-10-17 pass. See
+[Historical delta — 2026-10-13](#historical-delta--2026-10-13-superseded-by-2026-10-17).
+The 2026-10-12 and 2026-10-04 sections that follow are kept intact as history.
+
+**Previous measurement: 2026-10-12/13**, the first end-to-end run on real
+datasets against other engines. It covers `8d3ace1d` through `13023505`, plus
+the landings `7392832d`, `2420931a`, `fb18c95d` and `53ea2eef`, on an Apple M5
+Ultra. See
+[Historical delta — 2026-10-12](#historical-delta--2026-10-12-superseded-by-2026-10-13). The 2026-10-04 summary
+that follows is kept as history.
+
+**Previous measurement: 2026-10-04**, at `5df67f66`. `main` was red from
 2026-09-30 17:20 −0400 on five gates: fmt, clippy, tests (8 never-run laws for
 UNWIND … MERGE, a feature that had never worked), the UBS ratchet, and commit
 provenance. The landing on top of it is another session's unpushed `e062a907`
@@ -12,7 +79,7 @@ and neither is a code finding:
 - The determinism e2e. The host's disk reaper deleted the proof's target dir
   mid-run, which is an environment failure.
 
-See [Current delta — 2026-10-04](#current-delta--2026-10-04).
+See [Historical delta — 2026-10-04](#historical-delta--2026-10-04-superseded-by-2026-10-12).
 
 **After the landing (same evening).** The toolchain-less stream resumed with 5
 uncompiled commits (`f6cca5e5`..`5c21f28c`). This pass checked them at
@@ -33,7 +100,2674 @@ verified green on `main`'s history. (The earlier `9adf484d` of 2026-09-08 is
 not an ancestor; NE-0046.) The next proof of `main` ran on 2026-10-04 at
 `5df67f66`. It was stopped before finishing, with 5 gates already red.
 
-## Current delta — 2026-10-04
+## Current delta — 2026-10-22
+
+### Verdict, subject, and evidence boundary
+
+**FrankenGraphDB has a substantial real engine, but the composed B1–B6 product
+is unfinished. Neither G1 nor the later gates is established by this audit.**
+The useful delivered mechanisms are durable commits/recovery, native bounded
+queries and writes, authorized network surfaces, retrieval, maintained local
+queries/indexes, and scoped read replay. The largest remaining work is making
+these mechanisms share the final durable root, ownership, security, retention,
+resource, and verification contracts. More scalar functions or faster isolated
+analytics kernels cannot substitute for that integration.
+
+The complete project `AGENTS.md` (414 lines) and `README.md` (746 lines), the
+reality-check skill and its gap/bridge references, and both available parent
+instruction files were read. `/data/projects/AGENTS.md` is absent locally;
+`/Users/jemanuel/projects/AGENTS.md` is the available suite instruction file.
+Its text does not contain the two named sections that the project file
+references; those rules were not claimed to have been read from a nonexistent
+file. The project file's explicit summaries still apply. The normative plan's
+storage, transaction, performance, workspace and convergence contracts,
+current protocol/resource/status documents, invariant/checker/formal
+registries, and implementing code were inspected. **This was not a complete
+line-by-line reread of the 1.74 MB normative plan, its million-byte Appendix A,
+every historical alternative plan, or every source file.**
+
+Local HEAD stayed at `77cad9711`. Existing edits to four Rust files and the
+previous audit were preserved. Fetching remote `main` did not update the
+checkout. At the observation, remote `f0c40dc1c` was 11 commits ahead, changing
+18 files. Its delta adds frozen chained-MERGE/CREATE handling and chain CSV
+import, repairs visitor-unwind cleanup for aggregate difference, updates
+integration laws, and changes the directed-clustering kernel. These are
+source findings, not newly executed native behavior. The clustering commit
+explicitly scopes its exhaustive/paired harness evidence and leaves native
+Cargo integration/full gates UNRUN. It also reports a road-grid slowdown;
+this audit makes no universal speedup or competitor-win claim.
+
+No normative plan, registry, checker source, toolchain, or shared engine code
+was changed by this audit. The fresh remote delta changes none of those
+contract/checker files. No feature was declared complete from a crate name,
+absence of TODOs, model-only result, or passing G0 registry check.
+
+### Vision checklist and existing architectural owners
+
+These statuses describe inspected implementations. Except for the explicitly
+executed checks below, they do not assert current runtime qualification.
+Every broad goal has existing nonclosed architectural coverage; several
+narrow acceptance scopes needed concrete tasks.
+
+| # | Testable vision goal | Actual implementation and remaining gap | Existing owner |
+|---:|---|---|---|
+| 1 | Embedded open/session/prepare/typed streaming API | PARTIAL. Real async database, prepared reads, pinned sessions and transaction overlays. The advertised synchronous session API and durable catalog are absent. | `fgdb-7r8sy`, W10 |
+| 2 | Authorized server with all promised transports | PARTIAL. FGP, HTTP/1.1 JSON, Bolt subset and TLS have real owners. HTTP/2, gRPC, WS, durable result ACK/release/resume and explicit served write transactions remain excluded in `fgdb-server/src/lib.rs`. | `fgdb-w10-server-rte`, `fgdb-t79am` |
+| 3 | Agent CLI and installable distribution | PARTIAL. Real command handlers and robot contract; remote source extends chain import. Remote tag query returned none and GitHub releases API returned zero. No installer/Python release was established. | `fgdb-epic-w10-mhq.1`, bridge `.16` |
+| 4 | Frozen GQL/openCypher contract with conformance | PARTIAL. Native preparation lowers supported queries into operators. Graph/branch catalogs and inline `CALL { ... }` remain absent; diagnostics do not implement them. No fresh TCK run. | `fgdb-g0-language-contracts-54g`, bridge `.15`, draft `.23`–`.24` |
+| 5 | B1 final recovery/retention/branch universe | PARTIAL. Real capsule-first/marker-last durability and checkpoint-chain binding. Current Chronicle uses its append-only `commits.log` profile; final logical-command/root lifecycle, retention, BETWEEN and durable branch fork/merge are incomplete. | W2, `fgdb-w2-retention-checkpoints-cn1l`, branch owners |
+| 6 | B2 persistent compressed tiers and universal bounded memory | PARTIAL. Charged buffered Tier-D reads and admitted external stages exist. `tiered/sealed/mod.rs` explicitly says the manifest still roots Tier D; derived sealed images are not persistent registered Tier R. General operator spill and cross-process retention/GC remain. | `fgdb-w3-tier-r-0tj`, `fgdb-teypc`, bridge `.13` |
+| 7 | B3 factorized/WCO optimizer and parallel execution | PARTIAL. FreeJoin/trie/factorized machinery is real. It does not establish the complete cost optimizer, missing-order spillable tries or morsel-parallel execution over durable runs. | W5, `fgdb-w5-executor-olp` |
+| 8 | B4 one durable incremental runtime | PARTIAL. Commit-fed local query registrations, recursive/aggregate operators and served changefeeds exist. `standing_query.rs` explicitly excludes persistence across reopen; durable view DDL, cursor resume and complete circuit lifecycle remain. | W6, `fgdb-w6-subscriptions-evl` |
+| 9 | SSI, phantom protection and semantic rebase | PARTIAL. `write_txn_parts/finish.rs` validates recorded reads/scans/writes against intervening effects and explicitly excludes full SSI/durable session protocol. Conservative backward validation is not evidence of the planned SSI engine. | W4, `fgdb-w4-strict-serializability-trw` |
+| 10 | Retained strict replay of complete evidence closure | PARTIAL. Native certificates bind plans/parameters/snapshots/ordered results. This is neither every statement nor the complete retained executable/authority/index/policy closure. | bridge `.17`, verification epic, draft `.28` |
+| 11 | Every adaptive choice emits a replayable epoch-bound card | PARTIAL/UNWIRED. Calibration/card machinery exists; `fgdb-calibrate` is absent from all three product manifest dependency closures. Local Prism decisions do not establish universal integration. | `fgdb-consumer-census-law-5pjdc`, verification epic |
+| 12 | Broad authorized fnx analytics catalog | PARTIAL. Sixteen callable signatures, explicit decoded-cache/sealed boundaries, real kernels and upstream trait reuse. This does not deliver the promised broad catalog or universal zero-copy/external-memory analytics. | W8, `fgdb-w8-projection-sd7`, draft `.29` |
+| 13 | Durable transaction/branch-scoped search indexes | PARTIAL. Real BM25/HNSW/hybrid search and commit-maintained resident generations. Registrations fence failures but remain opened-database-local, without a durable branch-scoped catalog. | W7, `fgdb-t38fv`, `fgdb-5jyok` |
+| 14 | Mandatory governance and full key/audit/revocation/privacy lifecycle | PARTIAL. Real capability checks and source masking. Complete durable authority/audit/time/revocation/DP lifecycle and FG-INV-20.core enforcement remain unestablished. | W9, `fgdb-w4-secure-view-v87` |
+| 15 | B6 branch-per-agent memory, provenance and retrieval replay | PARTIAL. Useful hybrid and scoped reads. `query_branch.rs` explicitly resolves host-supplied read views only; it cannot create/fork/merge/write a branch. | W2 branch owners, W7, W9 |
+| 16 | Served replication/HA and exact backup/restore | UNWIRED IN PRODUCT. Aegis has real catch-up/publication state machines; `fgdb-repl` is absent from embedded/CLI/server production manifest closures. Real transport, fencing, pins and publisher adapters remain required. | W11 |
+| 17 | Authorized temporal system graph and operations | NOT STARTED as the promised integrated query surface. Studio model/Wasm tests pass; that does not expose sessions, obligations, plans and maintenance as a temporal property graph. | `fgdb-obs-system-graph-tki`, observability epic |
+| 18 | Closed dependencies and controlled unsafe islands | STRUCTURALLY CHECKED within the named checker scope. Product closures exclude the verification reference; unsafe-ledger/topology checks pass on the archived subject. No fresh Miri, cross-target, advisory or filesystem-conformance proof. | W1, bridge `.10` |
+| 19 | Independent reference, faults, DPOR/formal and live invariant closure | PARTIAL. Real simulation/reference/fault components. All 20 core clauses are stub; eight narrower clauses are live; 74/120 checkers live; 1/10 formal lanes checked. Current workspace runtime proof remains UNRUN. | verification epic, bridge `.17`, `.19`, `.20`, draft `.30` |
+| 20 | Every activated performance manifest meets §17 | UNPROVEN. `fgdb-bench/src/main.rs` declares `empirical_gate_activated=false`. Neither isolated kernel measurements nor historical gauntlets establish every current gate. | performance epic, bridge `.14` |
+
+Production manifest closure inspection found 12 first-party crates reachable
+from `fgdb`, 14 from the CLI and 15 from the server. None includes `fgdb-repl`,
+`fgdb-calibrate` or `fgdb-reference`. This is a manifest dependency census,
+not a proof of complete feature behavior or absence of every dynamic adapter.
+
+### Fresh execution and explicit UNRUN results
+
+| Probe | Actual exit/result | What it establishes |
+|---|---|---|
+| `cargo fmt --check` | 0 | Formatting of the inspected local tree, including existing peer edits. |
+| Tracked shell `bash -n`; warning-level shellcheck | 0 / 0 | Shell syntax/static lint; not execution of every gate or portability. |
+| Four Studio `node --test` files | 0; 49 passed, zero failed/skipped | Model/layout/streaming/Wasm assertions in those tests; not native server or browser integration. |
+| Cached registry/architecture/topology/unsafe checkers | 0 / 0 / 0 / 0 | Fresh executions against archived `77cad9711` after recomputing compiler-input key and verifying all cached artifact hashes. This does not validate today's report text or peer overlay. |
+| Engine AST `todo!` and `unimplemented!` scans | 1 / 1; no matches | No matching macros in `crates`; not feature completeness. |
+| Native live `br sync --reconcile-additive` plan | 6 | 88 `shared_relation_drift` conflicts, 57 proposed source-only creates, nine DB-only records preserved; no application performed. |
+| Native additive import into isolated draft | 0 | All 1,297 tracked IDs imported. Independent read-only comparison retained all 3,160 author/text/time-instant/multiplicity tuples; SQLite normalized timestamp spelling. |
+| Native draft `br dep cycles` | 0; zero cycles | The actual 1,307-record draft graph is acyclic. |
+| `bv --robot-triage` / `--robot-insights --db <draft-db>` | 0 / 0; cycles computed, empty | Actual draft DB reviewed, including deferred records and new tasks. The default JSONL view omitted six deferred records from its summary. |
+| Shared `scripts/br_sync.sh` with exactly 15 intended IDs | 65; refused before export | Seventeen pending shared DB records cannot fit the declared set. JSONL SHA-256 stayed byte-identical. Draft records were not silently published. |
+| `sbh check --need 20G` | 1 | About 279.2 GB free, 6.99% versus 8.06% host threshold. No override, cleanup or heavy build followed. |
+| Workspace check/clippy/tests, full `check.sh`, UBS, local-proof bundle | UNRUN | No current green engine or landing verdict. |
+| Current CLI/server smoke, TCK, §17 benchmarks | UNRUN | Historical execution and bounded external harness results were not relabeled as these revisions' live product proof. |
+
+The verified cached-subject key is
+`63f358e623ef934f046a73658d902d18952a7262d8d46fe51452694434a960ff`;
+its registry executable SHA-256 is
+`4c978cd5d6e0cfdf57a7b6321309bacf63e7ca73b992934093eaf41d4c96b922`.
+Remote transcripts are `/data/tmp/fgdb-rc1022-jjv97oi5-{registry,architecture,topology,unsafe}.jsonl`
+on css. Local inputs, receipts, draft database and logs are retained at
+`/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/T/fgdb-rc1022-jjv97oi5`.
+These are audit evidence paths, not a signed release or permanent archive.
+
+### The five questions, answered directly
+
+1. **What works?** The source implements real durable and query mechanisms,
+   with earlier live executions retained below. This invocation freshly
+   executes the scoped checks above. It does not re-certify all engine paths.
+2. **What does not work or is incomplete?** The checklist identifies each
+   composition gap. Branch lifecycle, final persistent storage/retention,
+   full SSI, universal bounded execution, durable derived/output state,
+   served replication and product invariant closure are decisive absences.
+3. **What blocks reaching the vision?** Shared tracker divergence prevents
+   attributable adoption; disk/build admission prevents fresh full proof;
+   cross-layer lifecycle integration remains substantial engineering work.
+   Broad architectural coverage is not itself a blocker-resolution witness.
+4. **Would completing every existing bead close everything?** Their broad
+   intent covers the vision, but current records alone do not guarantee it.
+   Some descriptions are stale, several appendix scopes lack dedicated
+   tasks, and whole-product acceptance must compose their results. Completing
+   the same narrow probes without that acceptance would leave the gap open.
+5. **What had no actionable scope?** Inline subqueries had no dedicated active
+   scope. The earlier appendix also lacked separately landed current tasks
+   for subscription-slot proof, retained certificate compatibility, exact
+   patch-version registry reconciliation, Prism strategy/parity disposition,
+   retained independent models and gate portability. Ten concrete drafts now
+   cover these seven clusters; this is draft coverage, not live publication.
+
+### Bridge and concrete Beads follow-through
+
+Keep the existing architectural queue. The acceptance order remains:
+
+1. **Tracker/proof integrity:** losslessly reconcile both shared DB and JSONL,
+   including all pending comments/labels/dependencies and DB-only rows; then
+   prove exact-ID import/mutation/export and run one current full exact-tree
+   proof with `.beads` present where required. A new remapper is not presumed
+   necessary: native additive import already works on a new database.
+2. **Durable B2 generation:** settle the registered root/run/descriptor contract,
+   seal once, publish authenticated run references, and reopen without rebuilding
+   the projection. Prove Tier-D/Tier-R/reference equality at retained cuts,
+   origin order, parallel edges, properties, cancellation and crashes; measure
+   complete disk bytes, cold admission, pool accounting and RSS beyond the pool.
+3. **Shared retention and reclamation:** establish exact rooted reachability,
+   checkpoint/suffix recovery and cross-process pins/fencing before physical
+   reclamation. Test pinned readers, branches, backups and replay owners through
+   crashes and repeated compaction; no process-local handle licenses deletion.
+4. **One semantic corpus across modes:** grow independent query semantics over
+   the reference's existing collection-valued state. Differential results,
+   order, failures, effects and observations across resident/buffered/spill,
+   historical/authorized/transaction/maintained surfaces; retain red cases.
+5. **One durable lifecycle across products:** connect SSI/catalog effects,
+   index/view publication, retained results, subscriptions and replication to
+   the same authority/root/retention contracts. Exercise actual server faults,
+   partitions, reconnects and denied outputs before claiming those helpers live.
+6. **Product proof and policy consumers:** activate real capability manifests
+   only when every reachable clause has its complete checker and negative
+   control. Integrate cards/epochs/fallback at real decisions. A narrow replay
+   test cannot justify promotion of the much broader FG-INV-19.core clause.
+7. **Breadth and shipment:** complete the full intended language, fnx catalog,
+   transports, typed/synchronous embedding, Python, operations and releases.
+   Prove install/upgrade/consumer workflows and §17 manifests with complete
+   consumption, matched durability/isolation, live incumbents and distributions.
+
+The bridge permits independent semantic and parity work alongside the storage
+spine. Tracker repair gates adoption/export; it is not an artificial dependency
+that makes every independent investigation wait.
+
+All following records were created/modified **only through `br` in the isolated
+draft**, based on the 1,297-record local source. Full descriptions contain source
+owners, rationale, scope, acceptance tests, fault/negative controls and logging
+requirements. No issue was closed.
+
+| Draft child of `fgdb-rc1017-bridge-wvze5` | Concrete scope | Dependency |
+|---|---|---|
+| `.23` | Compile correlated inline CALL subqueries through existing GLA; explicit scope, bag, error and transaction laws | Parent and existing W5 context |
+| `.24` | Independent oracle plus public cross-surface subquery acceptance, including failures and budgets | Hard-blocked on `.23` |
+| `.25` | Portable development gate execution without changing assertions or activating a filesystem profile | Existing verification context |
+| `.26` | Linux/macOS tool-profile execution and mutation-sensitive gate controls | Hard-blocked on `.25` |
+| `.27` | More than 64 served subscribe/cancel/disconnect cycles, failed setup and old-generation retirement proof | Related to durable subscription owner; cleanup source already exists |
+| `.28` | Retained fnx certificate producer/consumer compatibility probe before asserting or fixing a regression | Related to W8 witness owner |
+| `.29` | Per-signature Prism routing/breadth/copy/memory/parity evidence and strategy disposition | Related to W8 projection owner |
+| `.30` | Retain independent semantic models as executable differential witnesses across execution modes | Related to existing TCK/reference task `.19` |
+| `.31` | Reconcile delta V3, vertex patch V4 and property patch V3 with exact durable registries and decoder floors | Related to sibling FGPK task `.11` |
+| `.32` | Preserved-format artifacts, unknown-version/digest mutations, reopen/rebuild/compaction and crash tests | Hard-blocked on `.31` |
+
+Five existing records are refined in that draft: parent, `.13`, `.16`, `.17`
+and `.21`. The tracker title now acknowledges the native import path; the
+verification note forbids inflating native subset replay into full core proof.
+The storage acceptance requires an actually persistent generation and complete
+memory/disk evidence. Documentation notes require exact supported-profile
+truth-up rather than dropping target features.
+
+Three ambition passes strengthened: durable reusable generations instead of
+per-call reconstruction; shared root/authority/retention ownership; and one
+independent semantic corpus across modes. Five refinement passes addressed
+completeness/current source, minimal true dependency edges, negative controls
+and public e2e tests, proof/platform scope, and final graph/evidence consistency.
+The last pass found no additional task-scope change in the examined draft.
+This is not a claim that every historical bead is optimal or every vision
+detail was independently exhaustively audited.
+
+### Adoption boundary and remaining work
+
+At measurement, local tracked JSONL had **1,297 records**: 871 closed, 382 open,
+35 in progress, six deferred and three blocked. The shared DB had **1,249**
+records and 17 pending dirty records. Fetched remote JSONL had **1,299**: 873
+closed, 380 open, 37 in progress, six deferred and three blocked. Remote adds
+`fgdb-d04vu` and `fgdb-nbrog` and changes 12 existing records. The isolated draft
+has **1,307**, retaining all local source IDs plus ten new open tasks. No draft
+`.23`–`.32` ID collided with the observed remote graph. These counts describe
+different subjects; they are not interchangeable progress percentages.
+
+**Do not replace either shared source with the draft database.** Adoption must
+re-read the then-current graph, preserve both source histories and all nine
+DB-only issues, resolve relation drift, recheck IDs, and replay the 15 reviewed
+record changes through `br` under the single-writer rule. Only then may
+`scripts/br_sync.sh` export that exact attributable set. The attempted shared
+export exited 65 because its 17 existing dirty records cannot fit these 15
+declared IDs. No export ran; `.beads/issues.jsonl` stayed at SHA-256
+`75393ce64e1ef18984c8b64b7de918daf8ad47d40b285c5791036ee7afa031bd`.
+
+**Completion boundary:** documentation/vision/source assessment, bridge,
+concrete draft Beads generation, ambition/refinement and actual draft `br`/`bv`
+validation were performed. **Live Beads adoption/export, full runtime
+qualification, commit and push remain incomplete.** The required heavy/full
+gate was not run after disk refusal, so no landing was represented as green.
+The existing Rust overlay and earlier audit content were preserved. This
+report must not be cited as an end-to-end product pass or fully published
+completion of the skill workflow.
+
+## Previous delta — 2026-10-21
+
+### Verdict and scope
+
+**This is a substantial, unreleased graph engine with real durable mechanisms
+and useful query surfaces. It does not yet deliver the composed B1–B6 product
+or qualify for G1–G4 acceptance.** The most consequential missing work remains
+durable storage integration, enforced product invariants, and cross-layer
+verification. More language functions alone cannot close those gaps.
+
+The complete project `AGENTS.md` (414 lines) and `README.md` (746 lines) were
+read, along with the reality-check skill, local parent instructions, current
+status/protocol documentation, the prior audit, relevant normative plan
+contracts, registries, implementing code, and regression sources. The required
+`/data/projects/AGENTS.md` was absent both locally and on css; the available
+`/Users/jemanuel/projects/AGENTS.md` was read. Historical alternative plans were
+not treated as current contracts. This pass did not read every historical
+planning document or every source file.
+
+Evidence classes below are deliberately separate: **source-present** means a
+real implementation and regression sources were inspected; **executed** means
+the named check ran during this audit; **unrun** means no current behavioral
+verdict. No percentage-complete estimates are carried forward.
+
+### Changes since yesterday that must not be reported as still missing
+
+- Cross-domain equality now has the explicit FALSE/TRUE law for `=`/`<>` in
+  `fgdb-gql/src/algebra/predicate.rs`; NULL and unordered comparisons retain
+  their separate behavior. `dc51c2412` cites `fgdb-v6ku6`.
+- Exact averages converted into ordinary query rows now round to binary64;
+  the unrestricted exact-result interface remains separate
+  (`set_ops/aggregate/rows.rs`, `9a774ea9d`, `fgdb-y255t`). Yesterday's
+  integer-average refusal is no longer a universal description of the source.
+- Unsupported graph/branch DDL and inline subqueries have named diagnostics
+  (`fgdb-gql/src/construct.rs`, `fgdb-cli/src/refusal.rs`, `28bc4e172`). These
+  diagnostics do not implement the refused constructs.
+- Read-only sealed preparation now opens an authenticated published checkpoint
+  without a resident `Database` or writer lease
+  (`fgdb/src/query_prism.rs`, `open_prism_sealed_projection_with_vfs`). It still
+  seals a selected relation and builds a derived projection at preparation;
+  it is explicitly neither persistent Tier R nor an RSS bound. Yesterday's
+  writable/double-open claim must not be applied to this path.
+- The reference graph now stores `CanonicalPropertyValue`, including List/Map
+  encodings (`fgdb-reference/src/lib.rs`, `append_props_transcript`). The
+  remaining reference gap is independent query/value semantic coverage, not
+  the complete absence of collection-valued graph state.
+- Subscription cleanup is already implemented in
+  `fgdb-server/src/recovery/subscriptions.rs` (`9009e802b`): terminal consumers
+  reclaim their private circuits. The old R5 leak is a regression-verification
+  target, not an absent implementation. Remote typed batch writes and prepared
+  read reuse are also connected in `fgdb-cli/src/remote.rs` (`022334573` for
+  prepared reads); do not duplicate that wiring from stale bead descriptions.
+- The current source adds bounded unbounded-shortest-path closure, compound
+  label predicates, string functions and rounded vector-coordinate handling.
+  Their new regression sources were inspected; their Rust execution is
+  **unrun in this audit**. The README's universal finite-upper-bound statement
+  and some old status paragraphs therefore need a profile-specific truth-up.
+
+### Implementation follow-through — indexed scalar expressions
+
+Work item `fgdb-nested-list-slice-uhjck` is **in progress** in the shared local
+Beads database; its exact-ID JSONL export is pending tracker reconciliation.
+The historical async-elements CASE/slice failure did not reproduce: the
+unchanged `77cad9711` baseline passed all 47 focused tests. The nine added
+standalone/nested slice cases also passed against unchanged production code.
+
+A further real query did fail against that baseline:
+`MATCH (n) WITH [1,2,3] AS items RETURN items[0] + 10 AS result`
+refused preparation at offset 48 with `Expected("end of statement")`.
+The test-only overlay executed one test and exited 101. The repair connects
+named subscripts to the existing scalar let slots and resolves their base
+without recursively re-entering the scalar compiler. It introduces no new
+evaluator, dependency, policy relaxation or replacement abstraction.
+
+The first repaired candidate passed `computed_return_text` (14 tests) and
+`spill_set` (34 tests), exit 0. Its overlay fingerprint was
+`631643b13aa4194fee206904d1f0492cd30fe9593bd2272165fac8d577021f5a`.
+Logs: `/tmp/fgdb-composite-expression-red.log` and
+`/tmp/fgdb-composite-expression-fixed.log` on the initiating Mac.
+
+Broader qualification rejected that candidate. Direct execution of all 133
+compiled integration targets passed 132 targets (1,177 tests), but the existing
+`fuzz_prepare_never_panics` target aborted with a stack overflow. The unchanged
+fuzzer's iteration count, facade coverage and timing assertions were retained.
+A minimal `MATCH (n) RETURN missing[0] + 10 AS result` regression also aborted
+(RCH exit 101; `/tmp/fgdb-composite-fix-unknown-base-red.log`). The direct-run
+driver exited 1; `/tmp/fgdb-gql-integration-early.log` preserves every target.
+The full Cargo invocation was still compiling its unit-test binary when its
+owned compilation was stopped after this red; it exited 101 and is unqualified.
+The follow-up correction resolves literal and unknown bases directly, retaining
+graph-element projection for bound graph names. Its verification is pending.
+The unchanged `77cad9711` baseline fuzzer subsequently passed all five original
+tests in 59.40 seconds (RCH exit 0;
+`/tmp/fgdb-fuzz-unchanged-baseline.log`), confirming that the first candidate
+introduced the recursive refusal. The corrected candidate is now being checked
+with the original fuzzer, explicit NULL/name regressions and embedded API tests.
+
+- [x] Recheck source and old Beads descriptions before duplicating finished work.
+- [x] Execute the unchanged focused baseline and disclose its green result.
+- [x] Reproduce the remaining indexed-expression failure before editing production.
+- [x] Repair the shared parser and retain hand-computed result assertions.
+- [x] Pass the first focused candidate without changing existing assertions.
+- [ ] Finish all-feature GQL tests, including typed parameters, NULL, typed
+  failures under LIMIT 0 and synchronous/asynchronous event parity.
+- [ ] Verify literal NULL subscript bases and unknown-name diagnostics in
+  graph and row scopes; neither path may recursively re-enter the compiler.
+- [ ] Pass the original all-facade preparation fuzzer without relaxing its
+  campaign size, timing assertions or stack settings.
+- [ ] Execute the new cases through `Database::query` over committed properties.
+- [ ] Recheck the existing FCW read-dependency and grouped relationship-MERGE
+  failures at the current base before choosing any further repair.
+- [ ] Complete strict linting and the repository landing gates; focused success
+  does not satisfy `scripts/local_proof.sh`.
+- [ ] Reconcile and export only the named Bead through `scripts/br_sync.sh`.
+
+The tracker follow-through found an available native recovery path:
+`br sync --reconcile-additive`. A scratch workspace at
+`/private/tmp/fgdb-native-comment-import.EWWpaD` imported all 1,297 source issues
+with zero deletions and zero invented events. Independent read-only SQLite
+comparison matched every source scalar field, all 3,160 comment payloads with
+multiplicity, 3,770 labels and 2,363 complete dependency records. The native
+remapper preserved two same-issue comment-ID collisions. A mismatched plan
+token exited 6 without changing the empty database or its plan; the reviewed
+token applied successfully, and `br dep cycles --json` returned zero cycles.
+This supersedes any inference that a new upstream remapper must be built first.
+
+The live database's native dry run still exits 6: 88 records have
+`shared_relation_drift` in comments, labels or dependencies. It proposes 57
+creates and preserves nine database-only records. No live reconciliation was
+applied. Replacing that database from the successful scratch snapshot would
+discard pending work; `.21` must reconcile those relations without doing so.
+
+### Vision checklist: promise, implementation, remaining proof
+
+Every row below has existing architectural bead coverage. That is coverage of
+intent, not evidence that its acceptance conditions are satisfied.
+
+| # | Testable target and source | Current classification and concrete evidence | Existing work owner |
+|---:|---|---|---|
+| 1 | Embedded open/session/prepare/typed streaming API, README Installation | PARTIAL. Real async `Database` create/open/memory/write and prepared/read/transaction APIs; the advertised synchronous session API and durable schema catalog remain absent. `fgdb/src/lib.rs`, `query_explain.rs`. | `fgdb-7r8sy`, `fgdb-epic-w10-mhq` |
+| 2 | Capability-governed server across all promised transports, README CLI / plan §13 | PARTIAL. FGP, HTTP/1.1, Bolt subset, TLS, prepared reads and recovery are implemented. `fgdb-server/src/lib.rs` explicitly excludes HTTP/2, gRPC, WS, durable result ACK/release and explicit write transactions. No current server smoke run. | `fgdb-w10-server-rte`, `fgdb-t79am` |
+| 3 | Agent-first CLI plus installable distribution, README CLI/Installation | PARTIAL. Real command handlers and robot schema; new diagnostic source improves usability. `git ls-remote --tags origin` returned no tags and the GitHub releases API returned `[]`. No current CLI binary was built. | `fgdb-epic-w10-mhq.1`, `fgdb-rc1017-bridge-wvze5.16` |
+| 4 | Frozen ISO/openCypher language contract and conformance corpus, plan §8 | PARTIAL. Native reads/writes lower into checked operators, with broad regression sources. `construct.rs` explicitly refuses catalog/branch DDL and inline subqueries. Yesterday's TCK counts were not rerun or extrapolated. | `fgdb-g0-language-contracts-54g`, `fgdb-rc1017-bridge-wvze5.15` |
+| 5 | B1 authoritative recovery, temporal retention, branch fork/merge, plan §5 | PARTIAL. Real capsule/marker barriers, authentication and checkpoint binding. `commit.rs` still implements its append-only `commits.log` profile. Full logical-command/root/checkpoint contracts, retention, BETWEEN and durable branches are not delivered. No Chronicle change since the prior audit. | `fgdb-epic-w2-6hc`, `fgdb-w2-retention-checkpoints-cn1l`, `fgdb-w2-branch-fork-xj37`, `fgdb-w2-branch-merge-6db2` |
+| 6 | B2 durable compressed tiers and larger-than-memory in every posture/operator, plan §6 | PARTIAL with architectural integration risk. Charged buffered reads and spill execution are real subsets. `fgdb-strata/src/tiered/sealed/mod.rs` explicitly says the manifest still roots Tier D; registered persistent run refs and maintenance are separate work. `Database::compact` retains old objects. | `fgdb-w3-tier-r-0tj`, `fgdb-teypc`, `fgdb-e8gr4`, `fgdb-rc1017-bridge-wvze5.13` |
+| 7 | B3 unified factorized/WCO execution, optimizer and parallel scheduling, plan §8 | PARTIAL. Real `free_join` plans/tries/factorized batches feed `algebra_exec/policy/topology.rs`. The complete cost optimizer, missing-order spillable tries and morsel-parallel executor are not established by those kernels. | `fgdb-epic-w5-ba9`, `fgdb-w5-executor-olp` |
+| 8 | B4 one durable incremental engine for recursion/views/changefeeds, plan §9 | PARTIAL. Commit-fed maintained registrations, recursive/aggregate/topology operators and served changefeeds exist. `standing_query.rs` explicitly makes registrations local to one opened database; durable view DDL, restart/resume and full circuit runtime remain. | `fgdb-epic-w6-65w`, `fgdb-w6-zset-circuits-kjv`, `fgdb-w6-delta-consumption-iyc` |
+| 9 | Graph SSI, phantom protection and production semantic rebase, plan §7 | PARTIAL. `write_txn_parts/finish.rs` performs conservative read/scan/write conflict validation over intervening deltas. Its own contract excludes full SSI and the durable session protocol. Rebase helpers do not establish a served SSI/merge ladder. | `fgdb-w4-g1-txn-core-qpmg`, `fgdb-w4-strict-serializability-trw` |
+| 10 | Strict canonical replay of a retained evidence closure, plan §8.6/§15 | PARTIAL. Native certified reads and replay bind plans, parameters, snapshot and ordered results (`gql_cert.rs`, `query_explain.rs`). This is not every statement, a signed proof, or the complete executable-artifact/authority/index/policy closure. | `fgdb-rc1017-bridge-wvze5.17`, `fgdb-epic-verif-phi` |
+| 11 | Every adaptive choice emits epoch-bound replayable cards, AGENTS adaptive contract | PARTIAL/UNWIRED. `fgdb-calibrate` has substantial typed epoch/card machinery; product dependency closures do not include it. Prism has local decision evidence, while worker/cache/planner choices do not demonstrate the universal contract. Calling all this code a stub would be inaccurate. | `fgdb-consumer-census-law-5pjdc`, `fgdb-epic-verif-phi` |
+| 12 | Broad fnx catalog through authorized snapshot projections, README Prism / plan §11 | PARTIAL, strategy divergence. The registered in-core catalog remains small (16 procedures), with in-house kernels and fnx differential oracles. Borrowing `GraphView` and witness types does not expose the promised 550+ algorithms. | `fgdb-epic-w8-syz`, `fgdb-lq1v6`; unlanded R3 strategy spec below |
+| 13 | Durable transaction/branch-scoped vector/text/graph indexes, plan §10 | PARTIAL. Real HNSW/BM25/hybrid kernels and commit-maintained resident generations. `query_beacon/resident/maintained.rs` fences failures and preserves old pins, but registrations are not a durable catalog or universal product path. | `fgdb-epic-w7-xmk0`, `fgdb-t38fv`, `fgdb-5jyok` |
+| 14 | Mandatory secure views, full key/revocation/audit/DP lifecycle, plan §12 | PARTIAL. Warden permits, source masking, signed per-execution limits and output checks are real. Server docs explicitly exclude durable audit release and complete revocation barriers; FG-INV-20.core remains stub. | `fgdb-epic-w9-lcy`, `fgdb-w4-secure-view-v87`, `fgdb-g9af0` |
+| 15 | B6 agent branches, provenance and retained strict retrieval replay, README six bets | PARTIAL. Useful hybrid retrieval and capability-scoped queries exist. `query_branch.rs` resolves only host-supplied immutable read views; it explicitly cannot fork, merge or write a branch. | branch beads above, `fgdb-epic-w7-xmk0`, `fgdb-epic-w9-lcy` |
+| 16 | Served replication/HA, exact recovery and backup/restore, plan §14/§16 | UNWIRED IN PRODUCT. `fgdb-repl` has real catch-up/availability/publication state machines. It is absent from CLI/server/embedded production dependency closures; its own docs require a real transport, publisher, pins and fencing. | `fgdb-epic-w11-5r8` |
+| 17 | Access-controlled temporal system graph and operations, AGENTS ergonomics / plan §16 | NOT STARTED as the promised integrated surface. Studio UI/model/layout exists and its 49 tests pass; this does not supply a queryable graph of sessions, obligations, plans and maintenance. | `fgdb-obs-system-graph-tki`, `fgdb-epic-obs-38b` |
+| 18 | Closed dependencies and enforced unsafe islands, AGENTS doctrine | EXECUTED STRUCTURAL CHECKS PASS. Direct manifests stay in the closed universe; ordinary library roots forbid unsafe. The exact-input unsafe checker inspected 32 crates, 7 sites and 0 orphan rows. This is not executed Miri/cross-target proof or a fresh advisory audit. | `fgdb-epic-w1-54x`, `fgdb-rc1017-bridge-wvze5.10` |
+| 19 | Independent reference, DPOR/crash/formal/conformance ladder with live invariants, plan §15 | PARTIAL. Real `fgdb-sim` replay/fault campaigns and reference model exist. Registry census is 0/20 core clauses live, 8 additional clauses live, 74/120 checkers live, 1/10 formal lanes checked. No current workspace Rust tests. | `fgdb-epic-verif-phi`, `fgdb-rc1017-bridge-wvze5.17`, `.19`, `.20` |
+| 20 | Every activated §17 performance gate with live incumbents and distributions | UNPROVEN. `fgdb-bench/src/main.rs` explicitly emits `empirical_gate_activated=false`; the GAPBS example is not all §17 gates. No speed ratio, large-scale footprint or benchmark claim was measured this pass. | `fgdb-epic-perf-4xe`, `fgdb-rc1017-bridge-wvze5.14` |
+
+### Checks executed and checks that did not run
+
+| Probe | Exit | Scope and result |
+|---|---:|---|
+| `cargo fmt --check` | 0 | Current tracked tree; empty diagnostic log. Yesterday's formatting failures are not current evidence. |
+| `bash -n` over tracked shell files | 0 | Syntax only. |
+| `shellcheck --severity=warning` over tracked shell files | 0 | Static shell lint only. |
+| Studio's four `node --test` files | 0 | 49 passed, 0 failed/skipped. Includes actual tracked Wasm execution, not Rust server/browser integration or source-to-Wasm provenance. |
+| Cached `registry-check all` | 0 | Exact committed source archive at `77cad9711`, on css; source/toolchain input digest and every cached artifact hash verified before reuse. |
+| Cached architecture / topology / unsafe-ledger checkers | 0 / 0 / 0 | Same archive and verified subject. The previously unlabeled-bead architecture failure is no longer current. |
+| Fresh `br sync --import-only` | 4 | Preserved copy containing only tracked JSONL/config/metadata initially; duplicate comment id 2876. No shared database or JSONL changed. |
+| `br --no-db --no-auto-import dep cycles` | 4 | Same duplicate-comment validation refusal. This command did not establish acyclicity. |
+| `bv --robot-triage`, `bv --robot-insights` | 0 / 0 | Tracked JSONL, 1,297 records, `Cycles=[]` with cycle computation executed. This parser's success does not prove `br` importability. |
+| AST scans for engine `todo!` / `unimplemented!` macros | 1 / 1 | No matches. The registry tool's keyword matches are scanner fixtures. Absence of macros does not establish feature completeness. |
+| `sbh check --need 20G` | 1 | Host reported critical storage pressure: about 219.7 GB free but 5.50% available versus its 8.06% threshold. No threshold override or cleanup performed. |
+| Workspace check / clippy / Rust tests / full `scripts/check.sh` / UBS / exact-tree local proof | UNRUN | No new build lane admitted after the disk refusal. The fleet was degraded; no local fallback was used. |
+| Current CLI/server/embedded smoke, TCK and §17 benchmarks | UNRUN | Available historical binaries were not relabeled as this commit's executable evidence. |
+
+The cached checker subject input key was
+`63f358e623ef934f046a73658d902d18952a7262d8d46fe51452694434a960ff`.
+Its `registry-check` executable SHA-256 was
+`4c978cd5d6e0cfdf57a7b6321309bacf63e7ca73b992934093eaf41d4c96b922`.
+The source archive is `/data/tmp/fgdb-rc1021-77cad9711` on css; checker transcripts
+are beside it with `-registry`, `-architecture`, `-topology`, and `-unsafe`
+suffixes. Local transcripts use `/tmp/fgdb-rc1021-*`; the fresh import copy is
+`/tmp/fgdb-rc1021-tracker-i3ynk9kc`. These scratch paths are evidence locations,
+not a published release/proof bundle or guaranteed long-term archive.
+
+**Why a green registry run is not G1.** `sample_capability_manifest.toml`
+deliberately enables no features/postures/roles and expects zero reachable
+clauses. The run exercised its saturation control (28 reachable) and reported
+the licensed sample closure as `reachable=0`. This is a correct G0 registry
+verdict with explicit scope; it is not runtime enforcement of the 20 core
+invariants. The only checked formal lane is `lean-version-chain`.
+
+### Work graph and the five questions
+
+The tracked JSONL contains **1,297 records: 871 closed, 382 open, 35 in progress,
+6 deferred, 3 blocked**. There are 426 nonclosed records. The local database,
+read without auto-import, reports only 1,248 records. A database-backed lookup
+of `.21` refuses with `SYNC_CONFLICT` because the issue exists in JSONL but is
+not addressable in the database. The 56 duplicate comment IDs persist.
+
+`bv` reports 130 actionable records; the stale database reports 64 ready.
+Neither is a product-completion percentage. Its leading recommendations still
+include old constitutional-registry work. Read the evidence and the bridge
+dependencies before choosing a task solely by rank.
+
+1. **What works?** Source contains real durable storage, native queries/writes,
+   authorized network surfaces, maintained queries, retrieval and read replay.
+   Yesterday's section records actual live engine workflows. Today executes
+   formatting, shell/static registry checks and the Studio model/Wasm tests.
+2. **What is missing?** The checklist names each gap. The defining absences are
+   durable compressed tier publication/reclamation, final Chronicle/branch
+   lifecycle, SSI, universal bounded execution, durable incremental/index/result
+   state, served Aegis, and enforced product-level invariant closure.
+3. **What blocks progress?** The import/export authority is broken, fresh engine
+   proof is unavailable under current admission, and independently implemented
+   mechanisms still need one durable recovery/security/resource contract.
+   Prism strategy and the storage ADR need an explicit disposition. Already
+   resolved semantic choices must not keep being presented as owner blockers.
+4. **Would every existing open bead close the gap?** The architectural epics
+   cover every vision row, but completion of their current records is not a
+   sufficient proof. Some narrow probes remain only in the 10-20 appendix,
+   several records describe superseded behavior, and product acceptance must
+   compose the mechanisms. Close against the specified full-workflow evidence,
+   not the mere existence of a crate or an unrelated passing registry gate.
+5. **What lacks an actionable bead?** Broad vision coverage exists. The 10-20
+   appendix's Prism strategy, subscription-slot regression proof, certificate-version,
+   durable-format registration, retained independent models, gate-portability
+   and inline-subquery scopes are still specs rather than separately landed
+   records in this JSONL. `.21` now owns the import defect. Do not execute the
+   old landing script blindly: diagnostics, collection storage, sealed opening
+   and semantic assumptions in its descriptions have changed.
+
+### Bridge, revised in place
+
+Use the existing owners in the checklist and the 10-20 detailed specs; do not
+create another competing architecture queue. The following are acceptance
+contracts for their next revisions, with the corresponding tests retained as
+explicit work rather than deferred cleanup.
+
+1. **Restore attributable work-graph authority (`.21`, `.3`, `.5`).** Preserve
+   both databases and every comment; add/use a br-native collision-remap path
+   rather than editing JSONL by hand. Reconcile database-only records and
+   `source_repo_path` without dropping comments or rewriting unrelated records.
+   Test fresh import, lossless comment triples, round-trip, one-record mutation
+   and exact-ID export through `br_sync.sh`; mutation-test duplicate rejection.
+   Log before/after counts, changed record IDs and hashes. Only then migrate
+   the still-relevant appendix specs into actual beads through `br`.
+2. **Re-establish one current proof (`.20`, `kqglu`).** Once disk admission is
+   restored, run all-targets check, strict clippy, workspace tests, all registered
+   gates and UBS against a fixed tree with `.beads` present where required.
+   Record executed/passed/failed/unrun separately. Re-run CLI robot contracts,
+   fresh create/write/reopen/query, FGP/HTTP/Bolt authorization and subscription
+   cancellation/reconnect. Exported schemas and examples must match the binary.
+   A current local-proof manifest is the landing witness; today's partial
+   checks cannot substitute for it.
+3. **Make B2 durable (`.13`, `w3-tier-r-0tj`, `teypc`, `e8gr4`).** Decide the
+   registered run/root/descriptor contract and property/history/origin-order
+   semantics before publication. Reuse the seekable sealed machinery, but
+   persistence is more than one write: immutable object identity, FEC, versioned
+   format floors, authoritative Chronicle binding and recovery must agree.
+   Build/seal/publish once, reopen by authenticated descriptor, and keep readers
+   pinned across writer/compaction progress. Test Tier-D/Tier-R/reference
+   equivalence at historical cuts, injected crashes and corruption, parallel
+   edges, cancellation, and a graph larger than the configured pool. Measure
+   cold admission, peak RSS, tracked pool bytes and complete bytes/live-edge.
+4. **Complete retention before reclamation (Chronicle/GC owners).** Add exact
+   root/checkpoint/suffix reachability and cross-process retention/fencing.
+   Never infer that process-local snapshot references authorize deleting disk
+   objects. Test two root slots, process death, pinned readers, backups/replay
+   owners, restart and crash at every retirement boundary. Repeated compaction
+   must demonstrate bounded physical growth while preserving all retained
+   answers. Keep this separate from the already improved no-op sync cost.
+5. **Close semantics through independent oracles (`.15`, `.19`, verification
+   epic).** Rerun the TCK at the actual executable revision. Grow the independent
+   reference's query/value semantics over its existing collection-valued state.
+   Preserve new equality/average/path/label/vector decisions across resident,
+   buffered, spill, transaction, authorized and standing-query paths. Test
+   bag multiplicity, NULL/missing, exact/float conversion, typed ordering,
+   cancellation and budget failures before effects. Retain independent models
+   or vectors from kernel work as replayable test inputs with source hashes.
+6. **Integrate the shared lifecycles (W4/W6/W7/W9/W10/W11 owners).** Sequence
+   catalog/schema, SSI witnesses, final committed effects, durable index/view
+   publication, retained results and subscriptions through their exact command
+   and state contracts. A subscription slot must return after cancellation,
+   disconnect, recovery and failed setup; verify more than 64 sequential
+   subscribe/cancel cycles. Durable restart/resume needs its separate baseline,
+   ACK and retention tests. Add server-level fault/partition/authority/output
+   tests before claiming that the replication or security helpers are live.
+7. **Make proof and policy machinery part of the product (`.17`, consumer
+   census, verification epic).** Bind a real compiled/negotiated capability
+   manifest to reachable live clauses and negative controls. Integrate policy
+   epochs/cards at selected real decisions with deterministic fallback,
+   dwell/economics guards and answer-equivalence tests. Keep formal scope,
+   bounded exploration, empirical models and runtime assertions separately
+   typed. A producer and an actual consumer are both required for closure.
+8. **Qualify breadth and shipment (Prism/Fabric/performance owners).** Resolve
+   broad fnx reuse versus in-house fast paths with an honest copy boundary and
+   mandatory independent parity. Finish product transports, synchronous/typed
+   embedding, Python, operations and release artifacts without narrowing the
+   stated target. Run install/upgrade/consumer workflows and the activated §17
+   manifests with the incumbent live in the same invocation, complete result
+   consumption, durability/isolation parity, distributions and memory/debt.
+
+The hard dependency spine is **tracker/proof integrity → durable run/root
+contract → pinned recovery/retention → safe reclamation → general bounded
+execution**. Independent semantic verification can progress alongside it.
+Durable branches, indexes, views, results and replication join that same
+root/authority/retention contract; they are not independent bolt-ons.
+
+### Ambition and refinement applied to this revision
+
+Three ambition passes changed the bridge: (1) target a reusable durable sealed
+generation rather than more per-call kernel savings; (2) make recovery,
+authorization, retained evidence and reclamation share exact rooted ownership;
+(3) use the same independent semantic/metamorphic corpus across execution modes
+so new speed paths cannot silently acquire different answers. More techniques
+were not added without a measured need; no §17 goal was reduced.
+
+Five plan-space passes were performed over the checklist and existing scopes:
+
+1. **Completeness:** all 20 vision rows mapped to existing owners; documented
+   unlanded fine-grained specs separately from actual beads.
+2. **Currentness:** removed yesterday's unresolved-equality, universal-average-
+   refusal, absent-collection-model and writable-sealed-open assumptions.
+3. **Dependencies:** retention/fencing precedes disk reclamation; no parser
+   polish is a prerequisite for durable storage work; no duplicate epic added.
+4. **Verification:** every bridge stage now names its independent/unit/e2e or
+   fault tests and evidence to retain. Current Rust runtime proof remains unrun.
+5. **Graph and claims:** `bv` computed no cycles, while `br dep cycles` refused
+   the invalid import. These are different verdicts. The final pass found no
+   additional scope change within this audit; it does not certify unexamined
+   code, all historical documents, or the entire backlog as optimal.
+
+**Completion boundary.** This audit records the measured gap and a revised
+bridge. Shared Beads creation/update/export and the current engine runtime
+qualification remain blocked by the demonstrated tracker divergence and disk
+admission respectively. No issue was closed, no JSONL was rewritten, and no
+engine implementation was changed. The report must not be cited as a green
+`scripts/check.sh`, a local-proof landing, or completion of every skill phase.
+
+## Previous delta — 2026-10-20
+
+Measured at `df93ba15` (`origin/main` tip, 2026-10-20 16:00 −0400), 204 commits
+after `1563ee5b`. Method:
+- **Read-only audits.** Four parallel audits covered all 20 vision rows at file:line: storage, query engine, product surface, and verification/doctrine.
+- **Compile and tests.** A release build ran on the Mac Studio. fmt, `check --all-targets`, workspace clippy and the per-package test suites ran on the Linux host css in a fresh clone (local cargo, debug=0).
+- **Gates.** The 14 runnable registered gates ran on css. They cannot run on macOS; see finding 7.
+- **Live runs.** The README Quick example, 30 everyday statements and `fgdbd` over FGP/HTTP/Bolt/subscription were driven through the binaries.
+- **TCK.** The openCypher TCK ran through the gauntlet harness: 3,880 scenarios, pinned tzdb.
+- **Footprint.** A road-ny probe (730,100 edges) measured disk and memory.
+- **Work graph.** The work graph was inspected and rehearsed on scratch copies.
+
+### Product verdict
+
+**The steering landed, `main` came within a few commits of green and lost
+compile again two hours later, and the durable vision has not moved for a
+third consecutive check.**
+- **Landed:**
+  - the 10-17 document and beads;
+  - all stranded lanes (stored List/Map values, writes after WITH, math);
+  - the rustls fix;
+  - 40 repair commits.
+
+  `fgdb-gql` went from 2,612/17 to 2,717/1. Registered gates went from 3 pass to 10 pass. TCK +62 PASS, 0 lost.
+- **Not green yet:** rustfmt (10 files), one clippy lint, 4 CLI laws (robot contract ×2), and 22 known `fgdb` lib laws. There is also a security advisory published today.
+- **Unmoved:**
+  - Chronicle, the verification registries and the storage ADR: zero commits by anyone.
+  - Sealed images are rebuilt per call and never persisted. `--sealed` is slower than decoding.
+  - Compaction only grows the directory.
+- **Not steered:** 4 of the remote stream's 101 commits cite a bridge bead. It pushed 19 never-compiled commits to `main` today, nine of them during this measurement, and at that tip three test targets no longer compile.
+
+### What governs the state at `df93ba15`
+
+1. **The steering landed; the remote stream does not read it.**
+   - **What landed.** The integration sessions (`jeff@jeffreyemanuel.com`, Linux) landed the 10-17 document, beads and stranded lanes (`fgdb-rc1017-bridge-wvze5.4`, merge `169df7ec`), plus 40 repair and restate commits. The "steering never left the host" failure of 10-17 is closed.
+   - **What the remote stream did.** The toolchain-less stream (`35050222+Dicklesworthstone@users.noreply.github.com`) made 101 non-merge commits since `1563ee5b`. 4 cite a `wvze5` bead. Its queue is `fgdb-xohc8` (17), `tzxz1` (8), `qvy9n`, `imfld`, `694ga`, `62mzm` and `5jyok` (6 each).
+   - **What nobody touched.** Zero commits by anyone touched `fgdb-chronicle`, `invariants.toml`, `checker_index.toml`, `proof_lanes.toml`, the ADR files or `architecture_decisions.toml`.
+   - **The landing rule is contested.** Several of its messages say "Direct-main publication explicitly requested". That contradicts the 2026-09-22 owner ruling in AGENTS.md (toolchain-less pushes go to `staging`). There is still no `staging` branch and no merge-train notes on origin. Only the owner can say which rule stands (`.5`, `fgdb-verified-landing-queue-kqglu`).
+   - **The ranking does not steer either.** `bv --robot-triage` puts July-era G0 registry beads at the top of its recommendations, and no stream works them.
+2. **`main` compiles; it is not green.** On Linux at `df93ba15`:
+   - A release build and `cargo check --workspace --all-targets` exit 0.
+   - `cargo fmt --check` is red in 10 files from the 10 commits after the last verified tree (`5d49dfe0`).
+   - Workspace clippy has exactly one finding, `type_complexity` at `crates/fgdb/src/write_txn_parts/frozen_update_program.rs:13` (`e396b1bc`). With it allowed, clippy exits 0.
+   - Tests are in the evidence table. The 10 unrun commits' own laws pass, and they add nothing to the `fgdb`/`fgdb-gql` red tallies.
+   - The CLI's robot contract is red. The binary's schema no longer equals the frozen fixture (2 laws). `remote.rs:813-817` also emits a `subscription_reset` event the schema lacks.
+   - Nine more UNRUN commits landed during the measurement (`f97c9fff`..`92e83e49`, +3.5k lines). At `92e83e49`:
+     - three new test targets no longer compile; they were written against the pre-widening `CanonicalScalar` property type, the semantic conflict the 10-17 check predicted for every reader of stored values;
+     - rustfmt is red in 22 files.
+
+     So `main` went from "compiles, not green" to "test targets do not compile" within two hours of the last repair.
+3. **Security: RUSTSEC-2026-0382 was published today.** `rustls-webpki` 0.103.15 "may accept distrusted intermediates". It sits on every TLS path (`fgdbd --tls-*`, `fgdb remote --tls-ca-file`). `dependency_policy_e2e` is red on it alone; cargo-deny and the four controls pass.
+4. **The durable architecture is where it was on 10-13.**
+   - **Chronicle:** zero diff. No group commit, retention tiers, `BETWEEN` or `BranchManifest`; `pack.rs` is dead.
+   - **Sealed images are not Tier R.**
+     - The sealed work grew (+594 production lines: streaming Elias-Fano cursors, invisible-history skipping, relation-scoped sealing).
+     - But the image is "a derived adjacency image, not ... a second durable graph authority" (`tiered/sealed/mod.rs:16-23`). `encode()` has no non-test caller.
+     - `query --sealed` does a **writable** open (writer lease, so it cannot run beside `fgdbd`), then decodes the root a second time and encodes per call (`fgdb-cli/src/main.rs:1598-1604`, `query_prism.rs:484`).
+     - On road-ny, PageRank takes **6.8 s / 2.4 GB** with `--sealed` against **2.3 s / 0.69 GB** decoded.
+   - **Every open still decodes every block**, on all three open paths.
+   - **Footprint at HEAD on road-ny:**
+     - 332 B/edge on disk after load, 378 after `compact`, 403 after a second compact. Compaction never reclaims (`lib.rs:5464-5468`, `:5521`).
+     - A one-row CLI write takes 1.9 s at 1.5 GB peak RSS.
+     - The gauntlet's 10-16 web-google run had `fgdbd` at 10.6 GB for 5.1M edges.
+     - Tier R's target is 2.5–5 bits/edge.
+   - **No ADR.** The ADR the 10-17 bridge required before more resident work (`.13`) was not written. About 100 resident and kernel commits landed instead.
+5. **Correctness.** The TCK at HEAD reads 2,912 PASS / 188 REFUSED / **26 WRONG** (detail in the Evidence table).
+   - **23 of the 26 wait on two open owner rulings:** `fgdb-v6ku6` (cross-type equality UNKNOWN vs FALSE, 17) and `fgdb-e26tv` (null stored rather than absent, 6). For e26tv, `properties(n)` returns `{property1: null, ...}` after `SET n.property1 = null`.
+   - **Stored lists made v6ku6 a live data bug.** `WHERE NOT p.tags = 'a'` drops a row whose `tags` is `['x','y']`.
+   - **Stored lists are CREATE-only.** `SET p.tags = [...]` refuses, both as a literal and as a parameter.
+   - **Diagnostics are `Debug` dumps,** often naming a construct the user did not write (`CREATE GRAPH` gives `Program(InsertBind { ... Expected("(") })`).
+6. **Prism changed direction without a ruling.** It has 16 procedures, and **zero production calls into `fnx_algorithms`**: the last six were replaced by in-house CSR kernels on 10-18/19. fnx survives as the `GraphView` trait and as test oracles. The plan and README still promise "the entire franken_networkx catalog (550+)".
+7. **The work graph cannot be rebuilt from the tracked JSONL.**
+   - `br sync --import-only` on a fresh clone fails: "duplicate import comment id 2876". 56 comment ids are each used by two comments, from concurrent Mac and Linux writers on 10-12/13, unioned by the 10-16/18 record-by-record merges.
+   - **Mac-only records.** The Mac Studio's database holds 8 records that exist nowhere else and 16 dirty rows (last export 10-15). Two of them are the unexported ids that keep `g0_commit_provenance` red (`fgdb-load-beats-memgraph-xf2n8`, `fgdb-rwtcx`). The third, `fgdb-016qw`, was minted by the toolchain-less stream and exists in no database.
+   - **Every export path rewrites the whole file.** A three-way-merge rehearsal on a copy changes all 1,288 tracked rows (`source_repo_path`). So this session could not land beads without rewriting shared truth, and the specs below are staged for the single writer.
+   - **The gates do not run on macOS.**
+     - `private_subject.sh` probes `/proc/<pid>/fd`.
+     - `g0_proof_lanes` hits a bash here-string failure under a long TMPDIR ("No space left on device" with 248 GiB free), then reads elan's update notice as the Lean version. The proof itself checks with Lean 4.7.0.
+     - The Linux proof host has no `lean`.
+8. **Verification depth is frozen; verification health improved.**
+   - The registries are unchanged since September: 0/20 `.core` live, 74/120 checkers live, 1/10 proof lanes checked.
+   - 0 of the 16 new test files use the reference oracle, DPOR or FaultVfs.
+   - The reference oracle has no List/Map model, so the stored-collection surface shipped with no differential.
+   - The toolchain-less stream does validate each kernel against an independent Python model (tens of thousands of cases per commit), then discards the model.
+
+### Evidence (2026-10-20, `df93ba15` unless stated)
+
+| Probe or gate | How | Exit | Result |
+|---|---|---:|---|
+| Release build | `cargo --config .cargo/macos-lld.toml build --release --locked -p fgdb-cli -p fgdb-server` (Mac) | 0 | 212 s |
+| fmt | `cargo fmt --check` | 1 | 10 files, all from commits after `5d49dfe0` |
+| check | `cargo check --workspace --all-targets --all-features --locked` (css) | 0 | every target compiles |
+| clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` (css) | 101 | one `type_complexity` (`frozen_update_program.rs:13`); with it allowed: 0 |
+| fgdb-gql lib | `cargo test -p fgdb-gql --lib` (css) | 0 | 1,570 / 0 |
+| fgdb-gql all targets | `cargo test -p fgdb-gql --tests` (css) | 101 | 2,717 / 1 (`spill_set` `items[1..]` slice refused); 10-17: 2,612 / 17 |
+| fgdb lib | `cargo test -p fgdb --lib` (css) | 101 | 1,360 / 22: same count and modules as `5d49dfe0` (`.20`) |
+| fgdb new integration tests | `--test spilled_predicate_probes --test frozen_unwind_updates --test scalar_unwind_writes` | 0 | 22 / 0 |
+| strata, delta-types, prism | `cargo test -p ...` (css) | 101 | 944 / 1 (`relation_root_does_not_restrict...`, `fgdb-7ch6v`) |
+| cli, server, bolt, protocol | `cargo test -p ...` (css) | 101 | 667 / 4, all CLI: robot schema frozen, CLI fuzz contract, spilled carried properties ("native Set read has no supported pull execution"), packed search rank order |
+| Registered gates (css, Linux) | the 14 runnable script gates | — | **10 pass**: claims, spine, identity, negative evidence, topology, tree stability, threat, collections, crypto codegen, unsafe tool lanes. **3 red:** commit provenance (8: three unexported ids), architecture decisions (3 unlabeled beads from 10-20), dependency policy (RUSTSEC-2026-0382). **1 environment:** proof lanes (no `lean` on css). 10-17: 3 / 7 / 4 |
+| Gates on macOS | same scripts | 2 | subject gates abort before any assertion (`/proc` probe); see finding 7 |
+| Lean lane | `lean VersionChain.lean` with the pinned 4.7.0 | 0 | the proof checks |
+| openCypher TCK | `gauntlet/tck.py`, 3,880 scenarios, pinned tzdb (5 zones), 8 jobs, 186 s | 0 | 2,912 PASS, 133 PASS-ERR, 544 ERR-UNSUP, 188 REFUSED, **26 WRONG**, 2 DIVERGE, 3 COLUMNS, 22 SETUP, 50 FIXTURE |
+| TCK delta | per-scenario diff against the same harness's run `tck-1e727c2a` (10-14) | — | +44 REFUSED→PASS, +18 SETUP→PASS, **0 PASS lost**, 2 REFUSED→WRONG (Merge6 [4], Set4 [3], both e26tv) |
+| README Quick example | 11 statements via `fgdb --robot`; `SUBSCRIBE TO` via `fgdbd` | — | 6 of 11 run as the README states. `hybrid.search` refuses vectors that are not exact f32 (`0.1`); it works with `0.5/0.25/0.125` |
+| Everyday statements | 30 statements | — | Run: OPTIONAL MATCH, `-[r]->`, var-length DISTINCT, WITH aggregates, EXISTS, CASE/collect, `date()`, UNWIND CREATE, DETACH DELETE. Refused: pattern comprehension, `CALL {}`, `WHERE v:A OR v:B`, unbounded `shortestPath(*)`, list SET. Wrong: `NOT tags = 'a'` |
+| `fgdbd` end to end | keygen, tokens, serve FGP+HTTP+Bolt, remote query/write, scoped and read-only tokens, HTTP, Studio, subscribe, Neo4j driver 6.4 | 0 | all served. Scoped token hides `:Person` (count 0). Read-only write denied. No token: 401. Subscription: baseline plus live delta. Bolt reads work. Driver `execute_query` writes refuse (explicit transaction) |
+| road-ny footprint | `fgdb load` / `compact` / reads / writes / Prism, `/usr/bin/time -l` | 0 | load 14.4 s, 2.1 GB. Disk 332 → 378 → 403 B/edge. Point read 0.94 s cold. Default `count(*)` refused (100k budget). One-row write 1.9 s, 1.5 GB. PageRank 2.3 s / 0.69 GB decoded, 6.8 s / 2.4 GB `--sealed` |
+| Work graph | `br sync --import-only` on a fresh copy of the tracked `.beads` | 1 | duplicate import comment id 2876 (56 duplicated ids); `br doctor`: `jsonl.duplicate_ids` |
+| Tip re-check | fmt, `check --all-targets` at `92e83e49` (css), after 9 more UNRUN commits | 1 / 101 | rustfmt red in 22 files (was 10). Three new test targets **do not compile**: 5 × E0277 from tests written against the pre-k3nub `CanonicalScalar` property type (`fgdb-gql` `compound_stored_aggregates`, `fgdb` `vertex_merge_scripts_all`, `vertex_merge_no_return`). Library targets compile |
+
+### Vision checklist (2026-10-17 → 2026-10-20)
+
+| # | Row | 10-17 | 10-20 | Status | What changed / what governs it |
+|---:|---|---:|---:|---|---|
+| 1 | Embedded library | ~66% | ~67% | PARTIAL | `WeakEmbeddedReadView`, the digest accessor. Still async with `&CommitCx`; no session, typed `get`, `:memory:` path or catalog (`fgdb-7r8sy`). 361 public `Database` fns, 306 raw. |
+| 2 | `fgdbd` and wire | ~60% | ~61% | PARTIAL | Reads from weakly published snapshots (`963c4e3b`, UNRUN, partial: handshake and subscription polls still wait). Subscription slots are never released (cap 64 until reopen). No HTTP/2, gRPC, WS, RESULT_ACK or multi-statement write transactions. |
+| 3 | CLI | ~68% | ~69% | PARTIAL | `--sealed` and 8 flags shipped undocumented. Robot contract red. Diagnostics are `Debug` dumps. No releases, Python, shell, branch or backup. |
+| 4 | GQL / openCypher | ~63% | ~65% | PARTIAL | Stranded lanes landed: TCK +62, 0 lost. 26 WRONG (23 = two rulings). Lists are CREATE-only. Parser race and the four copied write classifiers unchanged. No DDL, branches or `CALL {}`. |
+| 5 | Chronicle (B1) | ~56% | ~56% | PARTIAL | Zero diff. |
+| 6 | Strata (B2), larger-than-memory | ~46% | ~47% | WRONG_APPROACH risk | Sealed images faster but per-call and unpersisted; `--sealed` costlier than decoding. Every open decodes every block. Disk grows on compaction. |
+| 7 | Loom (B3) | ~44% | ~45% | PARTIAL | About 12 shape-specific operators (theta range probes, range bands, merge-key inference). FreeJoin unchanged; no optimizer, parallelism or SIMD. |
+| 8 | Ripple (B4) | ~52% | ~55% | PARTIAL | Incrementally maintained triangle, clustering, component and core-number subscriptions; predicated join witnesses (most UNRUN). No MV DDL, durability or circuit runtime. |
+| 9 | Transactions | ~56% | ~56% | PARTIAL | Backward OCC unchanged; rebase APIs are still test-only. |
+| 10 | Certificates and replay | ~61% | ~60% | PARTIAL | Reads only. `cb4f5cc9` evidence v2 without an envelope bump: probe needed. |
+| 11 | Decision cards | ~5% | ~7% | STUB | One `BfsDecisionCard`, no policy epoch. Worker counts, index-vs-scan and cache retention are uncarded. |
+| 12 | Prism | ~44% | ~45% | PARTIAL, direction changed | 16 in-house kernels, 0 production fnx calls. `GRAPH name` still unsupported. |
+| 13 | Beacon | ~51% | ~53% | PARTIAL | Maintained-index reuse in privileged `hybrid.search`, but no product surface registers an index. No durable segments. |
+| 14 | Warden | ~59% | ~61% | PARTIAL | The authorization digest is real on authorized writes but never verified. Process-global REUSE now holds scoped projections (worse). |
+| 15 | Agent-native (B6) | ~35% | ~35% | PARTIAL | No change. |
+| 16 | Aegis | ~19% | ~19% | NOT_STARTED in product | No change. |
+| 17 | System graph and observability | ~7% | ~7% | NOT_STARTED | No change. |
+| 18 | Closed universe and unsafe ledger | ~89% | ~88% | REGRESSED | rustls fixed; webpki advisory today; raw `thread::scope` spread to betweenness, closeness and harmonic; `force.wasm` unchanged. |
+| 19 | Verification ladder | ~33% | ~34% | FROZEN depth, better health | Gates 10/14 on Linux (was 3). Registries and oracle depth frozen. The tracker cannot rebuild from JSONL. |
+| 20 | §17 performance | ~16% | ~17% | UNPROVEN | GAPBS same-invocation correctness differential (`eae0f62a`), not a gate. No §17 gate measured. |
+
+### The five reality-check questions
+
+**1. What works today, end to end?**
+- **All three postures ran.**
+  - The CLI: create, write, query, diff, certify/replay, compact, scrub, search, analytics, robot schema.
+  - `fgdbd` over FGP, HTTP and Bolt, with capability scoping that holds on the wire, a live subscription, and supervised serving.
+  - The library, through both of the above.
+- **Real graphs answer.** road-ny loads in 14 s, a point read takes under 1 s from a cold process, and PageRank over 264k vertices takes 2.3 s.
+- **Conformance is measured.** 2,912 TCK scenarios pass with no PASS lost. The integration sessions' landing discipline (proof clones, restated laws, export of exact ids) works when it is the one landing.
+
+**2. What is stubbed, partial or aspirational?**
+- **Storage:** durable Tier R, reclamation, retention, branches and BETWEEN.
+- **Transactions:** SSI and the merge ladder in production.
+- **Ripple:** views as DDL and durable subscriptions.
+- **Indexes:** a durable Beacon catalog.
+- **B5:** decision cards beyond one, and digest verification.
+- **Fabric:** HTTP/2, gRPC, WS and result retention; the system graph; Aegis.
+- **Analytics:** the fnx catalog (now only a name).
+- **Larger-than-memory:** everywhere except the `--buffered`/`--spill-dir` profiles.
+
+**3. What is blocking us?**
+1. **Six owner decisions gate the rest:**
+   - two semantics rulings (v6ku6, e26tv) that gate 23 TCK answers and a live data bug;
+   - the landing rule for the toolchain-less stream;
+   - the Prism direction;
+   - the storage ADR;
+   - Studio.
+2. **An integration model with one disciplined lane and one undisciplined lane.** The fastest writer compiles nothing and cites the bridge 4% of the time.
+3. **A work graph that cannot onboard a new writer** (finding 7).
+
+**4. If every open and in-progress bead were implemented, would the gap close?**
+- No. 415+ beads are open or in progress, and they cover every vision row (W1–W12, obs, perf, verif). Coverage is not the problem.
+- The problem is that the beads doing the work are not the beads on the critical path. `bv` ranks July-era G0 registry beads first, the remote stream works its own perf queue, and the bridge beads that would move B1/B2/B5 have had zero commits for three checks running.
+- Several beads also disagree with the code:
+  - done but open: `agp1o`, `yzt2b`, `zshkh`, `vuyw5`, `3xol9`, `du0xg`, `8erds`, `tzxz1`;
+  - stale or needing re-scope: `t38fv`, `lq1v6`, `g9af0`, `7qznp`.
+
+**5. What do no beads cover?** (now specified below):
+- the JSONL comment-id collision;
+- RUSTSEC-2026-0382;
+- the Prism direction;
+- list SET;
+- subscription slot release;
+- certificate evidence versioning;
+- the k3nub durable formats;
+- the `--sealed` cost;
+- the reference List/Map model;
+- the remote stream's models as tests;
+- gate portability;
+- diagnostic codes;
+- `CALL {}` subqueries.
+
+### Dependency-ordered bridge plan (2026-10-20)
+
+```mermaid
+flowchart TD
+    S0["Stage 0 — importable tracker, green main, security
+    JSONL comment ids (R1), webpki (R2), fmt + clippy + CLI contract (.20),
+    orphan labels, Mac-only records exported (.3)"] --> S2
+    S1["Stage 1 — owner rulings (parallel with Stage 0)
+    v6ku6, e26tv, landing rule (kqglu/.5), Prism (R3), ADR (.13), Studio (.12)"] --> S2
+    S1 --> S3
+    S2["Stage 2 — correctness found live
+    list SET (R4), subscription slots (R5), evidence version probe (R6),
+    k3nub format registry (R7), diagnostics codes (R12)"] --> S4
+    S3["Stage 3 — durable storage from what exists
+    --sealed floor (R8), then the ADR's route: persist the sealed image
+    at compaction as Tier R (teypc), reclamation (l89gt), lazy open (e8gr4)"] --> S4
+    S4["Stage 4 — verification that keeps up
+    reference List/Map model (R9), models as tests (R10), gate portability (R11),
+    TCK-vs-reference (.19), then CALL {} (R13)"]
+```
+
+- **Stage 0 (hours, mostly mechanical).**
+  - **Tracker first.** Repair the JSONL comment ids through the single writer (R1). Without it no other writer, this session included, can land beads.
+  - **Green and secure.** Bump `rustls-webpki` (R2). rustfmt the 10 files, alias the one complex type, and attribute and fix the 4 CLI laws (`.20`).
+  - **Gates.** Label `dhcfo`/`m4cab`/`7ch6v`, which turns the architecture gate green. Export the Mac-only records, which turns provenance green except `016qw`.
+- **Stage 1 (owner, in parallel).**
+  - **Decisions:** v6ku6, e26tv, the landing rule, the Prism direction (R3), the ADR (`.13`) and Studio. Each is a page of reading in its bead.
+  - **The landing rule has a deadline.** The remote stream added 19 UNRUN commits in one day, and every hour of it adds integration debt for the disciplined lane.
+- **Stage 2 (days).** Fix what users hit:
+  - stored-list SET (R4);
+  - subscription slot release (R5);
+  - the certificate-evidence probe (R6);
+  - registry rows and compatibility laws for the k3nub formats (R7);
+  - stable diagnostic codes (R12).
+- **Stage 3 (the vision's critical path).**
+  - Take `--sealed` off the writable open and the double decode (R8).
+  - Then the ADR's route to Tier R. **Persist the sealed image the code already builds** as a registered, content-addressed, RaptorQ-coded object at compaction, and open it by descriptor.
+  - Then reclamation (`l89gt`) and lazy writable open (`e8gr4`).
+- **Stage 4 (the ratchet).**
+  - The reference List/Map model (R9) unlocks a meaningful TCK-vs-reference differential (`.19`).
+  - The remote stream's models checked in as vectors (R10) turn "WRITTEN, NOT RUN" into "model-checked on landing".
+  - Gate portability (R11), then `CALL {}` (R13).
+
+### Ambition rounds, applied in place
+
+**Round 1. What makes this 10× rather than incremental.**
+1. **The sealed image is Tier R minus one write.**
+   - **What exists.** Streaming seekable Elias-Fano cursors (`ec86eab9`, `8581af31`), invisible-history skipping and relation-scoped sealing already produce a compressed, authenticated image per call.
+   - **What is missing.** Publishing it at compaction under a registered object kind, and opening by descriptor.
+   - **What it buys.** The remote stream's three days of kernel work become the first half of B2, instead of a competitor to it.
+   - This replaces 10-17's Round 1.1 (persist the flat `AdjacencyIndex`) as the ADR's first candidate: the image is already compressed and authenticated, and the index is neither.
+2. **Make the uncompiled stream verifiable without changing its environment.**
+   - Its per-commit Python models are independent oracles. Checked in as vectors with a Rust test (R10), every disciplined proof re-verifies its kernels for free.
+   - This is the cheapest way to turn the AGENTS.md landing-rule dispute into a measurable property: a kernel commit that ships a model is model-checked on landing.
+3. **Two rulings, one value model, one differential.**
+   - v6ku6 and e26tv decide 23 TCK answers.
+   - R9 makes those decisions executable in the reference, and `.19` then turns 3,880 scenarios into an engine-vs-reference semantic oracle that covers stored collections.
+4. **Steering as a number.** The share of a stream's commits that cite a ready bead of the current bridge is cheap to compute: 4/101 since 10-17. It belongs in the next check's evidence table, not in a new gate.
+
+**Round 2. Every idea judged on merit.**
+
+| Idea | Impact / cost | Decision |
+|---|---|---|
+| Repair the JSONL and add a round-trip gate (R1) | Highest / low | KEEP, Stage 0: the tracker is the steering medium |
+| Persist the sealed image as Tier R (Round 1.1) | Extreme / medium | KEEP as the ADR's first candidate (`.13`, `teypc`) |
+| Models as vectors (R10) | High / low | KEEP, narrow: only kernels whose commit cites a model |
+| Reference List/Map model (R9) | High / medium | KEEP, parameterized until the rulings |
+| Stable diagnostic codes (R12) | Medium-high / low-medium | KEEP: agent-first is a product promise |
+| A steering-ratio gate | Low / medium; risks "gate self-weakening" games | CUT. Report it in reality checks only |
+| More `--sealed` kernels before R8 | Negative: extends a path slower than default | PAUSE until R8 |
+| More resident micro-optimizations before the ADR | Diminishing | PAUSE (unchanged from 10-17, not followed) |
+| `CALL {}` subqueries (R13) | Medium / medium | KEEP at P3 |
+
+**Round 3. Deeper technique where it pays.**
+- **Tier R encoding.** Persist the image with **partitioned Elias-Fano** (Ottaviano & Venturini, SIGIR 2014): choose partition endpoints by the paper's linear-time approximate DP over the encoded-size cost, so dense runs (power-law hubs) use bitmaps and sparse runs use EF. The seekable cursor already landed, so this is an encoder change. Report bits/edge on road-ny, web-google and pokec against the 2.5–5 target.
+- **Reclamation.** Make it reachability, not heuristics. Mark from {manifest roots within the retention window ∪ pinned snapshot epochs}, sweep content-addressed objects unreachable from that set, and gate deletion behind an epoch barrier that readers already hold through pinned snapshots. Each sweep emits a decision card (reclaimable bytes vs. I/O, with hysteresis), which also gives row 11 a real producer.
+- **Semantics.** Once v6ku6/e26tv are ruled, add metamorphic relations to the differential:
+  - `x = y ⇔ [x] = [y]`;
+  - `x IN L ⇔ any(e IN L WHERE e = x)` under three-valued logic;
+  - `NOT (x = y)` partitions with `x = y` and the null case.
+
+  They are cheap, independent of the TCK, and they catch exactly the class of the 17 v6ku6 answers.
+
+### Plan-space refinement (Phase 5): what changed in the bead specs
+
+- **Pass 1, sense.** Two gaps had no owner and became beads: `Debug`-dump diagnostics (R12) and `CALL {}` (R13). The fmt, clippy, CLI-contract and label fixes went to existing beads (`.20`, orphans) rather than new ones.
+- **Pass 2, tests and logging.**
+  - Every spec names its laws, its e2e transcript and a mutation check where a gate is added.
+  - R1 gained a fresh-clone probe: `br create` plus `br_sync.sh` must change exactly one record.
+- **Pass 3, dependencies.**
+  - Hard blocks only where work cannot start: `.3` is blocked by R1.
+  - SET-list, the reference model, the `--sealed` floor and models-as-tests became `related` links, so no fix waits on a ruling it does not need.
+  - `br dep cycles` stays empty.
+- **Pass 4, graph check.** In a rehearsal database, `bv --robot-triage` ranks R1 as the top quick win, `bv --robot-insights` reports no cycles, and every spec rendered intact.
+- **Pass 5.** No further change found, so the specs converged.
+
+### Beads: specified, rehearsed, not yet landed
+
+The tracked JSONL cannot be imported (finding 7), and the integration session holding the only exportable database was running at the time. So this session did not write the shared work graph.
+- **Specs:** an epic and 13 children (R1–R13 above), plus dated comments on 20 existing beads. The full text is in the [appendix](#appendix-the-2026-10-20-bead-specs-and-landing-script) at the end of this section.
+- **Landing script:** `land_rc1020.sh`, also in the appendix with a one-line extraction command. It:
+  - creates the beads;
+  - closes R2, which is already fixed;
+  - adds the dependencies and the orphan labels;
+  - prints the exact `scripts/br_sync.sh` id list.
+- **Rehearsal:** run three times on scratch copies of the database; the third run used the script extracted from the appendix. Result: 14 beads, 13 dependencies, no cycles, R2 closed.
+- **Ownership:** landing them, with R1 first, belongs to the single graph writer or to the owner.
+
+### Evening follow-up (2026-10-20)
+
+The remote stream kept landing never-compiled commits after this check: 9 more by `92e83e49` (18:14) and 23 more by `d9ce976b` (21:32). This session fixed what blocked every other writer, using Linux evidence. Every tree was rebuilt with `git am` on css, and its tree hash matched. The six fixes were pushed as `d9ce976b..a74ce364`. The feature defects were left to their owners.
+At `d064e8c2` (`origin/main` after these pushes and one more stream commit), `cargo check --workspace --all-targets --all-features` and workspace clippy (`-D warnings`) exit 0 on css. That is the first green check and clippy since `92e83e49`. rustfmt is at 623 hunks and rising.
+
+- **What broke, and where:**
+  - **At `b3b6e1db` (20:10):** `cargo check --workspace --all-targets` failed with 11 errors in five targets, and fixing them exposed a twelfth:
+    - tests written against the pre-collection property type;
+    - a test that used a transaction after `abort()`, which consumes it;
+    - a lib test missing `mut`.
+  - Workspace clippy reported 10 lints on top of those errors, and rustfmt reported 429 hunks.
+  - **At `9f843afd`:** six more commits added 2 errors and 3 lints. They also added `crates/fgdb-cli/QUERY_FED_WRITES.md` without registering it, which turned `registry-check lint` red (unclaimed_prose).
+  - **At `88e84aed`:** `0b93a580` broke the `fgdb` library itself, so nothing that depends on `fgdb` built at `origin/main`:
+    - a public cursor type was reachable but not nameable, and the workspace denies `unnameable_types`;
+    - its tests copied the two test defects fixed an hour earlier.
+  - **At `d9ce976b`:** `00b3e152`'s new test needed `Debug` on a crate-private error type.
+  - **At `b75ef707` (22:19):** its new test passed a resolver struct where `PreparedGraphText::prepare` takes a closure.
+- **Fixed on main:**
+  - `78827885`: rustls-webpki 0.103.16 clears RUSTSEC-2026-0382 (R2). `dependency_policy_e2e` exits 0 on css. TLS laws pass: `fgdb-server` tls 2/0, `fgdb-cli` remote 29/0.
+  - `13881c8f`, `4b3d7e0b`, `4dc99bbd` and `a74ce364` restore compile and clippy. At `d9ce976b` plus all six commits, `cargo check --workspace --all-targets --all-features` and workspace clippy (`-D warnings`) exit 0.
+  - `808b0ffe` registers the new CLI doc. `registry-check lint` and `all` pass, and lint fails without it.
+  - `eaef0191` uses `prepare_with_resolver` there. At `b75ef707` plus it and `1cbd6836`, check and clippy exit 0.
+  - `1cbd6836` fixes the `compound_stored_aggregates` laws (7/0). Details under the next bullet.
+- **`compound_stored_aggregates`, root-caused:** it went 4/3 to 7/0 at `1cbd6836`, with no engine change.
+  - The three failures were never about stored properties. Each took AVG over integers.
+  - This engine's AVG of integers is an exact rational, which write-group row conversion refuses (`set_ops/aggregate/rows.rs:73-80`). Read-side `WITH avg(x)` refuses the same way, and existing laws pin it (`write_return_aggregates.rs:350`, `with_aggregate/tests.rs:225`).
+  - The laws assumed openCypher's float average. They now run the AVG checks over binary64 and pin the integer refusal at its exact column.
+  - A stale law that `92e83e49` contradicted (`write_return_aggregates.rs:427`) is repaired.
+  - **Owner decision:** should integer AVG evaluate to a float, as openCypher's does? It is the same family as `v6ku6` and `e26tv`, and it affects TCK aggregation scenarios.
+- **Red laws now visible, because their targets compile:**
+  - `list_property_mutations` (`b75ef707`) passes 5 and fails 1. `UNWIND [1,2] AS key MATCH (n:Item {q:key}) SET n.q=n.p` is refused at prepare ("CREATE or INSERT after WITH/UNWIND/MATCH"). Left for its owner.
+  - At `bf4aeba2`, `fgdb-gql --tests` passes 2772 and fails 3: two in `computed_return_text`, and `spill_set` `async_elements`.
+- **Passing:**
+  - `query_fed_writes`, `vertex_merge_scripts_all`, `vertex_merge_no_return`, `with_mutation_metadata`: 27/0;
+  - lib `query_write_autocommit_tests`: 5/0;
+  - `fgdb-cli` query-write tests: 4/0 + 4/0;
+  - on the pushed tree, lib `query::view::spool::sort::difference` (bag difference, pull cursor, historical): 23/0;
+  - on the pushed tree, `fgdb-gql` lib `insertion::collect::stored`: 9/0.
+- **Still red:**
+  - rustfmt: 539 hunks at `9f843afd`, all from the stream. The edits follow each file's unformatted local style.
+  - the 22 `fgdb` lib failures, which the integration session is working through (`.20`);
+  - the four CLI contract failures (not re-run).
+- **The pattern:** five times between 18:14 and 22:19, a never-compiled commit broke compile for every writer. Each fix took one or two lines. This is the cost the 2026-09-22 staging rule exists to remove (`kqglu`, `.5`).
+- **Handoff channel:** Agent Mail on the Mac reported health `red` (its latest full integrity check failed) and listed no agents for this project, so it cannot carry the handoff. The bead specs follow as an appendix instead, with the landing command.
+- **Gate portability (R11, partly done):** the Mac's cargo-deny 0.20 moved `--config` to the top level, and 0.19 (css) rejects that form, so the dependency-policy controls failed on a usage error on the Mac. Fixed at `a1302335`: the gate now asks the binary which form it takes, and runs 6/0 on both hosts. The `/proc` liveness probe and the proof-lane traps remain.
+
+### Appendix: the 2026-10-20 bead specs and landing script
+
+These are the specs described under "Beads: specified, rehearsed, not yet landed". They are committed here so that the single graph writer can land them from git. Each file sits between `rc1020-file` markers.
+
+To land them:
+1. Use the working tree that holds the single writer's database.
+2. Run `br sync --import-only`.
+3. Land R1 first, or at least before exporting anything else from another host.
+4. Run:
+
+```bash
+D="$(mktemp -d)" && awk -v d="$D" '/^(<!-- |# )rc1020-file /{f=d "/" $3; next} /^(<!-- |# )\/rc1020-file/{f=""; next} f!=""{print > f}' docs/REALITY_CHECK_AND_BRIDGE_PLAN.md && bash "$D/land_rc1020.sh"
+```
+
+The script refuses a database older than the tracked JSONL. It creates the epic and its 13 children, closes R2 with its evidence, adds the dependencies and the three orphan labels, and comments on 20 existing beads. Its last line is the exact `scripts/br_sync.sh` id list. Headings inside the specs are demoted two levels to fit this document; `br` renders them the same.
+
+**R0** (`00-epic.md`, epic, P0)
+
+<!-- rc1020-file 00-epic.md -->
+#### Bridge 2026-10-20: what the reality check at df93ba15 found, and the order to close it
+
+Measured 2026-10-20 at `df93ba15` (origin/main, 204 commits after the 2026-10-17 check at `1563ee5b`). The full write-up is the "Current delta — 2026-10-20" section of `docs/REALITY_CHECK_AND_BRIDGE_PLAN.md`. This epic carries the self-contained work.
+
+##### What changed since 2026-10-17 (good)
+- The steering landed. The 10-17 document, its beads, the three stranded lanes and the shared worktree's nine stranded commits are all on origin (`fgdb-rc1017-bridge-wvze5.4`).
+- Main is close to green:
+  - HEAD compiles: a release build and `cargo check --workspace --all-targets` both exit 0.
+  - Clippy has exactly one finding.
+  - `fgdb-gql` is 1,570/0 (lib) and 2,717/1 (all integration targets); it was 2,612/17 on 10-17.
+  - Registered gates went from 3 pass / 7 red / 4 unrun to 10 pass / 3 red / 1 environment-unrun.
+- openCypher TCK on the gauntlet harness (3,880 scenarios, pinned tzdb): 2,912 PASS / 188 REFUSED / 26 WRONG. That is +62 PASS against the last run of the same harness (10-14), with 0 PASS lost.
+
+##### What did not change (the gap)
+- The durable architecture had zero commits again:
+  - `fgdb-chronicle` and the verification registries (invariants, checkers, proof lanes) were untouched;
+  - nobody wrote the ADR that `.13` asked for before more resident work;
+  - no sealed image is ever persisted.
+- Sealed images exist only as per-call, in-memory artifacts, and `query --sealed` is the expensive path. On road-ny, PageRank takes 6.8 s / 2.4 GB peak RSS with `--sealed`, against 2.3 s / 0.69 GB decoded.
+- Footprint on road-ny at HEAD:
+  - 332 B/edge on disk after load; compaction grows it to 378, then 403. Tier R's target is 2.5–5 bits/edge.
+  - A one-row CLI write costs 1.9 s and 1.5 GB RSS.
+- The remote toolchain-less stream does not follow the bridge.
+  - Only 4 of its 101 commits since 10-17 cite a 10-17 bridge bead.
+  - Its last 10 commits on main (10-20 14:23–16:00) were never compiled. They leave rustfmt red in 10 files and one clippy lint, though their own laws pass where measured.
+  - Its messages say "Direct-main publication explicitly requested", which contradicts the 2026-09-22 staging rule in AGENTS.md.
+- 23 of the 26 TCK WRONG answers wait on two open owner rulings: `fgdb-v6ku6` (cross-type equality UNKNOWN vs FALSE, 17 scenarios) and `fgdb-e26tv` (null-as-absent, 6).
+
+##### Order of work
+1. Make the tracker importable (child: duplicate comment ids), fix the security advisory (child: rustls-webpki; fixed on main at 78827885), and restore the green bar (`.20` comment; all-targets compile restored at 13881c8f..a74ce364).
+2. Get the owner rulings that gate everything downstream:
+   - v6ku6 and e26tv;
+   - the landing model for the toolchain-less stream (`fgdb-verified-landing-queue-kqglu`, `.5`);
+   - the Prism strategy (child);
+   - the storage ADR (`.13`).
+3. Fix the correctness defects found live: stored lists cannot be SET (child), and the subscription slot leak (child).
+4. Register the new durable formats (child) and probe the certificate evidence version (child).
+5. Make Tier R durable starting from the sealed images, so `--sealed` stops costing more than decoding (child, plus `.13`/`fgdb-teypc`).
+6. Grow verification: a reference value model for List/Map (child), and the remote stream's models checked in as tests (child).
+7. Gate portability (child).
+
+8. Make robot diagnostics stable codes (child), and own `CALL { }` subqueries (child).
+
+##### Verify-then-close candidates (code says done; each owner closes with cited evidence)
+| Bead | Evidence |
+|---|---|
+| fgdb-agp1o | Done for checkpoint-selected opens since 4001c58f |
+| fgdb-yzt2b | Fix 1b8ad45c at strata/src/root.rs:2006-2059 |
+| fgdb-zshkh | Landed via 169df7ec / b471be8c |
+| fgdb-vuyw5 | Landed via b471be8c / 7691bca6 |
+| fgdb-3xol9 | 85c75ffc; OPTIONAL MATCH-first runs in the 2026-10-20 e2e |
+| fgdb-du0xg | 9b8e1df9; `(a)-[r]->(b)` count runs |
+| fgdb-8erds | b5919753, 1d3cffcf, 2d9273c9 |
+| fgdb-tzxz1 | Every copy path gone; `copy_graph` is `#[cfg(test)]` |
+
+##### Re-scope candidates
+- **fgdb-t38fv:** no product surface registers a maintained index.
+- **fgdb-lq1v6:** zero production fnx calls; see the Prism ruling child.
+- **fgdb-g9af0:** the digest is recorded but not verified.
+- **fgdb-7qznp:** CALL is already hosted in authorized and transaction reads.
+
+##### Orphan labels
+`fgdb-dhcfo`, `fgdb-m4cab` and `fgdb-7ch6v` were created 2026-10-20 without labels, which turned `g0_architecture_decisions_e2e` red. The landing script labels them.
+
+Labels follow the 10-17 epic: every child carries a bet label, so `g0_architecture_decisions_e2e` stays green.
+<!-- /rc1020-file -->
+
+**R1** (`01-jsonl-comment-ids.md`, bug, P0)
+
+<!-- rc1020-file 01-jsonl-comment-ids.md -->
+#### Defect: the tracked JSONL cannot rebuild a database
+
+AGENTS.md says "JSONL is truth and beads.db is disposable", and asks for `br sync --import-only` after every pull. At `df93ba15` that import fails on a fresh database:
+
+```
+$ (fresh dir with only .beads/issues.jsonl, config.yaml, metadata.json) br sync --import-only
+Error: Validation failed: comment.id: duplicate import comment id 2876
+```
+
+`br doctor --json` reports `jsonl.duplicate_ids` (finding `fm-state_files-jsonl-duplicate-ids`) and leaves `rebuild-failed` artifacts in `.beads/.br_recovery/`.
+
+##### Measured (2026-10-20, python over `.beads/issues.jsonl`)
+- 3,144 comments carry 3,088 distinct ids, so **56 ids are each used by two comments**.
+- Every collision pairs a Mac-side writer (`jemanuel`, `NavyBrook`) with a Linux-side writer (`ubuntu`), all dated 2026-10-12/13. Examples: 2806 is on `fgdb-er71y` and `fgdb-kr8j1`; 2808 on `fgdb-61p1n` and `fgdb-bqri3`; 2825 on `fgdb-2n2a2` and `fgdb-0s2pq`.
+- Cause: two databases assigned comment ids independently. The 2026-10-16/18 record-by-record merges (`da5f4f65`, `237152f9`) unioned both comment lists without renumbering.
+
+##### Why it matters
+- Any fresh clone, CI-like proof clone or new agent host cannot build a beads database. So no new writer can join the work graph.
+- Existing databases keep working only because their own primary keys differ from the file.
+- Combined with `scripts/br_sync.sh`'s full `br sync --flush-only`, every writer except the one whose database predates the merge either cannot export or would churn records. (The 2026-10-20 rehearsal is below.)
+- This is also why the eight records the Mac Studio swarm filed on 10-15/16 are still unexported (`fgdb-sqj3b`, `fgdb-rwtcx`, `fgdb-load-beats-memgraph-xf2n8`, ...). They keep `g0_commit_provenance_e2e` red; see `fgdb-rc1017-bridge-wvze5.3`.
+
+##### Rehearsal evidence (scratch copies only, nothing written to the tree)
+- `br sync --reconcile-additive` on a copy of the Mac's stale DB: status=conflicted, 88 conflicted issues (86 `shared_relation_drift`), 8 database-only issues preserved, 63 comment remaps planned.
+- `br sync --merge --force-jsonl`, then export on the copy: 1,301 records (the 8 Mac-only ones added). But all 1,288 tracked records change, because `source_repo_path` is dropped, plus 61 comment and 50 `updated_at` diffs. `br_sync.sh` would rightly refuse that.
+
+##### Work
+1. **Coordinate first.** The repair rewrites shared truth, so it must be done by the single graph writer (today the Linux integration session) or with the owner's go-ahead, while no other writer exports.
+2. **Renumber.** Use a `br`-native path (`br doctor` fixer, or `br sync --reconcile-additive` with its comment remap, applied to an authoritative database). Never hand-edit the JSONL. Keep every comment, and keep each comment's author, timestamp and text byte-identical.
+3. **Decide `source_repo_path`.** Either every writer exports it, or none does. br 0.7.6's reconcile path describes it as legacy and strips it. Record the decision in `.beads/config.yaml` comments.
+4. **Add a regression gate.** In `scripts/check.sh` (claimed by file coverage), copy the tracked JSONL into a temp dir, run `br sync --import-only` then `br sync --flush-only`, and require a byte-identical round trip. Emit a PASS/FAIL line under `scripts/lib/gate_verdict.sh`, and UNRUN when `br` is absent.
+
+##### Tests and logging
+- The gate logs the comment count, the distinct-id count, the duplicate ids found (first 20), and the `cmp` result.
+- Mutation-prove the gate: plant one duplicated comment id in a temp copy and confirm the gate fails with that id named. Restore and confirm it passes.
+
+##### Acceptance
+- A fresh directory holding only the tracked `.beads` files imports with exit 0 and round-trips byte-identically.
+- The round-trip gate is registered, mutation-proven, and green on main.
+- `br doctor --json` on a fresh import reports no `jsonl.duplicate_ids`.
+- On a fresh clone, `br create` of one probe bead followed by `bash scripts/br_sync.sh <probe-id>` changes exactly that one JSONL record. This proves that a writer other than the current one can land beads. Do it in a throwaway clone and never push the probe.
+<!-- /rc1020-file -->
+
+**R2** (`02-webpki.md`, bug, P0; closed at landing)
+
+<!-- rc1020-file 02-webpki.md -->
+#### Security: RUSTSEC-2026-0382 in rustls-webpki 0.103.15 (published 2026-10-20)
+
+`dependency_policy_e2e.sh` (run on Linux at `df93ba15`, exit 1):
+
+```
+FAIL cargo-audit rejected Cargo.lock
+Crate:     rustls-webpki
+Version:   0.103.15
+Title:     Certificate verification may accept distrusted intermediates
+ID:        RUSTSEC-2026-0382
+Solution:  Upgrade to >=0.103.16, <0.104.0-alpha.1 OR >=0.104.0-alpha.8
+```
+
+cargo-deny and all four planted controls pass. Only the advisory is red.
+
+##### Why it matters
+- rustls-webpki verifies certificates for every TLS client and server path that rustls serves through the pinned asupersync foundation:
+  - `fgdbd serve --tls-cert-file` (FGP, HTTPS, Bolt);
+  - `fgdb remote --tls-ca-file`.
+- Accepting a distrusted intermediate means a client can be pointed at a server it should reject. This is the same class of fix as `fgdb-rc1017-bridge-wvze5.6` (rustls 0.23.45 → 0.23.46, landed `f8116529`).
+
+##### Work
+1. `cargo update -p rustls-webpki --precise 0.103.16` (or the newest compatible 0.103.x). Confirm it stays on the foundation's allowed path in `deny.toml`, and that no new crate enters `Cargo.lock`. Diff the lock file and record it in the commit.
+2. Rebuild `fgdb-server` and `fgdb-cli`. Run the TLS laws: `cargo test -p fgdb-server` and the CLI's TLS remote tests.
+
+##### Tests and logging
+- Log the full `cargo audit` output and `git diff Cargo.lock`.
+- Keep the TLS e2e path covered: a remote query with `--tls-ca-file` against `fgdbd serve --tls-cert-file` succeeds; a mismatched `--tls-server-name` fails closed.
+
+##### Acceptance
+- `bash scripts/dependency_policy_e2e.sh` exits 0 at the landing commit, on Linux.
+- The TLS server and CLI suites pass.
+- The lock diff touches only rustls-webpki.
+
+##### Status 2026-10-20 evening: fixed on main at 78827885
+- `cargo update -p rustls-webpki --precise 0.103.16`. The `Cargo.lock` diff is that package's version and checksum only; its dependency list is unchanged.
+- `deny.toml` pins the ISC exception to exact releases, so the exception moved with it (`rustls-webpki@0.103.16`). Without that, cargo-deny's license check would reject the new release.
+- On css (Linux, cargo-deny 0.19.4) at b3b6e1db plus the change:
+  - `dependency_policy_e2e.sh` exit 0: cargo-audit clean, cargo-deny clean, all four planted controls rejected;
+  - `cargo test -p fgdb-server --test tls`: 2/0;
+  - `cargo test -p fgdb-cli remote`: 29/0.
+- `land_rc1020.sh` creates this bead and closes it with this evidence.
+<!-- /rc1020-file -->
+
+**R3** (`03-prism-strategy.md`, task, P1, owner decision)
+
+<!-- rc1020-file 03-prism-strategy.md -->
+#### Owner decision: Prism is now an in-house kernel library, not a bridge to the fnx catalog
+
+##### What the plan and README say
+- **AGENTS.md:** `/dp/franken_networkx` (fnx-*) is "the algorithm brain: 550+ graph algorithms behind the GraphView trait ... Consumed via Prism (zero-copy SnapshotGraphView bridge)".
+- **README:** "Prism: the entire franken_networkx catalog (CALL fnx.pagerank, fnx.louvain, ...) exposed inside queries via an authorized SnapshotGraphView", and "In-DB analytics catalog: 550+ (fnx, cursor-borrowed)".
+
+##### What the code does at df93ba15 (read-only audit, 2026-10-20)
+- **16 registered procedures** (`crates/fgdb-prism/src/call.rs:178-337`), up from 14 on 10-17. The two new ones are `fnx.cdlp` and `fnx.directed_clustering_coefficient`.
+- **Zero production calls into `fnx_algorithms`.**
+  - At `1563ee5b`, `crates/fgdb-prism/src/foundation.rs:88-118` still called fnx for degree, closeness, harmonic, betweenness, eigenvector and core_number.
+  - The 10-18/19 commits (fgdb-tzxz1, fgdb-xohc8, fgdb-62mzm) replaced each one with an in-house CSR kernel, and `copy_graph` is now `#[cfg(test)]`.
+- **What fnx is used for now:** the `GraphView` trait (`fgdb-prism/src/lib.rs:67`), the `ComplexityWitness` type, and test oracles (`sealed_core.rs:501`, `sealed_eigenvector.rs:506`, `foundation/brandes_tests.rs:70`, `clustering.rs:766`, `shortest_path.rs:936`).
+- **The class enum has one variant:** `FnxImplementationClass` has only `InCoreDecodedCache` (`call.rs:80-82`), and every `execution_kernel` string is an in-house `fgdb-prism/...` kernel.
+- **Why there was no zero-copy route:** `crates/fgdb-prism/Cargo.toml:17` records that fnx entry points take `&fnx_classes::Graph`. So "the full catalog through a zero-copy view" could not be delivered by calling fnx; the work turned into kernel rewrites.
+- **The rewrites are fast.** The gauntlet 10-16 shows fgdbd WCC on pokec at 1.5 s vs 170 s for Memgraph, and `eae0f62a` checks BFS/WCC rows against live GAPBS. But they are 16 of 550+, and each one is new unverified surface outside the plan's two-hop oracle chain (Prism vs fnx vs NetworkX).
+
+##### Why this needs a ruling, not more kernels
+The vision promised breadth (the catalog) by reuse. The code delivers depth (fast kernels) by rewriting. Both are defensible, but they lead to different products, and agents are choosing between them one commit at a time.
+
+##### Options
+- **(A) Reuse.** Add a GraphView→fnx adapter that builds `fnx_classes::Graph` once per projection, behind an honest copy boundary. That exposes the catalog broadly, and in-house kernels stay as fast paths for the hot ten, each differential-tested against its fnx twin.
+- **(B) Rewrite.** Declare Prism an in-house kernel library. Change the README/AGENTS/plan text, and keep fnx as the test oracle only.
+- **(C) Hybrid with a rule.** Every in-house kernel must keep an fnx differential law over the same projection (the current test oracles, made mandatory and registered), and the catalog is exposed through (A).
+
+##### Work
+1. Owner ruling (A/B/C), recorded as an `architecture_decisions.toml` row and in this bead.
+2. Then align README "Prism", "How it compares" and AGENTS.md "What we stand on", with the change cited.
+3. If (A) or (C): a follow-up bead for the adapter, with a copy-cost law (bytes/edge charged to the projection budget) and a 20-procedure differential sweep.
+
+##### Acceptance
+- The ruling is recorded.
+- The docs match the ruling.
+- The kernel-vs-fnx differential laws are registered for every in-house kernel under (A) or (C).
+<!-- /rc1020-file -->
+
+**R4** (`04-set-list.md`, bug, P1)
+
+<!-- rc1020-file 04-set-list.md -->
+#### Defect: stored List values can be created but not SET (k3nub landed half a write surface)
+
+The stranded `k3nub` lane landed on 2026-10-20 (merge `169df7ec`). It made stored List/Map property values real: CREATE writes them, and reads return them. Updating one with SET is refused, through both a literal and a parameter.
+
+##### Live reproduction (release CLI at df93ba15, fresh database, bindings Person=1, name=1, tags=8)
+```
+fgdb write ... "CREATE (:Person {name: 'Lovelace2', tags: ['x', 'y']})"           -> exit 0, written
+fgdb query ... "MATCH (p:Person) WHERE p.tags IS NOT NULL RETURN p.name, p.tags"  -> exit 0, [Lovelace2, list[x,y]]
+fgdb write ... "MATCH (p:Person {name: 'Ada'}) SET p.tags = ['math', 'poetry']"   -> exit 3
+  graph write script statement 0 at byte 31: Program(Program(Bind { statement: 0,
+  source: GraphMutationTextError { offset: 31, kind: Build(ValueExpression { action: 0, kind: None }) } }))
+fgdb write ... --param 't=json:["math","poetry"]' "MATCH (p:Person {name: 'Ada'}) SET p.tags = $t" -> exit 3
+  ... GraphMutationTextError { offset: 31, kind: Query(Expected("scalar assignment, not a collection parameter")) } ...
+```
+
+A multi-assignment `SET p.bio = '...', p.e0 = 0.1, ..., p.tags = [...]` fails as a whole with `action: 4`, the list assignment.
+
+##### Why it matters
+- A user who can store a list and read it back cannot change it except by deleting and recreating the element. That loses identity and every incident edge.
+- The diagnostic is a Rust `Debug` dump of nested error enums. It does not name the construct (a list-valued SET) or say that it is unsupported, which breaks the agent-ergonomics contract (exit 3 is right, the text is not).
+- The TCK counts many SET scenarios as REFUSED for this reason. It is part of the 188.
+
+##### Work
+1. Wire the mutation value compiler (`crates/fgdb-gql/src/mutation*.rs`, `write_script.rs`) for `CanonicalPropertyValue::List`/`Map`:
+   - a literal list or map;
+   - a list or map parameter;
+   - a computed list (`n.tags + ['z']`).
+   Use the same write path as CREATE. Charge each value's bytes against the statement's existing budgets.
+2. `SET n += {tags: [...]}` and `SET n = {..., tags: [...]}` take the same path.
+3. Replace the Debug-dump diagnostic for any remaining refusal with a named one, for example "SET of a map-of-list value is not supported yet (fgdb-k3nub)".
+
+##### Tests and logging
+- `fgdb-gql` laws for literal, parameter, computed and map-merge SET of List and Map, each followed by a read-back equality, including nested lists and nulls inside lists.
+- A reference-oracle differential for the same statements. This needs the List/Map value model; see the sibling bead on the reference value model.
+- A CLI e2e that runs the repro above, asserts exit 0 and the read-back value, and logs the full robot NDJSON transcript.
+- A TCK delta run: SET-family REFUSED→PASS counts, and 0 PASS lost.
+
+##### Acceptance
+- All four SET forms succeed for List and Map values, and the read-back equals what was written.
+- The reference differential agrees.
+- The TCK shows no PASS lost.
+<!-- /rc1020-file -->
+
+**R5** (`05-subscription-slots.md`, bug, P2)
+
+<!-- rc1020-file 05-subscription-slots.md -->
+#### Defect: fgdbd never releases a subscription registration, so the 65th subscribe fails until reopen
+
+##### What the code does at df93ba15 (read-only audit)
+- fgdbd registers each served `SUBSCRIBE TO` through `subscribe_replaying` (`crates/fgdb-server/src/execute/subscription.rs:475`). It never calls the close-and-release path.
+- `docs/FABRIC_PROTOCOL.md:572-578` states that successful registrations remain until reopen, with a cap of 64 per opened database.
+- So after 64 subscriptions, whether cancelled, disconnected or completed (`fgdb remote subscribe --max-batches N` completes normally), the server refuses new ones until the database is reopened. Recovery reopen clears them as a side effect.
+
+##### Why it matters
+A changefeed client that reconnects on a timer exhausts the server in 64 reconnects. Bounded registrations without release are a slow denial of service against a feature the README lists as served ("live SUBSCRIBE TO changefeeds").
+
+##### Work
+1. On cancel, client disconnect, `--max-batches` completion, connection drop and authority refresh, release the registration through the standing-query close path. Free the slot, the maintained operators' memory, and the signed allowance reservations.
+2. Keep the 64 cap for live registrations only.
+3. Report released registrations in the server's per-database stats.
+
+##### Tests and logging
+- A server law: 200 sequential `subscribe → cancel` cycles on one database all succeed, and live registrations return to 0.
+- A law per release trigger: cancel, EOF, `--max-batches` completion, authority refresh, recovery.
+- An e2e: `fgdb remote subscribe --max-batches 1` run 100 times against one `fgdbd`, logging each exit code and the server's live-registration count.
+
+##### Acceptance
+- The slot count returns to its baseline after each kind of termination.
+- The 65th-and-later subscriptions succeed.
+- FABRIC_PROTOCOL.md's statement is updated.
+<!-- /rc1020-file -->
+
+**R6** (`06-cert-evidence-version.md`, bug, P2, probe first)
+
+<!-- rc1020-file 06-cert-evidence-version.md -->
+#### Probe first: did cb4f5cc9 break replay of saved CALL fnx certificates?
+
+##### Observation (read-only audit at df93ba15, not yet reproduced)
+- `cb4f5cc9` (2026-10-20, toolchain-less stream, "perf(prism): add bounded direction-switch BFS") moved procedure evidence to `native-procedure-evidence:v2` (`crates/fgdb/src/gql_cert.rs:664-695`). The result-certificate envelope version (`gql_cert.rs:738`) did not change.
+- The BFS kernel id in the registry also changed: `fgdb-prism/bfs-row-cursor-v1` became `fgdb-prism/bfs-bounded-pull-v1` (`crates/fgdb-prism/src/call.rs`).
+- So a certificate saved before `cb4f5cc9` for a statement containing `CALL fnx.*` probably fails `fgdb replay` with a procedure mismatch, not with a typed "certificate version not supported" refusal.
+
+##### Why it matters
+FG-INV-19 and the README promise that a saved certificate reproduces its result, or refuses in a typed, explainable way. An untyped mismatch on an old certificate looks like data drift. That is the opposite of auditability.
+
+##### Work
+1. **Probe.** Build `1563ee5b` (or `5d49dfe0`). Save `--certify-to` certificates for one composed `CALL fnx.pagerank` read and one BFS read. Replay them with the `df93ba15` binary. Record the exact exit code and diagnostic.
+2. **If the probe confirms the defect,** either:
+   - bump the envelope version and refuse older evidence versions with a typed error naming both versions; or
+   - accept v1 evidence by mapping it, if the kernel's results are bit-identical. They are not guaranteed to be, because the kernel id changed.
+   Kernel-id changes that alter evidence must bump the evidence version (a law).
+3. **If the probe refutes it,** close with the transcript.
+
+##### Tests and logging
+- A golden-certificate law: a checked-in certificate from a pinned older build replays to a typed refusal or a byte-identical result, never to a generic mismatch.
+- The probe transcript (commands, exit codes, diagnostics) goes in a bead comment.
+
+##### Acceptance
+- The probe is recorded.
+- Either a typed refusal plus the golden law, or the bead is closed as refuted with evidence.
+<!-- /rc1020-file -->
+
+**R7** (`07-unregistered-formats.md`, task, P1)
+
+<!-- rc1020-file 07-unregistered-formats.md -->
+#### Durable formats landed without registry rows: DELTA_FORMAT_V3, VERTEX_PATCH_FORMAT_V4, PROPERTY_PATCH_FORMAT_V3
+
+##### What landed
+`5d28822f` (stranded k3nub lane, authored 2026-10-12, merged to main by `169df7ec` on 2026-10-19/20) widened stored property values to `CanonicalPropertyValue` (List/Map). It introduced new on-disk versions:
+- `DELTA_FORMAT_V3`
+- `VERTEX_PATCH_FORMAT_V4`
+- `PROPERTY_PATCH_FORMAT_V3`
+
+None has a row in `registries/appendix_a_catalog.toml`, `durable_fields.toml` or `logical_object_kinds.toml`. Nothing in `registries/` changed after 2026-10-09 except `claims_lint.toml`. `fgdb-rc1017-bridge-wvze5.11` covers the FGPK commit pack only.
+
+##### Why it matters
+- AGENTS.md "Backwards Compatibility" says durable on-disk formats are the one exception to "no compat shims": they are versioned additive-minor/breaking-major from day one.
+- A version bump with no registry row, and no law that an older binary refuses it cleanly, is how the 2026-10-14 manifest rewrite made three databases unopenable (NE-0047).
+- The project memory "format-change gating" requires opening an existing old-binary database with the new binary before landing a format change. There is no record that this was done for these three.
+
+##### Work
+1. Add registry rows for each new version: owner crate, reader and writer, upgrade rule, and whether old binaries refuse or misread.
+2. Compatibility laws, using APFS clones on the Mac or reflink copies on Linux:
+   - **Forward open:** a database written by `1563ee5b` (pre-widening) opens and reads byte-identically with `df93ba15`, before and after a write that produces V3/V4 objects.
+   - **Backward refusal:** a database containing V3/V4 objects opened by `1563ee5b` fails closed with a typed version error. It must never decode garbage or panic.
+3. Add the three formats to the decoder fuzz targets and to the bit-rot and torn-write campaigns that cover their predecessors.
+
+##### Tests and logging
+Each compatibility law logs:
+- the binary commit used to write and to read;
+- the object kinds and versions found on disk, per directory;
+- the exact refusal text.
+
+##### Acceptance
+- Registry rows exist and the registry gates pass.
+- Forward-open and backward-refusal laws are green.
+- Fuzz and damage campaigns include the three formats.
+<!-- /rc1020-file -->
+
+**R8** (`08-sealed-cost.md`, bug, P2)
+
+<!-- rc1020-file 08-sealed-cost.md -->
+#### `query --sealed` costs more than the decoded path it was meant to beat
+
+##### Measured (release CLI at df93ba15, road-ny: 264,346 vertices, 730,100 edges, Mac Studio, one run each, cold CLI process)
+| invocation | wall | peak RSS |
+|---|---:|---:|
+| `query --graph-relation E "CALL fnx.pagerank() YIELD node, score"` (decoded) | 2.26 s | 687 MiB |
+| `query --graph-relation E --sealed "CALL fnx.pagerank() YIELD node, score"` | 6.78 s | 2,414 MiB |
+
+The sealed path is 3.0× slower and uses 3.5× the memory. This is a self-measurement: maintenance evidence, not an incumbent comparison.
+
+##### Why (read-only audit)
+- `crates/fgdb-cli/src/main.rs:1598-1604`: `--sealed` performs a **writable** `Database::open`. That decodes every block, builds the writer and takes the writer lease. So `--sealed` cannot run beside a live `fgdbd` on the same database.
+- It then calls `execute_fnx_sealed` → `seal_relation_with_source_limits` (`crates/fgdb/src/query_prism.rs:484`). That reopens and decodes the whole root a second time, runs `compact_with_props` in memory, and encodes an image (`crates/fgdb-strata/src/tiered/sealed/mod.rs:334-367`). The image is discarded after the call (`fgdb-cli/src/fnx.rs:416-418`: "not published as durable graph authority").
+- The robot schema says so honestly ("source preparation may retain decoded storage ... not a larger-than-memory seal pipeline"), but the README does not mention `--sealed` at all.
+
+##### Why it matters
+- The sealed image is the only Tier R-shaped artifact in the product. Today it costs a writable open, two decodes and an encode per call.
+- Every new kernel added to `--sealed` (11 procedures) extends a path that is slower than the default.
+- `fgdb-rc1017-bridge-wvze5.13` (ADR) and `fgdb-teypc` (Tier R) are the strategic fix: persist the image once, then read descriptors. This bead is the tactical floor.
+
+##### Work (independent of the ADR)
+1. Open read-only (a pinned read view, or `open_buffered_read_view`). Take no writer lease.
+2. Seal from the already decoded source, without a second reopen.
+3. Measure before and after on road-ny and web-google: wall, peak RSS and `first_s`, three interleaved rounds, median (project memory: probe median, not p95).
+4. Document `--sealed` in the README CLI section with its real cost model.
+
+##### Tests and logging
+- A law that `--sealed` succeeds while another process holds the writer lease (fgdbd running on the same database).
+- A law that the source is decoded exactly once, counted by an injected VFS read counter.
+- A benchmark harness under `crates/fgdb-bench` printing `empirical_gate_activated=false` and the measured pair.
+
+##### Acceptance
+- `--sealed` takes no writer lease.
+- Single decode is proven by the counter law.
+- On road-ny, `--sealed` is no slower and uses no more memory than the decoded path (median of 3 interleaved).
+<!-- /rc1020-file -->
+
+**R9** (`09-reference-value-model.md`, task, P1)
+
+<!-- rc1020-file 09-reference-value-model.md -->
+#### The reference oracle has no List/Map value model, so the k3nub surface shipped with no differential
+
+##### Measured (read-only audit at df93ba15)
+- `fgdb-reference` changed on 2026-10-20 only by the mechanical `CanonicalScalar` → `CanonicalPropertyValue` widening in `5d28822f` (14 files, signatures and transcripts).
+- `CanonicalPropertyValue::List`/`Map` appears nowhere in `fgdb-reference` or `fgdb-sim`.
+- The sim oracles unwrap scalars: `crates/fgdb-sim/tests/gql_oracle_list_values.rs:189` does `.as_scalar().expect("scalar fixture")`.
+- Of the 16 test files added since 2026-10-17, none uses `fgdb_reference`, DPOR or FaultVfs. No crate has `fgdb-reference` as a dev-dependency; only `fgdb-sim` uses it.
+
+##### Why it matters
+- Stored List/Map values are exactly where the openCypher semantics questions live:
+  - equality and `IN` between lists, nested lists and nulls (`fgdb-v6ku6`);
+  - null-as-absent (`fgdb-e26tv`).
+- They are also where a live silent wrong answer was found on 2026-10-20: `WHERE NOT n.tags = 'a'` drops a row whose `tags` is a list.
+- Without a reference model, every ruling on v6ku6/e26tv will be implemented in the engine with nothing independent to check it against. AGENTS.md: "What should this return is a program, not a debate."
+
+##### Work
+1. Extend `fgdb-reference`'s value domain with List and Map:
+   - construction;
+   - equality, ordering and comparability under the pinned SemanticProfile, written to follow the owner's v6ku6 and e26tv rulings (parameterize until ruled);
+   - `IN`;
+   - `keys()` / `properties()`;
+   - SET semantics, including null-as-absent per e26tv.
+2. Extend the sim oracle generators to produce List/Map property values. Remove the scalar-only unwrap.
+3. Add a differential over stored List/Map reads and writes (engine vs reference), run under `fgdb-sim` with seeds swept, not single-seed.
+
+##### Tests and logging
+- Each differential failure prints the seed, the generated graph, the statement, the engine rows and the reference rows. A replay command line is emitted.
+- A mutation check: flip the engine's list-equality result in a scratch build (project memory: restore with touch) and confirm the differential fails.
+
+##### Acceptance
+- List/Map semantics are implemented in the reference.
+- Generators emit List/Map values.
+- The differential is green and mutation-proven.
+- It is listed as a live checker row in `registries/checker_index.toml`.
+<!-- /rc1020-file -->
+
+**R10** (`10-models-as-tests.md`, task, P2)
+
+<!-- rc1020-file 10-models-as-tests.md -->
+#### The toolchain-less stream validates every commit against an independent model, then discards it: check the models in as tests
+
+##### Observation
+The remote toolchain-less stream cannot compile Rust, but it does validate each kernel against an independent Python model and reports the counts in the commit message. Examples from 2026-10-20:
+- `17c30df8`: "independent Python model passed 7,396 exhaustive bags, 76,388 Boolean necessity checks, 5,000 randomized projected predicates, 15,000 page checks and 72 modeled checkpoint refusals".
+- `ae2b9ce9` / `29a14743`: "39,366 exhaustive weighted cases, 15,000 randomized grouped cases ... 259 modeled refusals and six replays".
+- `6125f975`: "33,282 exhaustive and 24,000 randomized bag cases, 72,000 page checks, 63,933 necessity checks".
+
+None of these models is in the repository. When the Rust lands, the only evidence that the kernel matches the model is the commit message. When the kernel changes later, nobody can rerun the model.
+
+##### Why it matters
+- These are real oracles, independent implementations of the intended semantics, and they cost the project nothing extra to keep.
+- Checked in as generated test vectors, they become regression tests that run on every toolchain-ful proof. That narrows the "WRITTEN, NOT RUN" gap from the verified side, without asking the toolchain-less stream to change its environment.
+
+##### Work (deliberately narrow: no new gate, no new framework)
+1. The stream commits each model next to its kernel. Suggested home: `crates/<crate>/tests/models/<kernel>.py`, std-library only, deterministic seeds.
+2. The model emits a bounded vector file: inputs plus expected outputs, a few thousand cases, deterministic, committed as `.jsonl` under `tests/vectors/`.
+3. A Rust test per kernel reads the vector file and asserts kernel output equals the vector. It needs no Python at test time.
+4. A `scripts/check.sh` file-coverage claim for the new files. Python runs only to regenerate vectors, and regeneration is checked by a byte-identical re-emit.
+
+##### Considerations
+- Keep it proportional (AGENTS.md "conformance metastasis" is a named reward-hacking pattern). Do this only for kernels whose commit already cites a model, not retroactively for everything.
+- Vectors must not be regenerated just to make a failing test pass ("golden regeneration reflex"). A vector change needs the model change that explains it in the same commit.
+
+##### Tests and logging
+- Each vector test logs the case count and the first mismatching case: inputs, expected, actual.
+- Mutation-prove one vector test: perturb the kernel in a scratch build and confirm failure.
+
+##### Acceptance
+- The models and vectors for 17c30df8, 1eb5f6a6, ae2b9ce9, 29a14743 and 6125f975 are in-repo.
+- The Rust vector tests are green on a toolchain-ful proof.
+- One test is mutation-proven.
+- The convention is written into AGENTS.md's toolchain-less section.
+<!-- /rc1020-file -->
+
+**R11** (`11-gate-portability.md`, task, P2)
+
+<!-- rc1020-file 11-gate-portability.md -->
+#### The registered gates cannot run on macOS, where the performance swarm works
+
+##### Measured 2026-10-20 at df93ba15 on the Mac Studio (bash 5.3.9 from Homebrew)
+- **Subject-building gates (`g0_claims`, `g0_spine`, `g0_identity`, ...) exit 2 before any assertion:** "FATAL: subject liveness lock was not retained by this gate".
+  - `reapable_lock_fd_is_open` (`scripts/lib/private_subject.sh`) checks `/proc/${BASHPID}/fd/$lock_fd`.
+  - macOS has no `/proc`, so the check always fails. The gates also use `flock` and `sync -f`, which are Linux-specific.
+- **`g0_proof_lanes_e2e.sh` has two Mac failures:**
+  - With a long TMPDIR (the agent scratchpad path), bash fails the here-string at line 220 with "cannot create temp file for here-document: No space left on device", then hangs until killed. The disk had 248 GiB free. With a short TMPDIR it works.
+  - Then it reports "TOOLCHAIN PIN DRIFT — lean-toolchain pins 4.7.0 but the prover is: info: Version 4.2.4 of elan is available!". The first line of `lean --version 2>&1` is elan's update notice, not the version.
+  - Run directly, `lean VersionChain.lean` with the pinned 4.7.0 exits 0. The proof is fine.
+- **`dependency_policy_e2e.sh` depends on the cargo-deny version** (measured 2026-10-20 evening):
+  - cargo-deny 0.20 (Homebrew on the Mac) moved `--config` from `check` to the top level. The three cargo-deny controls call `cargo deny ... check <which> --config <mutant>`, so on 0.20 they die on a usage error and report "FAIL control: cargo-deny failed for a reason other than the planted ...".
+  - The real scans still pass.
+  - css has 0.19.4, which rejects the top-level form (`cargo deny --config X check` exits 2), so neither spelling works on both versions.
+  - Fix: probe `cargo deny --help` for a top-level `--config` and place the flag accordingly, or pin the cargo-deny version the gate accepts and report UNRUN otherwise.
+  - **Done at a1302335 (2026-10-20 evening):** the gate probes the binary and places `--config` accordingly. It now exits 0 with 6/0 on both the Mac (0.20.2; it was 3/3 before) and css (0.19.4).
+- **On Linux (css) the same gates run** (10 PASS). But `g0_proof_lanes` fails there because `lean` is not installed. So no single host currently runs every gate green.
+
+##### Why it matters
+- The gate contract says "only *ran and passed* is green" and offers UNRUN for environment refusals. These gates instead report FAIL/abort for host incompatibility. That is indistinguishable from a product failure unless someone reads the transcript.
+- The Mac is where the toolchain-ful performance work and the gauntlet run. An agent there cannot prove a landing with the registered gates.
+
+##### Work (choose one per gate, write it down)
+1. **Portable:** replace the `/proc` fd probe with a portable check (for example `lsof -p`, or holding the lock through a coprocess and testing it with `flock -n` on Linux / `shlock` on macOS). Parse the Lean version with `lean --version 2>/dev/null | grep -m1 '^Lean (version'`. Use a short private TMPDIR for here-strings.
+2. **Or declared Linux-only:** on Darwin, emit `UNRUN` (retryable, environment) through `gate_unrun`, never `FAIL`, with the reason in the transcript, and document it in AGENTS.md "Reading a gate".
+3. Provision `lean` (elan + v4.7.0) on the Linux proof hosts, or mark the lane UNRUN there with the same mechanism.
+
+##### Tests and logging
+- `scripts/lib/gate_verdict.sh` self-tests gain a Darwin case: a gate run on a host without `/proc` must end UNRUN or PASS, never an abort before the verdict.
+- `scripts/g0_proof_lanes_e2e.sh` gains a control for "elan prints an update notice first".
+
+##### Acceptance
+- On the Mac Studio, every registered gate ends PASS or UNRUN with a reason.
+- On the Linux proof host, every gate ends PASS, or UNRUN with a reason.
+- The lean lane is actually checked on at least one documented host.
+<!-- /rc1020-file -->
+
+**R12** (`12-diagnostics.md`, task, P2)
+
+<!-- rc1020-file 12-diagnostics.md -->
+#### Robot-mode refusal diagnostics are Rust Debug dumps: no stable code, and often the wrong construct named
+
+AGENTS.md "Agent Ergonomics Requirements" asks robot mode for a stable, versioned schema and explicit exit codes, so an agent can act on a refusal without guessing. Exit codes are right (3 = query refusal). The diagnostic text is a `Debug` rendering of nested error enums, and it often names a construct the user did not write.
+
+##### Live examples (release CLI at df93ba15, `--robot`, 2026-10-20)
+| statement | diagnostic as emitted |
+|---|---|
+| `CREATE GRAPH social` | `graph write script statement 0 at byte 7: Program(InsertBind { statement: 0, source: GraphInsertTextError { offset: 7, kind: Query(Expected("(")) } })` |
+| `MATCH (p:Person) RETURN p.name, [(p)-[:KNOWS]->(q) \| q.name] AS knows` (pattern comprehension) | `unsupported query construct: graph-pattern text error at byte 34: Expected("typed integer or numeric parameter")` |
+| `CALL { MATCH (p:Person) RETURN p } RETURN count(p)` | `unsupported query construct: aggregate pipeline at byte 5: Input(Pattern(Expected("identifier")))` |
+| `MATCH (p:Person {name:'Ada'}) SET p.tags = ['math','poetry']` | `... GraphMutationTextError { offset: 31, kind: Build(ValueExpression { action: 0, kind: None }) } ...` |
+| `CREATE BRANCH what_if FROM social@trunk` | `graph insertion text at byte 33: Query(InvalidToken)` |
+
+The 2026-10-17 check traced the misleading ones to the furthest-offset race between the read parsers (`fgdb-one-lexer-one-dispatch-285i2`). The losing parser's expectation is reported. That bead's unification fixes the cause. This bead fixes the contract, and it is useful on its own.
+
+##### Work
+1. Add a closed registry of refusal codes, for example:
+   - `FGDB-Q-UNSUPPORTED-CONSTRUCT`, with `construct` = `graph_ddl` | `branch_ddl` | `pattern_comprehension` | `call_subquery` | `collection_set`;
+   - `FGDB-Q-SYNTAX`;
+   - `FGDB-Q-BUDGET`, with the limit name;
+   - `FGDB-Q-PERMISSION`.
+   Each code carries a short human message and the byte offset.
+2. Map every `Gql*Error` / `Graph*TextError` refusal to a code at the CLI and fgdbd boundary. Nested enum detail moves to an optional `detail` field.
+3. Extend the robot `error` event with `code`, `construct` and `offset`. That changes the frozen contract, so bump `"v"`, or add the fields under the documented optional-fields rule, and update the fixture and contract tests in the same commit.
+4. For an unsupported construct, the message names it and the bead that owns it, e.g. "pattern comprehension is not supported yet (fgdb-7nwox)".
+
+##### Tests and logging
+- A corpus test of at least 30 unsupported or invalid statements: the five above, plus temporal and branch DDL, budget refusals, permission refusals. Assert the code and construct, and snapshot the human text.
+- A contract test: every emitted `error` event validates against the frozen schema, and no diagnostic contains `{ ` or `Program(`.
+
+##### Acceptance
+- Every refusal in the corpus has a stable code and the right construct.
+- The robot schema documents the fields.
+- No Debug dumps reach the robot or human output for the corpus.
+<!-- /rc1020-file -->
+
+**R13** (`13-call-subquery.md`, feature, P3)
+
+<!-- rc1020-file 13-call-subquery.md -->
+#### `CALL { ... }` subqueries are refused, and no bead owns them
+
+`CALL { MATCH (p:Person) RETURN p } RETURN count(p)` refuses at byte 5 (release CLI at df93ba15). The 2026-10-20 query-engine audit found the refusal at `crates/fgdb-gql/src/pipeline.rs:973-976`, and found no bead covering it. The openCypher 2024.3 TCK used by the gauntlet barely exercises this, so the TCK score cannot show the gap.
+
+##### Why it matters
+CALL subqueries are idiomatic in openCypher and Neo4j, and GQL has the equivalent (procedure-body / inline call) in ISO/IEC 39075 §15:
+- per-row correlated work (`CALL { WITH n ... }`);
+- UNION inside a pipeline;
+- batching writes (`CALL { ... } IN TRANSACTIONS`).
+
+Agents porting Cypher workloads hit this early. Today the refusal names the wrong construct (see the sibling diagnostics bead).
+
+##### Work
+1. **Decide scope.** Uncorrelated read subqueries first. Then correlated `CALL { WITH x ... }` with importing WITH. Then UNION bodies. Keep `IN TRANSACTIONS` out (it conflicts with the single-commit statement model) and give it a named refusal.
+2. **Lower to the existing algebra.** A correlated subquery is a dependent join (Apply). Reuse the native correlation path used by leading UNWIND→MATCH, so no new executor family is added.
+3. **Budgets.** The subquery's work, scratch and row admissions share the outer statement's allowances.
+
+##### Tests and logging
+- `fgdb-gql` laws:
+  - uncorrelated count;
+  - correlated per-row aggregation;
+  - a UNION body;
+  - empty-input correlation, where the outer row survives only if the body returns rows, per openCypher;
+  - refusal of `IN TRANSACTIONS` with a named diagnostic.
+- A reference-oracle differential once the reference has an Apply operator. Otherwise record that it is absent.
+- A CLI e2e with the robot transcript.
+
+##### Acceptance
+The first two scopes run and agree with the reference or the documented semantics. `IN TRANSACTIONS` refuses by name.
+<!-- /rc1020-file -->
+
+**Comments on existing beads** (`comments.md`; one `=== <bead-id>` header per comment)
+
+````text
+# rc1020-file comments.md
+# Comments to add to existing beads (2026-10-20 reality check at df93ba15)
+# Format: one "=== <bead-id>" header per comment; the body runs to the next header.
+# land_rc1020.sh splits this file and runs `br comments add <id> --file <part>`.
+
+=== fgdb-rc1017-bridge-wvze5.20
+2026-10-20 reality check, measured at df93ba15 (origin/main). Linux host css, fresh clone, debug=0, local cargo (rch bypassed), --all-features --locked --no-fail-fast:
+- cargo fmt --check: RED, 10 files, all from the 10-20 toolchain-less commits after 5d49dfe0:
+  - delta-types zset/incremental.rs
+  - gql row_join/input{,/predicate{,/tests}}.rs
+  - gql set_ops/execute/selected_cross{,/range}.rs
+  - gql set_ops/spill/relational_join{,/tests}.rs
+  - fgdb query_spool/sort/relational_join_filtered.rs
+  - fgdb tests/spilled_predicate_probes.rs
+- cargo check --workspace --all-targets: exit 0. Every test target compiles.
+- cargo clippy --workspace --all-targets --all-features -D warnings: exit 101 on exactly one lint, clippy::type_complexity at crates/fgdb/src/write_txn_parts/frozen_update_program.rs:13 (e396b1bc). With that lint allowed, workspace clippy exits 0.
+- Tests:
+  - fgdb-gql --lib: 1570/0.
+  - fgdb-gql --tests: 2717 passed, 1 failed (spill_set async_elements, `items[1..]` slice refused: "typed integer or numeric parameter").
+  - fgdb --lib: 1360 passed, 22 failed. Same count as 5d49dfe0, same modules (beacon prepared/mixed_demand, temporal aggregate pair, spill filtered join, standing selected join, vertex/edge stream, analytics).
+  - fgdb named integration tests spilled_predicate_probes, frozen_unwind_updates, scalar_unwind_writes: 22/0.
+  - fgdb-strata/delta-types/prism: 944 passed, 1 failed (relation_root_does_not_restrict_independent_join_incidence, ResourceExhausted; tracked by fgdb-7ch6v).
+  - fgdb-cli/server/bolt/protocol: 667 passed, 4 failed, all in fgdb-cli:
+    - robot_schema_is_frozen_and_help_is_a_complete_robot_invocation (binary schema != fixture);
+    - cli_fuzz_campaign_keeps_robot_contract (same drift);
+    - spilled_carried_properties_match_resident_rows_and_keep_pinned_history ("native Set read has no supported pull execution");
+    - packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql (rank order differs from native GQL).
+  - Attribution of the 4 CLI reds is not yet bisected.
+Net: today's ten unrun commits leave fmt + one lint + nothing new in the gql/fgdb lib tallies. The CLI robot contract is red.
+
+Evening follow-up, 2026-10-20 (css, local cargo, debug=0; every tree rebuilt with git am, tree hash matched; pushed as d9ce976b..a74ce364):
+- Main lost test-target compile at 92e83e49.
+  - At b3b6e1db, `cargo check --workspace --all-targets` had 11 errors in five targets (a twelfth surfaced behind them), and clippy had 10 lints.
+  - Each later batch broke it again:
+    - 9f843afd added 2 errors, 3 lints and an unregistered doc;
+    - 0b93a580 broke the fgdb lib itself (unnameable_types on the new NativeSpoolDifference);
+    - 00b3e152 needed Debug on ProjectionFailure;
+    - b75ef707's new test passed a resolver where PreparedGraphText::prepare takes a closure.
+- Fixed on main:
+  - 78827885: rustls-webpki 0.103.16 clears RUSTSEC-2026-0382. dependency_policy_e2e exits 0, fgdb-server tls 2/0, fgdb-cli remote 29/0.
+  - 13881c8f, 4b3d7e0b, 4dc99bbd, a74ce364 and eaef0191 restore compile and clippy. At b75ef707 plus the last two, `cargo check --all-targets --all-features` and workspace clippy -D warnings exit 0.
+  - 808b0ffe registers crates/fgdb-cli/QUERY_FED_WRITES.md. registry-check lint and all pass, and lint fails without it (unclaimed_prose).
+- compound_stored_aggregates was 4 passed, 3 failed. 1cbd6836 makes it 7/0.
+  - The three failures were AVG over integers. The engine yields an exact rational there, and write-group row conversion refuses it (set_ops/aggregate/rows.rs:73-80). Read WITH does the same, pinned by existing laws.
+  - 1cbd6836 aligns the laws with that refusal and pins it. It also repairs write_return_aggregates.rs:427, which 92e83e49 contradicted.
+  - OWNER DECISION: should integer AVG in compound expressions (and WITH) evaluate as openCypher floats? Today it refuses.
+- Red laws you can see now that the targets compile:
+  - list_property_mutations (b75ef707) is 5 passed, 1 failed. `UNWIND [1,2] AS key MATCH (n:Item {q:key}) SET n.q=n.p` is refused at prepare: "CREATE or INSERT after WITH/UNWIND/MATCH".
+  - At bf4aeba2, fgdb-gql --tests is 2772 passed, 3 failed: computed_return_text 2, and spill_set async_elements 1.
+- Passing:
+  - query_fed_writes, vertex_merge_scripts_all, vertex_merge_no_return, with_mutation_metadata: 27/0;
+  - lib query_write_autocommit_tests: 5/0;
+  - fgdb-cli query_write: 4/0, and query_fed_write: 4/0;
+  - on the pushed tree: fgdb lib query::view::spool::sort::difference 23/0, and fgdb-gql lib insertion::collect::stored 9/0.
+- Still red: rustfmt (539 hunks at 9f843afd), the 22 fgdb lib failures above, and the 4 CLI failures (not re-run).
+
+=== fgdb-rc1017-bridge-wvze5.3
+2026-10-20: still 8 FAILs at df93ba15 (Linux run of g0_commit_provenance_e2e: 274 PASS / 8 FAIL), same three ids. Where they live:
+- fgdb-load-beats-memgraph-xf2n8 and fgdb-rwtcx (plus fgdb-sqj3b, fgdb-hzgtd, fgdb-1xst9, fgdb-kozhq, fgdb-8e5q8, fgdb-m9ezj) exist ONLY in the Mac Studio's /Users/jemanuel/projects/frankengraphdb/.beads/beads.db. It holds 16 dirty records, last export 2026-10-15.
+- fgdb-016qw exists in no database I could reach. Only the toolchain-less stream's own commits e21bb4a1 and 5ad98ec1 (10-15) cite it, so that stream mints bead ids nobody creates.
+Exporting the Mac records is blocked by the duplicate-comment-id defect (new bead in the 2026-10-20 bridge epic): a three-way merge rehearsal on a copy changes all 1,288 tracked rows.
+
+=== fgdb-rc1017-bridge-wvze5.5
+2026-10-20 measurement for the ruling:
+- Of 101 non-merge commits by the noreply identity since 1563ee5b, only 4 cite any wvze5 bead. Zero commits by anyone touched fgdb-chronicle, invariants/checker_index/proof_lanes, the ADR files or architecture_decisions.toml.
+- The ten commits after the last verified tree (5d49dfe0) all say WRITTEN/UNRUN. Several say "Direct-main publication explicitly requested".
+- That claim contradicts the AGENTS.md owner ruling of 2026-09-22 (toolchain-less pushes go to staging; merge_train promotes). One of the two is out of date, and only the owner can say which.
+- There is still no staging branch on origin and no refs/notes/*.
+- 40 of the integration identity's 92 non-merge commits in the same window are repairs/restatements, mostly of that stream's breakages.
+Recommendation: the owner states the rule in one place (AGENTS.md), and the remote stream's queue is set to the ready set of the 2026-10-20 bridge epic.
+
+=== fgdb-verified-landing-queue-kqglu
+2026-10-20: see fgdb-rc1017-bridge-wvze5.5 comment of the same date. The toolchain-less stream now asserts "Direct-main publication explicitly requested" in its commit messages (e.g. 17c30df8, ae2b9ce9, 29a14743, 6125f975), contrary to the 2026-09-22 rule this bead enforces. Needs the owner's word.
+Same evening, measured cost of the direct-main route: four times in five hours
+(92e83e49, the 9f843afd batch, 0b93a580, 00b3e152) a never-compiled commit broke
+`cargo check --all-targets` for every writer. 0b93a580 broke the fgdb lib itself.
+Each repair took one or two lines once a compiler saw it
+(13881c8f, 4b3d7e0b, 4dc99bbd, a74ce364). Through staging and merge_train.sh,
+none of the four would have reached main.
+
+=== fgdb-rc1017-bridge-wvze5.13
+2026-10-20: still no ADR. Meanwhile about 100 more resident/kernel commits landed (fgdb-xohc8, tzxz1, 62mzm, 61p1n, qvy9n, t38fv).
+Data for the ADR, measured at df93ba15 on road-ny (730,100 edges):
+- 332 B/edge on disk after load, 378 after compact, 403 after a second compact.
+- A one-row CLI write peaks at 1.5 GB RSS.
+- --sealed PageRank: 6.8 s / 2.4 GB, against 2.3 s / 0.69 GB decoded.
+Gauntlet 10-16 web-google: fgdbd 10.6 GB RSS for 5.1M edges, about 2 KB/edge.
+The cheapest route to a durable Tier R now visible in the code: the in-memory sealed image already exists (tiered/sealed/image.rs, streaming Elias-Fano cursors from ec86eab9/8581af31, relation-scoped sealing 55cd40c5). Persisting that image at compaction as a registered, content-addressed, RaptorQ-coded object, and opening it by descriptor, turns the per-call image into Tier R. Propose this as the ADR's first candidate, ahead of persisting the flat AdjacencyIndex.
+
+=== fgdb-teypc
+2026-10-20: tiered/sealed grew +594 production lines since 10-17 (streaming EF cursors, invisible-history skipping, relation-scoped sealing). None of it persists: tiered/sealed/mod.rs:16-23 says the image is "a derived adjacency image, not a newly registered AdjRunSegment kind or a second durable graph authority". encode() has no non-test caller. See the fgdb-rc1017-bridge-wvze5.13 comment of the same date for the proposed route.
+
+=== fgdb-l89gt
+2026-10-20, df93ba15, road-ny (730,100 edges): load gives 231.4 MB (332 B/edge). compact gives 263.4 MB (378 B/edge) in 4.9 s, 2.5 GB RSS. Two one-row writes and a second compact give 280.9 MB (403 B/edge) in 4.5 s. Compaction still only grows the directory: lib.rs:5464-5468 sets the floor to zero, and lib.rs:5521 says "objects are never removed".
+
+=== fgdb-e8gr4
+2026-10-20, df93ba15, road-ny (730,100 edges, Mac Studio): a one-row `fgdb write` takes 1.93 s / 1.54 GB peak RSS (two runs: 1.93 s and 1.92 s). A point read takes 0.94 s / 645 MB. No code has landed for this bead since 10-18.
+
+=== fgdb-rc1017-bridge-wvze5.9
+2026-10-20: worse than filed. bc50acca (10-19) put scoped-capability projections into the process-global REUSE cache (query_authorized/analytics.rs:38). That removed the "unrestricted scopes only" property this bead asked to pin with a law. 5d49dfe0 then had to serialize tests because scoped_capabilities_reuse_* failed in 2 of 4 runs.
+
+=== fgdb-rc1017-bridge-wvze5.10
+2026-10-20: the raw-thread helper has spread. Besides the CLI loader (fgdb-cli/src/load/mod.rs:513,523) and PageRank (fgdb-prism/src/execute.rs:391,440), std::thread::scope now runs in:
+- betweenness (foundation/brandes.rs:262,354; e93520c1);
+- closeness/harmonic (foundation/distance.rs:585,649; 025f8dcc).
+Worker counts come from available_parallelism with no decision card.
+
+=== fgdb-rc1017-bridge-wvze5.15
+2026-10-20 TCK at df93ba15. Release CLI, gauntlet/tck.py (3,880 scenarios), pinned tzdb with the five TCK zones, 8 jobs, 186 s:
+- 2912 PASS / 133 PASS-ERR / 544 ERR-UNSUP / 188 REFUSED / 26 WRONG / 2 DIVERGE / 3 COLUMNS / 22 SETUP / 50 FIXTURE.
+- Against the same harness's last run (results/tck-1e727c2a, 10-14): +44 REFUSED->PASS, +18 SETUP->PASS, 0 PASS lost, 2 REFUSED->WRONG (Merge6 [4], Set4 [3]).
+The 26 WRONG:
+- 17 are v6ku6 (List3 x3, List5 x12, Comparison1 [6], Precedence3 [4]).
+- 6 are e26tv null-as-stored-value (Set2 [1]-[3], Set4 [3], Set5 [4], Merge6 [4]). Verified live: after `SET n.property1 = null`, properties(n) is {property1: null, property2: 46}.
+- 2 are Match1 [11] VariableTypeConflict.
+- 1 is List12 [7] InvalidAggregation.
+So 23 of 26 wait on the two owner rulings.
+
+=== fgdb-v6ku6
+2026-10-20 live repro on stored lists (the k3nub landing makes this reachable from real data, not only literals). After `CREATE (:Person {name:'Lovelace2', tags:['x','y']})`:
+`MATCH (p:Person) WHERE p.tags IS NOT NULL AND NOT p.tags = 'a' RETURN p.name`
+returns 0 rows. Under openCypher (['x','y'] = 'a' is false) it returns Lovelace2. This is a silent row drop on stored data, not a TCK curiosity. It raises the cost of leaving this ruling open.
+
+=== fgdb-g9af0
+2026-10-20: the core landed. write_txn_parts/authorized.rs:236-240 hashes permit.canonical_decision_bytes() into the marker for every authorized write family, including fgdbd's program path. Remaining:
+(1) the digest is recorded but never verified: scrub and replay ignore it, and its only reader is the accessor at lib.rs:4427;
+(2) marker_for_capsule (lib.rs:5985-6000) still hardcodes policy_epoch 1, txn_token zero and resource_effect_digest zero;
+(3) the only test covers write_authorized. There is none through the authorized write session, fgdbd EXECUTE or EXECUTE_BATCH.
+
+=== fgdb-t38fv
+2026-10-20: the library wiring landed (fd2690bc, 0950f424, 455850e2, 5d78c6ed). privileged CALL hybrid.search reuses a maintained registration at the current cut. But no product surface registers an index: register_beacon_index (resident/maintained.rs:296) is called only from tests. So CLI search and fgdbd hybrid.search always build per call (the robot schema says "the index is built for the one call"). Suggest re-scoping to "a product surface registers and reuses a maintained index" plus durability.
+
+=== fgdb-rc1017-bridge-wvze5.16
+2026-10-20 additions (verified against df93ba15):
+- README line 487, "The commands above are exactly the ones that run today", is false. `fgdb adopt`, `fgdbd attenuate`, `query --sealed` with its six `--sealed-*` limits, `--graph-staging-bytes`/`--graph-workspace-bytes`, the fgdbd token caveat flags (--allow-*, --deny-property, --max-*, --expires-in, --not-before-in, --policy-epoch), --http-allow-host, --max-connections and Studio (/studio/) all run but are undocumented.
+- docs/FABRIC_PROTOCOL.md (~650-682) still describes Bolt as read-only, but bounded autocommit writes are served (0ff3c25c). README:453 says that doc "lists exactly what is served".
+- These README statements have no target-state caveat and are false today:
+  - :31 "Larger-than-memory is first-class everywhere";
+  - :187 "Every durable thing ... stored as RaptorQ symbols" (Strata objects are not coded);
+  - :41/:156-157/:189 "cost-based optimizer ... morsel-parallel FreeJoin ... SIMD galloping";
+  - :42/:126/:190 "One DBSP-style Z-set engine drives ... materialized views";
+  - :152 lists Datalog, HTTP/2, gRPC, WS;
+  - :55 the example comment "serializable by default".
+- The robot schema omits the emitted `subscription_reset` event (fgdb-cli/src/remote.rs:813-817) and has no entry for `remote subscribe`/`remote write`.
+- The official Neo4j driver's `execute_query` write is refused with AccessMode, because it opens an explicit transaction. Only session.run autocommit writes work. The README's Bolt example implies the driver's default write path works.
+- The README Quick example's `CALL hybrid.search(..., vector => $query_embedding, vector_properties => ['e0','e1','e2'] ...)` refuses with "vector float is not finite exact f32" when the stored coordinates or the query are ordinary decimals such as 0.1/0.2/0.3. It works with 0.5/0.25/0.125. Real embeddings are rarely exactly representable. Either document the GQL-side equivalent of `--vector-encoding coordinates-rounded` next to the example, or make the README example use packed f32 (`--param e=vector:...`).
+
+=== fgdb-rc1017-bridge-wvze5.14
+2026-10-20: eae0f62a (crates/fgdb-bench/examples/gapbs_compare.rs) is a genuine same-invocation correctness differential against live GAPBS for BFS/WCC. It is not a gate, not tracked output, and has no speed ratio. It delivers none of this bead's items (dataset manifest with hashes, runner, scoreboard). The gauntlet repo (~/projects/fgdb_gauntlet) has no git remote: the only incumbent evidence lives in one directory on one disk.
+
+=== fgdb-one-lexer-one-dispatch-285i2
+2026-10-20: no commit since 10-04. Two measurements for scope:
+(1) The 7-parser furthest-offset read race is unchanged (crates/fgdb/src/query_explain.rs:118-279). EXPLAIN is still routed by matching a text prefix (:909-934).
+(2) The write-RETURN classifier chain (5 has_return_clause checks, then the UNWIND write parser, then the script parser) is copied into four hosts: fgdb/src/query.rs:474-590 (autocommit) and :635+ (WriteTxn), fgdb-server/src/execute.rs:556-636, and fgdb-cli/src/write_returning.rs. This bead covers only the read race; the write classifier duplication should be in scope.
+The losing-parser diagnostics are now a separate bead (robot diagnostics as stable codes) in the 2026-10-20 bridge epic.
+
+=== fgdb-rc1017-bridge-wvze5.8
+2026-10-20: 963c4e3b (UNRUN) admits ordinary, prepared and ordered reads from a weakly published snapshot (fgdb-server/src/recovery.rs:290-335) without the writer's lock. Still waiting behind an in-flight write: the handshake READY step (connection.rs:460, chosen.db.read) and subscription polls (execute/subscription.rs:587). The fallback re-takes the lock after Arc::make_mut dissociates (recovery.rs:295-297). No law yet measures read latency during a write's fsync.
+# /rc1020-file
+````
+
+**Landing script** (`land_rc1020.sh`)
+
+````bash
+# rc1020-file land_rc1020.sh
+#!/bin/bash
+# Land the 2026-10-20 reality-check beads: one epic, thirteen children, their dependencies,
+# and dated comments on existing beads. Run from the frankengraphdb working tree whose
+# beads database is the single writer's, current with the tracked JSONL
+# (`br sync --status` must not say "JSONL is newer"). Then export exactly the printed ids
+# with `bash scripts/br_sync.sh <ids...>` and commit.
+# The spec files sit beside this script once extracted from the appendix of
+# docs/REALITY_CHECK_AND_BRIDGE_PLAN.md (the extraction command is printed there).
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+command -v br >/dev/null && command -v jq >/dev/null || { echo "need br and jq" >&2; exit 2; }
+if br sync --status 2>&1 | grep -q 'JSONL is newer'; then
+  echo "refusing: this database is older than the tracked JSONL; import first" >&2; exit 3
+fi
+mk() { # mk <file> <type> <priority> <labels> <title> [parent]
+  local args=(create --json --type "$2" --priority "$3" --labels "$4" --title "$5" --description-file "$HERE/$1")
+  [ -n "${6:-}" ] && args+=(--parent "$6")
+  br "${args[@]}" | jq -r .id
+}
+EPIC=$(mk 00-epic.md epic 0 b1,b2,b5,reality-check \
+  "Bridge 2026-10-20: importable tracker and green main, the owner rulings that gate 23 TCK answers and the landing model, then Tier R from the sealed images")
+J=$(mk 01-jsonl-comment-ids.md bug 0 b5,beads,gates,green-bar \
+  "Tracked .beads/issues.jsonl cannot rebuild a database: 56 comment ids are each used by two comments (br sync --import-only fails on a fresh clone)" "$EPIC")
+W=$(mk 02-webpki.md bug 0 b6,dependencies,security \
+  "RUSTSEC-2026-0382: rustls-webpki 0.103.15 may accept distrusted intermediates; dependency_policy_e2e red at df93ba15" "$EPIC")
+br close "$W" --reason "Fixed on main at 78827885: rustls-webpki 0.103.16 plus the matching deny.toml exception; dependency_policy_e2e exit 0, fgdb-server tls 2/0, fgdb-cli remote 29/0 on css" >/dev/null
+P=$(mk 03-prism-strategy.md task 1 b3,b6,prism,owner-decision \
+  "Owner ruling: Prism became an in-house kernel library (16 procedures, 0 production fnx calls) while the plan promises the fnx catalog" "$EPIC")
+S=$(mk 04-set-list.md bug 1 b3,correctness,gql \
+  "Stored List/Map values can be CREATEd but not SET (literal and parameter refuse with a Debug-dump diagnostic)" "$EPIC")
+U=$(mk 05-subscription-slots.md bug 2 b4,fabric,server \
+  "fgdbd never releases subscription registrations: cancelled or completed subscriptions hold the 64 slots until reopen" "$EPIC")
+C=$(mk 06-cert-evidence-version.md bug 2 b5,certificates,determinism \
+  "Probe: cb4f5cc9 moved procedure evidence to v2 and renamed the BFS kernel without an envelope bump; do old CALL fnx certificates replay to a typed refusal?" "$EPIC")
+F=$(mk 07-unregistered-formats.md task 1 b1,durability,formats \
+  "Register DELTA_FORMAT_V3, VERTEX_PATCH_FORMAT_V4, PROPERTY_PATCH_FORMAT_V3 (from k3nub) with forward-open and backward-refusal laws" "$EPIC")
+Q=$(mk 08-sealed-cost.md bug 2 b2,prism,strata,performance \
+  "query --sealed costs more than decoding: writable open, writer lease, double decode (road-ny PageRank 6.8 s / 2.4 GB vs 2.3 s / 0.69 GB)" "$EPIC")
+R=$(mk 09-reference-value-model.md task 1 b5,reference,verification \
+  "fgdb-reference has no List/Map value model: the stored-collection surface shipped with no differential" "$EPIC")
+M=$(mk 10-models-as-tests.md task 2 b5,verification,toolchain-less \
+  "Check in the toolchain-less stream's independent kernel models as generated vectors and Rust tests (they validate each commit, then vanish)" "$EPIC")
+G=$(mk 11-gate-portability.md task 2 b5,gates \
+  "Registered gates abort on macOS (/proc liveness probe, long-TMPDIR here-string, elan notice parsed as the Lean version); declare UNRUN or make portable" "$EPIC")
+D=$(mk 12-diagnostics.md task 2 b3,b6,agent-ergonomics,cli \
+  "Robot refusal diagnostics are Rust Debug dumps of nested error enums: add stable codes and name the construct (CREATE GRAPH, pattern comprehension, CALL {}, collection SET)" "$EPIC")
+K=$(mk 13-call-subquery.md feature 3 b3,gql,conformance \
+  "CALL { ... } subqueries are refused and no bead owns them (uncorrelated, then correlated WITH-import, then UNION bodies)" "$EPIC")
+# Dependencies (issue depends-on target). Hard blocks only where work cannot start without the target
+# (refinement pass 3); everything else is a related link so nothing waits on an owner ruling it does not need.
+br dep add fgdb-rc1017-bridge-wvze5.3 "$J"                                 # exporting the Mac-only records needs an importable JSONL
+br dep add --type related "$S" "$R"                                         # SET read-back differential uses the value model once it exists
+br dep add --type related "$R" fgdb-v6ku6                                   # equality semantics follow the ruling (parameterized until then)
+br dep add --type related "$R" fgdb-e26tv                                   # null-as-absent follows the ruling
+br dep add --type related "$Q" fgdb-rc1017-bridge-wvze5.13                  # durable route is the ADR's; the tactical floor lands first
+br dep add --type related "$M" fgdb-verified-landing-queue-kqglu
+br dep add --type related "$F" fgdb-rc1017-bridge-wvze5.11                  # sibling format-registry gap (FGPK)
+br dep add --type related "$P" fgdb-lq1v6
+br dep add --type related "$P" fgdb-luq0b
+br dep add --type related "$D" fgdb-one-lexer-one-dispatch-285i2
+br dep add --type related "$K" "$D"
+br dep add --type related "$G" "$J"                                         # the round-trip gate must be portable too
+br dep cycles
+# Orphan labels that turned g0_architecture_decisions_e2e red on 2026-10-20.
+br label add fgdb-dhcfo b3 gql
+br label add fgdb-m4cab b3 gql
+br label add fgdb-7ch6v b2 strata
+# Comments on existing beads.
+awk -v dir="$HERE/.comments" 'BEGIN{system("mkdir -p " dir)} /^=== /{id=$2; f=dir "/" id ".txt"; next} id!=""{print > f}' "$HERE/comments.md"
+for f in "$HERE"/.comments/*.txt; do
+  id="$(basename "$f" .txt)"; br comments add "$id" --file "$f" >/dev/null && echo "commented $id"
+done
+echo "CREATED $EPIC $J $W $P $S $U $C $F $Q $R $M $G $D $K"
+echo "export with: bash scripts/br_sync.sh $EPIC $J $W $P $S $U $C $F $Q $R $M $G $D $K fgdb-dhcfo fgdb-m4cab fgdb-7ch6v $(ls "$HERE"/.comments | sed 's/\.txt$//' | tr '\n' ' ')"
+# /rc1020-file
+````
+
+## Historical delta — 2026-10-17 (superseded by 2026-10-20)
+
+Measured at `1563ee5b` (`origin/main` tip, 2026-10-17 20:47 −0400), 274 commits
+after the 2026-10-13 check at `fd2a62a3`. Method:
+- Four parallel read-only audits covered all 20 vision rows at file:line.
+- Release binaries were built from `1563ee5b` through rch and driven end to
+  end: the README Quick example, the CLI workflows, and `fgdbd` over FGP,
+  HTTP, Studio and a live subscription.
+- The 2026-10-04 900k-edge scale probe was repeated on the same box with the
+  same input file.
+- The scratch openCypher TCK runner (3,897 scenarios) ran against the same
+  binary.
+- 14 of the 15 distinct registered script-gate artifacts ran, plus
+  check.sh's file-coverage closure. The one not run is the determinism gate:
+  it needs two workspace test runs, which rch does not place. The workspace
+  test suites ran per package through rch.
+
+The 2026-10-13 section below is the stranded document described in finding 1,
+landed by this pass unchanged as history.
+
+### Product verdict
+
+**The engine got much faster on the resident path, and nothing else moved.**
+- **Faster:** a 900k-edge CLI point read went from 72–81 s to 1.5–1.75 s on
+  this box. Hub and two-hop counts that were refused now answer in 2–4 s. The
+  remote swarm reports large server-side wins on real graphs.
+- **Unmoved:** the durable architecture (Chronicle, Strata tiers, FreeJoin,
+  Ripple, transaction validation, branches, the registries, the reference
+  oracle).
+- **Main is red:** the `fgdb-gql` lib test target does not compile, and 7
+  registered gates fail.
+- **The steering has stopped reaching the code.** The 2026-10-13 reality
+  check, its gate repairs, its 26 beads and three compiled feature lanes never
+  left this host. Every commit that did reach origin came from two remote
+  streams that never saw them.
+
+### What governs the state at `1563ee5b`
+
+1. **Local work strands; the 2026-10-13 steering never landed.**
+   - **The shared worktree's local `main`** holds 9 commits made 2026-10-16
+     00:42 on top of `fd2a62a3` and never pushed. They are the 10-13 reality
+     check document, its Stage-0 gate fixes, a beads export (26 new beads,
+     labels for 52 orphan beads), and uncompiled fixes:
+     - the `fgdb-zshkh` open brick;
+     - the FG-INV-20 authorization digest;
+     - maintained Beacon reuse in `CALL hybrid.search`.
+   - **Session 2ef0d2f2's scratch clone** holds three compiled lanes:
+     - `k3nub-land2`: 22 commits, stored List/Map values and writes after
+       `WITH`;
+     - `lane19`: 36 commits;
+     - `lane20`: 12 commits, math functions.
+   - **TCK cost of the stranded lanes:** the last lane binary (2026-10-13)
+     passed 3,002 TCK scenarios; `origin/main` passes 2,887. 116 scenarios go
+     PASS → REFUSED (Create3, Delete3/5/6, bound-node MERGE, Match4).
+   - **Duplicate work:** `search_beacon_index_filtered` was written twice
+     (upstream `07f292f0`, stranded `f8982f8e`).
+   - **What this pass did:** landed the doc, the gate fix and the merged beads,
+     and pushed the rest to `stranded/*` branches (`fgdb-rc1017-bridge-wvze5.4`).
+2. **Three writer streams, no integration point** (`.5`).
+   - **The remote performance swarm** (`jeff141421@gmail.com`): 185 commits,
+     65 on `fgdb-61p1n`, plus 31 repair commits for the third stream.
+   - **The toolchain-less identity:** 78 commits, 68 of them saying Rust never
+     compiled.
+   - **Local sessions:** 0 commits reached origin.
+   - **The merge train has never run:** `merge_train.sh audit --since
+     b36d556a` against GitHub gives proven=0, unproven=1152, violations=621
+     (543 on 10-13). There is no `staging` branch and there are no
+     merge-train notes.
+3. **`main` is red.**
+   - `cargo fmt --check` passes.
+   - The `fgdb-gql` lib test target fails to compile: E0614 at
+     `set_ops/execute/selected_cross.rs:523`, from the toolchain-less
+     `3cb674cd` (10-17 14:41). So no `fgdb-gql` lib law can run at the tip.
+     This pass lands the one-line fix (`.1`).
+   - **Workspace clippy** (`--all-targets --all-features -D warnings`) exits
+     101: two `fgdb` lints (`gql_exec/source.rs:653` manual `pop_if`,
+     `query_spool/sort/relational_join_filtered.rs:188` `while let`). With
+     `fgdb` red, no crate that depends on it was linted. This pass fixes both
+     (`.20`). With those and the `fgdb-gql` fix, workspace clippy exits 0.
+   - **Tests at `1563ee5b`** (rch, per package, `--all-features --locked
+     --no-fail-fast`):
+     - `fgdb` lib: 1,274 passed, 19 failed (12 are authorized Beacon
+       prepared-index laws).
+     - `fgdb-gql` (with the compile fix): 2,612 passed, 17 failed; the lib
+       target is 1,511/0.
+     - `fgdb-cli`: 356 passed, 3 failed (`fgdb-oyk2b`, `fgdb-ow4m7`, and a
+       stale `cli_robot` law after graph-only search).
+     - `fgdb-server`, `fgdb-bolt` and `fgdb-protocol`: 286 passed, 0 failed.
+     - Core crates (strata, chronicle, types, delta-types, reference, prism,
+       beacon, warden, crypto): 1,802 passed, 5 failed.
+       - 3 are wall-clock decoder-fuzz bounds and 1 is the crypto timing
+         detector. All four are load-sensitive on a saturated fleet.
+       - 1 is structural: `vertex_patch op 5: fan-out exceeded the bound`.
+     - `fgdb` integration tests: UNRUN. After about 2 h of compiling on the
+       saturated fleet, rch worker hz3's linker died with SIGBUS
+       (`collect2: fatal error: ld terminated with signal 7 [Bus error]`,
+       target `authorized_clock_pacing`). Zero test blocks executed, which
+       is an environment failure, not a verdict.
+     - The `fgdb` test build also warns `recursion_depth_exceeding_limit`
+       again (`tests/buffered_probe_queries.rs`).
+     - The remote swarm records "the known sqj3b 11 and temporal pair" in
+       `fgdb-sqj3b`, a bead that was never exported. So main has been
+       knowingly red, and the owner of the red is invisible to everyone else
+       (`.20`).
+   - **Registered gates: 3 pass, 7 red, 4 unrun** (rch refusals,
+     retryable).
+     - Topology: the stranded `2cdea945` fixes it, landed here.
+     - Commit provenance: 8 citations of 3 bead ids that were never
+       exported, plus one transient false FAIL (`.3`).
+     - Architecture decisions: 67 unlabeled beads, now 0 after this pass's
+       merge and labels.
+     - Claims and spine: 4 unregistered docs, registered here (`.2`).
+     - Negative evidence: 3 reverts without dispositions (`.7`).
+     - Dependency policy: rustls 0.23.45 has RUSTSEC-2026-0346/0347/0348/0349
+       (`.6`).
+   - **check.sh file-coverage closure:** red on 21 unclaimed files, now
+     closed (`.2`).
+4. **The durable architecture had zero diff for four days.**
+   - **No change since `fd2a62a3`:** `fgdb-chronicle`,
+     `fgdb-strata/src/tiered`, `fgdb-gql/src/free_join`, `standing_query*`,
+     `write_txn_parts/finish.rs`, `query_branch.rs`, `registries/`,
+     `fgdb-reference`, and all 12 unreachable crates (105k LOC).
+   - **What the 98 `perf(...)` commits built:** a resident `AdjacencyIndex`
+     (flat base plus AVL overlay) from every decoded block, admitted-record
+     caches up to 1 GiB, positioned graphs and per-query tries.
+   - **Resident cost, from the remote swarm's own measurement:** on pokec
+     (30.6M edges), `fgdbd` holds 20.8 GiB after open, and the first bound
+     two-hop adds about 14 GiB of index, roughly 1.1 KB of RAM per edge. The
+     plan's sealed-run target is 2.5–5 bits per edge with first-class
+     larger-than-memory operation.
+   - Each resident optimization raises the cost of Tier R (`.13`).
+5. **Real self-speedups, no comparisons.** On this box, with the same input
+   as 2026-10-04 (45k vertices, 900k edges) and host load ~60:
+
+   | Measure | 2026-10-04 | 2026-10-17 |
+   |---|---|---|
+   | Load wall time | 249 s | 209.6 s (39.5 s CPU, so fsync-bound) |
+   | Load peak RSS | 2.0 GB | 1.19 GB |
+   | Point read | 72–81 s | 1.54–1.75 s |
+   | Hub count, default limits | refused | 2.6–3.7 s |
+   | Two-hop count, default limits | refused | 2.2 s |
+   | `count(*)`, raised limits | 59 s | 2.9 s |
+
+   - `count(*)` is still refused at default limits.
+   - A one-row write takes 7.1 / 7.2 / 19.6 s: the writable open dominates
+     (`fgdb-e8gr4`).
+   - Compaction took 26.7 s and the directory grew from 202.5 MB to 264.9 MB.
+     It never reclaims.
+   - `--buffered` refuses a property-only point read.
+   - Every competitor figure in a commit since `fd2a62a3` is quoted from an
+     earlier scoreboard, never measured in the same invocation. Under RULE 0.5
+     these are maintenance, not wins, and no harness is tracked in the repo
+     (`.14`).
+6. **The TCK on main:** 2,887 PASS, 677 PASS-ERR, 256 REFUSED, **24 WRONG**,
+   3 COLUMNS, 50 FIXTURE.
+   - 22 of the 24 WRONG are silent wrong answers or accepted invalid queries:
+     list equality and `IN` with nulls and nested lists, two missing semantic
+     errors, and a named-zone datetime.
+   - 2 are the documented canonical-order divergence (`.15`).
+7. **Security and doctrine.**
+   - `CommitMarker::authorization_decision_digest` is still all zeros on every
+     commit (`lib.rs:5735`). FG-INV-20.core is still a stub, and the fix sits
+     on a stranded branch (`fgdb-g9af0`).
+   - In `fgdbd`, a new read waits for the whole in-flight write, including its
+     fsyncs (`.8`).
+   - Three process-global caches escape per-database budgets and use
+     `try_lock` retention (`.9`).
+   - Raw OS threads run on product paths, outside `Cx` (`.10`).
+   - The new FGPK commit-pack format is unregistered, not erasure-coded and
+     outside every damage campaign. Its first version destroyed three gauntlet
+     databases: `686a1ffc`, reverted in `5d7c662c`, re-landed in `dabd63df`
+     (`.11`).
+   - Studio ships ungated JavaScript and a C-built `force.wasm` in `fgdbd`,
+     outside the plan (`.12`).
+8. **Verification froze in September** (`.17`).
+   - `invariants.toml` has 0/20 `.core` live; `checker_index.toml` 74/120
+     live; `proof_lanes.toml` 1/10 checked. No registry has changed since
+     09-22.
+   - `fgdb-reference` has not changed since 08-13.
+   - Of 49 new test files, 0 use the reference oracle, DPOR or FaultVfs.
+
+### Evidence (2026-10-17, `1563ee5b` unless stated)
+
+| Probe or gate | How | Exit | Result |
+|---|---|---:|---|
+| fmt | `cargo fmt --check` | 0 | clean |
+| fgdb-gql tests | `cargo test -j 4 -p fgdb-gql --all-features --locked --no-fail-fast` (rch) | 101 | lib test target fails to compile: E0614 `selected_cross.rs:523` (`3cb674cd`) |
+| fgdb-gql tests, with the one-line fix | same command | 101 | 2,612 passed, 17 failed. lib 1,511/0. Reds: `spill_set` 4, `aggregate_element_sources` 4, `text_predicates_and_functions` 2, `multipart_reads` 2, one each in `write_return_aggregates`, `mutation_queries`, `edge_upsert_text`, `computed_aggregate_text`, `boolean_text` |
+| Workspace clippy | `cargo clippy -j 4 --keep-going --workspace --all-targets --all-features --locked -- -D warnings` (rch) | 101 | `fgdb` lints at `gql_exec/source.rs:653` and `relational_join_filtered.rs:188`, plus the fgdb-gql E0614. On the landing tree: exit 0 |
+| fgdb lib tests | `cargo test -j 2 -p fgdb --lib ...` (rch) | 101 | 1,274 passed, 19 failed, 1 ignored. 12 authorized Beacon prepared-index, 2 temporal aggregate, 2 spill filtered join, 2 standing selected join, 1 edge stream, 1 Prism budget |
+| fgdb-cli tests | `cargo test -j 4 -p fgdb-cli ...` (rch) | 101 | 356 passed, 3 failed: `buffered` admission (`fgdb-oyk2b`), `stream` profile (`fgdb-ow4m7`), `cli_robot` graph-only search (stale law) |
+| fgdb-server, fgdb-bolt, fgdb-protocol | `cargo test -j 4 -p fgdb-server -p fgdb-bolt -p fgdb-protocol ...` (rch) | 0 | 286 passed, 0 failed |
+| Core crates | `cargo test -j 4 -p fgdb-strata -p fgdb-chronicle -p fgdb-types -p fgdb-delta-types -p fgdb-reference -p fgdb-prism -p fgdb-beacon -p fgdb-warden -p fgdb-crypto ...` (rch) | 101 | 1,802 passed, 5 failed. Wall-clock fuzz bounds: chronicle ×2, strata ×1. Crypto timing detector ×1. Strata `vertex_patch` fan-out bound ×1, which is structural |
+| Gates on the landing tree | gates.sh at the landing commits | — | topology, claims, spine, architecture decisions, identity, threat, collections: 0. Commit provenance: 1 (8 unexported ids). Negative evidence, dependency policy: 1 (`.7`, `.6`). Crypto codegen, unsafe tool lanes: UNRUN (rch refusal; zero checked workloads) |
+| fgdb integration tests | `cargo test -j 2 -p fgdb --tests ...` (rch) | 101 (UNRUN) | worker hz3's linker SIGBUS (`ld terminated with signal 7`) while linking `authorized_clock_pacing`; no test block ran |
+| fgdb lib on the landing tree | same command, landing commits | 101 | 1,274 passed, 19 failed, 1 ignored: the identical failure set to `1563ee5b`, so the two lint fixes change no verdict |
+| Remaining workspace crates (sim, calibrate, repl, order, sketch, …) | `cargo test -j 4 --workspace --exclude <the above> ...` (rch) | — | still running when this section landed; results go on `fgdb-rc1017-bridge-wvze5.20` |
+| Release build | `cargo build --release -p fgdb-cli -p fgdb-server` (rch) | 0 | no warnings: the 10-13 `fgdbd` recursion warning is gone from the binaries. But the fgdb test build warns `recursion_depth_exceeding_limit` in `tests/buffered_probe_queries.rs` (Send overflow through `AsyncEdgeJoinCursor::next`; `.20`) |
+| `g0_topology_e2e` | gates.sh | 1 | exits without a verdict: the `grep -c` deferred count is 0 under `set -e` |
+| `g0_commit_provenance_e2e` | gates.sh, plus 3 reruns | 1 | 303/9, then 304/8 on every rerun. 8 genuine failures: `fgdb-load-beats-memgraph-xf2n8` ×5, `fgdb-rwtcx`, `fgdb-016qw` ×2 |
+| `g0_architecture_decisions_e2e` | gates.sh | 1 | 67 `bead_provenance_orphan` + `not_total` |
+| `g0_claims_e2e`, `g0_spine_e2e` | gates.sh | 1, 1 | 4 `unclaimed_prose`: REMOTE_BATCH_WRITES, STUDIO, VECTOR_COORDINATE_PROJECTION, cli_graph_only_search |
+| `g0_negative_evidence_e2e` | gates.sh | 1 | reverts `a886b984`, `75045da7`, `469352c7` lack dispositions |
+| `dependency_policy_e2e` | gates.sh | 1 | cargo-audit: rustls 0.23.45, RUSTSEC-2026-0346/0347/0348/0349 |
+| `g0_identity_e2e`, `g0_proof_lanes_e2e`, `g0_tree_stability_e2e` | gates.sh | 0 | pass |
+| `g0_threat_e2e`, `w1_collections_e2e`, `w1_crypto_codegen_e2e`, `w1_unsafe_tool_lanes` | gates.sh | 2 | UNRUN: rch refusal, retryable |
+| check.sh file-coverage closure | check.sh's own functions | 1 | 21 unclaimed: 16 Studio files, 4 docs, `.cargo/macos-lld.toml` |
+| Merge-train audit | `merge_train.sh audit --since b36d556a --remote <GitHub>` | 1 | proven=0, unproven=1152, violations=621 |
+| README Quick example | 13 statements via `fgdb --robot` | — | runs as written: INSERT, SHORTEST, AS OF SEQ 1, `hybrid.search`, EXPLAIN (CERTIFICATE), `fnx.pagerank()`. Fails: CREATE GRAPH, CREATE/MERGE BRANCH, AT BRANCH write, `fnx.pagerank(GRAPH social)` |
+| fgdb-vuyw5 regressions | AS OF SEQ 1/2; `--certify-to` onto an existing file | 0 / 2 | the queried seq is reported; overwrite is refused |
+| `fgdbd` end to end | keygen, token, serve FGP+HTTP+Bolt; remote query/write; scoped token; HTTP; Studio; subscribe | 0 | all work. The scoped token hides `:Secret` (count 3 of 4). A read-only token's write is denied. No token gives 401. The subscription delivers a baseline plus a live delta. `--read-mode source` refuses `RETURN p.name` |
+| 900k scale probe | see finding 5 | 0 | see finding 5 |
+| openCypher TCK | `tck_run.py`, 8 jobs | 0 | 2887 / 677 / 256 / 24 WRONG / 3 / 50 |
+
+### Vision checklist (2026-10-13 → 2026-10-17)
+
+| # | Row | 10-13 | 10-17 | Status | What changed / what governs it |
+|---:|---|---:|---:|---|---|
+| 1 | Embedded library | ~66% | ~66% | PARTIAL | +2 raw Beacon methods. Still no synchronous `Database::open(path)`, no `session()`, no typed `get<T>`, no durable name catalog (`fgdb-7r8sy`), and GRAPH/BRANCH/PARTITION hardcoded (`lib.rs:287-289`). |
+| 2 | `fgdbd` and wire protocols | ~58% | ~60% | PARTIAL | Studio, Bolt cursor multiplexing, `remote write --rows-file`. Still no HTTP/2, gRPC, WebSocket, RESULT_ACK, remote multi-statement transactions or masked subscriptions. New reads wait behind writes (`.8`). |
+| 3 | CLI | ~66% | ~68% | PARTIAL | vuyw5 fixed upstream (`7691bca6`), JSON-array load, graph-only search. Robot schema drift under `"v":1`. No releases or Python. |
+| 4 | GQL / openCypher | ~62% | ~63% | PARTIAL | WITH → CREATE, `graph_access`, decimals. TCK 2887 PASS with 24 WRONG. Still 7 racing read parsers and 6 write classifiers. zshkh not fixed on origin. No DDL and no branches. |
+| 5 | Chronicle (B1) | ~54% | ~56% | PARTIAL | Bulk commit packs (FGPK, Strata side), 10+N+S fsyncs per small commit, no group commit. Branches, retention and BETWEEN unchanged. Chronicle's own pack.rs is dead. |
+| 6 | Strata (B2) and larger-than-memory | ~44% | ~46% | WRONG_APPROACH risk | Only resident speed and memory work. Tiers I/R/A still not in `Database`. Every open decodes every block. Pokec 20.8 GiB + 14 GiB (`.13`). |
+| 7 | Loom (B3) | ~40% | ~44% | PARTIAL | Flat identified adjacency and a spill join family (inner/outer/semi/anti, residual, selected products). Still per-query index builds, no optimizer, single thread, no SIMD. |
+| 8 | Ripple (B4) | ~52% | ~52% | PARTIAL | No change. |
+| 9 | Transactions | ~56% | ~56% | PARTIAL | No change. Backward OCC is presented in the README as "serializable by default" (`.16`). |
+| 10 | Certificates and replay | ~60% | ~61% | PARTIAL | vuyw5. Reads only, embedded/CLI only. FG-INV-19 is a stub. |
+| 11 | Decision cards | ~5% | ~5% | NOT_STARTED | More uncarded adaptive choices: ChunkFit, bound-closure trial, cache retention. |
+| 12 | Prism | ~42% | ~44% | PARTIAL | Faster in-house kernels and projection reuse. Still 14 procedures and the double copy in foundation.rs. |
+| 13 | Beacon | ~48% | ~51% | PARTIAL | 14 library commits, mostly not reachable from any product. No durable segments. hybrid.search ignores registrations. |
+| 14 | Warden | ~58% | ~59% | PARTIAL | Side-channel fixes. The authorization digest is zero. About 300 raw `Database` methods remain. |
+| 15 | Agent-native (B6) | ~35% | ~35% | PARTIAL | No change. |
+| 16 | Aegis | ~18% | ~19% | NOT_STARTED in product | Format-compatibility laws only. |
+| 17 | System graph and observability | ~8% | ~7% | NOT_STARTED | Correction: `Server::metrics()` never existed. |
+| 18 | Closed universe and unsafe ledger | ~93% | ~89% | REGRESSED | rustls advisories; C-built `force.wasm`; the ledger is still 7 for 7. |
+| 19 | Verification ladder | ~36% | ~33% | REGRESSED | Registries and oracle frozen; 7 red gates; FGPK outside the damage campaigns. |
+| 20 | §17 performance | ~12% | ~16% | UNPROVEN | 45× self-speedup at 900k. No gate measured, no tracked harness, no same-invocation comparison. |
+
+### The five reality-check questions
+
+**1. What works today, end to end?**
+- **All three postures work.** The library, `fgdb` (14 subcommands, robot
+  NDJSON) and `fgdbd` (FGP+TLS, HTTP/1.1 JSON, the Bolt subset, Studio,
+  prepared reads, batches, ordered spill reads, subscriptions, supervised
+  recovery) all ran in this pass.
+- **Capability scoping holds on the wire.** A scoped token cannot see a hidden
+  label, even through `count(*)`.
+- **History works:** time travel by sequence, diff, certify/replay, and
+  scrub/compact.
+- **Analytics and retrieval work:** composed `CALL fnx.*` and
+  `CALL hybrid.search` run.
+- **Scale:** a 900k-edge graph answers point, hub and two-hop queries from the
+  CLI in about 1.5–4 s.
+- **openCypher:** 2,887 of 3,897 TCK scenarios pass strictly.
+
+**2. What is stubbed, partial or aspirational?**
+- **Storage:** durable Strata tiers, retention cooling, branches, `BETWEEN`.
+- **Transactions:** SSI, and production callers of the deterministic rebase.
+- **Incremental views:** materialized-view DDL and durable subscriptions.
+- **Indexes and catalog:** durable Beacon segments and a durable name catalog.
+- **B5:** decision cards; the authorization digest.
+- **Server and operations:** HTTP/2, gRPC and WebSocket, durable result
+  retention, remote multi-statement transactions, the system graph,
+  replication, backup and restore.
+- **Unwired code:** 12 unreachable crates (105k LOC), including all three
+  unsafe performance islands.
+
+**3. What are the biggest risks?**
+1. Stranded steering, and three streams with no integration queue. The plan
+   cannot steer code it cannot reach.
+2. A red main produced by the toolchain-less stream faster than repairs land.
+3. Resident-path lock-in versus Tier R.
+4. Silent wrong answers: 24 in the TCK.
+5. Unauthenticated provenance of writes: the zero digest.
+6. A durable format (FGPK) outside the format contract and the damage
+   campaigns, which has already lost data once.
+
+**4. Where do docs diverge from the code?** See `.16`:
+- the isolation claim;
+- Bolt described as awaiting W10;
+- server-surface omissions, Studio included;
+- robot schema drift;
+- `--certify-to --overwrite`;
+- shipped flags that are undocumented;
+- the `--read-mode source` profile;
+- the stale "Not served" crate docs.
+
+**5. Would the open beads close the gap?**
+- **No, for three reasons.** Stranded work is invisible to the writers who
+  pick beads. Several open beads (`teypc`, `7r8sy`, `62kus`, `g9af0`, `dyuiy`,
+  `nge6g`) existed only in the stranded export until this pass. And the
+  resident-path beads the swarm actually works on (`61p1n`) pull away from
+  Tier R.
+- **New gaps no bead covered until this pass:** Studio governance, the
+  `fgdbd` read/write locking, process-global caches, raw threads, the FGPK
+  contract, the in-repo gauntlet, and the verification ratchet. They are now
+  `fgdb-rc1017-bridge-wvze5.8`–`.17`.
+
+### Dependency-ordered bridge plan (2026-10-17)
+
+```mermaid
+flowchart TD
+    S0["Stage 0 — one integration queue + true green
+    gql compile fix, docs/Studio registration, bet labels,
+    provenance exports, topology fix (landed: .1 .2 + labels)
+    stranded work land-or-retire (.4), integration audit (.5)"] --> S1
+    S0 --> S2
+    S1["Stage 1 — correctness, security, doctrine
+    rustls (.6), auth digest g9af0, zshkh, TCK WRONG (.15),
+    fgdbd read stalls (.8), caches (.9), threads (.10),
+    FGPK contract (.11), negative evidence (.7), Studio (.12)"] --> S3
+    S2["Stage 2 — storage decision before more resident work
+    ADR (.13) -> Tier R fgdb-teypc + lazy open fgdb-e8gr4
+    gauntlet in repo (.14) as the measuring instrument"] --> S3
+    S3["Stage 3 — conformance + verification + claims
+    in-repo TCK ratchet fgdb-cdbn5, verification ratchet (.17),
+    parser unification 285i2, README truth-up (.16)"]
+```
+
+- **Stage 0. Make one queue and a true green bar.** Nothing else can be
+  trusted while main is red and work strands.
+  - This pass lands four things:
+    - the `fgdb-gql` compile fix (`.1`);
+    - the docs, Studio and macOS registration (`.2`);
+    - the topology gate fix and the 10-13 document (stranded `2cdea945`,
+      `91197b8e`);
+    - the merged beads, with bet labels for every orphan.
+  - Still open:
+    - the three unexported bead ids (their writers must export them);
+    - the stranded code (`.4`);
+    - the stranded-work audit and the merge-train ruling (`.5`).
+- **Stage 1. Close the cliffs found in this pass.**
+  - **rustls first:** a pre-authentication 1 GiB allocation on every TLS
+    listener.
+  - **Then two ports from the stranded branch:** the authorization digest
+    (`fgdb-g9af0`) and the zoned-timestamp decode (`fgdb-zshkh`).
+  - **Then the TCK wrong answers,** with a reference differential (`.15`,
+    `.17`).
+  - **Then the server and doctrine items:** read stalls (`.8`), caches (`.9`),
+    threads (`.10`), the FGPK contract (`.11`), negative evidence (`.7`) and
+    Studio (`.12`).
+- **Stage 2. Decide storage before optimizing it further.**
+  - **The ADR (`.13`)** fixes four things:
+    - the cursor/slice boundary that the resident index and FGRN runs both
+      implement;
+    - the bytes-per-edge budget, measured on road-ny, web-google and pokec;
+    - the larger-than-memory target, for example a pokec two-hop with `fgdbd`
+      capped at 8 GiB;
+    - which resident-path beads pause.
+  - **Then Tier R and lazy open:** `fgdb-teypc` (now blocked by the ADR) and
+    `fgdb-e8gr4`.
+  - **The in-repo gauntlet (`.14`)** is the instrument that decides every
+    trade-off with incumbents measured live.
+- **Stage 3. Make conformance and verification ratchets.**
+  - The in-repo TCK gate (`fgdb-cdbn5`).
+  - The verification ratchet and the first live `.core` invariant (`.17`).
+  - One lexer and one dispatch (`285i2`).
+  - The README truth-up (`.16`).
+
+### Ambition rounds, applied in place
+
+**Round 1. What would make this 10× rather than incrementally better.**
+1. **Turn the resident index into a durable artifact.**
+   - **The opportunity:** the swarm already built a flat CSR-shaped
+     `AdjacencyIndex` base. Persisting exactly that base at compaction as an
+     FGRN run makes open O(segments) instead of O(blocks):
+     - page-aligned;
+     - BLAKE3 page Merkle tree;
+     - read through `fgdb-unsafe-vfs` mmap.
+   - **What changes:** the index stops being rebuilt per process. The 14 GiB
+     pokec index becomes page cache, not heap. The existing overlay becomes
+     the Tier D delta over the run.
+   - **Why it works:** this turns the four days of resident work into the
+     first half of Tier R instead of a competitor to it. The ADR (`.13`)
+     should evaluate it first.
+2. **Answer whole-graph aggregates from metadata.**
+   - Under an unrestricted scope, `count(*)` of a relation, a label count and
+     degree histograms are by-products of seal and compaction.
+   - Maintaining them as Z-set-maintained sketches in the commit stream (B4)
+     gives O(1) answers. That removes the default `count(*)` refusal without
+     raising budgets, and gives Ripple its first production consumer.
+3. **Möbius-inversion trail compilation** (`fgdb-62kus`, landed in this pass's
+   bead merge). It generalizes the hand-written falling-factorial and
+   inclusion–exclusion cases into one compiler over the partition lattice. It
+   is the cheapest correctness-and-speed win for `DIFFERENT EDGES` motifs.
+4. **Make the TCK an engine-vs-reference differential, not a scoreboard.**
+   - Every TCK scenario also runs against `fgdb-reference`.
+   - A disagreement between engine and reference is a bug, even where the TCK
+     is silent.
+   - That converts 3,897 scenarios into a semantic oracle for the paths the
+     swarm changes daily.
+
+**Round 2. Every idea judged on merit.**
+
+| Idea | Impact / cost | Decision |
+|---|---|---|
+| One integration queue with a stranded-work audit (`.5`) | Highest / low | KEEP, Stage 0: without it no plan steers anything |
+| Persist the flat AdjacencyIndex base as FGRN (Round 1.1) | Extreme / medium | KEEP as the ADR's first candidate |
+| Metadata answers for whole-graph aggregates (Round 1.2) | High / low | KEEP under `fgdb-61p1n`; record in the ADR |
+| TCK as an engine-vs-reference differential (Round 1.4) | High / medium | KEEP under `.17` and `fgdb-cdbn5` |
+| Möbius trail compiler (`62kus`) | High / low-medium | KEEP, after Stage 0 |
+| Port the stranded zshkh and authorization-digest fixes | High / low | KEEP, Stage 1 |
+| Rebase the stranded k3nub/lane19/lane20 (116 TCK scenarios) | High / medium-high (semantic conflicts) | KEEP, but land in one batch with a TCK delta, or retire explicitly |
+| Studio | Unknown / ongoing | OWNER DECISION (`.12`); until then exempt, documented, ungated |
+| More resident-path micro-optimizations | Diminishing / growing switching cost | PAUSE pending the ADR |
+| Multi-node replication | Low near-term / high | DEFER, as on 10-13 |
+
+**Round 3. The operator's view.** Someone evaluating FrankenGraphDB today
+clones the repo, builds, loads a graph, queries it, serves it and connects a
+driver. Four frictions dominate:
+- **No name catalog.** Every invocation repeats `--label/--relation/--property`,
+  and without them a plain `MATCH (p:Person) RETURN p.name` fails with a
+  parser error about a missing aggregate. That is the losing-parser diagnostic
+  of `285i2`.
+- **Default budgets refuse `count(*)`** on anything above 100k records.
+- **A one-row CLI write costs about 7 s at 900k edges.**
+- **Claims that do not match what they get:** "serializable by default",
+  Bolt "awaiting W10", Studio undocumented.
+
+`fgdb-7r8sy` (catalog), Round 1.2 (aggregates), `fgdb-e8gr4` (lazy writable
+open) and `.16` (truth-up) cover these four. They are the difference between a
+demo and a tool.
+
+### Plan-space refinement (Phase 5) — what changed in the beads
+
+- **Merged, not replaced.** The stranded export was merged record by record
+  onto origin's: 1,174 kept, 26 added, 66 merged with label and comment
+  unions.
+  - Upstream status wins wherever a stranded closure rested on unlanded,
+    uncompiled code: `fgdb-cltfx`, `fgdb-wpteg` and `fgdb-7nwox` keep their
+    upstream status.
+  - The stranded `fgdb-c85bp` and `fgdb-t38fv` closures reopen.
+  - The ten in-progress claims of the stopped session revert to open.
+- **Every orphan gets a bet label.**
+  - 15 orphans without one were labelled; `b8` became `b3` on `fgdb-62bpe` and
+    `fgdb-62mzm`.
+  - `g0_architecture_decisions_e2e` resolves all records.
+- **Dependencies added:**
+  - `fgdb-teypc` is blocked by the ADR (`.13`);
+  - `fgdb-e8gr4` and `fgdb-61p1n` are related to it;
+  - the stranded-work bead is related to every bead its code would close;
+  - Studio governance is blocked by the registration bead.
+  - `br dep cycles` is empty.
+- **Corrected while writing the beads:** the suspected pipe race in the
+  provenance gate could not be reproduced (0 misses in 3,000 trials; 3 clean
+  reruns), so its bead now asks for a deterministic reproduction before any
+  gate change, instead of asserting the mechanism.
+
+---
+
+## Historical delta — 2026-10-13 (superseded by 2026-10-17)
+
+Measured at `fd2a62a3` (`main` tip, 2026-10-13 21:35 −0400). Since the last full
+20-row reality check on 2026-10-04 (`08be545e`), **771 commits** have landed on
+`main` (**178 commits** since the 2026-10-12 gauntlet anchor `53ea2eef`). Four
+parallel code-audit passes inspected all 20 vision rows at line level, and every
+key finding was verified by compiling and executing the binaries, unit/integration
+suites, and registered G0 script gates locally against `fd2a62a3`.
+
+### Product verdict
+
+**FrankenGraphDB is now a real three-posture system (`fgdb` library, `fgdbd`
+server, `fgdb` CLI) with a broad, working GQL/openCypher surface and real
+out-of-core spill/buffered read execution — but `main` is red at `fd2a62a3` on
+three registered G0 gates and 11 unit/integration tests across `fgdb-gql` and
+`fgdb-cli`, 38% of the last 771 commits (and 59% of the last 178) landed directly
+on `main` without a compiler, 12 of the 31 active crates (104,972 LOC) have zero
+dependency path from any shipped binary or library, and the core storage tiers
+(Strata Tiers I/R/A) remain unintegrated in production `Database`, leaving the
+engine 2–4 orders of magnitude slower than incumbents.**
+
+Seven empirical findings govern the project's state at `fd2a62a3`:
+
+1. **The third product posture (`fgdbd` server) is no longer vaporware (Row 2: `~20%` → `~58%`).**
+   - On 2026-10-04 (`08be545e`), neither `crates/fgdb-server` nor `crates/fgdb-bolt`
+     existed. Today `fgdbd` is an active binary serving:
+     - Native **FGP** over TCP and **TLS 1.3** (`ALPN fgp/1`, 0-RTT disabled,
+       10 s handshake bound, `CiphertextIo` per-poll capability/revocation re-verification),
+       including `HELLO`/`AUTH`/`SELECT_DATABASE`, `AUTH_REFRESH` live capability
+       narrowing (`a271ad32`), `PREPARE`/`EXECUTE_PREPARED`/`RELEASE_PREPARED`
+       (`2371bd8a`), `EXECUTE` (`Read`, `ReadStream`, `ReadOrdered` over server
+       spill scratch, `Write` including all 5 write-`RETURN` families, and
+       `Subscribe` live Z-set changefeeds), `EXECUTE_BATCH` (`0a595715`), and
+       supervised authoritative recovery (`recovery.rs`, `SUBSCRIPTION_RESET`).
+     - **HTTP/1.1 JSON adapter** (`GET /v1/health`, `GET /v1/databases/<name>/schema`,
+       `POST /query`, `/write`, `/write-batch`) with DNS-rebinding `Host` allowlists
+       and lossless `$bytes`/`$vector`/`$decimal` encoding.
+     - **Bolt 5.0 subset** (`crates/fgdb-bolt` + `crates/fgdb-server/src/bolt.rs`:
+       `BoltCompatProfileV1` read-only sessions with causal bookmarks `fgdb:<db>:seq:<n>`
+       plus bounded no-`RETURN` autocommit writes in `bolt/autocommit.rs`).
+   - Verified end-to-end in this pass (`fgdbd keygen`, `fgdbd token`,
+     `fgdbd attenuate`, `fgdbd serve`, and `fgdb remote` `query` / `write` /
+     `--read-mode source`) and by `cargo test -p fgdb-server --lib` (`110 passed; 0 failed`).
+2. **Despite 10 `fix(build)` repair commits on 2026-10-13 alone, `main` at `fd2a62a3` is RED on tests and three registered G0 gates.**
+   - `cargo fmt --check`, `cargo check --all-targets --locked`,
+     `cargo clippy --all-targets --all-features --locked -- -D warnings`, and
+     `cargo run -p registry-check -- all --root .` all exit `0` at `fd2a62a3`
+     only because `jeff141421@gmail.com` landed **10 separate repair commits** on
+     2026-10-13 (`7306c340` 1st repair through `fd2a62a3` 9th repair, with the 5th
+     repair split across `bd9f2030` and `9d8a3a27` when 14 more uncompiled commits
+     landed mid-verification).
+   - Underneath the green compile/clippy bar, **`main` is red on six distinct checks**:
+     1. **`cargo test -p fgdb-gql --lib`** (`1,419 passed; 8 failed`, exit `101`):
+        2 newly landed uncompiled write-query tests (`edge_merge_query::with_tests::filtering_unwind_grouping_and_rebinding_use_one_native_tail` from `28d5f031` and `vertex_upsert::query::batch::tests::full_width_identity_is_not_collapsed_or_replaced_by_row_number` from `50034984`) plus 6 stale refusal-law tests (`edge_stream::aggregate::*`, `set_ops::aggregate::stage::*`, `stream::aggregate::tests::spill_tests::*`) that were never updated when the underlying features were enabled.
+     2. **`cargo test -p fgdb-gql --test edge_upsert_text`** (`10 passed; 1 failed`, exit `101`):
+        `malformed_branch_direction_and_target_never_reach_catalog_resolution` panics at `crates/fgdb-gql/tests/edge_upsert_text.rs:82:9` (`MATCH (a),(b) MERGE (a)-[e:R]-(b) ON MATCH SET e.w=1`).
+     3. **`cargo test -p fgdb-cli --bins`** (`174 passed; 2 failed; 1 ignored`, exit `101`):
+        - `diff::tests::query_and_replay_take_the_same_exact_limits_and_write_refuses_them` (`crates/fgdb-cli/src/diff/tests.rs:782`) panics (`write takes no query limits`) because `e42f4c9e` (`fgdb-ewc7i`) gave `fgdb write` query limits without updating this test.
+        - `stream::tests::supported_projection_and_pipeline_streams_do_not_weaken_real_refusals` (`crates/fgdb-cli/src/stream/tests.rs:323`) panics (`query: operator 2 is outside the ordered vertex-stream profile`) because `ccf882f9` rewrote the test to assert `fgdb query --stream` supports `"MATCH (n) RETURN n.p AS p"` without updating `crates/fgdb-cli/src/stream/mod.rs` (and left a crashpack in `artifacts/test/`).
+     4. **Registered gate `scripts/g0_topology_e2e.sh`** (exit `1`):
+        Line 125 runs `grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"'` under `set -euo pipefail`. Since `492f280d` (2026-10-06) activated `fgdb-server`, all 3 postures (`embedded`, `server`, `cli`) report `"outcome":"pass"` (`0` deferred), so `grep -c` prints `0` and exits `1`, aborting the gate before its 7 negative mutation controls ever run.
+     5. **Registered gate `scripts/g0_commit_provenance_e2e.sh`** (`241 passed; 1 failed`, exit `1`):
+        `FAIL 6be1a501 cites fgdb-7fqu6, which resolves in neither .beads/issues.jsonl nor the local beads database`. Commit `6be1a501` (`HEAD~1`) cited a nonexistent bead ID.
+     6. **Registered gate `scripts/g0_architecture_decisions_e2e.sh`** (exit `1`):
+        Fails with **52 `bead_provenance_orphan` violations** (`fgdb-0tbrz` .. `fgdb-yzt2b`): 52 beads exported to `.beads/issues.jsonl` since 2026-10-04 carry no `b1..b6` bet label and no family/override entry in `registries/architecture_decisions.toml`.
+     7. **Future-incompatible compiler warning on `cargo build -p fgdb-server`**:
+        Monomorphizing `fgdbd` emits `warning: overflow evaluating the requirement Pin<Box<{async block@fgdb_server::Server::serve...}>>: CoerceUnsized<...>` (`#[warn(recursion_depth_exceeding_limit)]`, part of `#[warn(future_incompatible)]`).
+3. **The toolchain-less commit stream to `main` accelerated.**
+   - `bash scripts/merge_train.sh audit --since b36d556a`: `first-parent commits: proven=0 unproven=1064 violations=543` (up from `unproven=400 violations=227` on 2026-10-04).
+   - Across `08be545e..fd2a62a3` (771 commits), **316 commits (41.0%)** came from the toolchain-less `35050222+Dicklesworthstone@users.noreply.github.com` identity, and **291 commits (37.7% of all commits)** explicitly disclose in their commit message that `cargo`, `rustc`, `rustfmt`, and `clippy` are `UNRUN`.
+   - Across `53ea2eef..fd2a62a3` (the last 178 commits on 2026-10-12/13), **124 of 178 commits (69.7%)** came from that toolchain-less identity and **105 (59.0%)** explicitly state `UNRUN`. Across the 10-day window, **51 separate repair/rustfmt commits** had to be landed on `main` to clean up broken builds, clippy errors, and unformatted files.
+4. **Seven of the ten 2026-10-04 reality-check beads are genuinely closed — including the silent wrong-answer bug (`fgdb-qnqrj`) and both authorized-write side channels (`fgdb-hxgm1`).**
+   - **`fgdb-qnqrj` (CLOSED)**: Cross-kind `Int`/`Float` ordering, equality, `IN` membership, and property-index range translation (`crates/fgdb/src/gql_exec/source/numeric.rs:13-188`, `39d47f40`) now agree across all query shapes. Verified live on the README Quick-example database: `MATCH (p:Person) WHERE p.born > 1800.0 RETURN p.name` now returns `["Ada"]` and `["Alan"]` (previously `0 rows`).
+   - **`fgdb-hxgm1` (CLOSED)**: Authorized writes now reject caller-chosen creation/ensure IDs before storage inspection (`4b8f397a`) and allocate engine-issued `VId`/`EId` values through a 4-round unbalanced Feistel permutation `P_k(counter)` over `[1, 2^63)` keyed by `DatabaseKeys` (`crates/fgdb/src/identity_permutation.rs`, `b7ae8e9d`) with raw counters persisted in `CommitMarker::identity_counters`.
+   - **`fgdb-zww2g` (CLOSED)**: `scripts/check.sh` now classifies truncated UBS output as `UNRUN` (`1287e166`) and partitions `run_ubs` into 30 per-crate scans below UBS's 16 MiB `ast-grep` stdout cap (`68ad62da`).
+   - **`fgdb-8m1in`, `fgdb-f0u74`, `fgdb-o92t9`, `fgdb-u9l0e` (CLOSED)**: Unnameable types re-exported with `unnameable_types = "deny"` (`eb47a7ec`), `--all-features` enabled in `check.sh` (`54f599b9`), `UNWIND ... MERGE` fixed (`a54336f6`), and `README.md`/`IMPLEMENTATION_STATUS.md` updated (`f4ec3c25`).
+5. **Larger-than-memory execution (`Row 6`) moved from library-only islands to wired CLI/server spill and cold-read paths — but default `Database::open` and `fgdbd` are still all-in-RAM Tier D.**
+   - **What landed**: `Database::open_buffered_read_view` (`crates/fgdb/src/buffered_read.rs:278`) with per-block `BlockSummary` / `PatchDescriptor` pruning (`d93988f9`), cold vertex/edge/incidence streams (`BufferedEdgeIncidenceScan`, `46bfd003`, `64fca993`, `34ababa3`), CLI `fgdb query --buffered` and `--spill-dir <dir>` (external merge sort, hash-partitioned numeric/`DISTINCT` grouping, external `UNION`/`INTERSECT`/`EXCEPT`, external `UNWIND`, cold correlated `EXISTS` probes), server `ReadOrdered` / `PreparedReadMode::OrderedStream` (`a6277864`), three-level V5 partition root (`FGSI`, `0aeaf5bc`), open-addressed `EIdIndex` edge-history validation (`4fc882e0`, `1b8ad45c`), lock-free read-only CLI open beside a live `fgdbd` (`dce94b64`), and `--max-source-rows`/`--max-total-key-bytes`/budget flags (`3db4ae45`, `c8ddecdc`).
+   - **What is still missing**:
+     - **Strata Tiers I (inline micro-adjacency), R (sealed compressed CSR runs), and A (archived anchors) are NOT in the production `Database` storage/read/write/compaction path.** `SealedPartition` is an in-memory derived projection called *only* by `query_prism.rs` (`call_fnx_sealed`) and tests.
+     - Default `Database::open`, `Database::open_read_view`, `fgdb query` (without `--buffered`), and `fgdbd` (`crates/fgdb-server/src/lib.rs:397`) still read and decode **every** `FGSB` block, `FGSP` edge property sidecar, and `FGVP` vertex patch into resident RAM on open, and even `open_buffered_read_view` sequentially reads and history-validates every block during initial admission (`crates/fgdb-strata/src/store/buffered_read.rs:492-570`) before dropping payloads.
+     - Inside `fgdb-gql`, `algebra_exec::build_index` (`crates/fgdb-gql/src/algebra_exec.rs:291-353`) and `free_join::trie::RelationTrie` (`crates/fgdb-gql/src/free_join/trie.rs:31-147`) still rebuild fresh in-memory `BTreeMap` / sorted-`Vec` adjacency copies per query execution.
+     - Multi-object packing (`crates/fgdb-chronicle/src/pack.rs`) is still unintegrated: every commit still writes and fsyncs one file per touched `(src, relation)` block (`fgdb-79kyi`).
+6. **Half of the workspace crates (16 of 32, including 12 non-test engine/unsafe crates totaling 104,972 LOC) are completely unreachable from `fgdb`, `fgdb-cli`, and `fgdb-server`.**
+   - None of the three `fgdb-unsafe-*` performance/VFS islands (`fgdb-unsafe-simd`, `fgdb-unsafe-arena`, `fgdb-unsafe-vfs`), nor `fgdb-calibrate` (41,584 LOC), `fgdb-repl` (19,693 LOC), `fgdb-sketch` (14,757 LOC), `fgdb-order` (7,471 LOC), `fgdb-collections` (6,690 LOC), `fgdb-resource` (5,492 LOC), `fgdb-evidence` (2,833 LOC), or `fgdb-claim` (1,358 LOC) is in the transitive dependency closure of any product crate.
+7. **Verification registries have been 100% frozen since September 4, and new feature tests bypass `fgdb-reference`, `FaultVfs`, and DPOR.**
+   - `registries/invariants.toml` is still `0/20` `.core` invariants live (`8/28` narrowing clauses live). `registries/checker_index.toml` is still `74/120` live (`46` stubs). `registries/proof_lanes.toml` is still `1/10` checked (`0` TLA+ files on disk).
+   - `crates/fgdb-reference` has not been modified since **2026-08-13** (`53bb7d06`, 2 months ago). Of the **166 new test files** added since 2026-10-04 (`08be545e..fd2a62a3`), **0 (0%)** use `fgdb_reference`, **0 (0%)** use DPOR schedule exploration, and **1 (0.6%)** uses `FaultVfs` (and only with `FaultPlan::faultless()`).
+
+---
+
+### Evidence & Reproducibility (Measured Locally at `fd2a62a3`, 2026-10-13)
+
+| Probe / Gate | Command (with `RCH_CARGO_WRAPPER_BYPASS=1`) | Exit Code | Measured Result |
+|---|---|---:|---|
+| Formatting | `cargo fmt --check` | `0` | Clean (restored by 9th repair `fd2a62a3`) |
+| Workspace typecheck | `cargo check --all-targets --locked` | `0` | All 32 workspace members check cleanly (2m 45s) |
+| Workspace clippy | `cargo clippy --all-targets --all-features --locked -- -D warnings` | `0` | Clean across all 32 members and all features (1m 26s) |
+| Binary build (`fgdb`, `fgdbd`) | `cargo build -p fgdb-cli -p fgdb-server --locked` | `0` | **1 warning** in `fgdbd`: `#[warn(recursion_depth_exceeding_limit)]` on `Server::serve` → `connection::ordered_stream` |
+| Constitutional registries | `cargo run -p registry-check -- all --root .` | `0` | 21 Appendix A slices, 4,191 projection rows, 26 scanned prose files, 0 violations |
+| Dependency policy e2e | `bash scripts/dependency_policy_e2e.sh` | `0` | `6 passed, 0 failed, 0 unrun` (`cargo-audit` + `cargo-deny` + 4 planted negative controls) |
+| G0 spine e2e | `bash scripts/g0_spine_e2e.sh` | `0` | `15 passed, 0 failed, 0 unrun` |
+| G0 claims e2e | `bash scripts/g0_claims_e2e.sh` | `0` | `17 passed, 0 failed, 0 unrun` |
+| G0 identity e2e | `bash scripts/g0_identity_e2e.sh` | `0` | `96 passed, 0 failed, 0 unrun` |
+| G0 negative evidence e2e | `bash scripts/g0_negative_evidence_e2e.sh` | `0` | `10 passed, 0 failed, 0 unrun` |
+| G0 proof lanes e2e | `bash scripts/g0_proof_lanes_e2e.sh` | `0` | `1 passed, 0 failed, 0 unrun` (`VersionChain.lean` under Lean 4.7.0) |
+| G0 threat e2e | `bash scripts/g0_threat_e2e.sh` | `0` | `PASS THREAT MODEL E2E GREEN` |
+| **G0 topology e2e** | `bash scripts/g0_topology_e2e.sh` | **`1` (RED)** | `grep -c '"outcome":"deferred"'` at line 125 exits `1` under `set -e` because all 3 postures are now `"outcome":"pass"` (0 deferred) |
+| **G0 commit provenance e2e** | `bash scripts/g0_commit_provenance_e2e.sh` | **`1` (RED)** | `241 passed, 1 failed`: `6be1a501` (`HEAD~1`) cites nonexistent `fgdb-7fqu6` |
+| **G0 architecture decisions e2e** | `bash scripts/g0_architecture_decisions_e2e.sh` | **`1` (RED)** | **52 `bead_provenance_orphan` violations** (`fgdb-0tbrz` .. `fgdb-yzt2b` in `.beads/issues.jsonl` lack `b1..b6` labels / ADR rules) |
+| **`fgdb-gql` lib tests** | `cargo test -p fgdb-gql --lib --no-fail-fast --locked` | **`101` (RED)** | `1,419 passed; 8 failed` (2 newly landed uncompiled write tests + 6 stale refusal-law tests) |
+| **`fgdb-gql` `edge_upsert_text`** | `cargo test -p fgdb-gql --test edge_upsert_text --locked` | **`101` (RED)** | `10 passed; 1 failed` (`malformed_branch_direction_and_target_never_reach_catalog_resolution`) |
+| **`fgdb-cli` bin tests** | `cargo test -p fgdb-cli --bins --no-fail-fast --locked` | **`101` (RED)** | `174 passed; 2 failed; 1 ignored` (`diff::tests` write limits + `stream::tests` vertex-stream profile) |
+| `fgdb-server` & `fgdb-bolt` tests | `cargo test -p fgdb-bolt --all-targets --locked && cargo test -p fgdb-server --lib --locked` | `0` | `fgdb-bolt` + `fgdb-server` (`110 passed; 0 failed`) |
+| Repaired `fgdb` integration tests | `cargo test -p fgdb --test buffered_probe_queries --test authorized_edge_merge_admission --test native_with_edge_aggregate_stream --locked` | `0` | `14 passed; 0 failed` across all 3 targets |
+| Merge-train provenance audit | `bash scripts/merge_train.sh audit --since b36d556a` | `1` | `proven=0 unproven=1064 violations=543` |
+| Live 14-step CLI + `fgdbd` probe | `create`, `write`, `MERGE..RETURN`, `query`, cross-kind `p.born > 1800.0`, `AS OF SEQ 1`, `diff`, `--certify-to`+`replay`, `CALL fnx.pagerank({...})`, `CALL hybrid.search`, `scrub`, `compact`, `fgdbd serve` + `fgdb remote` (`query`, `write`, `--read-mode source`) | `0` | All 14 workflows execute end-to-end; `p.born > 1800.0` returns `["Ada", "Alan"]`; eager `AS OF SEQ 1` still stamps `"seq":2` (`fgdb-vuyw5`) |
+
+---
+
+### Vision Checklist (20-Row Refresh: `2026-10-04` → `2026-10-13`)
+
+| # | Vision Item | 10-04 | 10-13 | Grounded Code & Runtime Assessment at `fd2a62a3` |
+|---:|---|---:|---:|---|
+| 1 | **Embedded Rust library (`fgdb`)** | ~62% | **~66%** | `Database` now exposes **360 inherent `pub fn` methods** (**286** with purpose-typed `Cx`, **74** pure in-memory/key accessors without `Cx`), up from 303 on 10-04. New since 10-04: `Database::adopt` (`f8750862`), `open_read_view` (`EmbeddedReadView`, lazy adjacency via `OnceLock`, `e9229ab2`/`fcfa9920`), `open_buffered_read_view` (`BufferedReadView`, `71cc663f`), `ensure_delta_window` (`4001c58f`), `open_restoring_capsules`, `register_beacon_index` / `register_beacon_graph_index` (`d9a9f15c`), `authorized_prepared_read_session` / `authorized_ordered_read_session` (`2371bd8a`, `ec4ee361`), `query_diff` (`ff10c8e4`), and `standing_replay_coalesced` / `standing_replay_difference` (`b310da29`). `fgdb-8m1in` closed (`eb47a7ec`, `unnameable_types = "deny"`). **Still missing vs 1.0 target**: no synchronous `Database::open(path)?` or `":memory:"` path literal; no unified `db.session()` owning multi-statement read/write transactions (`fgdb-w10-embedded-54r` open); no typed `row.get::<T>("col")`; no durable schema catalog (`RelationBind` required on every call); no Rust UDF registration; single coordinate `GraphId(1)`/`BranchId(1)`/`PARTITION=0` hardcoded (`crates/fgdb/src/lib.rs:281-283`). |
+| 2 | **Server `fgdbd` & wire protocols** | ~20% | **~58%** | **Biggest movement since 10-04.** `crates/fgdb-server` (`fgdbd`) and `crates/fgdb-bolt` are now active workspace crates (`492f280d`, `9bea2ebe`). `fgdbd` serves: (1) **FGP over TCP & TLS 1.3** (`tls.rs:63`, ALPN `fgp/1`, 0-RTT disabled, `CiphertextIo` per-poll capability guard) with `HELLO`/`AUTH`/`SELECT_DATABASE`, `AUTH_REFRESH` live narrowing (`a271ad32`), `PREPARE`/`EXECUTE_PREPARED`/`RELEASE_PREPARED` (`2371bd8a`), `EXECUTE` (`Read`, `ReadStream`, `ReadOrdered` over `--query-scratch-dir`, `Write` including all 5 write-`RETURN` families pre-admitted before commit, and `Subscribe`), `EXECUTE_BATCH` (`0a595715`), and supervised recovery (`recovery.rs`, `SUBSCRIPTION_RESET`); (2) **HTTP/1.1 JSON adapter** (`http.rs`: `/v1/health`, `/v1/databases/<name>/schema`, `/query`, `/write`, `/write-batch`, `Host` DNS-rebinding guard); (3) **Bolt 5.0 subset** (`BoltCompatProfileV1` read-only with causal bookmarks + no-`RETURN` autocommit writes in `bolt/autocommit.rs`). **Still missing**: no HTTP/2, gRPC, or WebSocket listeners; no durable `PublishedResultStream` (`RESULT_ACK`/`RESULT_RELEASE` refused at `connection.rs:708-728`); no multi-statement remote write transactions; subscriptions require `Scope::All`; no multi-tenant QoS scheduler lanes. |
+| 3 | **CLI `fgdb`, robot mode, installer, Python** | ~55% | **~66%** | 14 subcommands (`create`, `adopt`, `compact`, `scrub`, `write`, `query`, `import-csv`, `diff`, `transaction`, `replay`, `load`, `search`, `remote`, `robot schema` / `help`). New since 10-04: `fgdb remote` (`query`, `write`, `subscribe`, `--read-mode buffered|source|ordered`, TLS 1.3 flags), `query --buffered` and `query --spill-dir` (external sort, numeric/`DISTINCT` grouping, binary set ops, `UNWIND`), `transaction --savepoint/--rollback-to/--release` (`218b6c6f`) + staged write-`RETURN` (`d77e1674`), `adopt` (`f8750862`), `--bindings-file`, `--max-source-rows` / `--max-total-key-bytes` on `load` (`3db4ae45`), budget flags on `query`/`write`/`import-csv`/`transaction` (`19466747`, `e42f4c9e`), `--vector-encoding packed` and `--eligible` on `search`. `fgdb-vty1w` closed (`11421745`). **Still open/missing**: 2 failing CLI unit tests at `HEAD`; `fgdb-vuyw5` (eager `AS OF SEQ` reports frontier `seq`, `--certify-to` overwrites); `fgdb-95wsi` (`ROBOT_SCHEMA` still `"v":1` after multiple surface additions); 0 git tags, no release installer script, no `fgdb-python` crate (`fgdb-w10-python-kkb`). |
+| 4 | **GQL / openCypher / FQL query language** | ~52% | **~62%** | New since 10-04: ISO GQL `DIFFERENT EDGES` default match mode + `REPEATABLE ELEMENTS` (`7d752d17`, `fgdb-8gbaz`); untyped relationship patterns `(a)-->(b)`, `(a)-[r]->(b) RETURN type(r)`, and `(a)-[*1..2]->(b)` via `EdgeRelation::One/Any` (`9b8e1df9`, `fgdb-du0xg`; requires all present `RelationId`s to be mapped in caller bindings until a durable catalog lands); exact cross-kind `Int`/`Float` comparison, `ORDER BY`, `IN`, and index range scans (`f6cca5e5`, `39d47f40`, `fgdb-qnqrj` closed); prepare-time rejection of unorderable `Map`/`Path` sort keys (`fgdb-3wlho` closed); hidden `ORDER BY` expressions and post-`DISTINCT` ordering (`fgdb-mf7og` closed); full temporal types (`DATE`, `LOCAL TIME`, `TIME`, `LOCAL DATETIME`, `DATETIME`, `DURATION`, `date.truncate`, `duration.between`, `--tzdb-file`, `fgdb-hbi8s`/`fgdb-txbg9` closed); exact `Decimal` constructors/arithmetic/aggregates/wire tags (`ed28ecd1`, `c54334ad`, `422aa1de`); dynamic `properties()`, `keys()`, `n{.*}` (`fgdb-2jw3z` closed); `UNION` column alignment (`fgdb-d9q6v` closed); `WITH` feeding `CREATE`/`SET`/`DELETE` and `UNWIND` driving `MERGE`/`SET` (`fgdb-cpny9` closed); `MERGE` edge `RETURN` (`9e741df7`, `28d5f031`); in-GQL `CALL hybrid.search` (`25cf0f73`) and `CALL fnx.*({...})` inline projection maps (`4cd8d16e`). **Still open/missing**: still **7 racing read parsers + 6 write pre-classifiers** (`fgdb-285i2` open); P1 bug `fgdb-zshkh` (committing a named-zone `DATETIME` bricks `Database::open` without `--tzdb-file`); 9 failing tests in `fgdb-gql`; no chained `CREATE (a)-[:R]->(b)-[:S]->(c)`, general `CALL {}` subqueries, `FOREACH`, or native `SHORTEST k` in `MATCH`; no in-repo openCypher TCK runner/gate (`fgdb-cdbn5` open; scratch Python run on 10-10 scored 827 PASS / 657 PASS-ERR / 2,236 REFUSED / 54 WRONG / 61 COLUMNS / 12 ERROR across 3,897 scenarios). |
+| 5 | **Chronicle (B1 — One Version Universe)** | ~50% | **~54%** | Append-only content-addressed commit stream, two-fsync protocol (`D1` symbols/blocks, `D2` `CommitMarker` + root slot), AEAD + RaptorQ-coded `CommittedEffectCapsule` with systematic-source fast path (`e97e42d8`), expanded `fgdb scrub` covering capsules + `FGVP` vertex patches + `FGSM`/`FGSR`/`FGSG`/`FGSI` metadata chain (`af1ebcf6`), and three historical result-diffing surfaces (`Database::query_diff`, `AuthorizedReadSession::query_diff` in `a28f36da`, and `standing_replay_difference` / `_cursor` in `b310da29`/`e26433b6`). **Still absent** (`crates/fgdb-chronicle/src/lib.rs:28-31`): no durable database branches (`BranchManifest`, fork, merge, branch write — `BRANCH = BranchId(1)` is hardcoded and `AT BRANCH` in `query_branch.rs` is only a read-only host closure); no retention cooling (compaction floor is hardcoded to `CommitSeq(0)` at `crates/fgdb/src/lib.rs:4953-4958`); no `FOR SYSTEM_TIME BETWEEN`; Strata objects have no RaptorQ coding; multi-object packing (`pack.rs`) is unwired. |
+| 6 | **Strata (B2 — Graph-Structured LSM) & larger-than-memory** | ~30% | **~44%** | **Major progress on cold reads, external spill, and root scaling, but Tiers I/R/A are still unintegrated in `Database`.** Landed since 10-04: three-level V5 `PartitionRoot` (`FGSI`, `0aeaf5bc`, flat per-commit root bytes to $2^{20}$ refs); open-addressed `EIdIndex` edge-history validator (`be665f5e`, `4fc882e0`, `1b8ad45c`); lock-free single-decode read-only open (`dce94b64`) + on-demand delta window (`4001c58f`); `BufferedReadView` (`crates/fgdb/src/buffered_read.rs`) with `BlockSummary`/`PatchDescriptor` pruning (`d93988f9`) and cold vertex/edge/incidence streams (`46bfd003`, `64fca993`, `34ababa3`); external spill execution (`crates/fgdb/src/query_spool/`, CLI `--spill-dir`, server `ReadOrdered`) for `ORDER BY`, numeric/`DISTINCT` grouping, binary set ops, `UNWIND`, and cold correlated probes; Saved V2 compact load checkpoints (`327f6e30`, `6818faba`). **Still unintegrated/missing**: Tiers I (inline), R (sealed compressed CSR runs), and A (archived anchors) are NOT in the production `Database` read/write/compact path (`SealedPartition` is called only by `query_prism.rs` and tests); zero tier-migration decision cards; default `Database::open`, `open_read_view`, `fgdb query`, and `fgdbd` still decode every block and vertex patch into RAM on open (and `open_buffered_read_view` still reads/validates every block during initial admission); commits still issue one file write + fsync per touched `(src, relation)` block (`fgdb-79kyi`). |
+| 7 | **Loom (B3 — Unified Factorized / WCOJ Execution)** | ~32% | **~40%** | `GlaOperator` has 28 variants (`DifferentEdges` added in `7d752d17`). New since 10-04: factorized falling-factorial multiplicity $m(m-1)\cdots(m-k+1)$ for `DIFFERENT EDGES` in `aggregation/weighted.rs` (`fb18c95d`, `fgdb-ujaad`, cutting `facebook_combined` triangle count 9.51 s → 0.55 s and `fgdbd` triangles 59.5 s → 1.17 s via `cd7a116d`); 2–3 hop trail-multiplicity chain DP + single-pass target grouping (`0c1438fe`, `7f70b36a`, `fgdb-h3gf6`, cutting `soc-Epinions1` 3-hop `GROUP BY d` 7.64 s → 0.08 s); skipping unused `CapturePath` (`8ebd5d32`, `39312f6d`, cutting named 2-hop count 31.3 s → 0.49 s); dense per-group endpoint verdict arrays (`c6b41b1d`, 2.2× on `road-ny`); open-addressed `WinnerIndex` and `BorrowedTables` sorted-`Vec` binary search in `gql_exec/source.rs` (`613a29f9`, `52180f74`). **Still missing vs Plan §8**: `fgdb-gql` (`algebra_exec::build_index` at `algebra_exec.rs:291-353`, `free_join::trie::RelationTrie` at `free_join/trie.rs:31-147`, `weighted::topology::weigh`) still rebuilds fresh in-memory `BTreeMap` / `Vec` adjacency indexes on every query instead of executing over Strata CSR runs; no cost-based optimizer (`fgdb-calibrate`/`fgdb-sketch` unwired); no SIMD galloping intersection (`fgdb-unsafe-simd` unwired); single-threaded execution (no morsel parallelism). |
+| 8 | **Ripple (B4 — Incremental Everything)** | ~45% | **~52%** | 17 active `StandingQuery` variants in `crates/fgdb/src/standing_query.rs:275-310` over exact multi-limb `ZSet`s (`crates/fgdb-delta-types`). New since 10-04: `StandingQuery::Group` over arbitrary row-producing views (`32aab046`), `StandingQuery::Set` over `Window` and `Closure` views (`87dc30ca`), owned subscription slot reclamation (`subscribe_native_owned` / `close_and_release`, `02b564ab`), k-way `SortedMerge` coalesced multi-tick replay and `result(after) - result(before)` historical differences (`standing_replay_coalesced`, `standing_replay_difference`, `standing_replay_difference_cursor`, `c8cf3a43`, `b310da29`, `e26433b6`), and live remote `SUBSCRIBE TO` over FGP in `fgdbd` (`aeea3039`). **Still missing**: no `fgdb-ripple` crate; no `CREATE MATERIALIZED VIEW ... REFRESH INCREMENTAL` DDL or planner view substitution; subscriptions are in-memory only and do not survive restart (`standing_query.rs:5`); no general recursive Datalog / stratified negation circuit; remote `SUBSCRIBE` requires unrestricted `Scope::All`. |
+| 9 | **Transactions, SSI & deterministic merge ladder** | ~52% | **~56%** | Backward OCC validation in `WriteTxn::transaction_conflict_in` (`crates/fgdb/src/write_txn_parts/finish.rs:425-532`) checks per-relation, label-domain, point-read, and mutation-footprint witnesses over `delta_since(basis)` (with on-demand `ensure_delta_window` in `finish.rs:237-244`). New since 10-04: CLI savepoints (`--savepoint`, `--rollback-to`, `--release` in `218b6c6f`), composed `CALL fnx.*` (`e674c06b`) and `CALL hybrid.search` (`37e87bec`) over staged `WriteTxn` overlays, and all 5 write-`RETURN` families wired in transactions (`d77e1674`). **Still stubbed/unwired**: validation is backward FCW/read-witness OCC, **not** full multi-transaction SSI with `rw`-antidependency cycle detection (`FG-INV-05.core` is `stub`, `fgdb-w4-ssi-witnesses-jds` open); the 4 deterministic rebase methods (`commit_append_only_rebased`, `commit_disjoint_fields_rebased`, `commit_mixed_rebased`, `commit_idempotent_rebased` using `MergeEvalCx`) have **zero production callers** (`WriteTxn::finish` hardcodes `append_rebase: None` at `finish.rs:191`; `FG-INV-17.core` is `stub`). |
+| 10 | **Plan certificates & deterministic replay (B5)** | ~55% | **~60%** | `NativePlanCertificate`, `NativeExplainCertificate` (`EXPLAIN` / `EXPLAIN (CERTIFICATE)`), and `NativeResultCertificate` (`Database::execute_certified`, `Database::replay`, CLI `--certify-to` / `fgdb replay`). New since 10-04: `NativeResultCertificate` v2 (`b310da29`, `fgdb-3b1v7` closed) binds `Vec<NativeProcedureEvidence>` (`call_digest`, `kernel_digest`, `evidence_digest`, `ComplexityWitness`) for composed `CALL fnx.*` queries and verifies them bit-for-bit on `replay`. **Still open**: `fgdb-vuyw5` (eager `fgdb query` with `FOR SYSTEM_TIME AS OF SEQ n` stamps `"seq"` with the database frontier instead of `n` — reproduced live in this pass — and `--certify-to` silently overwrites existing files); `FG-INV-19.core` remains `stub`. |
+| 11 | **Adaptive decision cards (B5)** | ~5% | **~5%** | **Unchanged.** Zero runtime adaptive controllers or decision cards exist anywhere in `fgdb`, `fgdb-gql`, `fgdb-strata`, or `fgdb-chronicle` (no plan-choice, tier-migration, compaction-pacing, victim-selection, or hedge/race decision cards). Only the test-only CI budget allocator `CoverageDecisionCard` in `crates/fgdb-sim/src/campaign.rs:408-570` and the enum tag `ReplayClass::DecisionCards` in `crates/fgdb-evidence/src/lib.rs:45` exist. (Note: `crates/fgdb-policy` is the macaroon read-caveat IR consumed by `fgdb-warden`, not an adaptive policy engine.) |
+| 12 | **Prism `fnx-*` algorithm bridge** | ~32% | **~42%** | 14 registered `CALL fnx.*` procedures (`8` in-house kernels over `SnapshotGraphView` / `6` over `SealedGraphView`, plus `6` `fnx-algorithms` centrality/core-number routines). New since 10-04: inline query-local graph projection maps `CALL fnx.pagerank({labels:['Person'], relations:['KNOWS'], weight:'w', direction:'undirected', ...})` and named projection arguments (`4cd8d16e`, `fgdb-luq0b` closed); `YIELD node` column alias and direct `node.prop` access (`0a402191`); `OnceLock` caching of `kernel_source_digest()` (`e26433b6`); reusing unrestricted Prism projections across `fgdbd` calls + interruptible introsort (`287ea094`, `4d68f4d5`, `fgdb-0tbrz` closed: WCC 3.9–5.5×, PageRank 2.0–2.2×); mutex-serialized cache tests (`6be1a501`). **Still missing**: only 14 of 550+ `fnx-*` algorithms exposed; `SnapshotGraphView` copies visible vertices/edges into a fresh CSR, and the 6 `FoundationAlgorithm` routines copy the graph a **second** time into a string-keyed `fnx_classes::Graph::strict()` (`crates/fgdb-prism/src/foundation.rs:53-85`) with no mid-kernel cancellation; Graphalytics gaps (`fgdb-8erds` open: PageRank exact-iteration mode, directed LCC, CDLP). |
+| 13 | **Beacon hybrid vector + text + graph retrieval** | ~38% | **~48%** | New since 10-04: in-GQL `CALL hybrid.search(label => ..., text => ..., vector => ..., k => ...) YIELD node, score` (`25cf0f73`, `895d4ed3`), composing with `MATCH`/`WHERE`/`RETURN` and staged `WriteTxn` overlays (`37e87bec`); packed LE `f32` vector properties (`vector_property => 'emb'`, `--vector-encoding packed`, `vector:0.1,...`, `97174601`, `38385a8f`); `HnswConfig::exact_only()` skipping HNSW graph construction on one-shot exact vector searches (`52315f38`, `53ea2eef`, `fgdb-43k4t` closed: Reddit 51k×300d kNN unblocked in 0.9 s); zero-norm vectors skipped under cosine rather than refusing index build, and finite `f64` coordinates rounded deterministically to `f32` (`1e96c93d`, `fgdb-x83z1` closed); `--eligible` endpoint filtering (`fgdb-w7-hybrid-99if`); commit-maintained resident registrations (`Database::register_beacon_index`, `d9a9f15c`). **Still missing**: no durable on-disk HNSW or BM25 segments in Strata/Chronicle; `CALL hybrid.search` and `fgdb search` still rebuild the in-memory index from scratch on every call and do **not** consult `register_beacon_index`; open P1 bug `fgdb-euy8y` Part 2 (`CALL hybrid.search ... RETURN` without explicit `ORDER BY score DESC` re-sorts by `VId`, discarding rank order). |
+| 14 | **Warden capability security (`fgdb-warden`)** | ~45% | **~58%** | Keyed BLAKE3 macaroon tokens with chained HMAC tags, caveats, revocation set, and per-permit resource budgets. **Major fixes since 10-04**: both authorized-write existence/ID-counter side channels closed (`fgdb-hxgm1` closed via `4b8f397a` rejecting client-chosen IDs on authorized writes and `b7ae8e9d` introducing the keyed 4-round Feistel permutation `P_k(counter)` for `VId`/`EId` allocation); offline token delegation via `fgdbd attenuate` (`b8a4d40c`, `fgdb-8d8kq`); live idle-connection narrowing via `AUTH_REFRESH` (`a271ad32`); pre-commit output admission across all 5 server write-`RETURN` families (`b1a2cfbc`, `7d72a1ef`, `caa7daed`); per-poll `CiphertextIo`/`GuardedIo` output guards (`326d3a0f`, `bca0da51`); 1-in-256 Warden clock sampling (`2c6fab14`). **Still missing**: no `fgdb-secure-view` crate (`fgdb-w4-secure-view-v87` open; only **48 of 360** `Database` `pub fn` methods are capability-guarded, leaving **312** raw methods); `CommitMarker::authorization_decision_digest` is still hardcoded to `Digest([0u8; 32])` (`crates/fgdb/src/lib.rs:5473`); `FG-INV-20.core` is `stub`. |
+| 15 | **Agent-Native (B6: branches, capabilities, provenance, hybrid)** | ~28% | **~35%** | Hybrid retrieval (`CALL hybrid.search` in GQL/transactions/authorized sessions), CLI `--robot` NDJSON, offline `fgdbd attenuate` sub-delegation, and live `AUTH_REFRESH` narrowing all work end-to-end. **Still missing**: zero branch-per-agent isolation (`BranchId(1)` hardcoded, no branch fork/merge/write); zero first-class provenance edges or automatic agent lineage capture. |
+| 16 | **Aegis replication, backup/restore & rolling upgrade** | ~15% | **~18%** | `crates/fgdb-repl` gained read-quorum confirmation (`Replica::confirm_read_probe`, `AppliedReplica::confirm_read_probe`) and batched read-index heartbeats (`read_index_batch`, `d5fef47e`..`13ae0336`), and `crates/fgdb-crypto` gained pure-Rust `Sha512` (`82c5e03f`), strict cofactorless RFC 8032 `Ed25519` (`9be473de`), and `SIGNATURE_PROFILE_ED25519_STRICT` (`cc4d7a35`). `Database::adopt` / `fgdb adopt` (`f8750862`) syncs offline directory copies. **Still 0% wired in product**: neither `fgdb`, `fgdb-cli`, nor `fgdb-server` depends on `fgdb-order` or `fgdb-repl`; quorum-one Raft (`fgdb-w2-order-raft-0a90`) is unwired; no online backup/restore command or rolling-upgrade controller exists. |
+| 17 | **System graph (`$system`) & observability** | ~5% | **~8%** | `Server::metrics()` (`active_connections`, `accepted_connections`, `rejected_connections`), `GET /v1/health`, `GET /v1/databases/<name>/schema` (`83b25ab4`), and `Database::beacon_index_status` (`d9a9f15c`) exist as narrow Rust/HTTP endpoints. **Still missing**: no `fgdb-system-graph` or `fgdb-observatory` crate (`fgdb-obs-system-graph-tki` open); no queryable `$system` virtual graph over live transactions, locks, compactions, capability revocations, or decision cards. |
+| 18 | **Closed dependency universe & unsafe boundary ledger** | ~92% | **~93%** | `Cargo.lock` (279 packages) and `deny.toml` pass `dependency_policy_e2e.sh` (`6/6`). All 28 ordinary crates under `crates/` enforce `#![forbid(unsafe_code)]`; the 3 unsafe islands (`fgdb-unsafe-arena`, `fgdb-unsafe-simd`, `fgdb-unsafe-vfs`) use `#![deny(unsafe_code)]` and their **7 `#[allow(unsafe_code)]` sites** match the **7 rows** in `registries/unsafe_boundary_ledger.toml` 1-for-1. **Caveat**: 12 of the 31 active crates (104,972 LOC — including **all 3 `fgdb-unsafe-*` crates**) have zero dependency path from `fgdb`, `fgdb-cli`, or `fgdb-server` (`fgdb-topology-seven-crates-9n8ao` still open), and `g0_topology_e2e.sh` is red at line 125. |
+| 19 | **Verification ladder, invariants, checkers & proof lanes** | ~38% | **~36%** | **Regressed on live gate greenness and stagnant on registries.** `fgdb-zww2g` (UBS partitioned scan) and `fgdb-f0u74` (`--all-features`) were fixed on 10-05, and `g0_spine_e2e`, `g0_claims_e2e`, `g0_identity_e2e`, `g0_negative_evidence_e2e`, `g0_proof_lanes_e2e`, and `g0_threat_e2e` pass. **However**: (1) `invariants.toml` (`0/20` `.core` live, `8/28` narrowing clauses live), `checker_index.toml` (`74/120` live, `46` stubs), and `proof_lanes.toml` (`1/10` checked, `0` TLA+ files) have been untouched since Sept 4; (2) `fgdb-reference` has been untouched since Aug 13; (3) **0 of 166 new test files** added since 10-04 use `fgdb_reference` or DPOR; (4) `main` is red on 3 registered G0 script gates and 11 unit/integration tests across `fgdb-gql` and `fgdb-cli`. |
+| 20 | **§17 Performance gates & real-world competitive speed** | ~5% | **~12%** | First real-world gauntlet (`2026-10-12/13`) ran on 7 SNAP/DIMACS graphs against 7 engines (Kùzu, LadybugDB, DuckDB/DuckPGQ, Grafeo, Neo4j, Memgraph, FalkorDB) and drove 28+ targeted `perf(...)` commits (`7392832d`, `2420931a`, `fb18c95d`, `53ea2eef`, `be665f5e`, `4fc882e0`, `7f70b36a`, `8ebd5d32`, `39312f6d`, `52180f74`, `c6b41b1d`, `4d68f4d5`, `13534f4d`, `fa590382`). **Reality**: every shape in `crates/fgdb-bench` still emits `"empirical_gate_activated": "false"` (skew shapes still use `VERTEX_COUNT = 150`), and `fgdb` remains **2–4 orders of magnitude slower** than incumbents on point lookups, bulk load, and whole-graph scans because Strata Tiers I/R/A, packed object writes, and zero-copy resident/mmap reads are not yet built. |
+
+---
+
+### The Five Reality-Check Questions (2026-10-13)
+
+#### 1. What really works today end-to-end?
+- **All three product postures (`fgdb` embedded, `fgdbd` server, `fgdb` CLI) build, run, and interoperate end-to-end.**
+  - Embedded `Database` (`360` `pub fn` methods) and `EmbeddedReadView` / `BufferedReadView` create, adopt, write, compact, scrub, diff, certify/replay, run 14 `CALL fnx.*` algorithms, run `CALL hybrid.search`, and maintain 17 `StandingQuery` incremental Z-set operators.
+  - `fgdbd` serves authenticated connections over native **FGP** (TCP and TLS 1.3), **HTTP/1.1 JSON**, and **Bolt 5.0** (`BoltCompatProfileV1` reads + causal bookmarks + no-`RETURN` autocommit writes), enforcing Warden capability caveats before graph expansion, per-poll output guards (`CiphertextIo` / `GuardedIo`), live `AUTH_REFRESH` narrowing, `PREPARE`/`EXECUTE_PREPARED`, `ReadStream`, `ReadOrdered` (with disk spill), `SUBSCRIBE TO`, `EXECUTE_BATCH`, and supervised recovery.
+  - `fgdb` CLI executes all 14 subcommands (`create`, `adopt`, `compact`, `scrub`, `write`, `query`, `import-csv`, `diff`, `transaction`, `replay`, `load`, `search`, `remote`, `robot schema`) in both human and `--robot` NDJSON modes, including `--buffered` cold reads and `--spill-dir` external sort/grouping/set-ops/UNWIND.
+  - On 7 real SNAP/DIMACS graphs (up to 264K vertices / 730K edges), `fgdb` matched independent gold and 7 competing graph engines on **39/39 compared query cells**.
+
+#### 2. What is stubbed, partial, or purely aspirational?
+- **Unintegrated core storage tiers (Bet B2)**: Strata's Tier I (inline micro-adjacency), Tier R (sealed compressed CSR runs), and Tier A (archived anchors) do not exist in the production `Database` storage/read/write/compact path (`SealedPartition` is an in-memory projection used only by `query_prism.rs`). Default `Database::open`, `open_read_view`, and `fgdbd` still decode every block and vertex patch into RAM on open.
+- **Unintegrated multi-object packing & retention cooling (Bet B1)**: `crates/fgdb-chronicle/src/pack.rs` is unwired (commits still write and `fsync` one file per touched `(src, relation)` block), compaction is consolidation-only (`floor = CommitSeq(0)`), Strata objects have no RaptorQ coding, and durable database branches (`BranchManifest`, fork, merge, branch write) do not exist (`BranchId(1)` is hardcoded).
+- **Per-query `BTreeMap` / `Vec` adjacency rebuilds in Loom (Bet B3)**: `fgdb-gql` (`algebra_exec::build_index`, `free_join::trie::RelationTrie`, `weighted::topology::weigh`) still allocates fresh in-memory adjacency maps per query; there is no cost-based optimizer, no SIMD galloping intersection, and no morsel-parallel execution.
+- **In-memory-only Ripple & Beacon (Bets B4 & B6)**: Standing queries (`standing_query.rs`) and registered Beacon indexes (`register_beacon_index`) are in-memory only and lost on reopen; `CALL hybrid.search` and `fgdb search` rebuild their BM25/HNSW index from scratch on every call; no `CREATE MATERIALIZED VIEW` or `CREATE INDEX` DDL exists.
+- **Backward OCC instead of SSI, and test-only Merge Ladder**: `WriteTxn` validates backward FCW/read witnesses over `delta_since(basis)` (`FG-INV-05.core` is `stub`), and the 4 `commit_*_rebased` methods (`FG-INV-17.core` is `stub`) have zero production callers.
+- **Zero runtime decision cards (Bet B5)** and **zero `$system` virtual graph (`Row 17`)**.
+- **12 active non-test crates (104,972 LOC) are completely unwired from all product crates**: `fgdb-calibrate`, `fgdb-repl`, `fgdb-sketch`, `fgdb-order`, `fgdb-collections`, `fgdb-resource`, `fgdb-unsafe-arena`, `fgdb-evidence`, `fgdb-claim`, `fgdb-unsafe-vfs`, `fgdb-unsafe-simd`, plus `fgdb-policy` (only used by `fgdb-warden`).
+
+#### 3. What are the biggest architectural & correctness risks?
+1. **Uncompiled direct-to-`main` commit flood breaking gates faster than repairs can land**:
+   104 of the last 178 commits (59%) landed directly on `main` with `cargo`/`rustc` explicitly `UNRUN`, requiring 10 `fix(build)` repair commits on 2026-10-13 alone and still leaving `main` red at `fd2a62a3` on 3 registered G0 script gates and 11 tests across `fgdb-gql` and `fgdb-cli`.
+2. **Named-zone `DATETIME` bricks `Database::open` (`fgdb-zshkh`, P1)**:
+   Once a vertex property containing a named-zone `DATETIME('...[America/New_York]')` is committed, every subsequent `Database::open` or `open_read_view` without `--tzdb-file` fails at startup with `TzdbResolverRequired` while eagerly decoding vertex patches, even for queries that never touch that vertex.
+3. **Architecture-level O(N) open, O(M) per-query index build, and O(blocks) per-commit fsync**:
+   Until Strata stores durable CSR runs (`Tier R`), packs delta objects per commit (`pack.rs`), and pages/mmaps blocks lazily on `Database::open` without full-root eager decode, `fgdb` cannot close the 100×–10,000× latency gap against Kùzu/DuckDB or scale smoothly to 10M–100M edges.
+4. **7 racing read parsers + 6 write pre-classifiers (`fgdb-285i2`, P1)**:
+   Every new GQL clause (`WITH ... MERGE`, `UNWIND ... SET`, `CALL ... RETURN`) requires combinatorial glue across multiple independent text parsers and executors, directly causing the subtle preparation/rebinding bugs seen in the newly failing `with_tests` and `edge_upsert_text` suites.
+5. **Two-month verification drift**:
+   166 new test files landed since 2026-10-04 with 0% using `fgdb-reference` (untouched since Aug 13) and 0% using DPOR schedule exploration.
+
+#### 4. Where does documentation diverge from implementation?
+- **`crates/fgdb-server/src/lib.rs:35`**: Still lists `PREPARE` and `AUTH_REFRESH` under *"Not served"*, even though both are implemented and served (`2371bd8a`, `a271ad32`).
+- **`crates/fgdb-server/src/main.rs:82-84` (`fgdbd help`)**: Still states of `--bolt-listen`: *"It is read-only: every RUN executes on a read session, and writes refuse with Neo.ClientError.Statement.AccessMode"*, whereas `crates/fgdb-server/src/bolt/autocommit.rs` (`40416231`) now serves bounded no-`RETURN` autocommit writes and advertises `"fgdb_autocommit_writes": true` in `HELLO`.
+- **`crates/fgdb-cli/src/main.rs:37-40` (`ROBOT_SCHEMA`)**: Still reports `"v": 1` despite adding `"adopted"`, `"buffered"`, `"stream"`, `"statement"`, and expanded `"scrubbed"` fields (`fgdb-95wsi`).
+- **`README.md` vs runtime posture**: `README.md` (updated in `f4ec3c25` on 10-05) still describes `fgdbd` as not yet shipped (`"there is no server binary (fgdbd)..."` in the status narrative), whereas `fgdbd` is now an active binary speaking FGP, HTTP/1.1, and Bolt 5.0.
+
+#### 5. What is the dependency-ordered path to close the gap?
+See the **Dependency-Ordered Bridge Plan (2026-10-13)** and its **Three Ambition Rounds** immediately below.
+
+---
+
+### Dependency-Ordered Bridge Plan (2026-10-13)
+
+```mermaid
+flowchart TD
+    S0["Stage 0: Restore True Green Bar on main at fd2a62a3<br/>(fgdb-c85bp, fgdb-dvtfk, fgdb-cltfx)"] --> S1["Stage 1: Eliminate Startup & Correctness Cliffs<br/>(fgdb-zshkh, fgdb-vuyw5, fgdb-euy8y, fgdb-7r8sy)"]
+    S0 --> S2["Stage 2: One Lexer, One AST, One Planner<br/>(Collapse 7 Read Parsers + 6 Write Classifiers fgdb-285i2)"]
+    S1 --> S3["Stage 3: Packed Commit Stream & Lazy Paged Strata Open<br/>(Wire pack.rs fgdb-79kyi + Descriptor-Only Open fgdb-teypc)"]
+    S2 --> S4["Stage 4: Durable Sealed CSR Runs (Tier R) & Zero-Copy Loom/Prism<br/>(fgdb-teypc, fgdb-61p1n, Möbius Trail Compiler fgdb-62kus)"]
+    S3 --> S4
+    S4 --> S5["Stage 5: Durable Beacon Segments, Incremental Views & Full SSI/Rebase<br/>(Resident/Disk HNSW+BM25, Durable Subscriptions, Production Rebase & SSI)"]
+```
+
+#### Stage 0 — Restore the True Green Bar on `main` (`fgdb-c85bp`, `fgdb-dvtfk`, `fgdb-cltfx`)
+1. **Fix `scripts/g0_topology_e2e.sh` line 125 (`fgdb-c85bp`)**: Replace bare `grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"'` (which exits `1` under `set -e` now that all 3 postures are `"outcome":"pass"`) with ` { grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"' || true; }` and assert all 3 postures are accounted for.
+2. **Fix `scripts/g0_commit_provenance_e2e.sh` (`6be1a501` → `fgdb-7fqu6`, `fgdb-c85bp`)**: Adjudicate `6be1a501`'s citation of `fgdb-7fqu6` in the provenance ledger or create/sync the corresponding bead record so `g0_commit_provenance_e2e.sh` exits `0`.
+3. **Fix `scripts/g0_architecture_decisions_e2e.sh` (52 `bead_provenance_orphan` violations, `fgdb-c85bp`)**: Add the appropriate `b1..b6` bet labels to the 52 orphaned beads (`fgdb-0tbrz` .. `fgdb-yzt2b`), export via `scripts/br_sync.sh`, and verify `scripts/bead_provenance_preflight.sh` and `g0_architecture_decisions_e2e.sh` exit `0`.
+4. **Fix the 11 failing tests in `fgdb-gql` and `fgdb-cli` + the `fgdbd` recursion-limit warning (`fgdb-dvtfk`, `fgdb-cltfx`, `fgdb-c85bp`)**:
+   - In `fgdb-gql` (`fgdb-dvtfk`, `fgdb-cltfx`): fix the 2 newly broken write-query tests (`edge_merge_query::with_tests::filtering_unwind_grouping_and_rebinding_use_one_native_tail` and `vertex_upsert::query::batch::tests::full_width_identity_is_not_collapsed_or_replaced_by_row_number`), the 1 failing `tests/edge_upsert_text.rs` test (`malformed_branch_direction_and_target_never_reach_catalog_resolution`), and update the 6 stale refusal-law tests (`edge_stream::aggregate::*`, `set_ops::aggregate::stage::*`, `stream::aggregate::tests::spill_tests::*`) whose negative assertions were superseded when `COLLECT` and spilled aggregates were enabled.
+   - In `fgdb-cli` (`fgdb-c85bp`): update `diff::tests::query_and_replay_take_the_same_exact_limits_and_write_refuses_them` (`crates/fgdb-cli/src/diff/tests.rs:782`) to reflect `e42f4c9e` (`write` now accepts query limits), and fix `stream::tests::supported_projection_and_pipeline_streams_do_not_weaken_real_refusals` (`crates/fgdb-cli/src/stream/tests.rs:323`).
+   - In `crates/fgdb-server/src/main.rs` (`fgdb-c85bp`, `fgdb-7r8sy`): add `#![recursion_limit = "256"]` (or box the inner ordered-stream future) to eliminate the `#[warn(recursion_depth_exceeding_limit)]` future-incompatibility warning, and update stale help/doc comments in `crates/fgdb-server/src/{lib,main}.rs` and `README.md`.
+
+#### Stage 1 — Eliminate User-Facing Correctness, Catalog & Startup Cliffs (`fgdb-zshkh`, `fgdb-vuyw5`, `fgdb-euy8y`, `fgdb-7r8sy`)
+1. **Decouple `Database::open` from `--tzdb-file` (`fgdb-zshkh`)**: Store and admit named-zone `DATETIME` scalars by their canonical structural payload during vertex-patch admission without invoking the IANA zone resolver at `Database::open` time; invoke `CanonicalScalarResolver` lazily only when a query expression requires zone transition math on a named-zone timestamp.
+2. **Persist a self-describing `SchemaCatalogObject` + doc truth-up (`fgdb-7r8sy`)**: Persist `LabelId`/`RelationId`/`PropertyKeyId` ↔ name bindings in the database root manifest so `fgdb query/write/diff/search` and `fgdbd` do not require repeating `--label`/`--relation`/`--property` on every invocation (and so untyped `MATCH (a)-[r]->(b) RETURN type(r)` never fails at runtime when a relation flag is omitted).
+3. **Fix CLI `FOR SYSTEM_TIME AS OF SEQ` result metadata & `--certify-to` safety (`fgdb-vuyw5`)**: Report the queried `AS OF` sequence (not `view.frontier().0`) in eager `fgdb query` output, support `int:` parameters in `AS OF SEQ $p` and leading `FOR SYSTEM_TIME` before `CALL`, and require `--force` or atomic create-new on `--certify-to`.
+4. **Preserve `CALL hybrid.search` rank order (`fgdb-euy8y`)**: Preserve procedure output ordering through downstream `RETURN` projections when no explicit `ORDER BY` overrides it.
+
+#### Stage 2 — Unify the GQL Front-End (`fgdb-285i2`, `fgdb-cdbn5`)
+1. **Collapse the 7 racing read parsers and 6 write pre-classifiers into one lexer, one AST, and one syntax dispatcher (`fgdb-285i2`)**: Eliminate `PreparedNativeRead::prepare`'s 7-way sequential parser race (`crates/fgdb/src/query_explain.rs:97-284`) and `query_write`'s 5-way `has_return_clause` probing (`crates/fgdb/src/query.rs:474-607`), retiring the legacy 1–2 hop `BoundPlan` parser.
+2. **Build the in-house openCypher TCK runner & tracked conformance matrix (`fgdb-cdbn5`)**: Turn the 2026-10-10 out-of-tree Python TCK measurement (827 PASS / 657 PASS-ERR / 2,236 REFUSED / 54 WRONG) into a first-party Rust runner in `fgdb-conformance` with a ratcheted CI gate in `checker_index.toml`.
+
+#### Stage 3 — Close the Storage I/O & Open-Time Gap (`fgdb-79kyi`, `fgdb-teypc`, `fgdb-e8gr4`)
+1. **Wire multi-object packing (`crates/fgdb-chronicle/src/pack.rs`) into `BlockStore` and `CommitCoordinator` (`fgdb-79kyi`)**: Coalesce all `FGSB`, `FGSP`, and `FGVP` objects produced by a commit or `fgdb load` chunk into a single `PackedObjectGroup` segment with **one** data `fsync` at `D1` and **one** marker `fsync` at `D2` (replacing ~400 `F_FULLFSYNC`s per commit).
+2. **Descriptor-only lazy `Database::open` / `open_read_view` (`fgdb-teypc`, `fgdb-e8gr4`)**: Store authenticated per-block `BlockSummary` and `PatchDescriptor` tables directly in `DeltaRootSegment` (`FGSG`), so `Database::open`, `open_read_view`, and `open_buffered_read_view` verify only the root/manifest chain on startup ($O(\text{segments})$ instead of reading and decoding every block on open) and fault blocks in on demand through `ExtentBuffer` / `fgdb-unsafe-vfs` read-only `mmap`.
+
+#### Stage 4 — Durable Sealed CSR Runs (`Tier R`) & Zero-Copy Loom / Prism Execution (`fgdb-teypc`, `fgdb-61p1n`, `fgdb-62kus`)
+1. **Promote `SealedPartition` (`Tier R`) to a durable, content-addressed Strata segment (`FGRN`, `fgdb-teypc`)**: Persist Elias-Fano / dense-CSR runs across compactions and checkpoints with a 4 KiB BLAKE3 page Merkle tree and tier-migration decision cards so `Database` and `fgdbd` read directly from CSR runs via `fgdb-unsafe-vfs` `mmap` without decoding `AdjacencyEntry` vectors or building `BTreeMap`s on open.
+2. **Eliminate per-query `BTreeMap` / `Vec` adjacency rebuilds in `fgdb-gql` and generalize the Möbius trail compiler (`fgdb-61p1n`, `fgdb-62kus`)**: Replace `algebra_exec::build_index`, `build_identified_index`, `free_join::trie::RelationTrie`, and `weighted::topology::weigh` with direct cursor/slice traversal over Strata's resident/sealed CSR runs, wire `fgdb-unsafe-simd` for galloping slice intersection, and generalize `aggregation/weighted.rs` into the partition-lattice Möbius trail compiler (`fgdb-62kus`).
+3. **Zero-copy `GraphView` for all 14 Prism procedures**: Eliminate the second copy into string-keyed `fnx_classes::Graph::strict()` in `crates/fgdb-prism/src/foundation.rs:53-85` and check `QueryCx` cancellation inside inner centrality loops.
+
+#### Stage 5 — Durable Beacon Indexes, Materialized Views, Full SSI & Active-Crate Closure
+1. **Route `CALL hybrid.search` and `fgdb search` through `MaintainedBeaconIndex` and persist HNSW/BM25 segments**: Stop rebuilding HNSW and BM25 indexes from scratch per query when a maintained index is registered, and persist immutable Beacon segments in Strata.
+2. **Wire or demote the 12 unreachable active workspace crates (`fgdb-topology-seven-crates-9n8ao`)**: Wire `fgdb-unsafe-simd` + `fgdb-unsafe-vfs` + `fgdb-calibrate` + `fgdb-sketch` into Strata/Loom, wire quorum-one `fgdb-order` into `CommitCoordinator` (`fgdb-w2-order-raft-0a90`), and honestly reclassify any remaining unintegrated crates in `registries/workspace_topology.toml`.
+3. **Promote the first wave of `.core` invariants in `registries/invariants.toml`**: Wire production callers for deterministic rebase (`FG-INV-17`), bind `authorization_decision_digest` into `CommitMarker` (`FG-INV-20`), and extend `fgdb-reference` differential and DPOR tests to cover native GQL reads/writes.
+
+---
+
+### Ambition Rounds Applied In-Place (2026-10-13)
+
+#### Round 1 — The Dramatically More Ambitious Technical Synthesis (10× Systems & Mathematical Alpha)
+Rather than merely patching individual hot loops, three structural algorithmic leaps turn FrankenGraphDB's existing building blocks into genuine 10× advantages over Kùzu, DuckPGQ, and Neo4j:
+
+1. **Zero-Decode Succinct CSR (`FGRN`) over BLAKE3-Verified `mmap` Views (`fgdb-teypc`: `fgdb-unsafe-vfs` + Elias-Fano)**:
+   - *Why the current design is slow*: Every `fgdb` CLI invocation reads, BLAKE3-hashes, and decodes every `FGSB` block into heap-allocated `Vec<AdjacencyEntry>` and `BTreeMap`s before answering a 1-hop query (taking ~3 s on `soc-Epinions1` vs 1–5 ms on Kùzu).
+   - *The 10× leap*: `crates/fgdb-strata/src/tiered/sealed/mod.rs` *already* implements Elias-Fano monotone gap encoding for neighbor lists and degree offsets, and `crates/fgdb-unsafe-vfs/src/view.rs` *already* implements ledgered read-only `mmap` (`Mapping::view_bytes`). By persisting `SealedPartition` as a page-aligned, 64-byte-cacheline-framed `FGRN` segment with a 4 KiB / 16 KiB Merkle/BLAKE3 page tree in its footer (`fgdb-teypc`), `open_read_view` becomes **zero-allocation and $O(1)$**: it `mmap`s the `FGRN` file, verifies only the 64-byte root MAC on open, and verifies individual pages lazily on first page touch. Point lookups and 1-hop neighbor scans touch $\le 2$ pages (<200 µs cold, <5 µs warm).
+2. **Homomorphism-Basis & Falling-Factorial Compilation for Arbitrary `DIFFERENT EDGES` Motifs (`fgdb-62kus`: Loom)**:
+   - *Why the current design hits walls*: Commit `fb18c95d` (`fgdb-ujaad`) proved that replacing edge-tuple enumeration with falling-factorial weights $m(m-1)\cdots(m-k+1)$ sped up directed triangles **17×–50×**, and `7f70b36a` (`fgdb-h3gf6`) proved that inclusion-exclusion over 2–3 hop chains ($\text{trails} = \text{walks} - N_{12} - N_{23} - N_{13} + 2N_{123}$) sped up 3-hop counts **36×–95×**. Right now those are hand-coded special cases in `aggregation/weighted.rs`.
+   - *The 10× leap*: Generalize this into a general **Möbius-inversion trail compiler** in Loom (`fgdb-62kus`): for any query pattern $Q = (V_Q, E_Q)$ under `DIFFERENT EDGES` whose edge-variables are not projected, decompose $\text{Trails}(Q \to G) = \sum_{\pi \in \Pi(E_Q)} \mu(\hat{0}, \pi) \cdot \text{Hom}(Q/\pi \to G)$, where $\Pi(E_Q)$ is the partition lattice of parallel-compatible edge slots, $\mu(\hat{0}, \pi) = \prod_{B \in \pi} (-1)^{|B|-1}(|B|-1)!$ is the Möbius function of the partition lattice, and each quotient pattern $Q/\pi$ is evaluated by factorized FreeJoin / WCOJ over compressed CSR degree multiplicities. This gives exact ISO GQL `DIFFERENT EDGES` semantics on **any** k-hop chain, cycle, diamond, or clique without ever materializing intermediate edge tuples.
+3. **Sublinear Delta-Driven Maintenance for Prism & Beacon Over Chronicle's Z-Set Stream**:
+   - *Why the current design is slow*: Both `CALL hybrid.search` and `CALL fnx.*` rebuild projections from scratch when the database advances by even 1 commit.
+   - *The 10× leap*: Chronicle's `LogicalDeltaBatch` is *already* a Z-set delta $\Delta G_t$. By feeding $\Delta G_t$ directly into (a) `MaintainedBeaconIndex` (with tombstoned HNSW bitsets + delta posting lists merged on compaction) and (b) incremental CSR delta overlays in `ProjectionCache` (applying $\Delta E_t$ to the cached `SnapshotGraphView` in $O(|\Delta E_t| \log d)$ and warm-starting PageRank from the prior frontier's eigenvector $x^{(t-1)}$), post-write analytics and hybrid search drop from $O(|V| + |E|)$ to $O(|\Delta G_t|)$.
+
+#### Round 2 — Every Idea Evaluated on Merit (Keep / Defer / Cut Matrix)
+
+| Candidate Idea | Expected Impact vs Complexity | Decision | Rationale |
+|---|---|---|---|
+| **1. Fix the 3 red G0 gates + 11 failing `fgdb-gql`/`fgdb-cli` tests + `fgdbd` warning (`fgdb-c85bp`, `fgdb-dvtfk`, `fgdb-cltfx`)** | Very High / Low (1 day) | **KEEP (Immediate P0)** | A red `main` masks every subsequent regression; all 6 failures are pinpointed to exact file:line causes. |
+| **2. Packed commit objects (`pack.rs` → `BlockStore`) + summary-only lazy open (`fgdb-79kyi`, `fgdb-teypc`)** | Extreme (100× fewer fsyncs, 50× faster CLI open) / Medium | **KEEP (P1 Critical Path)** | Directly eliminates the #1 and #2 bottlenecks measured in the 2026-10-12/13 real-world gauntlet. |
+| **3. Durable `Tier R` sealed CSR segment (`FGRN`) + zero-copy Loom/Prism CSR cursors (`fgdb-teypc`, `fgdb-61p1n`)** | Extreme (10×–100× scan & join speed) / Medium-High | **KEEP (P1 Critical Path)** | `SealedPartition` and `fgdb-unsafe-vfs` already exist in-tree; wiring them into `Database` and `fgdb-gql` unlocks real CSR performance. |
+| **4. General Möbius-inversion / partition-lattice compiler for `DIFFERENT EDGES` motifs (`fgdb-62kus`)** | High (unblocks 4+ hop and cyclic ISO GQL patterns) / Low-Medium | **KEEP (Stage 4 Loom)** | Cleanly unifies and generalizes the `fb18c95d` and `7f70b36a` special cases in ~300 LOC of pure algebra. |
+| **5. Unify the 7 racing read parsers + 6 write classifiers (`fgdb-285i2`)** | High (eliminates parser-race bugs & compile bloat) / Medium | **KEEP (Stage 2)** | Eliminates the root cause of multi-clause GQL bugs and cuts `fgdb-gql` compile/test time. |
+| **6. Warm-started PageRank + delta-updated `ProjectionCache` & `MaintainedBeaconIndex` routing** | High (10×–100× on mixed read/write server workloads) / Low-Medium | **KEEP (Stage 5)** | `MaintainedBeaconIndex` and `ProjectionCache` already exist; routing `CALL hybrid.search` and `CALL fnx.*` through them is high-leverage glue. |
+| **7. Full multi-node Raft network replication (`fgdb-repl` over QUIC)** | Low immediate product leverage / High | **DEFER** | Single-node storage/query performance and quorum-one local coordinator (`fgdb-w2-order-raft-0a90`) must land before multi-node replication. |
+
+#### Round 3 — User Journey & Operator Ergonomics Pass (`fgdb-7r8sy`)
+Tracing the end-to-end developer and operator journey (`fgdb create` → `fgdb load` → `fgdb query` → `fgdbd serve` → `fgdb remote`) exposed four concrete friction points that must close alongside the engine work:
+1. **Self-describing durable schema catalog (`fgdb-7r8sy`)**: Today every CLI invocation (`fgdb query`, `fgdb write`, `fgdb diff`, `fgdb search`) and every `fgdbd serve` command requires repeating `--label Person=1 --relation KNOWS=2 --property name=1 ...` (or `--bindings-file`), and getting a number wrong silently queries the wrong ID or refuses (e.g., `MATCH (a)-[r]->(b) RETURN type(r)` failing with `unmapped edge relation id`). Persisting the `(name ↔ LabelId/RelationId/PropertyKeyId)` catalog in the database manifest makes `fgdb query --db ./my_db --key-file ./db.key "MATCH (p:Person) RETURN p.name"` work with **zero** manual ID flags while keeping explicit `--label` overrides optional.
+2. **No-surprise `DATETIME` and `AS OF` semantics (`fgdb-zshkh`, `fgdb-vuyw5`)**: Storing a zoned timestamp must never brick subsequent `fgdb query` runs that omit `--tzdb-file`, and `FOR SYSTEM_TIME AS OF SEQ 1` must work both before `MATCH`/`CALL` and after `MATCH` while reporting `"seq": 1` in `--robot` output.
+3. **Preserved ranking in `CALL hybrid.search` (`fgdb-euy8y`)**: A user writing `CALL hybrid.search(...) YIELD node, score RETURN node.title, score LIMIT 10` expects the top-10 highest-scoring results in rank order without having to remember a mandatory `ORDER BY score DESC, node ASC`.
+4. **Honest `fgdbd help` and bumped `robot schema` version (`fgdb-95wsi`)**: `fgdbd help` must accurately document Bolt autocommit writes and `PREPARE`/`AUTH_REFRESH`, and `fgdb robot schema` must bump its schema version whenever new event or result fields are added.
+
+---
+
+## Historical delta — 2026-10-12 (superseded by 2026-10-13)
+
+This is the first time the system was built for macOS and Linux and pointed at
+real data next to other databases. Machine: Apple M5 Ultra (36 cores), 256 GiB
+RAM, macOS 27, with other agents' builds running concurrently, so wall times
+are upper bounds. Every number below comes from an interleaved A/B or a
+gold-checked run whose artifacts are in the sibling repository
+`/Users/jemanuel/projects/fgdb_gauntlet` (local git). It lives outside the
+workspace on purpose: its competitor drivers are Python packages, and the
+closed dependency universe must not see them.
+
+### Product verdict
+
+**fgdb answers correctly on real graphs. It is two to four orders of
+magnitude slower than every incumbent on the same queries, and it cannot load
+any graph above one million rows.** Three of the slowest paths were fixed
+this pass, plus a vector-search defect. One severe regression was found and
+fixed (`fb18c95d`).
+
+1. **Correct.**
+   - On seven SNAP/DIMACS graphs (4K–264K vertices, 88K–730K edges), every
+     fgdb answer equals an independent numpy/scipy/igraph gold. That covers
+     counts, hub degree, 2-hop, top-10 degree, SHORTEST, PageRank top-10,
+     WCC and directed triangles.
+   - fgdb agrees with Kùzu 0.11.3, LadybugDB 0.21.2, DuckDB 1.4.4 (SQL and
+     DuckPGQ), Grafeo 0.5.44, Neo4j CE 2026.09, Memgraph 3.13 and FalkorDB
+     6.0.2 on 39/39 compared cells.
+   - Every disagreement found was another engine's: DuckPGQ's `{1,3}` reach
+     is off by one on all six graphs.
+2. **Slow.** Each CLI query re-opens and re-verifies every object file. A
+   point lookup on soc-Epinions1 (509K edges) costs about 3 s; on Kùzu and
+   DuckDB it costs 1–5 ms. Loads run at 5–16K rows/s, against 0.3–17M rows/s
+   for the others.
+3. **Walled.**
+   - `fgdb load` caps an input at 1M rows, and an edge may only name a vertex
+     from the same file (fgdb-nhwg0 and fgdb-ewc7i).
+   - web-Google, roadNet-CA, cit-Patents, soc-Pokec and soc-LiveJournal1 all
+     load into Memgraph in 7–35 s. None of them can be loaded into fgdb.
+
+### What landed (interleaved A/B in one invocation, byte-identical result digests)
+
+| Bead | Change | Real-data effect |
+|---|---|---|
+| fgdb-57col (`7392832d`) | Query and Txn contexts poll the lock-free published cancel bit on every call. They run asupersync's clock-reading full checkpoint once per 64 calls. | facebook SHORTEST{1,4}: user 7.12 → 1.77 s. `{1,3}` reach: 61.8 → 9.9 s. Triangles: wall 60.7 → 9.4 s. |
+| fgdb-mdkfb (`2420931a`) | A walk-first pattern filters its start vertex before `VarLengthExpand`. Before, it expanded from every vertex and filtered `{id:$s}` afterwards. | On top of 57col: SHORTEST 10×, reach 12.5×. epinions SHORTEST{1,9} went from no answer in 1,200 s to 2.5 s (9 hops = gold). cit-hepph SHORTEST went from TIMEOUT to 1.9 s; ca-hepth from 805 s to 0.44 s. |
+| fgdb-43k4t (`53ea2eef`) | Per-call exact vector search builds an exact-only segment with no HNSW links. hybrid.search's budget is the caller's remaining work units. | Before: Reddit 300-d vectors refused above 350 vectors, even with `--max-work-units 1e12`. After: 51,278 × 300-d exact l2 and dot kNN answer in 0.9 s per call and equal numpy (10/10 and 5/5, distance error 1e-14). ANN ef=64 runs (73 s, all of it the per-call build). |
+
+### Regression found and fixed: DIFFERENT EDGES (fgdb-ujaad, `fb18c95d`)
+
+- **Cause.** The clause-wide DIFFERENT EDGES default (`7d752d17`/`4c373391`/
+  `3648e7c9`, merged after `8d3ace1d`) sends every same-relation cycle to the
+  identified enumeration lane.
+- **Slowdown.** Directed triangles on facebook went from 0.80 s to 58.6 s of
+  user CPU (73×) between `8d3ace1d` and `13023505`.
+- **Refusals.** email-Enron and soc-Epinions1 refuse with
+  `ScratchEntries … 4000000001`. They answered that morning.
+- **The fix.**
+  - For fixed, single-typed atoms, two atoms can bind one relationship only
+    when their bound (source, relation, destination) keys are equal.
+  - A clause-complete constraint therefore has an exact per-binding weight:
+    the product of falling factorials m·(m−1)···(m−k+1) over equal-key groups.
+  - The factorized engine computes it on complete bindings (constraint
+    operators stripped; guarded intersection). Any other constraint shape keeps
+    the identified evaluator.
+  - Laws: on a multigraph with 1–3 parallel self-loops, parallel edges,
+    2-cycles and triangles, it equals the identified evaluator on 8 shapes ×
+    5 aggregates, and a brute-force distinct-relationship oracle on triangles.
+- **Effect** (interleaved A/B, identical digests).
+  - facebook triangles: user 9.51 → 0.55 s against `2420931a` (17×), and
+    0.86 → 0.55 s against the pre-regression `8d3ace1d` (1.56× faster than
+    before the regression).
+  - Gold-exact where `2420931a` refused: email-Enron 4,362,264 (31 s) and
+    soc-Epinions1 2,220,930 (27 s).
+- **Version message.** An older binary (`8d3ace1d`) reports a database
+  written by a newer one as `commit log entry at seq 1 is corrupt`. A version
+  mismatch should say so, not report corruption.
+
+### Ranked bridge (profile: `fgdb_gauntlet/runs/profile/PROFILE_REPORT.md`)
+
+Rank = recoverable wall time × breadth. The status is the bead's state.
+
+| # | Target | Evidence | Bead / owner |
+|---|---|---|---|
+| T1 | Var-length/SHORTEST expanded from every vertex | Sink-source control cost the same as the hub | fgdb-mdkfb — **landed** |
+| T2 | Every CLI query opens and verifies every object | epinions: 61K opens, 3 F_FULLFSYNC, 5.7–60 s depending on contention; road-ny 186 s | fgdb-2n2a2, fgdb-agp1o, fgdb-e8gr4 (open path); superseded by packing below |
+| T3 | One file + one F_FULLFSYNC per tiny object | road-ny load: 493,078 F_FULLFSYNC for 994K rows; average object 242 B; 17× space | fgdb-79kyi (NavyBrook), fgdb-gcm3 |
+| T4 | Clock read per metered event | 415M–1.44B `clock_gettime` per query | fgdb-57col — **landed** |
+| T5 | Compaction re-syncs every live object | A no-op compaction issues 3,717 F_FULLFSYNC | fgdb-l89gt |
+| T6 | fgdbd admits the whole table per request | epinions point lookup p50 55 ms; 1-hop refused at 100K records | fgdb-mu7jm, fgdb-er71y (NavyBrook) |
+| T7 | 256-way concurrent fsync burns sys CPU | load sys 96–823 s | folded into fgdb-79kyi |
+| T8 | 13 serial F_FULLFSYNC per commit | Single-row write ≥ 50 ms of flushes | fgdb-w2-group-commit-8zwd, fgdb-tier-d-drain-off-commit-path-tw7fo |
+| T9 | Cycles on the identified lane | See fgdb-ujaad | fgdb-ujaad — **landed** |
+| T10 | Per-query BTreeMap adjacency rebuild and heap sort | 24% of facebook count(edges); 52% of an fgdbd 1-hop request | fgdb-w3-tier-r-0tj (CSR once per generation) |
+| T11 | Load checkpoint rewrites the full key map | 3.15 GB written at `--rows-per-chunk 1000` | fgdb-28oee |
+| T12 | 4–6 blocking-pool hops per object read | 80–84% of open spent in `lock_slow` | fgdb-bmkk0 (asupersync) |
+| T13 | Prism projection rebuilt per CALL | Whole cost of resident analytics | fgdb-0tbrz |
+
+The finished but unwired code is about 103K lines in crates that no product
+crate depends on. The kernels that matter most cannot be reached under the
+default MATCH:
+- The Generic Join lane, the galloping intersection and the weighted
+  chain/cycle counts are blocked by `DifferentEdges` and by label `Select`.
+  fgdb-ujaad reopens the count side.
+- `MaintainedBeaconIndex`, standing triangles/k-core/components and the sealed
+  Prism kernels have no product caller. Each belongs behind `fgdbd`, gated to
+  full-scope capabilities: Beacon statistics must not leak to scoped tokens.
+
+### Correctness gaps the real data exposed (all filed)
+
+- **fgdb-x83z1.** One zero vector refuses every cosine search. One non-f32
+  decimal coordinate refuses every per-coordinate search.
+- **fgdb-euy8y.** CLI `search` cannot use a packed vector. hybrid.search rows
+  lose rank order without ORDER BY.
+- **fgdb-8erds.** Graphalytics conformance. BFS, SSSP, WCC and undirected LCC
+  match their references. PageRank has no exact-iteration mode, directed LCC
+  is refused, and CDLP is missing.
+- **fgdb-ewc7i.** There is no scalable way to add edges to an existing graph:
+  - load keys are file-scoped;
+  - write/import-csv MATCH costs |V| per record against a fixed 100K budget;
+  - an UNWIND-bound map field cannot be used in a MATCH property map;
+  - JSON parameters are capped near 2K values, against the 65,536 documented.
+- **fgdb-j72ep.** A `transaction` step refuses MERGE/SET … RETURN that `write`
+  accepts.
+- **fgdb-vuyw5.** An AS OF read reports the frontier as its `seq`.
+  `--certify-to` silently overwrites an existing certificate.
+
+### Environment findings
+
+- **fgdb-4xkuh.** Bare `cargo` and `rustc` fail on aarch64-darwin: the
+  `llvm-tools-preview` component collides with `libLLVM.dylib`. The
+  workaround is `RUSTUP_TOOLCHAIN=nightly-2026-08-31`.
+- **fgdb-jon4t.** Apple `ld` segfaults linking the `fgdb` lib test binary
+  (`__eh_frame` > 16 MB). The fgdb-gql lib test binary is at the edge too.
+- **rch.** It routes this repository to `ts1`, which refuses it
+  (`RCH_SYNC_LIVE_CHECKOUT_REFUSED`). `rch exec --worker <id>` works. The
+  gauntlet's `scripts/linux_lane.sh` (Docker) runs Linux-only laws locally.
+- **macOS durability cost.** On macOS `sync_all` is `F_FULLFSYNC`: 4–20 ms
+  each, up to 1 s under contention. `fgdb-bench gql-point-lookup` takes 640 s
+  on macOS and 14.6 s on Linux x86_64. Publish durable-write comparisons from
+  Linux.
+
+### Bridge, in order (the plan for the next pass)
+
+1. **Rerun the Tier-0 gauntlet at `53ea2eef`** with `--tag <commit>`, on a
+   quieter host. Check triangles against gold on all seven graphs and
+   `{1,3}` reach on epinions (30 s / 3.7 GB, all of it trail enumeration;
+   BFS reachability is the fix, below).
+2. **Ingest walls** (NavyBrook: fgdb-nhwg0, fgdb-mu7jm, fgdb-79kyi; plus
+   fgdb-ewc7i).
+   - When they land, run Tier 1: web-Google, roadNet-CA, cit-Patents with its
+     Graphalytics references, soc-Pokec and soc-LiveJournal1.
+   - This is the first point at which fgdb can be compared beyond toy scale.
+3. **Open cost (T2/T3/T12).** Packing (fgdb-79kyi/fgdb-gcm3) makes open a few
+   sequential reads. A hash-sealed snapshot image keyed by root makes repeat
+   opens O(1). Until then, every CLI number is open-dominated.
+4. **Resident execution (T6/T10/T13 plus the wiring above).** Build a CSR once
+   per generation in `fgdbd`. Run maintained Beacon and standing analytics
+   behind full-scope tokens. Add an fgdbd column to the gauntlet so
+   resident-vs-resident comparisons are possible: competitors are measured
+   warm and in-process today.
+5. **Parallelism.** Every query runs on one core of 36. Morsel-parallel scans
+   with a deterministic merge (fgdb-w5-executor-olp) come after the CSR.
+   Determinism holds because the canonical-order merge is part of the plan,
+   not because the thread count is fixed.
+6. **Gold suites as gates.** Graphalytics (fgdb-8erds), LSQB (blocked on
+   fgdb-ujaad for cycles) and LDBC SNB SF0.1/SF1 (blocked on step 2) run
+   through the gauntlet with their published references. A cell that
+   disagrees blocks publication.
+
+**Ambition tier** (pursue once the walls are down; each has a measurable
+gate):
+- **Decode once, map forever.** A content-addressed, hash-sealed CSR image per
+  root, verified lazily per page (BLAKE3 tree), so open is O(1).
+- **Fused kernels.** A fused scan→filter→aggregate kernel over CSR, with the
+  already ledgered `fgdb-unsafe-simd` lanes and bit-identical scalar
+  fallbacks. Today nothing depends on that crate.
+- **SIMD galloping intersection.** Make it real: the README claims it, and
+  only scalar `seek_ge` exists.
+- **Factorized counting for every DIFFERENT EDGES shape.** Inclusion–exclusion
+  over coincidence partitions, so contractions survive the constraint.
+- **Group commit.** F_BARRIERFSYNC at ordering points and one F_FULLFSYNC per
+  commit group on APFS.
+
+### Evidence boundary
+
+- Not run: the workspace-wide `cargo test`. `main` was not green at
+  `13023505` for pre-existing reasons: four `fgdb-gql` edge_stream aggregate
+  laws, plus the six fgdb-sim and three fgdb lib laws already attributed in
+  fgdb-vexfr.
+- Each landing above cites its targeted laws and a red-set diff (identical
+  before and after).
+- Competitor numbers are warm and in-process (embedded) or same-connection
+  (servers). fgdb numbers are one CLI process per query, so they include open.
+- These are not LDBC Benchmark Results.
+
+## Historical delta — 2026-10-04 (superseded by 2026-10-12)
 
 Measured at `5df67f66`, the `main` tip. No commit has landed since
 2026-09-30 21:02 −0400, and the tracker was last written 2026-10-01 20:33.

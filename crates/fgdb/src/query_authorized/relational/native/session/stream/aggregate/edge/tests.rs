@@ -103,7 +103,10 @@ fn scalar(value: i64) -> QueryValue {
 fn null() -> QueryValue {
     QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
 }
-fn rows(cursor: &mut AuthorizedAggregateCursor<'_>) -> Vec<Vec<QueryValue>> {
+fn rows<Driver>(cursor: &mut AuthorizedAggregateCursor<'_, Driver>) -> Vec<Vec<QueryValue>>
+where
+    Driver: FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError>,
+{
     let slots = cursor.output_slots().to_vec();
     cursor
         .by_ref()
@@ -166,7 +169,15 @@ fn scoped_edges_and_fixed_joins_aggregate_only_admitted_topology_and_fields() {
         ),
         (
             "MATCH (a)-[e:R]->(b)-[f:R]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
-            vec![vec![Count(4), Integer(16)]],
+            vec![vec![Count(3), Integer(16)]],
+        ),
+        (
+            "MATCH (a)-[e]->(b)-[f]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
+            vec![vec![Count(3), Integer(16)]],
+        ),
+        (
+            "MATCH (a)-[e]->(b)-[f:R]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
+            vec![vec![Count(3), Integer(16)]],
         ),
         (
             "MATCH (a)-[e:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(x) } RETURN COUNT(*) AS n",
@@ -198,6 +209,15 @@ fn scoped_edges_and_fixed_joins_aggregate_only_admitted_topology_and_fields() {
         let mut cursor = session.stream_aggregate(&cx, &prepared, &params).unwrap();
         assert_eq!(rows(&mut cursor), expected, "{text}");
         assert_eq!(eager, expected, "eager: {text}");
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        let mut cursor = session
+            .stream_aggregate_send(&cx, &prepared, &params)
+            .unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        assert_eq!(rows(&mut cursor), expected, "Send: {text}");
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert!(cursor.next().is_none());
     }
@@ -232,6 +252,9 @@ fn orientation_parallel_edges_and_collection_profiles_keep_native_identity_order
         ("(a)-[e:R]->(b)", 4, 14),
         ("(a)<-[e:R]-(b)", 4, 14),
         ("(a)-[e:R]-(b)", 7, 28),
+        ("(a)-[e]->(b)", 4, 14),
+        ("(a)<-[e]-(b)", 4, 14),
+        ("(a)-[e]-(b)", 7, 28),
     ] {
         let prepared = session
             .prepare(
@@ -553,23 +576,24 @@ fn denied_root_relations_open_no_directory_and_unscoped_access_refuses() {
     let issuer = authority();
     let token = issuer.issue_at(&grant(), 100).unwrap();
     let verified = issuer.verify_at(&token, "main", 100).unwrap();
-    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(
+    let mut clock = || 100;
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(
         &cx,
         verified.begin_read_at("main", 100).unwrap(),
-        Box::new(|| 100),
-    )));
+        &mut clock,
+    ))));
     let mut source = Source {
         edges: NoReads,
         vertices: ScopedSource {
             inner: NoReads,
-            execution: Rc::clone(&execution),
+            execution: execution.clone(),
         },
         after: None,
     };
     let mut control = |_| execution.borrow_mut().checkpoint();
     assert!(
         source
-            .next_edge_for_relation(RelationId(2), &mut control)
+            .next_edge_for_relation(EdgeRelation::One(RelationId(2)), &mut control)
             .unwrap()
             .is_none()
     );
@@ -586,7 +610,7 @@ fn denied_root_relations_open_no_directory_and_unscoped_access_refuses() {
     ));
     issuer.retire();
     assert!(matches!(
-        source.next_edge_for_relation(RelationId(2), &mut control),
+        source.next_edge_for_relation(EdgeRelation::One(RelationId(2)), &mut control),
         Err(EdgeScanSourceError::Control(QueryError::Authorization(
             Denied::AuthorityRetired
         )))

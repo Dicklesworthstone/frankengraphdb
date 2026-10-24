@@ -75,7 +75,7 @@ pub(super) fn run(
 // Borrow cells in their original domain. This private transport interface
 // performs no graph execution, input materialization or aggregate-to-scalar
 // conversion. Both kinds use the same encoders as ordinary eager CLI output.
-trait DeliveryRow {
+pub(super) trait DeliveryRow {
     fn width(&self) -> usize;
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure>;
 }
@@ -114,6 +114,68 @@ fn invalid_layout() -> Failure {
     Failure::query("stream row does not match its native layout")
 }
 
+pub(super) fn header_line(columns: &[String], seq: u64, robot: bool) -> String {
+    if robot {
+        format!(
+            r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"columns":[{}]}}"#,
+            columns
+                .iter()
+                .map(|name| quoted(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    } else {
+        format!(
+            "{}\nstream at seq {seq}",
+            columns
+                .iter()
+                .map(|name| name
+                    .chars()
+                    .flat_map(char::escape_default)
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\t")
+        )
+    }
+}
+
+pub(super) fn row_line(
+    row: &impl DeliveryRow,
+    robot: bool,
+    checkpoint: &mut impl FnMut() -> Result<(), Failure>,
+) -> Result<String, Failure> {
+    let mut encoded = Vec::with_capacity(row.width());
+    for column in 0..row.width() {
+        checkpoint()?;
+        encoded.push(row.encode(column, robot)?);
+    }
+    Ok(if robot {
+        format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, encoded.join(","))
+    } else {
+        encoded.join("\t")
+    })
+}
+
+pub(super) fn summary_line(seq: u64, sent: u64, robot: bool) -> String {
+    if robot {
+        format!(
+            r#"{{"v":1,"event":"result","kind":"rows","stream":true,"seq":{seq},"count":{sent}}}"#
+        )
+    } else {
+        format!("{sent} row(s) (stream complete at seq {seq})")
+    }
+}
+
+pub(super) fn incomplete(error: Failure, sent: u64) -> Failure {
+    Failure {
+        message: format!(
+            "stream incomplete after {sent} fully flushed row(s); output may contain a partial final frame: {}",
+            error.message,
+        ),
+        ..error
+    }
+}
+
 // Only the physical result row is owned. Repeated keys and aggregates borrow
 // the same payload, and names/slots are frozen before the first source demand.
 struct AggregateDeliveryRow<'a> {
@@ -125,15 +187,29 @@ impl DeliveryRow for AggregateDeliveryRow<'_> {
         self.slots.len()
     }
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
-        match self.slots.get(column).ok_or_else(invalid_layout)? {
-            GraphAggregateTextSlot::Aggregate(at) => self.row.encode(*at, robot),
-            GraphAggregateTextSlot::GroupKey(at) => {
-                let key = self.row.keys().get(*at).ok_or_else(invalid_layout)?;
-                if robot {
-                    value_cell(key)
-                } else {
-                    human_value(key)
-                }
+        aggregate_cell(
+            &self.row,
+            self.slots.get(column).ok_or_else(invalid_layout)?,
+            robot,
+        )
+    }
+}
+
+// Both live aggregate cursors and authenticated external aggregate rows keep
+// counts, wide sums and exact averages in their original result domain.
+pub(super) fn aggregate_cell(
+    row: &GraphAggregateRow,
+    slot: &GraphAggregateTextSlot,
+    robot: bool,
+) -> Result<String, Failure> {
+    match slot {
+        GraphAggregateTextSlot::Aggregate(at) => row.encode(*at, robot),
+        GraphAggregateTextSlot::GroupKey(at) => {
+            let key = row.keys().get(*at).ok_or_else(invalid_layout)?;
+            if robot {
+                value_cell(key)
+            } else {
+                human_value(key)
             }
         }
     }
@@ -153,28 +229,7 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
     let mut sent = 0u64;
     let result = (|| {
         checkpoint()?;
-        let header = if robot {
-            format!(
-                r#"{{"v":1,"event":"columns","stream":true,"seq":{seq},"columns":[{}]}}"#,
-                columns
-                    .iter()
-                    .map(|name| quoted(name))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        } else {
-            format!(
-                "{}\nstream at seq {seq}",
-                columns
-                    .iter()
-                    .map(|name| name
-                        .chars()
-                        .flat_map(char::escape_default)
-                        .collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join("\t")
-            )
-        };
+        let header = header_line(columns, seq, robot);
         emit(out, &header)?;
         out.flush().map_err(Failure::io)?;
         loop {
@@ -192,16 +247,7 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
             let next = sent
                 .checked_add(1)
                 .ok_or_else(|| Failure::query("stream delivery counter overflow"))?;
-            let mut encoded = Vec::with_capacity(columns.len());
-            for column in 0..row.width() {
-                checkpoint()?;
-                encoded.push(row.encode(column, robot)?);
-            }
-            let line = if robot {
-                format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, encoded.join(","))
-            } else {
-                encoded.join("\t")
-            };
+            let line = row_line(&row, robot, &mut checkpoint)?;
             checkpoint()?;
             emit(out, &line)?;
             out.flush().map_err(Failure::io)?;
@@ -210,20 +256,11 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
             sent = next;
         }
         checkpoint()?;
-        let summary = if robot {
-            format!(
-                r#"{{"v":1,"event":"result","kind":"rows","stream":true,"seq":{seq},"count":{sent}}}"#
-            )
-        } else {
-            format!("{sent} row(s) (stream complete at seq {seq})")
-        };
+        let summary = summary_line(seq, sent, robot);
         emit(out, &summary)?;
         out.flush().map_err(Failure::io)
     })();
-    result.map_err(|error: Failure| Failure::new(error.code, error.class, format!(
-        "stream incomplete after {sent} fully flushed row(s); output may contain a partial final frame: {}",
-        error.message,
-    )))
+    result.map_err(|error| incomplete(error, sent))
 }
 
 /// The tests drive [`run`] over a database's current generation, as the CLI

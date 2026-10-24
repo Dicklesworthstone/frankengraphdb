@@ -7,12 +7,18 @@
 mod graph;
 #[path = "relational/native.rs"]
 mod native;
+#[path = "relational/seeded.rs"]
+mod seeded;
 pub use native::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 use super::*;
+use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
     GraphAggregateError, GraphAggregateRow, GraphSetExecutionError, PreparedGraphSet,
@@ -32,10 +38,6 @@ fn set_error(error: GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>)
     }
 }
 
-fn aggregate_error(error: GqlQueryError<GraphAggregateError<ReadError>, QueryError>) -> QueryError {
-    aggregate_gql_error(error.map_source(|error| error.map_source(GqlError::Read)))
-}
-
 fn aggregate_gql_error(
     error: GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 ) -> QueryError {
@@ -51,28 +53,167 @@ fn aggregate_gql_error(
     }
 }
 
-fn set_at<Clock: FnMut() -> u64>(
+// Parameters can contain vertex/edge values, so an element identity alone is
+// not evidence of a preceding capability-scoped pattern or CALL. Resolve its
+// winner at this statement's admitted cut, mask the vertex or edge relation
+// AND both endpoints, and only then clone the requested property value.
+// This ordinary reader retains the existing derived-index lookup path. The
+// prepared Beacon reader separately guarantees bounded cold patch searches.
+fn scoped_element_property<Clock: FnMut() -> u64>(
     snapshot: &Snapshot,
+    at: CommitSeq,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    failure: &RefCell<Option<QueryError>>,
+    element: ElementId,
+    key: PropertyKeyId,
+) -> Result<Option<fgdb_types::CanonicalPropertyValue>, GqlError> {
+    // This source-error carrier is private to the governed call below. Its
+    // checkpoint or final boundary restores the retained QueryError, including
+    // cancellation, before work settlement or any result can escape.
+    let interrupted_source = || {
+        GqlError::Procedure(crate::query::ProcedureError::Search(
+            crate::query::HybridCallError::Combination(
+                "authorized element property read interrupted",
+            ),
+        ))
+    };
+    if failure.borrow().is_some() {
+        return Err(interrupted_source());
+    }
+    let result: Result<Option<fgdb_types::CanonicalPropertyValue>, QueryError> = (|| {
+        if !scope.allows_property(key) {
+            return Ok(None);
+        }
+        // Physical index/history probes may inspect hidden records. They
+        // remain cancellable without spending visible source/work allowance.
+        let mut control = |_: source::SourceEvent| execution.borrow_mut().poll();
+        control(source::SourceEvent::Work)?;
+        let props = match element {
+            ElementId::Vertex(id) => {
+                let Some(vertex) = source::find_vertex(snapshot, id, at, &mut control)? else {
+                    return Ok(None);
+                };
+                if !scope.allows_vertex(&vertex.labels) {
+                    return Ok(None);
+                }
+                vertex.props.as_slice()
+            }
+            ElementId::Edge(id) => {
+                let coordinate = snapshot
+                    .adjacency_index()
+                    .statement_at(&snapshot.blocks, id, at);
+                control(source::SourceEvent::Work)?;
+                let Some((block, row)) = coordinate else {
+                    return Ok(None);
+                };
+                let edge = &snapshot.blocks[block][row];
+                if !scope.allows_relation(edge.relation) {
+                    return Ok(None);
+                }
+                for endpoint in [edge.src, edge.dst] {
+                    let vertex = source::find_vertex(snapshot, endpoint, at, &mut control)?;
+                    if vertex.is_none_or(|vertex| !scope.allows_vertex(&vertex.labels)) {
+                        return Ok(None);
+                    }
+                }
+                source::edge_properties_at(&snapshot.block_props, block, row)
+            }
+        };
+        control(source::SourceEvent::Work)?;
+        Ok(props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|position| props[position].1.clone()))
+    })();
+    result.map_err(|error| {
+        failure.borrow_mut().get_or_insert(error);
+        interrupted_source()
+    })
+}
+
+fn set_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphSet,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphValueRow>, QueryError> {
-    query
-        .execute_governed_with_procedures(
-            policy,
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            || execution.borrow_mut().checkpoint(),
-        )
+    set_execution_at(snapshot, at, query, scope, execution, policy)
         .map(|result| result.value)
         .map_err(set_error)
+}
+
+// Keep measured usage inside the authorized host for multi-endpoint execution.
+// Ordinary reads discard it at their existing delivery boundary, as before.
+fn set_execution_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSet,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
+> {
+    // The whole statement is one phase: its row stages' signed work (ORDER BY
+    // and LIMIT over every row a CALL yields) is charged in runs, as its
+    // patterns' and kernels' already is.
+    work_runs(execution, GqlQueryError::Interrupted, || {
+        set_execution_in_runs(snapshot, at, query, scope, execution, policy)
+    })
+}
+
+fn set_execution_in_runs<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSet,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
+> {
+    let element_failure = RefCell::new(None);
+    let result = query.execute_governed_with_seeded_elements(
+        policy,
+        |pattern, remaining| {
+            pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |pattern, seeds, remaining| {
+            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+        },
+        |call, arguments, remaining| {
+            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+        },
+        |element, key| {
+            scoped_element_property(
+                snapshot,
+                at,
+                scope,
+                execution,
+                &element_failure,
+                element,
+                key,
+            )
+        },
+        || {
+            if let Some(error) = element_failure.borrow_mut().take() {
+                return Err(error);
+            }
+            execution.borrow_mut().checkpoint()
+        },
+    );
+    let failure = element_failure.borrow_mut().take();
+    match failure {
+        Some(error) => Err(GqlQueryError::Interrupted(error)),
+        None => result,
+    }
 }
 
 /// A CALL stage under the capability (fgdb-7qznp). It binds exactly as every
@@ -84,7 +225,7 @@ fn set_at<Clock: FnMut() -> u64>(
 /// permit and allowance. No Prism certificate escapes, as on every
 /// authorized analytics path.
 fn procedure_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     call: &fgdb_gql::PreparedProcedureCall,
     arguments: &[fgdb_gql::algebra::GraphValue],
@@ -92,6 +233,11 @@ fn procedure_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     remaining: GqlQueryPolicy,
 ) -> Result<fgdb_gql::GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>> {
+    if crate::query::is_hybrid(call) {
+        return super::beacon::hybrid_at(
+            snapshot, at, call, arguments, scope, execution, remaining,
+        );
+    }
     let spec = crate::query::bind_procedure(call, arguments)?;
     let options = crate::query::procedure_options(&spec, at, remaining);
     super::analytics::preflight(&spec, options.projection.directedness)
@@ -107,7 +253,10 @@ fn procedure_at<Clock: FnMut() -> u64>(
         options,
         scope,
         execution,
-        |event| usage.observe(remaining, event).map_err(query_error),
+        super::analytics::UsageObserver {
+            usage: &mut usage,
+            policy: remaining,
+        },
     )
     .map_err(crate::query::procedure_failure)?;
     let value = crate::query::procedure_rows(rows)?;
@@ -125,27 +274,66 @@ fn procedure_at<Clock: FnMut() -> u64>(
 }
 
 fn aggregate_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphSetAggregate,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-    query
-        .execute_governed_with_procedures(
-            policy,
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            || execution.borrow_mut().checkpoint(),
-        )
+    aggregate_execution_at(snapshot, at, query, scope, execution, policy)
         .map(|result| result.value)
         .map_err(aggregate_gql_error)
+}
+
+fn aggregate_execution_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSetAggregate,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
+> {
+    let element_failure = RefCell::new(None);
+    let result = query.execute_governed_with_seeded_elements(
+        policy,
+        |pattern, remaining| {
+            pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |pattern, seeds, remaining| {
+            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+        },
+        |call, arguments, remaining| {
+            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+        },
+        |element, key| {
+            scoped_element_property(
+                snapshot,
+                at,
+                scope,
+                execution,
+                &element_failure,
+                element,
+                key,
+            )
+        },
+        || {
+            if let Some(error) = element_failure.borrow_mut().take() {
+                return Err(error);
+            }
+            execution.borrow_mut().checkpoint()
+        },
+    );
+    let failure = element_failure.borrow_mut().take();
+    match failure {
+        Some(error) => Err(GqlQueryError::Interrupted(error)),
+        None => result,
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {

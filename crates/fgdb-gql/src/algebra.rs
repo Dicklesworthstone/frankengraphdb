@@ -6,6 +6,7 @@
 
 mod boolean;
 mod existence;
+mod orderability;
 mod ordering;
 mod output;
 mod pattern;
@@ -16,24 +17,27 @@ pub use boolean::{
     GraphBooleanOperand, MAX_BOOLEAN_INSTRUCTIONS,
 };
 pub use existence::{GraphExistence, GraphMatchClause};
+pub(crate) use orderability::OrderableNumber;
 pub use ordering::{GraphOrderError, GraphValueOrder};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
+pub(crate) use pattern::valid_column_name;
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES,
     MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError,
-    PatternLimitDimension, PreparedGraphPattern,
+    PatternLimitDimension, PreparedGraphPattern, PreparedGraphPatternFactors,
 };
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
+pub(crate) use predicate::{equality_value_bytes, numeric_domain};
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue,
-    GraphValueRow, ValueProjection,
+    GraphValueDecodeError, GraphValueRow, ValueProjection,
 };
 pub(crate) use values::{RowKey, ValueRef};
 
 use crate::{BoundPlan, EdgeDirection, ReturnProjection};
 use core::marker::PhantomData;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 /// An ordinal in the binding table, independent of a parser variable's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,6 +56,109 @@ pub enum GlaDirection {
     Forward,
     Reverse,
     Undirected,
+}
+
+/// Relationship types admitted by one graph atom. `Any` ranges over the
+/// already-authorized edge source; it never grants access to hidden types.
+/// `Set` is a type alternation, openCypher `-[:A|B]->`: an executor must
+/// admit exactly its members, so `one() == None` never means "every type"
+/// unless the selector is `Any`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EdgeRelation {
+    One(RelationId),
+    Any,
+    Set(EdgeRelationSet),
+}
+
+/// The most relationship types one alternation may name.
+pub const MAX_EDGE_RELATION_ALTERNATIVES: usize = 8;
+
+/// Two to `MAX_EDGE_RELATION_ALTERNATIVES` distinct relation types in
+/// ascending order. Unused slots stay zero, so derived equality and order
+/// are canonical. Built only by `EdgeRelation::alternation`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EdgeRelationSet {
+    len: u8,
+    ids: [RelationId; MAX_EDGE_RELATION_ALTERNATIVES],
+}
+
+impl EdgeRelationSet {
+    #[must_use]
+    pub fn relations(&self) -> &[RelationId] {
+        &self.ids[..usize::from(self.len)]
+    }
+}
+
+impl EdgeRelation {
+    #[must_use]
+    pub fn matches(self, relation: RelationId) -> bool {
+        match self {
+            Self::One(expected) => expected == relation,
+            Self::Any => true,
+            Self::Set(set) => set.relations().binary_search(&relation).is_ok(),
+        }
+    }
+
+    /// The single admitted type. `None` for `Any` AND for an alternation:
+    /// test `relations()` or `matches()` before treating `None` as untyped.
+    #[must_use]
+    pub const fn one(self) -> Option<RelationId> {
+        match self {
+            Self::One(relation) => Some(relation),
+            Self::Any | Self::Set(_) => None,
+        }
+    }
+
+    /// Every admitted type in ascending order, or `None` for `Any`.
+    #[must_use]
+    pub fn relations(&self) -> Option<&[RelationId]> {
+        match self {
+            Self::One(relation) => Some(core::slice::from_ref(relation)),
+            Self::Any => None,
+            Self::Set(set) => Some(set.relations()),
+        }
+    }
+
+    /// `:A|B|...`: duplicates collapse, one distinct type is `One`, and more
+    /// than `MAX_EDGE_RELATION_ALTERNATIVES` distinct types is `None`.
+    #[must_use]
+    pub fn alternation(relations: &[RelationId]) -> Option<Self> {
+        let mut sorted = relations.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        match sorted.as_slice() {
+            [] => None,
+            [relation] => Some(Self::One(*relation)),
+            members if members.len() <= MAX_EDGE_RELATION_ALTERNATIVES => {
+                let mut ids = [RelationId(0); MAX_EDGE_RELATION_ALTERNATIVES];
+                ids[..members.len()].copy_from_slice(members);
+                Some(Self::Set(EdgeRelationSet {
+                    len: u8::try_from(members.len()).ok()?,
+                    ids,
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl From<RelationId> for EdgeRelation {
+    fn from(relation: RelationId) -> Self {
+        Self::One(relation)
+    }
+}
+
+/// Relationship reuse within one positive graph-pattern clause. Separate
+/// MATCH, OPTIONAL and existence bodies have independent relationship sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphMatchMode {
+    /// Every actual EId may occur at most once across all atoms in the clause,
+    /// including quantified atoms and disconnected comma-separated parts.
+    DifferentEdges,
+    /// Each atom uses its declared search semantics without a clause-wide
+    /// restriction. This preserves the generic typed builder's WALK default.
+    #[default]
+    RepeatableElements,
 }
 
 /// Search semantics of one finite path atom, not a terminal row quantifier.
@@ -85,6 +192,26 @@ pub enum GraphWalkSearch {
     Trail,
 }
 
+impl GraphWalkSearch {
+    /// Whether an atom with no upper hop bound still ends: TRAIL reuses no
+    /// edge and ACYCLIC or SIMPLE no vertex, and an ALL atom under DIFFERENT
+    /// EDGES runs as a trail. A shortest selector settles each endpoint at
+    /// its first admissible depth, and no shortest walk revisits a vertex
+    /// after its first `max(minimum, 1)` hops (cutting that cycle out would
+    /// be shorter), so its breadth-first layers end once a layer reaches no
+    /// new vertex (fgdb-20foe). Only a WALK that may repeat edges and selects
+    /// every walk could revisit a cycle forever.
+    #[must_use]
+    pub fn ends_unbounded(self, mode: GraphMatchMode) -> bool {
+        match self {
+            Self::Trail | Self::Acyclic | Self::Simple | Self::AllShortest | Self::AnyShortest => {
+                true
+            }
+            Self::All => mode == GraphMatchMode::DifferentEdges,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntegerComparison {
     Equal,
@@ -108,7 +235,7 @@ impl IntegerComparison {
         }
     }
 
-    fn tag(self) -> u8 {
+    pub(crate) fn tag(self) -> u8 {
         match self {
             Self::Equal => 0,
             Self::NotEqual => 1,
@@ -120,7 +247,8 @@ impl IntegerComparison {
     }
 }
 
-/// Ordinary comparisons reject missing, null and incompatible scalar kinds.
+/// Ordinary comparisons reject missing and null values. A present value of
+/// another domain is unequal (fgdb-v6ku6): only NotEqual accepts it.
 /// PropertyNull explicitly tests missing/stored null without conflating errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VertexPredicate {
@@ -145,7 +273,7 @@ impl VertexPredicate {
     pub fn matches(
         &self,
         labels: &[LabelId],
-        properties: &[(PropertyKeyId, CanonicalScalar)],
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
     ) -> bool {
         self.matches_borrowed(
             labels.iter().copied(),
@@ -153,12 +281,17 @@ impl VertexPredicate {
         )
     }
 
-    /// Evaluate borrowed canonical fields without cloning scalar payloads.
+    /// Evaluate borrowed canonical fields without cloning their payloads.
+    ///
+    /// A stored List or Map (fgdb-k3nub) is a present, non-NULL value, and
+    /// every predicate here compares a property against a scalar literal: the
+    /// two are of different domains (fgdb-v6ku6), so `=` and every ordering
+    /// reject and `<>` accepts. An absent property is UNKNOWN and rejects.
     #[must_use]
     pub fn matches_borrowed<'a>(
         &self,
         labels: impl IntoIterator<Item = LabelId>,
-        properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalScalar)>,
+        properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalPropertyValue)>,
     ) -> bool {
         match self {
             Self::HasLabel(label) => labels.into_iter().any(|actual| actual == *label),
@@ -166,24 +299,28 @@ impl VertexPredicate {
                 key,
                 comparison,
                 value,
-            } => properties.into_iter().any(|(actual_key, scalar)| {
+            } => properties.into_iter().any(|(actual_key, value_ref)| {
                 actual_key == *key
-                    && comparison
-                        .accepts_scalar_pair(Some(scalar), Some(&CanonicalScalar::Int(*value)))
+                    && comparison.evaluate_property_scalar(
+                        Some(value_ref),
+                        Some(&CanonicalScalar::Int(*value)),
+                    ) == Some(true)
             }),
             Self::ScalarProperty { key, predicate } => {
                 let actual = properties
                     .into_iter()
                     .find(|(actual_key, _)| actual_key == key)
                     .map(|(_, value)| value);
-                predicate.matches(actual)
+                predicate.matches_property(actual)
             }
             Self::PropertyNull { key, is_null } => {
                 let actual = properties
                     .into_iter()
                     .find(|(actual_key, _)| actual_key == key)
                     .map(|(_, value)| value);
-                actual.is_none_or(|value| matches!(value, CanonicalScalar::Null)) == *is_null
+                actual.is_none_or(|value| {
+                    matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+                }) == *is_null
             }
         }
     }
@@ -196,7 +333,7 @@ pub enum GlaOperator {
     Empty,
     ScanVertices,
     ScanEdges {
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
     },
     Select {
@@ -210,7 +347,7 @@ pub enum GlaOperator {
     },
     Expand {
         source: BindingSlot,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
     },
     /// Append an endpoint for each selected path occurrence in the inclusive
@@ -220,10 +357,17 @@ pub enum GlaOperator {
     /// restrictions apply to this atom, not to a surrounding compound path.
     VarLengthExpand {
         source: BindingSlot,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: GlaDirection,
         bounds: crate::GraphWalkBounds,
         search: GraphWalkSearch,
+    },
+    /// Require pairwise distinct actual EIds across these identified expansion
+    /// segments. The newest endpoint is last. This positive-clause constraint
+    /// includes repetitions inside a quantified segment and is independent of
+    /// vertex identity, edge orientation and later MATCH/OPTIONAL/probe bodies.
+    DifferentEdges {
+        segments: Vec<BindingSlot>,
     },
     /// Evaluate the enclosed binding scope once per outer occurrence. The
     /// first complete witness resolves the predicate; it is not an output row.
@@ -246,6 +390,22 @@ pub enum GlaOperator {
     /// Match success is recorded here, before executing any later clause.
     OptionalEnd {
         group: u32,
+    },
+    /// A pattern comprehension (fgdb-7nwox): evaluate the enclosed scope
+    /// once per outer occurrence and collect one value per complete witness,
+    /// in enumeration order, into the list ValueProjection::Collected reads.
+    /// `slots` is the inner frame width. The scope exports no binding, and
+    /// no witness collects the empty list, never NULL.
+    Collect {
+        group: u32,
+        end: u32,
+        slots: u32,
+    },
+    /// One complete witness of the Collect scope: append the element `value`
+    /// projects (a vertex, a relationship or a path), or NULL for none.
+    CollectEnd {
+        group: u32,
+        value: Option<ValueProjection>,
     },
     /// Copy a correlated identity into the inner scope, without scanning rows.
     BindVertex {
@@ -425,7 +585,7 @@ impl GlaPlan {
                 EdgeDirection::Incoming | EdgeDirection::Outgoing => GlaDirection::Forward,
             };
             operators.push(GlaOperator::ScanEdges {
-                relation,
+                relation: EdgeRelation::One(relation),
                 direction,
             });
             bind_alias(
@@ -466,7 +626,7 @@ impl GlaPlan {
             if let Some(relation) = plan.hop2_relation {
                 operators.push(GlaOperator::Expand {
                     source: destination,
-                    relation,
+                    relation: EdgeRelation::One(relation),
                     direction,
                 });
                 if let Some(name) = &plan.hop2_dst_var {
@@ -569,7 +729,9 @@ impl<Row> GlaPlan<Row> {
             // targets aligned with the one newly inserted instruction.
             for op in &mut operators {
                 match op {
-                    GlaOperator::Probe { end, .. } | GlaOperator::Optional { end, .. } => *end += 1,
+                    GlaOperator::Probe { end, .. }
+                    | GlaOperator::Optional { end, .. }
+                    | GlaOperator::Collect { end, .. } => *end += 1,
                     _ => {}
                 }
             }
@@ -606,22 +768,35 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
-    /// Every relation whose edges this plan can read. Each edge operator
-    /// names exactly one relation, so no edge of another relation can
-    /// change this plan's rows. That is what lets a transaction record a
-    /// per-relation read witness instead of the whole edge table
-    /// (fgdb-whole-edge-read-flag-4qe1z). Empty when the plan reads no edges.
+    /// Every relation whose edges this plan can read, or `None` for an
+    /// untyped atom. A typed plan permits per-relation transaction witnesses;
+    /// an untyped atom needs a whole-edge-table witness, including types first
+    /// inserted after the read. `Some(empty)` means the plan reads no edges.
     #[must_use]
-    pub fn edge_relations(&self) -> std::collections::BTreeSet<RelationId> {
-        self.operators
-            .iter()
-            .filter_map(|operator| match operator {
-                GlaOperator::ScanEdges { relation, .. }
-                | GlaOperator::Expand { relation, .. }
-                | GlaOperator::VarLengthExpand { relation, .. } => Some(*relation),
-                _ => None,
-            })
-            .collect()
+    pub fn edge_relations(&self) -> Option<std::collections::BTreeSet<RelationId>> {
+        let mut relations = std::collections::BTreeSet::new();
+        for operator in &self.operators {
+            if let GlaOperator::ScanEdges { relation, .. }
+            | GlaOperator::Expand { relation, .. }
+            | GlaOperator::VarLengthExpand { relation, .. } = operator
+            {
+                // An alternation reads each member, never every type.
+                relations.extend(relation.relations()?.iter().copied());
+            }
+        }
+        Some(relations)
+    }
+
+    /// Whether every edge atom names exactly one relation type: neither an
+    /// untyped atom nor a type alternation.
+    #[must_use]
+    pub fn single_typed_edges(&self) -> bool {
+        self.operators.iter().all(|operator| match operator {
+            GlaOperator::ScanEdges { relation, .. }
+            | GlaOperator::Expand { relation, .. }
+            | GlaOperator::VarLengthExpand { relation, .. } => relation.one().is_some(),
+            _ => true,
+        })
     }
 
     /// Which vertices this plan's vertex scans can bind (fgdb-h1d6l). Slot 0
@@ -663,6 +838,7 @@ impl<Row> GlaPlan<Row> {
             matches!(
                 op,
                 GlaOperator::CapturePath { .. }
+                    | GlaOperator::DifferentEdges { .. }
                     | GlaOperator::VarLengthExpand {
                         search: GraphWalkSearch::Trail,
                         ..
@@ -676,21 +852,29 @@ impl<Row> GlaPlan<Row> {
     #[must_use]
     pub fn projects_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
-            GlaOperator::ProjectValues { columns } => columns
-                .iter()
-                .any(|column| matches!(column, ValueProjection::Property { .. })),
+            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Property { .. } | ValueProjection::Properties { .. }
+                )
+            }),
             _ => false,
         })
     }
 
     /// Captured relationship payloads need the explicit edge property source.
+    /// A WHERE that reads a captured relationship's identity needs the same
+    /// element executor, the only one that hands it the captured paths.
     #[must_use]
     pub fn projects_edge_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
-            GlaOperator::ProjectValues { columns } => columns
-                .iter()
-                .any(|column| matches!(column, ValueProjection::EdgeProperty { .. })),
-            GlaOperator::SelectBoolean { expression } => expression.contains_edge_property(),
+            GlaOperator::ProjectValues { columns } => columns.iter().any(|column| {
+                matches!(
+                    column,
+                    ValueProjection::EdgeProperty { .. } | ValueProjection::EdgeProperties { .. }
+                )
+            }),
+            GlaOperator::SelectBoolean { expression } => expression.contains_captured_edge(),
             _ => false,
         })
     }
@@ -715,6 +899,32 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
+    /// Complete property maps require an enumerating, named property source.
+    #[must_use]
+    pub fn projects_vertex_property_maps(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::Properties { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn projects_edge_property_maps(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::EdgeProperties { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn projects_property_maps(&self) -> bool {
+        self.projects_vertex_property_maps() || self.projects_edge_property_maps()
+    }
+
     /// The binding slots whose vertex rows (labels or properties) this plan
     /// reads, or `None` when that cannot be stated slot by slot (a Boolean
     /// expression or a path projection may read any bound vertex).
@@ -730,17 +940,23 @@ impl<Row> GlaPlan<Row> {
                     slots.insert(left.ordinal());
                     slots.insert(right.ordinal());
                 }
-                GlaOperator::SelectBoolean { .. } => return None,
+                // A collected element may be read by the value language
+                // later (fgdb-7nwox), as a path projection may.
+                GlaOperator::SelectBoolean { .. } | GlaOperator::CollectEnd { .. } => return None,
                 GlaOperator::ProjectValues { columns } => {
                     for column in columns {
                         match column {
                             ValueProjection::Property { slot, .. }
+                            | ValueProjection::Properties { slot }
                             | ValueProjection::Labels { slot } => {
                                 slots.insert(slot.ordinal());
                             }
-                            ValueProjection::Path { .. } => return None,
+                            ValueProjection::Path { .. } | ValueProjection::Collected { .. } => {
+                                return None;
+                            }
                             ValueProjection::Vertex { .. }
                             | ValueProjection::EdgeProperty { .. }
+                            | ValueProjection::EdgeProperties { .. }
                             | ValueProjection::Type { .. } => {}
                         }
                     }
@@ -772,6 +988,27 @@ impl<Row> GlaPlan<Row> {
         let mut bytes = b"fgdb:bounded-gla:v1\0".to_vec();
         bytes.extend_from_slice(&(self.operators.len() as u64).to_be_bytes());
         for operator in &self.operators {
+            // A type alternation prefixes its members (tag 40), then encodes
+            // the operator in its untyped form. One and Any keep their bytes.
+            if let GlaOperator::ScanEdges {
+                relation: EdgeRelation::Set(set),
+                ..
+            }
+            | GlaOperator::Expand {
+                relation: EdgeRelation::Set(set),
+                ..
+            }
+            | GlaOperator::VarLengthExpand {
+                relation: EdgeRelation::Set(set),
+                ..
+            } = operator
+            {
+                bytes.push(40);
+                bytes.push(set.len);
+                for relation in set.relations() {
+                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                }
+            }
             match operator {
                 GlaOperator::Empty => bytes.push(0),
                 GlaOperator::ScanVertices => bytes.push(1),
@@ -779,8 +1016,13 @@ impl<Row> GlaPlan<Row> {
                     relation,
                     direction,
                 } => {
-                    bytes.push(2);
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    match relation {
+                        EdgeRelation::One(relation) => {
+                            bytes.push(2);
+                            bytes.extend_from_slice(&relation.0.to_be_bytes());
+                        }
+                        EdgeRelation::Any | EdgeRelation::Set(_) => bytes.push(32),
+                    }
                     bytes.push(direction_tag(*direction));
                 }
                 GlaOperator::Select { slot, predicates } => {
@@ -827,9 +1069,11 @@ impl<Row> GlaPlan<Row> {
                     relation,
                     direction,
                 } => {
-                    bytes.push(5);
+                    bytes.push(if relation.one().is_some() { 5 } else { 33 });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    if let EdgeRelation::One(relation) = relation {
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
                     bytes.push(direction_tag(*direction));
                 }
                 GlaOperator::VarLengthExpand {
@@ -841,16 +1085,24 @@ impl<Row> GlaPlan<Row> {
                 } => {
                     // Preserve existing transcripts byte-for-byte. Every
                     // selector has its own tag even when outputs coincide.
-                    bytes.push(match search {
+                    let tag = match search {
                         GraphWalkSearch::All => 22,
                         GraphWalkSearch::AllShortest => 23,
                         GraphWalkSearch::AnyShortest => 24,
                         GraphWalkSearch::Acyclic => 29,
                         GraphWalkSearch::Simple => 30,
                         GraphWalkSearch::Trail => 31,
-                    });
+                    };
+                    if relation.one().is_some() {
+                        bytes.push(tag);
+                    } else {
+                        bytes.push(34);
+                        bytes.push(tag);
+                    }
                     bytes.extend_from_slice(&source.0.to_be_bytes());
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    if let EdgeRelation::One(relation) = relation {
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
                     bytes.push(direction_tag(*direction));
                     bytes.extend_from_slice(&bounds.minimum().to_be_bytes());
                     bytes.extend_from_slice(&bounds.maximum().to_be_bytes());
@@ -881,40 +1133,16 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(12);
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for column in columns {
-                        match column {
-                            ValueProjection::Vertex { slot } => {
-                                bytes.push(0);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                            }
-                            ValueProjection::Property { slot, key } => {
-                                bytes.push(1);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                                bytes.extend_from_slice(&key.0.to_be_bytes());
-                            }
-                            ValueProjection::EdgeProperty { capture, key } => {
-                                bytes.push(3);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                                bytes.extend_from_slice(&key.0.to_be_bytes());
-                            }
-                            ValueProjection::Labels { slot } => {
-                                bytes.push(4);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                            }
-                            ValueProjection::Type { capture } => {
-                                bytes.push(5);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                            }
-                            ValueProjection::Path { capture, function } => {
-                                bytes.push(2);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                                bytes.push(*function as u8);
-                            }
-                        }
+                        append_value_projection_transcript(column, &mut bytes);
                     }
                 }
                 GlaOperator::OrderByValues => bytes.push(13),
                 GlaOperator::OrderByValueColumns { columns } => {
-                    bytes.push(20);
+                    // Tag 20 used storage type order. Keep implicit canonical
+                    // row order unchanged; explicit keys use orderability v1.
+                    // Tag 29 belongs to ACYCLIC expansion, so the briefly used
+                    // conflicting explicit-order encoding is also retired.
+                    bytes.push(36);
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for column in columns.iter() {
                         bytes.extend_from_slice(&(column.column as u64).to_be_bytes());
@@ -950,6 +1178,20 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(18);
                     bytes.extend_from_slice(&group.to_be_bytes());
                 }
+                GlaOperator::Collect { group, end, slots } => {
+                    bytes.push(37);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.extend_from_slice(&end.to_be_bytes());
+                    bytes.extend_from_slice(&slots.to_be_bytes());
+                }
+                GlaOperator::CollectEnd { group, value } => {
+                    bytes.push(38);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.push(u8::from(value.is_some()));
+                    if let Some(value) = value {
+                        append_value_projection_transcript(value, &mut bytes);
+                    }
+                }
                 GlaOperator::CompareProperties {
                     left,
                     left_key,
@@ -981,6 +1223,13 @@ impl<Row> GlaPlan<Row> {
                         bytes.extend_from_slice(&slot.0.to_be_bytes());
                     }
                 }
+                GlaOperator::DifferentEdges { segments } => {
+                    bytes.push(35);
+                    bytes.extend_from_slice(&(segments.len() as u64).to_be_bytes());
+                    for slot in segments {
+                        bytes.extend_from_slice(&slot.0.to_be_bytes());
+                    }
+                }
                 GlaOperator::SelectPathLength {
                     capture,
                     comparison,
@@ -1007,7 +1256,92 @@ impl<Row> GlaPlan<Row> {
             bytes.extend_from_slice(b"visible-prefix\0");
             bytes.extend_from_slice(&(width as u64).to_be_bytes());
         }
+        if self.projects_property_maps() {
+            append_property_catalog_transcript(self.reverse_catalog.as_deref(), &mut bytes);
+        }
         bytes
+    }
+}
+
+/// One projected column's bytes in the plan transcript.
+fn append_value_projection_transcript(column: &ValueProjection, bytes: &mut Vec<u8>) {
+    match column {
+        ValueProjection::Vertex { slot } => {
+            bytes.push(0);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::Property { slot, key } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+            bytes.extend_from_slice(&key.0.to_be_bytes());
+        }
+        ValueProjection::EdgeProperty { capture, key } => {
+            bytes.push(3);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+            bytes.extend_from_slice(&key.0.to_be_bytes());
+        }
+        ValueProjection::Labels { slot } => {
+            bytes.push(4);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::Type { capture } => {
+            bytes.push(5);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+        }
+        ValueProjection::Properties { slot } => {
+            bytes.push(6);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::EdgeProperties { capture } => {
+            bytes.push(7);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+        }
+        ValueProjection::Path { capture, function } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+            bytes.push(*function as u8);
+        }
+        ValueProjection::Collected { group } => {
+            bytes.push(8);
+            bytes.extend_from_slice(&group.to_be_bytes());
+        }
+    }
+}
+
+pub(crate) fn append_property_catalog_transcript(
+    catalog: Option<&crate::graph_text::ReverseSymbolCatalog>,
+    bytes: &mut Vec<u8>,
+) {
+    bytes.extend_from_slice(b"fgdb:property-catalog:v1\0");
+    let Some(catalog) = catalog else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(catalog.properties.len() as u64).to_be_bytes());
+    for (key, name) in &catalog.properties {
+        bytes.extend_from_slice(&key.0.to_be_bytes());
+        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+    }
+}
+
+/// The label names a post-statement `labels()` read resolves through.
+pub(crate) fn append_label_catalog_transcript(
+    catalog: Option<&crate::graph_text::ReverseSymbolCatalog>,
+    bytes: &mut Vec<u8>,
+) {
+    bytes.extend_from_slice(b"fgdb:label-catalog:v1\0");
+    let Some(catalog) = catalog else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(catalog.labels.len() as u64).to_be_bytes());
+    for (label, name) in &catalog.labels {
+        bytes.extend_from_slice(&label.0.to_be_bytes());
+        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
     }
 }
 
@@ -1099,7 +1433,10 @@ mod tests {
             };
             assert!(!predicate.matches(&[], &[]));
             assert_eq!(
-                predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(i64::MIN))]),
+                predicate.matches(
+                    &[],
+                    &[(PropertyKeyId(4), CanonicalScalar::Int(i64::MIN).into())]
+                ),
                 comparison.accepts(i64::MIN, i64::MAX)
             );
         }
@@ -1135,7 +1472,7 @@ mod tests {
         ] {
             let properties = [(
                 PropertyKeyId(4),
-                CanonicalScalar::Float(CanonicalF64::new(actual)),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(actual))),
             )];
             for (comparison, expected) in comparisons.into_iter().zip(expected) {
                 let predicate = VertexPredicate::IntegerProperty {
@@ -1157,15 +1494,21 @@ mod tests {
                 comparison,
                 value: 1,
             };
+            assert!(!predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Null.into())]));
+            // Another domain is unequal (fgdb-v6ku6): only `<>` accepts it.
             for actual in [
-                CanonicalScalar::Null,
                 CanonicalScalar::Bool(true),
                 CanonicalScalar::ucs_basic_text("1").unwrap(),
             ] {
-                assert!(!predicate.matches(&[], &[(PropertyKeyId(4), actual)]));
+                assert_eq!(
+                    predicate.matches(&[], &[(PropertyKeyId(4), actual.into())]),
+                    comparison == IntegerComparison::NotEqual
+                );
             }
             assert!(!predicate.matches(&[], &[]));
-            assert!(!predicate.matches(&[], &[(PropertyKeyId(99), CanonicalScalar::Int(1))]));
+            assert!(
+                !predicate.matches(&[], &[(PropertyKeyId(99), CanonicalScalar::Int(1).into())])
+            );
         }
     }
 
@@ -1193,7 +1536,10 @@ mod tests {
                 .collect();
             let rows = plan
                 .execute(vertices, edges, |id, predicates| {
-                    let properties = [(PropertyKeyId(4), values[id.0 as usize - 1].clone())];
+                    let properties = [(
+                        PropertyKeyId(4),
+                        CanonicalPropertyValue::Scalar(values[id.0 as usize - 1].clone()),
+                    )];
                     Ok::<_, ()>(
                         predicates
                             .iter()

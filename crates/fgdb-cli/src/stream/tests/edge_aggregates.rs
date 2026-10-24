@@ -204,24 +204,41 @@ fn failed_delivery_or_predemand_cancellation_does_not_drive_either_aggregate_fam
 }
 
 #[test]
-fn edge_shape_refusals_precede_headers_and_late_data_refusals_emit_no_success() {
+fn edge_collections_stream_while_shape_and_late_data_refusals_emit_no_success() {
     let ((), report) = run_async_under_lab(0x636c_e103, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, fixture()).await.unwrap();
-        for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values",
-            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total",
-        ] {
-            let mut output = Vec::new();
-            assert!(
-                run(&db, &cx, &edge_options(text), true, &mut output).is_err(),
-                "{text}"
-            );
-            assert!(output.is_empty());
-        }
+
+        // Property collection is now part of the native identified edge
+        // aggregate profile. Keep the CLI law aligned with the engine and
+        // compare the streamed row to the ordinary eager answer.
+        let collect = "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values";
+        let options = edge_options(collect);
+        let eager = db
+            .query(&cx, collect, &options.params, &options, policy())
+            .unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        let mut output = Vec::new();
+        okay(run(&db, &cx, &options, true, &mut output));
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            row_lines(&output),
+            row_lines(&String::from_utf8(expected).unwrap())
+        );
+        assert!(output.ends_with("\"seq\":1,\"count\":1}\n"));
+
+        let future = "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total";
+        let mut output = Vec::new();
+        assert!(
+            run(&db, &cx, &edge_options(future), true, &mut output).is_err(),
+            "{future}"
+        );
+        assert!(output.is_empty());
+
         let mut edit = WriteBatch::new(RelationId(1));
         edit.set_edge_property(
             EId(3),

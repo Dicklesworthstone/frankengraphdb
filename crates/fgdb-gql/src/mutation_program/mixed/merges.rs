@@ -80,7 +80,10 @@ impl MixedMeter {
         stats: GraphEdgeMergeStats,
     ) -> Result<(), GraphWriteProgramError<E, A, C>> {
         let no_input = stats.match_selection.result_rows == 0;
-        if stats.created_edges > 1
+        // Plain relationship MERGE visits all distinct selected pairs. Each
+        // creation consumes at least one real MATCH occurrence; duplicate rows
+        // cannot authorize additional creations or erase the empty-input law.
+        if stats.created_edges > stats.match_selection.result_rows
             || (no_input && (stats.overlay_edges != 0 || stats.created_edges != 0))
             || (!no_input && stats.created_edges == 0 && stats.overlay_edges == 0)
         {
@@ -132,6 +135,11 @@ impl MixedMeter {
         input: &PreparedGraphEdgeUpsert,
         stats: GraphEdgeUpsertStats,
     ) -> Result<(), GraphWriteProgramError<E, A, C>> {
+        // ON/trailing actions still belong to the singular branch contract.
+        // The wider plain-MERGE cardinality cannot weaken that premise.
+        if stats.merge.created_edges > 1 {
+            return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
+        }
         let branch = if stats.merge.match_selection.result_rows == 0 {
             GraphEdgeUpsertBranch::NoInput
         } else if stats.merge.created_edges == 1 {
@@ -311,5 +319,112 @@ impl MixedMeter {
             }
             source => GraphWriteProgramError::EdgeUpsert { statement, source },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_creation_counts_are_cumulative_and_cannot_exceed_real_input() {
+        let policy = GraphWriteProgramPolicy::new(GqlQueryPolicy::new(32, 8, 100, 100), 0, 0, 3);
+        let mut meter = MixedMeter {
+            common: ProgramMeter {
+                policy: policy.mutations,
+                stats: GraphMutationProgramStats::default(),
+            },
+            policy,
+            vertices: 0,
+            edges: 0,
+        };
+        let stats = GraphEdgeMergeStats {
+            match_selection: GqlExecutionStats {
+                snapshot_records: 7,
+                result_rows: 4,
+            },
+            overlay_edges: 9,
+            evaluator: GlaExecutionStats {
+                work_units: 20,
+                scratch_entries: 10,
+            },
+            created_edges: 2,
+        };
+        meter.absorb_edge_merge::<(), (), ()>(0, stats).unwrap();
+        assert_eq!(meter.edges, 2);
+        assert_eq!(
+            meter.common.stats.selection,
+            GqlExecutionStats {
+                snapshot_records: 16,
+                result_rows: 4,
+            }
+        );
+        let before = meter.common.stats;
+        assert!(matches!(
+            meter.absorb_edge_merge::<(), (), ()>(1, stats),
+            Err(GraphWriteProgramError::CreationBudget {
+                statement: 1,
+                dimension: GraphInsertLimitDimension::Edges,
+                limit: 3,
+                observed: 4,
+            })
+        ));
+        assert_eq!(meter.common.stats, before);
+        assert_eq!(meter.edges, 2);
+        assert!(matches!(
+            meter.absorb_edge_merge::<(), (), ()>(
+                1,
+                GraphEdgeMergeStats {
+                    created_edges: 5,
+                    ..stats
+                }
+            ),
+            Err(GraphWriteProgramError::Program(
+                GraphMutationProgramError::InvalidStatistics { statement: 1 }
+            ))
+        ));
+        assert_eq!(meter.common.stats, before);
+        assert_eq!(meter.edges, 2);
+    }
+
+    #[test]
+    fn repeated_existence_records_cannot_wrap_the_shared_source_allowance() {
+        let policy = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            0,
+            0,
+            0,
+        );
+        let mut meter = MixedMeter {
+            common: ProgramMeter {
+                policy: policy.mutations,
+                stats: GraphMutationProgramStats::default(),
+            },
+            policy,
+            vertices: 0,
+            edges: 0,
+        };
+        let error = meter
+            .absorb_edge_merge::<(), (), ()>(
+                0,
+                GraphEdgeMergeStats {
+                    match_selection: GqlExecutionStats {
+                        snapshot_records: u64::MAX,
+                        result_rows: 2,
+                    },
+                    overlay_edges: 1,
+                    evaluator: GlaExecutionStats::default(),
+                    created_edges: 0,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
+            statement: 0, dimension: GraphMutationProgramDimension::SnapshotRecords,
+            limit: u64::MAX, observed,
+        }) if observed == u128::from(u64::MAX) + 1)
+        );
+        assert_eq!(meter.common.stats, GraphMutationProgramStats::default());
+        assert_eq!(meter.edges, 0);
     }
 }

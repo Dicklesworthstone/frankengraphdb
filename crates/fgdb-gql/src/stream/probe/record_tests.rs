@@ -24,7 +24,7 @@ enum Fault {
 }
 struct Masked {
     after: Option<VId>,
-    props: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    props: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     fault: Fault,
 }
 impl Masked {
@@ -37,8 +37,11 @@ impl Masked {
                     (
                         id,
                         vec![
-                            (P, CanonicalScalar::Int(value)),
-                            (H, CanonicalScalar::Int(7)),
+                            (
+                                P,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)),
+                            ),
+                            (H, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7))),
                         ],
                     )
                 })
@@ -101,7 +104,8 @@ impl VertexScanSource for Masked {
         id: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, VertexScanSourceError<Self::Error, C>>
+    {
         control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
         match self.fault {
             Fault::Property => return Err(VertexScanSourceError::Source("property refused")),
@@ -249,7 +253,7 @@ fn borrowed_defaults_preserve_lookup_events_and_distinguish_missing_vertices_fro
     // The edge-family default also preserves the distinction and zero-copy
     // record borrowing when the vertex-root bridge is not involved.
     struct EdgeBorrowed {
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     }
     impl EdgeScanSource for EdgeBorrowed {
         type Error = ();
@@ -282,7 +286,7 @@ fn borrowed_defaults_preserve_lookup_events_and_distinguish_missing_vertices_fro
         }
     }
     let source = EdgeBorrowed {
-        props: vec![(P, source.0)],
+        props: vec![(P, source.0.into())],
     };
     let mut events = Vec::new();
     let value = source

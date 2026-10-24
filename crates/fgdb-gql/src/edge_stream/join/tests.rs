@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(9);
-type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 #[derive(Clone)]
 struct Fixture {
     edges: EdgeFixtures,
@@ -49,7 +49,7 @@ impl Fixture {
                 (
                     VId(from),
                     VId(to),
-                    vec![(P, CanonicalScalar::Int((id % 5) as i64 - 2))],
+                    vec![(P, CanonicalScalar::Int((id % 5) as i64 - 2).into())],
                 ),
             );
         }
@@ -219,12 +219,15 @@ fn oracle(
     for (&r, (x, y, rp)) in &f.edges {
         for (a, b) in orientations(*x, *y, d[0]) {
             for (&s, (x, y, sp)) in &f.edges {
+                if r == s {
+                    continue;
+                }
                 for (from, c) in orientations(*x, *y, d[1]) {
                     if from != (if shape == 1 { a } else { b }) || (shape == 2 && c != a) {
                         continue;
                     }
                     if filter
-                        && !matches!((&rp[0].1, &sp[0].1), (CanonicalScalar::Int(x), CanonicalScalar::Int(y)) if *x >= 0 && *y < 2)
+                        && !matches!((rp[0].1.as_scalar().unwrap(), sp[0].1.as_scalar().unwrap()), (CanonicalScalar::Int(x), CanonicalScalar::Int(y)) if *x >= 0 && *y < 2)
                     {
                         continue;
                     }
@@ -234,8 +237,8 @@ fn oracle(
                         GraphValue::Edge(s),
                         GraphValue::Vertex(b),
                         GraphValue::Vertex(c),
-                        GraphValue::Scalar(rp[0].1.clone()),
-                        GraphValue::Scalar(sp[0].1.clone()),
+                        GraphValue::Scalar(rp[0].1.as_scalar().unwrap().clone()),
+                        GraphValue::Scalar(sp[0].1.as_scalar().unwrap().clone()),
                     ]);
                 }
             }
@@ -243,6 +246,43 @@ fn oracle(
     }
     rows.sort();
     rows.into_iter().skip(skip).take(limit).collect()
+}
+
+#[test]
+fn different_edges_keeps_parallel_return_paths_and_repeatable_mode_keeps_backtracking() {
+    let query = "MATCH (a)-[r:R]-(b)-[s:R]-(a) RETURN r, a, s";
+    for (edges, different, repeatable) in [
+        (vec![(1, 1, 2)], 0, 2),
+        (vec![(1, 1, 2), (2, 1, 2)], 4, 8),
+        (vec![(1, 1, 1)], 0, 1),
+        (vec![(1, 1, 1), (2, 1, 1)], 2, 4),
+    ] {
+        for (text, expected) in [
+            (query.to_owned(), different),
+            (
+                query.replacen("MATCH ", "MATCH DIFFERENT EDGES ", 1),
+                different,
+            ),
+            (
+                query.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS ", 1),
+                repeatable,
+            ),
+        ] {
+            let prepared = prepare(&text);
+            let rows = EdgeScanCursor::new(
+                Fixture::from_edges(edges.iter().copied()),
+                EdgeScanPlan::compile(prepared.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+            assert_eq!(rows.len(), expected, "{text}: {edges:?}");
+            if !text.contains("REPEATABLE ELEMENTS") {
+                assert!(rows.iter().all(|row| row.values()[0] != row.values()[2]));
+            }
+        }
+    }
 }
 
 #[test]
@@ -474,6 +514,83 @@ fn maximum_depth_and_exponential_join_output_keep_only_one_prefix_and_obey_early
 }
 
 #[test]
+fn directed_join_identity_prefix_needs_no_synthetic_source_vertex_column() {
+    for mask in [0, 10, 31, 63] {
+        for shape in 0..3 {
+            for root in [GlaDirection::Forward, GlaDirection::Reverse] {
+                for next in [
+                    GlaDirection::Forward,
+                    GlaDirection::Reverse,
+                    GlaDirection::Undirected,
+                ] {
+                    for distinct in [false, true] {
+                        for (skip, limit) in [(0, 1000), (1, 3), (0, 0)] {
+                            let text = statement(shape, [root, next], false, skip, limit)
+                                .replace("r, a, s", "r, s");
+                            let text = if distinct {
+                                text.replace("RETURN ", "RETURN DISTINCT ")
+                            } else {
+                                text
+                            };
+                            let query = prepare(&text);
+                            let fixture = Fixture::small(mask);
+                            // The finite relation oracle enumerates orientations
+                            // independently, then removes only the unused root
+                            // vertex from complete rows before the native check.
+                            let expected: Vec<_> =
+                                oracle(&fixture, shape, [root, next], false, skip, limit)
+                                    .into_iter()
+                                    .map(|mut row| {
+                                        row.remove(1);
+                                        row
+                                    })
+                                    .collect();
+                            let eager = query
+                                .plan()
+                                .execute_governed_with_element_properties(
+                                    fixture.edges.len() as u64,
+                                    fixture.vertices.iter().copied(),
+                                    fixture.edges.iter().map(|(&id, (a, b, _))| (id, *a, R, *b)),
+                                    |_, _| Ok::<_, ()>(true),
+                                    |_, _| Ok(None),
+                                    |id, _| Ok(Some(&fixture.edges[&id].2[0].1)),
+                                    policy(),
+                                    || Ok::<_, ()>(()),
+                                )
+                                .unwrap();
+                            assert_eq!(plain(&eager.value), expected, "{text}, mask {mask}");
+                            let roots = Arc::clone(&fixture.roots);
+                            let mut cursor = EdgeScanCursor::new(
+                                fixture,
+                                EdgeScanPlan::compile(query.plan()).unwrap(),
+                                policy(),
+                                || Ok::<_, ()>(()),
+                            );
+                            assert_eq!(roots.load(Ordering::SeqCst), 0);
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(plain(&rows), expected, "{text}, mask {mask}");
+                            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                            assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for text in [
+        "MATCH (a)-[r:R]-(b)-[s:R]->(c) RETURN r, s LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r, c, s LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN s, r LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r LIMIT 0",
+    ] {
+        assert!(
+            EdgeScanPlan::compile(prepare(text).plan()).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change_semantics() {
     let text = statement(0, [GlaDirection::Forward; 2], false, 0, 5);
     for invalid in [
@@ -509,7 +626,9 @@ fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change
         policy(),
         || Ok::<_, ()>(()),
     );
-    c.next().unwrap().unwrap();
+    // The repeated identity is reported where it lands, never skipped. Under
+    // the DIFFERENT EDGES default the self-loop pair that used to come first
+    // is not a row, so it lands on the first call (fgdb-vexfr).
     assert!(matches!(
         c.next(),
         Some(Err(GqlQueryError::Source(

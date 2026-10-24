@@ -36,13 +36,107 @@ pub struct GraphTemporalTextError {
     pub kind: GraphTemporalTextErrorKind,
 }
 
+/// The selector clause's own refusals, shared with the set-algebra wrapper.
+#[derive(Clone, Copy)]
+pub(crate) enum SelectorRefusal {
+    Missing,
+    Duplicate,
+    Position,
+    Sequence,
+    ConflictingParameterType,
+    MissingParameter,
+    ParameterTypeMismatch(GqlParameterType),
+    UnexpectedArguments,
+}
+impl SelectorRefusal {
+    pub(crate) fn class(self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Missing | Self::Duplicate | Self::Position | Self::Sequence => {
+                crate::GqlRefusalClass::Syntax
+            }
+            Self::ConflictingParameterType
+            | Self::MissingParameter
+            | Self::ParameterTypeMismatch(_)
+            | Self::UnexpectedArguments => crate::GqlRefusalClass::InvalidValue,
+        }
+    }
+}
+impl core::fmt::Display for SelectorRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("expected FOR SYSTEM_TIME AS OF SEQ"),
+            Self::Duplicate => f.write_str("FOR SYSTEM_TIME appears more than once"),
+            Self::Position => f.write_str("FOR SYSTEM_TIME is not allowed at this position"),
+            Self::Sequence => {
+                f.write_str("FOR SYSTEM_TIME AS OF SEQ requires an unsigned integer or parameter")
+            }
+            Self::ConflictingParameterType => {
+                f.write_str("the sequence parameter is also used with another type")
+            }
+            Self::MissingParameter => f.write_str("missing sequence parameter value"),
+            Self::ParameterTypeMismatch(found) => {
+                write!(f, "sequence parameter has type {found}, expected UINT64")
+            }
+            Self::UnexpectedArguments => {
+                f.write_str("arguments supplied for parameters the statement does not use")
+            }
+        }
+    }
+}
+impl GraphTemporalTextErrorKind {
+    fn selector(&self) -> Result<SelectorRefusal, &dyn TemporalInner> {
+        Ok(match self {
+            Self::Query(kind) => return Err(kind),
+            Self::Pipeline(kind) => return Err(kind),
+            Self::MissingSystemTimeClause => SelectorRefusal::Missing,
+            Self::DuplicateSystemTimeClause => SelectorRefusal::Duplicate,
+            Self::InvalidSystemTimePosition => SelectorRefusal::Position,
+            Self::InvalidSequenceSelector => SelectorRefusal::Sequence,
+            Self::ConflictingParameterType => SelectorRefusal::ConflictingParameterType,
+            Self::MissingParameter => SelectorRefusal::MissingParameter,
+            Self::ParameterTypeMismatch { found } => SelectorRefusal::ParameterTypeMismatch(*found),
+            Self::UnexpectedArguments => SelectorRefusal::UnexpectedArguments,
+        })
+    }
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self.selector() {
+            Ok(refusal) => refusal.class(),
+            Err(inner) => inner.class(),
+        }
+    }
+}
+/// The wrapped statement's own kind: its message and class pass through.
+trait TemporalInner: core::fmt::Display {
+    fn class(&self) -> crate::GqlRefusalClass;
+}
+impl TemporalInner for GraphPatternTextErrorKind {
+    fn class(&self) -> crate::GqlRefusalClass {
+        GraphPatternTextErrorKind::class(self)
+    }
+}
+impl TemporalInner for crate::GraphPipelineAggregateTextErrorKind {
+    fn class(&self) -> crate::GqlRefusalClass {
+        crate::GraphPipelineAggregateTextErrorKind::class(self)
+    }
+}
+impl core::fmt::Display for GraphTemporalTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.selector() {
+            Ok(refusal) => refusal.fmt(f),
+            Err(inner) => inner.fmt(f),
+        }
+    }
+}
+impl GraphTemporalTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphTemporalTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "temporal graph text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphTemporalTextError {}
@@ -357,10 +451,12 @@ fn locate_clause(
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,
         ));
     }
+    // The clause closes the first MATCH, as in the aggregate facade: a WITH
+    // stage may follow it when the pattern facade's head accepts one.
     let next = tokens.get(token_at + 6);
-    if !next
-        .is_some_and(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"))
-    {
+    if !next.is_some_and(|token| {
+        token.word("WHERE") || token.word("OPTIONAL") || token.word("WITH") || token.word("RETURN")
+    }) {
         return Err(failure(
             end,
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,

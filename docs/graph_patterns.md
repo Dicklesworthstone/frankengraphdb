@@ -84,10 +84,17 @@ shared compiler schedules connected atoms. Truly disconnected definitions
 refuse instead of dropping a component or inserting a Cartesian product.
 
 RETURN selects named vertices and canonical vertex properties, with optional
-AS aliases. An unaliased vertex uses its variable name; an unaliased property
-uses the property name. Colliding output names require explicit distinct
-aliases and otherwise refuse. Repeated expressions under different aliases
-are legal. RETURN * selects each declared variable once in first-occurrence
+AS aliases. An unaliased item is named by its exact source text, as openCypher
+names columns, and never by its siblings: `RETURN a` yields `a`,
+`RETURN a.title` yields `a.title`, `count(*)` yields `count(*)`, and
+`size(a.title)` yields `size(a.title)` (owner ruling on fgdb-aw8lm, 2026-09-30).
+An explicit alias is never renamed: two equal names, explicit or not, or the
+same item twice, still refuse. WITH bindings keep requiring AS for computed
+values.
+A column name is any nonempty text of at most 128 bytes without control
+characters, so delimited identifiers (`` AS `total due` ``) are column names;
+names that introduce variables (UNWIND and YIELD aliases) stay identifiers.
+Repeated expressions under different aliases are legal. RETURN * selects each declared variable once in first-occurrence
 order and cannot be mixed with additional columns in this profile.
 
 **Text RETURN defaults to ALL; DISTINCT is explicit.** This is different from
@@ -102,8 +109,11 @@ Keywords are ASCII case-insensitive, while names are case-sensitive ASCII
 identifiers or backtick-delimited identifiers (`` `first name` ``). Unicode
 whitespace, `//` line comments and non-nesting `/* */` block comments are
 trivia, and errors carry byte offsets. Text literals take single or double
-quotes; a doubled delimiter is the only escape and a backslash is an ordinary
-byte. A delimited identifier that spells a keyword refuses (fgdb-285i2).
+quotes. A doubled delimiter is one delimiter, and the openCypher/GQL backslash
+escapes decode: `\\`, `\'`, `\"`, `` \` ``, `\b`, `\f`, `\n`, `\r`, `\t` and
+`\uXXXX` (four hex digits; a surrogate pair is one character). Any other
+escape refuses, including `\U`, whose digit count GQL and openCypher define
+differently. A delimited identifier that spells a keyword refuses (fgdb-285i2).
 The native read facade (`PreparedNativeRead`) strips one trailing semicolon,
 and multiple statements are `PreparedGraphWriteScript`'s. Anything outside
 the executed surface refuses with a typed error rather than being silently
@@ -257,6 +267,144 @@ This is projection of the existing atomic CanonicalScalar property domain,
 not arbitrary expressions, recursive collection-valued properties, edge/path
 values, a catalog binding service or an authorization grant.
 
+## Complete graph property maps
+
+The 2026-10-11 source implementation adds complete visible property maps to
+the native read compiler and the snapshot, historical, pinned, transaction
+and capability-authorized resident query sources:
+
+```text
+MATCH (person:Person)-[relationship:KNOWS]->(friend)
+RETURN properties(person) AS person,
+       keys(relationship) AS relationship_keys,
+       friend{.*, display_name: 'Friend'} AS friend
+```
+
+`properties(n)` and `properties(r)` return canonical maps with the actual
+property names and scalar values of the admitted vertex or fixed relationship.
+`keys(n)` and `keys(r)` return those names in canonical order. `n{.*}` and
+`r{.*}` select all visible properties; explicit projection entries override a
+matching key, including an explicit NULL value. An element with no visible
+properties produces an empty map. A NULL element from `OPTIONAL MATCH`
+produces NULL. Row-valued maps also support `properties(map)` as an identity
+operation, and `properties(NULL)` returns NULL. Maps can cross `WITH`, become
+grouping keys or aggregate arguments, and use the existing map/list wire cells.
+
+Names come from the host's `GraphSymbolResolver::reverse_catalog()` through
+`ReverseSymbolCatalog::insert_property(PropertyKeyId, name)`. The CLI and
+server populate that catalog from their operator-declared property bindings.
+Enumeration reads actual effective source properties; a list of catalog names
+is never treated as proof that other stored properties do not exist. A visible
+property ID without a name refuses with `ReadError::UnmappedProperty`, even
+under `LIMIT 0`. Two actual property IDs resolving to the same name refuse
+with `ReadError::InvalidPropertyMap`. Catalog property names participate in
+the identity of plans that enumerate maps; map-free plan bytes stay unchanged.
+
+Capability sources remove forbidden fields before looking up their names,
+inspecting their payloads, constructing maps or charging per-field work and
+scratch. Transaction maps merge the pinned basis with staged additions,
+updates and removals. Map cells, names and scalar payload copies consume the
+same cumulative allowance as source admission and query execution. Stored
+properties remain atomic `CanonicalScalar` values; this does not add stored
+recursive maps.
+
+`MATCH ... SET/REMOVE ... RETURN` also supports complete element maps, keys,
+wildcard projections and explicit overrides, including grouping and aggregate
+arguments. The mutation collector combines the frozen selection's maps with
+the statement's complete, conflict-checked assignment table before staging.
+Aliases of one element therefore see the same final properties, and every
+returned occurrence retains its original match multiplicity. `REMOVE` omits
+the field; `SET ... = NULL` retains the existing write API's stored scalar NULL
+semantics. A deleted target refuses property-map access. Projection failures,
+catalog failures and budget refusals stage no part of the statement, while
+`LIMIT 0` suppresses only output rows. The same behavior is available through
+the library's `query_write` and `query_write_engine`, the CLI's `write`, and
+FGP write execution.
+
+`CREATE` and `INSERT ... RETURN` support maps for newly created vertices and
+relationships and for already matched source elements. For example:
+
+```text
+MATCH (person:Person)
+CREATE (copy:Person {name:person.name}),
+       (person)-[relationship:KNOWS {weight:1}]->(copy)
+RETURN properties(person) AS original,
+       copy{.*, display_name:'Copy'} AS created,
+       keys(relationship) AS relationship_keys
+```
+
+The insertion collector freezes each created map from the same checked fields
+used by its intents, before requesting element identities. It does not rescan
+the graph or re-evaluate creation expressions. Matched maps use the original
+selection, including staged transaction changes and capability masking;
+imported `UNWIND` rows keep their own input columns. Grouping and aggregates
+consume these frozen occurrences through the existing write-RETURN owner.
+Explicit projection overrides affect only the result, not stored fields.
+Missing names for known creation fields and duplicate reverse names refuse
+during preparation, including an empty input or `LIMIT 0`. Expression,
+allocation, cancellation and quota failures publish no part of the statement
+and preserve earlier staged work; identities already issued by an allocator
+may remain spent. Names and map payloads use the existing cumulative work and
+scratch limits. Low-level callers can supply the catalog with
+`PreparedGraphInsertQuery::prepare_with_property_catalog`.
+
+Single-vertex `MERGE ... RETURN` supports the same maps, keys, projections and
+terminal aggregates after the selected `ON CREATE`/`ON MATCH` clause and every
+trailing `SET`:
+
+```text
+MERGE (person:Person {name:'Ada'})
+ON CREATE SET person.visits=1
+ON MATCH SET person.visits=person.visits+1
+RETURN person{.*} AS person
+```
+
+The host borrows the selected vertex's historical fields and applies the
+prepared transaction effects, then invokes the same governed map collector.
+It enumerates actual effective fields, including those outside the MERGE key
+and assignments, without copying the complete unmasked vertex or repeating
+the match. Both basis fields and staged edits are masked before naming or
+payload admission. An existing full-element read dependency covers the
+property domain, including an empty map and keys added by a concurrent writer;
+this keeps the transaction's conservative conflict-observation contract.
+All map construction and final projection remain inside the original rollback
+workspace and, for authorized execution, its one ReadWrite permit. A missing
+visible name, invalid map, cancellation, quota refusal or late RETURN failure
+restores the complete MERGE statement while retaining earlier staged work.
+Low-level callers provide names through
+`PreparedGraphVertexUpsertQuery::prepare_with_property_catalog`; their
+`Properties` input binding must contain a canonical map of scalar fields.
+Relationship-pattern and multi-row `MERGE RETURN` remain outside this map slice.
+Map-projection syntax on a generic imported `UNWIND` MAP row also remains
+outside the insertion slice; ordinary `properties(row)` and `keys(row)` use
+the existing row-value evaluator.
+
+Nullable imported bindings across multipart `OPTIONAL MATCH` boundaries also
+refuse; project their maps before that boundary. Mixed row/graph multipart
+projections support `properties(n)` and `keys(n)`, while `n{.*}` there remains
+outside this slice.
+Low-level callers need the map-aware element accessor APIs;
+an omitted map source is a typed refusal rather than an empty map.
+
+Regression sources are `crates/fgdb/tests/graph_property_maps.rs`,
+`crates/fgdb-gql/tests/insertion_property_maps.rs`,
+`crates/fgdb-gql/tests/vertex_upsert_property_maps.rs`, the native GQL projection
+and MERGE point-projection laws, and the CLI and FGP loopback suites. These
+additions have source review and pinned formatter checks here; compilation
+and Rust test execution remain **unverified** in this workspace.
+
+## UNION column semantics
+
+Text `UNION` operands must expose the same column names. Reordered names are
+aligned by a native projection before set arithmetic, so
+`RETURN 1 AS a, 2 AS b UNION RETURN 2 AS b, 1 AS a` produces one distinct row
+in the left arm's column order. Operand-local ordering and pagination remain
+inside that operand. Incompatible names refuse during preparation before
+catalog access. An unparenthesized UNION chain must use `ALL` throughout or
+`DISTINCT` throughout; omitted quantifiers mean DISTINCT. Parenthesized set
+expressions have independent quantifier scopes. The generic typed positional
+set API and text `INTERSECT`/`EXCEPT` retain their positional behavior.
+
 ## DISTINCT and ALL matching occurrences
 
 All three builder-prepared output shapes default to DISTINCT. Explicitly retain
@@ -341,12 +489,37 @@ relevant after output or evaluator refusal. Positive-label node patterns retain
 label-scoped insertion witnesses; unlabeled scans retain the table witness.
 An unrelated vertex-only insertion need not conflict with an edge scan.
 
-Fixed-length edge occurrences may be reused by different atoms. Distinct
-variable names may denote the same vertex unless an inequality forbids it.
-No TRAIL, ACYCLIC, SIMPLE, edge-variable identity or complete GQL morphism/bag
-contract is implied. The deterministic connected-edge schedule is not a
-cost-based optimizer or registered FreeJoin. A finite 64-edge definition can
-still have an enormous number of witnesses.
+The generic typed builder defaults to `GraphMatchMode::RepeatableElements`.
+Select `builder.match_mode(GraphMatchMode::DifferentEdges)` to require actual
+relationship IDs to be distinct across all atoms in that builder, including
+quantified segments and comma-separated components. Use value preparation and
+an identified-edge execution entrypoint when this constraint needs identities;
+anonymous topology cannot prove relationship uniqueness. Repeated vertices and
+parallel relationships with different IDs remain legal. Fixed atoms with
+disjoint concrete relationship types need no identity check.
+
+The shared text compiler uses `DIFFERENT EDGES` by default. For example,
+`MATCH (a)-[:R]->(b)<-[:R]-(c) RETURN a,c` cannot backtrack over one relationship.
+`MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)<-[:R]-(c) RETURN a,c` permits that result.
+Each later `MATCH`, `OPTIONAL MATCH` or existential pattern starts an independent
+relationship domain; comma-separated parts inside one clause share a domain.
+`DIFFERENT RELATIONSHIPS` is an equivalent explicit spelling.
+
+The bounded anchored `MATCH p = ANY CHEAPEST ... COST e.weight RETURN p`
+extension uses the same default and explicit match modes. Both single-answer
+and ranked `CHEAPEST k` searches enforce relationship history while refining
+cost-ranked candidates, including negative costs; rejecting a selected answer
+after ranking would miss valid alternatives. The native
+`PreparedGraphCheapestPath` constructor retains repeatable matching; opt into
+the textual default with `.with_match_mode(GraphMatchMode::DifferentEdges)`.
+
+Path modes remain separate: `TRAIL` forbids edge reuse within its atom even
+under repeatable matching, `ACYCLIC` forbids repeated vertices, and `SIMPLE`
+permits returning to its starting vertex. The enclosing different-edges rule
+also applies to `SIMPLE` closures and shortest-path selection. This bounded
+profile is not a complete GQL conformance claim. The deterministic connected-edge
+schedule is not a cost-based optimizer or registered FreeJoin. A finite 64-edge
+definition can still have an enormous number of witnesses.
 
 Typed patterns are not squeezed into the legacy BoundPlan certificate format.
 There is still no public pattern artifact/audit API. Logical bytes and schema

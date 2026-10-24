@@ -399,13 +399,14 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
         let db = seeded(&contexts.commit()).await;
         let cx = contexts.query();
         for (text, expected_facade) in [
-            // The refusal names the facade whose parser got furthest. Since the
-            // source-free pipeline aggregates (df505256, 60d2041e), the pipeline
-            // facade reads further into `RETURN 1` than the set facade does. The
-            // laws below (typed refusal, in-text offset, deterministic diagnostics,
-            // cached misses) are unchanged. That the winner moves at all is the
-            // parser race tracked by fgdb-crate-layer-drift-phjcs.
-            ("EXPLAIN RETURN 1", fgdb::NativeReadClass::PipelineAggregate),
+            // The refusal names the facade whose parser got furthest.
+            // `EXPLAIN RETURN 1` itself is answered at ad2a4059, so the probe
+            // repeats an alias, which every facade refuses; the set facade reads
+            // furthest into it (observed at 3c44cc6a). The laws below (typed
+            // refusal, in-text offset, deterministic diagnostics, cached misses)
+            // are unchanged. That the winner moves at all is the parser race
+            // tracked by fgdb-crate-layer-drift-phjcs.
+            ("EXPLAIN RETURN 1 AS x, 2 AS x", fgdb::NativeReadClass::Set),
             (
                 "MATCH (n:Missing) RETURN n",
                 fgdb::NativeReadClass::Aggregate,
@@ -733,6 +734,10 @@ fn every_write_facade_matches_two_specific_queries_in_autocommit_and_outer_trans
             (
                 WriteFacade::Insert,
                 "MATCH (a:Person) WHERE a.p=1 CREATE (a)-[:R]->(n:Person {p:8})",
+            ),
+            (
+                WriteFacade::Insert,
+                "MATCH (a:Person) WHERE a.p=1 CREATE (n:Person {p:8}) CREATE (a)-[e:R]->(n)",
             ),
             (WriteFacade::Delete, "MATCH (n:Person) WHERE n.p=4 DELETE n"),
             (
@@ -1099,6 +1104,544 @@ fn late_script_budget_refusal_matches_native_error_and_preserves_outer_prefix() 
         assert!(entry.vertex(VId(100)).unwrap().is_none());
         assert!(entry.vertex(VId(99)).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher id()/elementId() on the embedded surface (fgdb-j687q; owner
+/// ruling 2026-09-30: allowed where the owner sees everything). Independent
+/// expectation: the seeded fixture's explicit identities, vertices 1..=4 and
+/// edges 10 (1->2) and 11 (2->3), with p equal to each vertex identity.
+#[test]
+fn identity_functions_return_engine_identities_on_the_embedded_surface() {
+    let ((), report) = run_async_under_lab(0x7d14_0091, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let int = |value: i64| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
+        };
+        let text = |value: &str| {
+            GraphAggregateValue::Value(GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text(value).unwrap(),
+            ))
+        };
+        let null = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let rows = |db: &Database<MemVfs>, statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(&db, "MATCH (n) RETURN id(n) AS i ORDER BY i"),
+            [[int(1)], [int(2)], [int(3)], [int(4)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) AS i, n.p AS p ORDER BY i DESC LIMIT 2"
+            ),
+            [[int(4), int(4)], [int(3), int(3)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) RETURN id(r) AS e, elementId(a) AS src, ID(b) AS dst ORDER BY e"
+            ),
+            [[int(10), text("1"), int(2)], [int(11), text("2"), int(3)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) RETURN id(n) AS src, id(m) AS dst ORDER BY src"
+            ),
+            [
+                [int(1), int(2)],
+                [int(2), int(3)],
+                [int(3), null.clone()],
+                [int(4), null.clone()]
+            ]
+        );
+        // id() is an integer operand wherever one is admitted: a vertex's in a
+        // pattern WHERE (also against a parameter), arithmetic, toString and
+        // text concatenation, an aggregate grouping key.
+        assert_eq!(
+            rows(&db, "MATCH (n) WHERE id(n) = 2 RETURN n.p AS p"),
+            [[int(2)]]
+        );
+        let at_three = GqlParameters::new().with_int64("id", 3).unwrap();
+        assert_eq!(
+            db.query(
+                &cx,
+                "MATCH (n) WHERE id(n) = $id RETURN n.p AS p",
+                &at_three,
+                symbols,
+                policy()
+            )
+            .unwrap(),
+            QueryResult::Rows {
+                columns: vec!["p".to_owned()],
+                rows: vec![vec![int(3)]],
+            }
+        );
+        // An edge's identity filters in the pattern WHERE through the captured
+        // relationship (fgdb-cdbie), and through a WITH stage, where the edge
+        // is a row column. An OPTIONAL MATCH miss is NULL, so its comparison is
+        // UNKNOWN and the optional part stays NULL.
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WITH a, r WHERE id(r) = 11 RETURN a.p AS p"
+            ),
+            [[int(2)]]
+        );
+        assert_eq!(
+            rows(&db, "MATCH (a)-[r:R]->(b) WHERE id(r) = 11 RETURN a.p AS p"),
+            [[int(2)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WHERE elementId(r) = '10' AND id(b) = 2 RETURN a.p AS p, id(r) AS e"
+            ),
+            [[int(1), int(10)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r:R]->(b) WHERE id(r) % 2 = 0 OR id(r) > 100 RETURN id(r) AS e"
+            ),
+            [[int(10)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WHERE id(r) = 10 RETURN id(n) AS src, id(m) AS dst ORDER BY src"
+            ),
+            [
+                [int(1), int(2)],
+                [int(2), null.clone()],
+                [int(3), null.clone()],
+                [int(4), null.clone()]
+            ]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) % 2 AS parity, id(n) * 10 AS scaled ORDER BY scaled"
+            ),
+            [
+                [int(1), int(10)],
+                [int(0), int(20)],
+                [int(1), int(30)],
+                [int(0), int(40)]
+            ]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) WHERE id(n) = 4 RETURN toString(id(n)) AS s, elementId(n) + '!' AS bang"
+            ),
+            [[text("4"), text("4!")]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n) RETURN id(n) % 2 AS parity, count(*) AS c ORDER BY parity"
+            ),
+            [
+                [int(0), GraphAggregateValue::Count(2)],
+                [int(1), GraphAggregateValue::Count(2)]
+            ]
+        );
+        // A property is not an element, refused at preparation.
+        assert!(
+            db.query(
+                &cx,
+                "MATCH (n) RETURN id(n.p) AS i",
+                &args,
+                symbols,
+                policy()
+            )
+            .is_err()
+        );
+        // An identity above i64::MAX keeps its decimal elementId but has no
+        // Int: id() fails typed instead of wrapping.
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(
+            VId(1 << 64),
+            vec![PERSON],
+            vec![(P, CanonicalScalar::Int(5))],
+        );
+        db.write(&contexts.commit(), batch).await.unwrap();
+        assert_eq!(
+            rows(&db, "MATCH (n:Person) RETURN elementId(n) AS e ORDER BY e"),
+            [
+                [text("1")],
+                [text("18446744073709551616")],
+                [text("2")],
+                [text("3")],
+                [text("4")]
+            ]
+        );
+        assert!(
+            db.query(&cx, "MATCH (n) RETURN id(n) AS i", &args, symbols, policy())
+                .is_err()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher and GQL spell the sort directions ASC/ASCENDING and
+/// DESC/DESCENDING. Every ORDER BY parser accepts both spellings with the same
+/// meaning: a pattern RETURN, an aggregate RETURN, a WITH page and a set
+/// composition. The long forms used to refuse; 56 openCypher TCK scenarios use
+/// them.
+#[test]
+fn ascending_and_descending_spell_the_same_directions_as_asc_and_desc() {
+    let ((), report) = run_async_under_lab(0x7d14_0094, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .map_err(|error| format!("{statement}: {error}"))
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        let int = |value: i64| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
+        };
+        // Each long spelling answers exactly what its short spelling answers,
+        // and that answer is in the named direction.
+        for (long, short, expected) in [
+            (
+                "MATCH (n) RETURN n.p AS p ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p ORDER BY p DESC",
+                vec![vec![int(4)], vec![int(3)], vec![int(2)], vec![int(1)]],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p ORDER BY p ASCENDING",
+                "MATCH (n) RETURN n.p AS p ORDER BY p ASC",
+                vec![vec![int(1)], vec![int(2)], vec![int(3)], vec![int(4)]],
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p, count(*) AS c ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p, count(*) AS c ORDER BY p DESC",
+                [4, 3, 2, 1]
+                    .map(|p| vec![int(p), GraphAggregateValue::Count(1)])
+                    .to_vec(),
+            ),
+            (
+                "MATCH (n) RETURN n.p AS p UNION MATCH (n) RETURN n.p AS p ORDER BY p DESCENDING",
+                "MATCH (n) RETURN n.p AS p UNION MATCH (n) RETURN n.p AS p ORDER BY p DESC",
+                vec![vec![int(4)], vec![int(3)], vec![int(2)], vec![int(1)]],
+            ),
+        ] {
+            assert_eq!(rows(long), expected, "{long}");
+            assert_eq!(rows(short), expected, "{short}");
+        }
+        // A WITH page: the final RETURN has its own (canonical) order, so the
+        // direction shows in which rows the LIMIT keeps.
+        // Debug of a cell is redacted, so compare the kept integers sorted.
+        let kept = |statement: &str| {
+            let mut kept: Vec<i64> = rows(statement)
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(p)))] => {
+                        Some(*p)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .ok_or_else(|| format!("{statement}: expected one integer cell per row"))
+                .unwrap();
+            kept.sort_unstable();
+            kept
+        };
+        for (long, short, expected) in [
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p DESCENDING LIMIT 2 RETURN p",
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 RETURN p",
+                [3, 4],
+            ),
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p ASCENDING LIMIT 2 RETURN p",
+                "MATCH (n) WITH n.p AS p ORDER BY p ASC LIMIT 2 RETURN p",
+                [1, 2],
+            ),
+        ] {
+            assert_eq!(kept(long), expected, "{long}");
+            assert_eq!(kept(short), expected, "{short}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A WITH page sorts by any row value, not only a column (fgdb-mf7og):
+/// arithmetic over aliases, a carried vertex's properties inside an
+/// expression, text built from a value, and computed keys mixed with plain
+/// ones. The key is a hidden column, so a later RETURN * never sees it. The
+/// final RETURN has its own (canonical) order, so each case shows its sort in
+/// which rows the LIMIT keeps. Seeded rows: p = 1..=4, q = 10 * p.
+#[test]
+fn a_with_page_sorts_by_computed_keys_and_hides_them() {
+    let ((), report) = run_async_under_lab(0x7d14_0095, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let result = |statement: &str| {
+            db.query(&cx, statement, &args, symbols, policy())
+                .map_err(|error| format!("{statement}: {error}"))
+                .unwrap()
+        };
+        let rows = |statement: &str| match result(statement) {
+            QueryResult::Rows { columns, rows } => Ok((columns, rows)),
+            QueryResult::Write { .. } => Err(format!("{statement}: rows expected")),
+        };
+        let kept = |statement: &str| {
+            let (_, rows) = rows(statement).unwrap();
+            let mut kept: Vec<i64> = rows
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(p)))] => {
+                        Some(*p)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .ok_or_else(|| format!("{statement}: expected one integer cell per row"))
+                .unwrap();
+            kept.sort_unstable();
+            kept
+        };
+        for (statement, expected) in [
+            // A carried vertex's property inside the key: descending p.
+            (
+                "MATCH (n) WITH n ORDER BY n.p * -1 LIMIT 2 RETURN n.p AS p",
+                vec![3, 4],
+            ),
+            // Arithmetic over aliases: q - 11 * p = -p, so ascending keeps p = 4.
+            (
+                "MATCH (n) WITH n.p AS p, n.q AS q ORDER BY q - p * 11 LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            // Text built from a value, descending.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY toString(p) + 'x' DESC LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            // A computed key, then a plain one: even p first, each part descending.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p % 2, p DESC LIMIT 3 RETURN p",
+                vec![2, 3, 4],
+            ),
+            // After a WHERE.
+            (
+                "MATCH (n) WITH n.p AS p WHERE p > 1 ORDER BY 0 - p LIMIT 2 RETURN p",
+                vec![3, 4],
+            ),
+            // A repeated key cannot overwrite the first one's direction
+            // (TCK WithOrderBy3 [7]), for a column and a computed key.
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC, p ASC LIMIT 1 RETURN p",
+                vec![4],
+            ),
+            (
+                "MATCH (n) WITH n.p AS p ORDER BY p + 2 ASC, p + 2 DESC LIMIT 1 RETURN p",
+                vec![1],
+            ),
+        ] {
+            assert_eq!(kept(statement), expected, "{statement}");
+        }
+        // The key is projected away before RETURN *.
+        let (columns, rows) =
+            rows("MATCH (n) WITH n.p AS p ORDER BY p * 2 LIMIT 2 RETURN *").unwrap();
+        assert_eq!(columns, ["p"]);
+        assert_eq!(rows.len(), 2);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher binds the string, list and null predicates (IS [NOT] NULL,
+/// [NOT] IN, STARTS WITH, ENDS WITH, CONTAINS) tighter than comparisons.
+/// Expected values are the openCypher TCK's: Precedence1 [8] and [11],
+/// Precedence4 [1] and Boolean1 [5]. The scalar compiler used to apply them
+/// left to right on one level, so `false = true IS NULL` was
+/// `(false = true) IS NULL`.
+#[test]
+fn null_and_list_predicates_bind_tighter_than_comparison() {
+    let ((), report) = run_async_under_lab(0x7d14_0093, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let truth = |value: bool| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)))
+        };
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(
+                "RETURN false = true IS NULL AS a, false = (true IS NULL) AS b, \
+                 (false = true) IS NULL AS c"
+            ),
+            [[truth(true), truth(true), truth(false)]]
+        );
+        assert_eq!(
+            rows(
+                "RETURN false = true IN [true, false] AS a, \
+                 false = (true IN [true, false]) AS b, (false = true) IN [true, false] AS c"
+            ),
+            [[truth(false), truth(false), truth(true)]]
+        );
+        assert_eq!(
+            rows(
+                "RETURN null IS NOT NULL = null IS NULL AS a, \
+                 (null IS NOT NULL) = (null IS NULL) AS b, (null IS NOT NULL = null) IS NULL AS c"
+            ),
+            [[truth(false), truth(false), truth(true)]]
+        );
+        assert_eq!(
+            rows("RETURN (false AND null) IS NULL = (null AND false) IS NULL AS r"),
+            [[truth(true)]]
+        );
+        // A grouped comparison compares as a Boolean operand; NOT stays below
+        // comparisons. Ungrouped `1 < 2 = true` is a chain, `1 < 2 AND 2 =
+        // true` (openCypher, b490a061), not a left fold.
+        assert_eq!(
+            rows("RETURN (1 < 2) = true AS a, NOT true = false AS b"),
+            [[truth(true), truth(true)]]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn xor_is_three_valued_and_binds_between_and_and_or() {
+    let ((), report) = run_async_under_lab(0x7d14_0094, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit()).await;
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let truth = |value: bool| {
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)))
+        };
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, symbols, policy())
+            .map_err(|error| format!("{statement}: {error}"))
+            .unwrap()
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows(
+                "RETURN true XOR false AS a, false XOR true AS b, \
+                 true XOR true AS c, false XOR false AS d"
+            ),
+            [[truth(true), truth(true), truth(false), truth(false)]]
+        );
+        // Unlike AND and OR, neither operand decides XOR alone.
+        assert_eq!(
+            rows(
+                "RETURN (null XOR true) IS NULL AS a, (false XOR null) IS NULL AS b, \
+                 (null XOR null) IS NULL AS c"
+            ),
+            [[truth(true), truth(true), truth(true)]]
+        );
+        // OR(true, XOR(true, true)) and XOR(true, AND(true, false)); the
+        // other groupings give false for both.
+        assert_eq!(
+            rows("RETURN true OR true XOR true AS a, true XOR true AND false AS b"),
+            [[truth(true), truth(true)]]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A catalog-backed resolver, like the CLI's bindings: it names every id it
+/// binds, including ids the statement text never mentions.
+struct Catalog;
+
+impl GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Zenith") => Some(GraphSymbol::Label(LabelId(9))),
+            (GraphSymbolKind::Relation, "LOOPS_TO") => Some(GraphSymbol::Relation(RelationId(7))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(9), "Zenith");
+        catalog.insert_relation(RelationId(7), "LOOPS_TO");
+        Some(catalog)
+    }
+}
+
+/// labels(n) and type(r) read the caller's reverse catalog on the set facade,
+/// which answers every WITH pipeline and every projection with id() beside
+/// them. The facade used to wrap the resolver in a closure. That dropped the
+/// catalog, so names fell back to words in the statement text plus a fixed
+/// list of common names. "Zenith" and "LOOPS_TO" are in neither, and the read
+/// refused with UnmappedLabel or UnmappedRelation.
+#[test]
+fn set_facade_labels_and_type_name_every_id_the_callers_catalog_binds() {
+    let ((), report) = run_async_under_lab(0x7d14_0092, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(7));
+        batch.create_vertex(VId(1), vec![LabelId(9)], vec![(P, CanonicalScalar::Int(1))]);
+        batch.create_vertex(VId(2), vec![LabelId(9)], vec![(P, CanonicalScalar::Int(2))]);
+        batch.add_edge(EId(5), VId(1), VId(2), vec![]);
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let cx = contexts.query();
+        let args = GqlParameters::new();
+        let value = |value: GraphValue| GraphAggregateValue::Value(value);
+        let int = |id: i64| value(GraphValue::Scalar(CanonicalScalar::Int(id)));
+        let name = |text: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(text).unwrap());
+        let zenith = value(GraphValue::List(vec![name("Zenith")].into_boxed_slice()));
+        let rows = |statement: &str| match db
+            .query(&cx, statement, &args, Catalog, policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+        {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => Vec::new(),
+        };
+        assert_eq!(
+            rows("MATCH (n) RETURN id(n) AS i, labels(n) AS l ORDER BY i"),
+            [[int(1), zenith.clone()], [int(2), zenith.clone()]]
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) RETURN id(r) AS e, type(r) AS t"),
+            [[int(5), value(name("LOOPS_TO"))]]
+        );
+        // A WITH stage without id(): the same facade.
+        assert_eq!(
+            rows("MATCH (n) WITH labels(n) AS l, n.p AS p WHERE p = 2 RETURN l, p"),
+            [[zenith, int(2)]]
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) WITH type(r) AS t, id(r) AS e RETURN t, e"),
+            [[value(name("LOOPS_TO")), int(5)]]
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

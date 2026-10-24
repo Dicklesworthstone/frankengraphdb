@@ -11,9 +11,9 @@ use fgdb_gql::edge_stream::{
     EdgeScanState,
 };
 
-struct Source<'q, Edges, Vertices> {
+struct Source<'q, Edges, Vertices, Clock> {
     edges: Edges,
-    vertices: ScopedSource<'q, Vertices>,
+    vertices: ScopedSource<'q, Vertices, Clock>,
     after: Option<EId>,
 }
 
@@ -29,7 +29,7 @@ fn private_error<C>(
     })
 }
 
-impl<E, V> Source<'_, E, V>
+impl<E, V, Clock: FnMut() -> u64> Source<'_, E, V, Clock>
 where
     E: EdgeScanSource<Error = ReadError>,
     V: VertexScanSource<Error = ReadError>,
@@ -49,7 +49,7 @@ where
     fn visible<'a, C>(
         &'a self,
         eid: EId,
-        requested: Option<RelationId>,
+        requested: EdgeRelation,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<QueryError, C>> {
         self.poll()?;
         let execution = &self.vertices.execution;
@@ -57,7 +57,7 @@ where
         let Some(edge) = self.edges.edge(eid, &mut poll).map_err(private_error)? else {
             return Ok(None);
         };
-        if requested.is_some_and(|relation| edge.relation != relation)
+        if !requested.matches(edge.relation)
             || !execution
                 .borrow()
                 .permit
@@ -94,7 +94,7 @@ where
     }
 }
 
-impl<E, V> EdgeScanSource for Source<'_, E, V>
+impl<E, V, Clock: FnMut() -> u64> EdgeScanSource for Source<'_, E, V, Clock>
 where
     E: EdgeScanSource<Error = ReadError>,
     V: VertexScanSource<Error = ReadError>,
@@ -115,19 +115,20 @@ where
 
     fn next_edge_for_relation<C>(
         &mut self,
-        relation: RelationId,
+        relation: EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<QueryError, C>> {
         self.poll()?;
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        if !self
-            .vertices
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(relation)
-        {
+        // A typed selector whose every type this capability hides has no
+        // candidate directory; an alternation needs one visible member.
+        if relation.relations().is_some_and(|members| {
+            let execution = self.vertices.execution.borrow();
+            let predicates = execution.permit.predicates();
+            members
+                .iter()
+                .all(|member| !predicates.allows_relation(*member))
+        }) {
             return Ok(None); // No candidate directory, even for a nonempty raw graph.
         }
         loop {
@@ -146,7 +147,7 @@ where
                 )));
             }
             self.after = Some(eid);
-            if self.visible::<C>(eid, Some(relation))?.is_some() {
+            if self.visible::<C>(eid, relation)?.is_some() {
                 control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
                 return Ok(Some(eid));
             }
@@ -158,7 +159,7 @@ where
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
@@ -170,12 +171,59 @@ where
         }))
     }
 
+    fn next_edge_step_for_relation<C>(
+        &mut self,
+        relation: EdgeRelation,
+        continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<EId>, EdgeScanSourceError<QueryError, C>> {
+        use fgdb_gql::scan_stream::SourceStep;
+        self.poll()?;
+        // One logical successor lookup spans any number of private skips.
+        // Its admission and work charges occur once, not once per hidden edge.
+        if !continuing {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        }
+        if relation.one().is_some_and(|relation| {
+            !self
+                .vertices
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
+            return Ok(SourceStep::Exhausted);
+        }
+        let execution = &self.vertices.execution;
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let Some(eid) = self
+            .edges
+            .next_edge_for_relation(relation, &mut poll)
+            .map_err(private_error)?
+        else {
+            return Ok(SourceStep::Exhausted);
+        };
+        if self.after.is_some_and(|after| eid <= after) {
+            return Err(EdgeScanSourceError::Source(source_error(
+                EdgeScanError::NonIncreasingIdentity,
+            )));
+        }
+        self.after = Some(eid);
+        if self.visible::<C>(eid, relation)?.is_some() {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            Ok(SourceStep::Item(eid))
+        } else {
+            Ok(SourceStep::Skipped(eid))
+        }
+    }
+
     fn edge_record<'a, C>(
         &'a self,
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRecord<'a>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
@@ -200,8 +248,11 @@ where
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<QueryError, C>> {
-        let Some(edge) = self.visible(eid, None)? else {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<QueryError, C>,
+    > {
+        let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
@@ -261,7 +312,10 @@ where
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<QueryError, C>,
+    > {
         self.vertices
             .vertex_property(vid, key, &mut |event| control(edge_event(event)))
     }
@@ -275,13 +329,86 @@ where
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: fgdb_gql::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<QueryError, C>> {
         self.vertices
             .next_probe_edge_for_relation(endpoint, relation, direction, after, control)
+    }
+
+    fn next_incident_edge_step_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: EdgeRelation,
+        direction: fgdb_gql::algebra::GlaDirection,
+        after: Option<EId>,
+        continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<EId>, EdgeExpansionSourceError<QueryError, C>>
+    {
+        use fgdb_gql::scan_stream::SourceStep;
+        if !continuing {
+            control(GlaExecutionEvent::Work).map_err(|error| {
+                EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error))
+            })?;
+        }
+        if relation.one().is_some_and(|relation| {
+            !self
+                .vertices
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
+            return Ok(SourceStep::Exhausted);
+        }
+        if !continuing {
+            let vertex = self
+                .vertices
+                .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+                .map_err(|error| {
+                    EdgeExpansionSourceError::Read(match error {
+                        VertexScanSourceError::Source(error) => EdgeScanSourceError::Source(error),
+                        VertexScanSourceError::Control(error) => {
+                            EdgeScanSourceError::Control(error)
+                        }
+                    })
+                })?;
+            if vertex.is_none() {
+                return Err(EdgeExpansionSourceError::Read(EdgeScanSourceError::Source(
+                    source_error(EdgeScanError::DanglingEndpoint),
+                )));
+            }
+        }
+        let execution = &self.vertices.execution;
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let next = self
+            .edges
+            .next_incident_edge_for_relation(endpoint, relation, direction, after, &mut poll);
+        let next = match next {
+            Ok(next) => next,
+            Err(EdgeExpansionSourceError::Unavailable) => {
+                return Err(EdgeExpansionSourceError::Unavailable);
+            }
+            Err(EdgeExpansionSourceError::Read(error)) => {
+                return Err(EdgeExpansionSourceError::Read(private_error(error)));
+            }
+        };
+        let Some(eid) = next else {
+            return Ok(SourceStep::Exhausted);
+        };
+        if self
+            .visible::<C>(eid, relation)
+            .map_err(EdgeExpansionSourceError::Read)?
+            .is_some()
+        {
+            Ok(SourceStep::Item(eid))
+        } else {
+            Ok(SourceStep::Skipped(eid))
+        }
     }
 }
 
@@ -290,6 +417,7 @@ fn source_error(error: EdgeScanError<QueryError>) -> QueryError {
         EdgeScanError::Source(error) => return error,
         EdgeScanError::Plan(error) => EdgeScanError::Plan(error),
         EdgeScanError::NonIncreasingIdentity => EdgeScanError::NonIncreasingIdentity,
+        EdgeScanError::InvalidCandidateAdmission => EdgeScanError::InvalidCandidateAdmission,
         EdgeScanError::DanglingEndpoint => EdgeScanError::DanglingEndpoint,
         EdgeScanError::CounterExhausted => EdgeScanError::CounterExhausted,
         EdgeScanError::ExpansionUnavailable => EdgeScanError::ExpansionUnavailable,
@@ -297,7 +425,7 @@ fn source_error(error: EdgeScanError<QueryError>) -> QueryError {
     };
     QueryError::EdgeStream(GqlQueryError::Source(error))
 }
-fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
+pub(super) fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
         GqlQueryError::Source(GraphAggregateError::Source(error)) => source_error(error),
@@ -325,7 +453,9 @@ fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
-fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> QueryError {
+pub(in super::super) fn row_error(
+    error: GqlQueryError<EdgeScanError<QueryError>, QueryError>,
+) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
         GqlQueryError::Source(error) => source_error(error),
@@ -338,64 +468,66 @@ fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> Que
     }
 }
 
-impl<'q> AuthorizedRowCursor<'q> {
-    // An inherent factory lets the enclosing stream dispatcher reuse this
-    // private source without exporting it or changing the aggregate interface.
-    // Source and permit ownership never escape to the calling application.
-    pub(in super::super) fn from_edge_plan(
-        selected: (EdgeScanPlan, CommitSeq, Vec<String>),
-        view: &EmbeddedReadView,
-        cx: &'q QueryCx,
-        execution: Shared<'q>,
-        policy: GqlQueryPolicy,
-    ) -> Opened<'q, GraphValueRow, ()> {
-        let (plan, at, columns) = selected;
-        let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
-        let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
-        let source = Source {
-            edges,
-            vertices: ScopedSource {
-                inner,
-                execution: Rc::clone(&execution),
-            },
-            after: None,
-        };
-        let control = Rc::clone(&execution);
-        let mut cursor = EdgeScanCursor::new(source, plan, policy, move || {
-            control.borrow_mut().checkpoint()
-        });
-        execution.borrow_mut().checkpoint()?;
-        let driver = Box::new(move || {
-            let row = cursor.next().transpose().map_err(row_error)?;
-            // Delivery is charged only after matching, projection and native
-            // admission. Natural EOF and LIMIT 0 still recheck live authority.
-            execution.borrow_mut().deliver(usize::from(row.is_some()))?;
-            Ok((row, cursor.state() != EdgeScanState::Open))
-        });
-        Ok((
-            AuthorizedRowCursor {
-                driver: Some(driver),
-                guard: None,
-                columns,
-                snapshot_seq: at,
-                state: VertexScanState::Open,
-            },
-            (),
-        ))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build<'q>(
-    plan: EdgeAggregatePlan,
+// External ordering uses this exact masked source, with private input rows
+// rather than the row driver's final delivery admission.
+pub(in super::super) fn ordered_source<'q, C: FnMut() -> u64 + Send>(
     at: CommitSeq,
-    columns: Vec<String>,
-    layout: Layout,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
-    execution: Shared<'q>,
+    execution: Shared<'q, C>,
+) -> Result<impl EdgeScanSource<Error = QueryError> + Send + 'q + use<'q, C>, QueryError> {
+    Ok(Source {
+        edges: view.edge_scan_source(cx, at).map_err(QueryError::Read)?,
+        vertices: ScopedSource {
+            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+            execution,
+        },
+        after: None,
+    })
+}
+
+// Both row constructors erase this SAME native driver; only Send capability
+// differs. Sources and permit never escape independently to the application.
+pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
+    plan: EdgeScanPlan,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Opened<'q, GraphAggregateRow, Layout> {
+) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
+    let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let source = Source {
+        edges,
+        vertices: ScopedSource {
+            inner,
+            execution: execution.clone(),
+        },
+        after: None,
+    };
+    let control = execution.clone();
+    let mut cursor = EdgeScanCursor::new(source, plan, policy, move || {
+        control.borrow_mut().checkpoint()
+    });
+    execution.borrow_mut().checkpoint()?;
+    Ok(move || {
+        let row = cursor.next().transpose().map_err(row_error)?;
+        // Delivery is charged only after matching, projection and native
+        // admission. Natural EOF and LIMIT 0 still recheck live authority.
+        execution.borrow_mut().deliver(usize::from(row.is_some()))?;
+        Ok((row, cursor.state() != EdgeScanState::Open))
+    })
+}
+
+pub(super) fn aggregate_driver<'q, C: FnMut() -> u64>(
+    plan: EdgeAggregatePlan,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Result<impl FnMut() -> AggregateStep + use<'q, C>, QueryError> {
     // Both factories borrow the SAME view and cut; neither can refresh from a
     // writer. Constructing these cheap pin owners scans no graph candidates.
     let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
@@ -404,30 +536,20 @@ pub(super) fn build<'q>(
         edges,
         vertices: ScopedSource {
             inner,
-            execution: Rc::clone(&execution),
+            execution: execution.clone(),
         },
         after: None,
     };
-    let control = Rc::clone(&execution);
+    let control = execution.clone();
     let mut cursor = EdgeAggregateCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver = Box::new(move || {
+    Ok(move || {
         let row = cursor.next().transpose().map_err(error)?;
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         Ok((row, cursor.state() != EdgeScanState::Open))
-    });
-    Ok((
-        AuthorizedRowCursor {
-            driver: Some(driver),
-            guard: None,
-            columns,
-            snapshot_seq: at,
-            state: VertexScanState::Open,
-        },
-        layout,
-    ))
+    })
 }
 
 #[cfg(test)]

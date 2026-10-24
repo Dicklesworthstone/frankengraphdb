@@ -102,7 +102,7 @@ fn groups_own_keys_and_local_distinct_state_and_release_the_pin_before_delivery(
         "MATCH (a)-[r:R]->(b) RETURN b AS destination, COUNT(*) AS rows, COUNT(DISTINCT r.p) AS support, AVG(DISTINCT r.p) AS average GROUP BY b",
     );
     let mut s = source(63);
-    s.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Int(5))];
+    s.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Int(5).into())];
     let expected = eager(&q, &s);
     let reads = s.reads.clone();
     let dropped = s.drops.clone();
@@ -228,10 +228,12 @@ fn mixed_nullable_keys_empty_input_late_failures_and_close_preserve_group_semant
         "MATCH (a)-[r:R]->(b) RETURN r.p AS bucket, a AS owner, COUNT(*) AS rows, COUNT(DISTINCT b) AS destinations GROUP BY r.p, a",
     );
     let mut s = source(63);
-    s.edges.get_mut(&EId(1)).unwrap().3 = vec![(P, CanonicalScalar::Bool(false))];
+    s.edges.get_mut(&EId(1)).unwrap().3 = vec![(P, CanonicalScalar::Bool(false).into())];
     s.edges.get_mut(&EId(4)).unwrap().3 = vec![(
         P,
-        CanonicalScalar::ucs_basic_text(&"x".repeat(1024)).unwrap(),
+        CanonicalScalar::ucs_basic_text(&"x".repeat(1024))
+            .unwrap()
+            .into(),
     )];
     let expected = eager(&q, &s);
     let mut cursor = run(&q, s.clone(), wide());
@@ -254,7 +256,7 @@ fn mixed_nullable_keys_empty_input_late_failures_and_close_preserve_group_semant
         "MATCH (a)-[r:R]->(b) RETURN b AS destination, COUNT(*) AS rows, AVG(r.p) AS average GROUP BY b",
     );
     let mut s = source(63);
-    s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+    s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
     let mut invalid = run(&q, s, wide());
     assert!(matches!(
         invalid.next(),
@@ -340,15 +342,23 @@ mod saved_regressions {
                         .collect()
                 })
                 .collect();
-            let suffix = choices
-                .iter()
-                .skip(1)
-                .map(|edges| edges.len() as u64)
-                .product::<u64>();
-            if suffix == 0 {
-                continue;
-            }
             for &(eid, edge) in &choices[0] {
+                // DIFFERENT EDGES, the textual MATCH default: the closing R
+                // atom t never binds the edge r binds (fgdb-vexfr).
+                let suffix = choices
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(at, edges)| {
+                        edges
+                            .iter()
+                            .filter(|&&(other, _)| atoms[at].1 != R || other != eid)
+                            .count() as u64
+                    })
+                    .product::<u64>();
+                if suffix == 0 {
+                    continue;
+                }
                 let key = match key_kind {
                     0 => vec![GraphValue::Vertex(ids[0])],
                     1 => vec![
@@ -356,7 +366,9 @@ mod saved_regressions {
                             edge.3
                                 .iter()
                                 .find(|(k, _)| *k == P)
-                                .map_or(CanonicalScalar::Null, |(_, v)| v.clone()),
+                                .map_or(CanonicalScalar::Null, |(_, v)| {
+                                    v.as_scalar().unwrap().clone()
+                                }),
                         ),
                         GraphValue::Vertex(ids[width as usize - 1]),
                     ],
@@ -473,7 +485,10 @@ mod saved_regressions {
                     VId(0),
                     R,
                     VId(1),
-                    value.into_iter().map(|v| (P, v)).collect(),
+                    value
+                        .into_iter()
+                        .map(|v| (P, CanonicalPropertyValue::Scalar(v)))
+                        .collect(),
                 ),
             );
         }
@@ -523,7 +538,10 @@ mod saved_regressions {
             };
             match kind {
                 0 => s.fail = Some(EId(6)),
-                1 => s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))],
+                1 => {
+                    s.edges.get_mut(&EId(6)).unwrap().3 =
+                        vec![(P, CanonicalScalar::Bool(true).into())]
+                }
                 _ => {}
             }
             let mut stream = run(&q, s, p);
@@ -666,7 +684,7 @@ mod saved_regressions {
                     VId(0),
                     R,
                     VId(id % 4),
-                    vec![(P, CanonicalScalar::Int(i64::MAX))],
+                    vec![(P, CanonicalScalar::Int(i64::MAX).into())],
                 ),
             );
         }
@@ -732,7 +750,7 @@ mod saved_regressions {
                     VId(0),
                     R,
                     VId(target),
-                    vec![(P, CanonicalScalar::Int(value))],
+                    vec![(P, CanonicalScalar::Int(value).into())],
                 ),
             );
         }

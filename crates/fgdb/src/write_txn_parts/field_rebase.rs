@@ -219,7 +219,7 @@ impl WriteTxn {
             return Err(WriteTxnError::FieldRebaseIneligible);
         }
         debug_assert_eq!(prepared.basis, frontier);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         self.basis = frontier;
         Ok(())
     }

@@ -36,6 +36,7 @@ use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use std::sync::Arc;
 
 const K_OID: [u8; 32] = [0x5a; 32];
 const GRAPH: GraphId = GraphId(1);
@@ -148,14 +149,14 @@ fn shapes() -> Vec<(&'static str, Vec<Vec<DeltaRow>>)> {
                     elem: ElementId::Vertex(VId(1)),
                     property: PropertyKeyId(7),
                     before: None,
-                    after: Some(CanonicalScalar::Int(1)),
+                    after: Some(CanonicalScalar::Int(1).into()),
                 },
             ],
             vec![DeltaRow::Property {
                 elem: ElementId::Vertex(VId(1)),
                 property: PropertyKeyId(7),
-                before: Some(CanonicalScalar::Int(1)),
-                after: Some(CanonicalScalar::Int(9)),
+                before: Some(CanonicalScalar::Int(1).into()),
+                after: Some(CanonicalScalar::Int(9).into()),
             }],
         ],
     ));
@@ -174,12 +175,12 @@ fn shapes() -> Vec<(&'static str, Vec<Vec<DeltaRow>>)> {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(7),
                 before: None,
-                after: Some(CanonicalScalar::Int(4)),
+                after: Some(CanonicalScalar::Int(4).into()),
             }],
             vec![DeltaRow::Property {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(7),
-                before: Some(CanonicalScalar::Int(4)),
+                before: Some(CanonicalScalar::Int(4).into()),
                 after: None,
             }],
         ],
@@ -243,6 +244,112 @@ fn incremental_clone_publish_equals_full_rebuild_at_every_commit_of_every_shape(
             );
         }
     }
+}
+
+/// A clone retains the actual allocations for every immutable payload, not
+/// merely byte-equal copies. Later folds may append objects, so compare the
+/// retained prefix and account each of the three payload classes separately.
+fn shared_payload_bytes(original: &BlockWriter, cloned: &BlockWriter) -> [usize; 3] {
+    let mut bytes = [0; 3];
+    assert!(cloned.sealed().len() >= original.sealed().len());
+    assert!(cloned.sealed_patches().len() >= original.sealed_patches().len());
+    for (old, retained) in original.sealed().iter().zip(cloned.sealed()) {
+        assert_eq!(old.reference(), retained.reference());
+        assert!(Arc::ptr_eq(&old.bytes, &retained.bytes));
+        bytes[0] += old.bytes.len();
+        assert_eq!(
+            old.property_patch.is_some(),
+            retained.property_patch.is_some(),
+            "cloning changed a block's hosted property patch"
+        );
+        if let (Some(old), Some(retained)) = (&old.property_patch, &retained.property_patch) {
+            assert_eq!(old.patch_id, retained.patch_id);
+            assert!(Arc::ptr_eq(&old.bytes, &retained.bytes));
+            bytes[1] += old.bytes.len();
+        }
+    }
+    for (old, retained) in original
+        .sealed_patches()
+        .iter()
+        .zip(cloned.sealed_patches())
+    {
+        assert_eq!(old.reference(), retained.reference());
+        assert!(Arc::ptr_eq(&old.bytes, &retained.bytes));
+        bytes[2] += old.bytes.len();
+    }
+    bytes
+}
+
+#[test]
+fn cloned_writers_share_sealed_history_and_keep_subsequent_folds_independent() {
+    let mut shared = [0; 3];
+    for (name, commits) in shapes() {
+        let cut = commits.len().div_ceil(2);
+        let mut live = BlockWriter::new(GRAPH, BRANCH, 0);
+        for (index, rows) in commits.iter().enumerate().take(cut) {
+            fold(&mut live, index as u64 + 1, rows);
+        }
+        let mut anchor = live.clone();
+        for (total, bytes) in shared.iter_mut().zip(shared_payload_bytes(&live, &anchor)) {
+            *total += bytes;
+        }
+        let historical = anchor
+            .clone()
+            .publish(keys(), CommitSeq(cut as u64))
+            .unwrap();
+
+        // Continue with real property/label restatements, retirement, cascades
+        // and inserts. None may mutate the anchor's rows or sealed history.
+        for (index, rows) in commits.iter().enumerate().skip(cut) {
+            fold(&mut live, index as u64 + 1, rows);
+        }
+        shared_payload_bytes(&anchor, &live);
+        assert_eq!(
+            anchor
+                .clone()
+                .publish(keys(), CommitSeq(cut as u64))
+                .unwrap(),
+            historical,
+            "shape {name:?}: continued live writes changed the historical fold"
+        );
+        let frontier = CommitSeq(commits.len() as u64);
+        let published = live.clone().publish(keys(), frontier).unwrap();
+        let mut rebuilt = BlockWriter::new(GRAPH, BRANCH, 0);
+        for (index, rows) in commits.iter().enumerate() {
+            fold(&mut rebuilt, index as u64 + 1, rows);
+        }
+        assert_eq!(
+            published,
+            rebuilt.publish(keys(), frontier).unwrap(),
+            "shape {name:?}: continued shared history differs from full replay"
+        );
+
+        // Mutate the older copy independently too. Its new family cannot leak
+        // into the live writer, and its publication must equal its own stream.
+        let divergent = vec![
+            create_vertex(90_000, 90_000),
+            create_edge(90_000, 90_000, 90_000, 90_001),
+        ];
+        fold(&mut anchor, cut as u64 + 1, &divergent);
+        let mut expected_anchor = BlockWriter::new(GRAPH, BRANCH, 0);
+        for (index, rows) in commits.iter().enumerate().take(cut) {
+            fold(&mut expected_anchor, index as u64 + 1, rows);
+        }
+        fold(&mut expected_anchor, cut as u64 + 1, &divergent);
+        assert_eq!(
+            anchor.publish(keys(), CommitSeq(cut as u64 + 1)).unwrap(),
+            expected_anchor
+                .publish(keys(), CommitSeq(cut as u64 + 1))
+                .unwrap(),
+            "shape {name:?}: the historical copy's independent fold changed"
+        );
+        assert_eq!(live.publish(keys(), frontier).unwrap(), published);
+    }
+    assert!(shared.into_iter().all(|bytes| bytes > 0));
+    eprintln!(
+        "shared sealed payload bytes: blocks={}, hosted properties={}, vertex patches={}",
+        shared[0], shared[1], shared[2]
+    );
 }
 
 /// The control that can fail: a rebuild that is missing one historical row

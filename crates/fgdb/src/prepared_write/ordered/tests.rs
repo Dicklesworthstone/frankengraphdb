@@ -99,8 +99,14 @@ fn dependent_relations_keep_source_order_one_publication_and_global_birth_ordina
         let seq = db.commit_prepared(&cx, prepared).await.unwrap();
         assert_eq!(seq, CommitSeq(basis.0 + 1));
         assert_eq!(db.delta_since(basis).unwrap().count(), 1);
-        assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props, vec![(P, int(3))]);
-        assert_eq!(db.edge(EId(50)).unwrap().unwrap().props, vec![(P, int(11))]);
+        assert_eq!(
+            db.vertex(VId(5)).unwrap().unwrap().props,
+            vec![(P, int(3).into())]
+        );
+        assert_eq!(
+            db.edge(EId(50)).unwrap().unwrap().props,
+            vec![(P, int(11).into())]
+        );
         for (eid, relation) in [(50, 9), (60, 2), (70, 1)] {
             let edge = db.edge(EId(eid)).unwrap().unwrap();
             assert_eq!(edge.entry.relation, RelationId(relation));
@@ -383,7 +389,10 @@ fn only_final_cross_relation_vertex_content_faces_storage_admission() {
         db.write_ordered(&cx, vec![first.clone(), last])
             .await
             .unwrap();
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, int(3))]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, int(3).into())]
+        );
         let before = db.frontier().unwrap();
         let mut other = WriteBatch::new(RelationId(1));
         other.create_vertex(VId(5), vec![], vec![]);
@@ -431,6 +440,7 @@ fn ordered_programs_recover_all_or_none_at_the_existing_marker_boundary() {
             let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
                 .await
                 .unwrap();
+            reopened.ensure_delta_window(&cx, basis).await.unwrap();
             assert_eq!(
                 reopened.frontier().unwrap(),
                 CommitSeq(basis.0 + u64::from(committed))

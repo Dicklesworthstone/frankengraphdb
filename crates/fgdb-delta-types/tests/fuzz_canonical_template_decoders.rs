@@ -25,7 +25,7 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId,
     LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, ObjectId, VId};
 
 const MAX_INPUT: usize = 4096;
 const INPUT_BUDGET: Duration = Duration::from_secs(1);
@@ -80,8 +80,14 @@ fn rows() -> Vec<DeltaRow> {
             },
         };
         let props = vec![
-            (PropertyKeyId(1), scalar.clone()),
-            (PropertyKeyId(9), CanonicalScalar::Int(-(n as i64))),
+            (
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(scalar.clone()),
+            ),
+            (
+                PropertyKeyId(9),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-(n as i64))),
+            ),
         ];
         rows.extend([
             DeltaRow::CreateVertex {
@@ -119,8 +125,8 @@ fn rows() -> Vec<DeltaRow> {
             DeltaRow::Property {
                 elem,
                 property: PropertyKeyId(n),
-                before: populated.then(|| scalar.clone()),
-                after: Some(scalar.clone()),
+                before: populated.then(|| CanonicalPropertyValue::Scalar(scalar.clone())),
+                after: Some(CanonicalPropertyValue::Scalar(scalar.clone())),
             },
             DeltaRow::ValidTime {
                 elem,

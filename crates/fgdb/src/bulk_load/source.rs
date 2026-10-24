@@ -3,7 +3,7 @@
 //! Row framing preserves source order and every field; scalar bytes are owned
 //! by the existing canonical encoder. Only digests survive whole-source preflight.
 
-use super::{BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow};
+use super::{BulkEndpoint, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow};
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::QueryCx;
 
@@ -37,8 +37,23 @@ pub(super) fn admit_keys(
     match value {
         BulkRow::Vertex(v) => limit(row, "key_bytes", policy.max_key_bytes, v.key.len())?,
         BulkRow::Edge(e) => {
-            for key in [&e.key, &e.source, &e.destination] {
-                limit(row, "key_bytes", policy.max_key_bytes, key.len())?;
+            limit(row, "key_bytes", policy.max_key_bytes, e.key.len())?;
+            for endpoint in [&e.source, &e.destination] {
+                // A match endpoint's encoded value is bounded like a key.
+                let len = match endpoint {
+                    BulkEndpoint::Key(key) => key.len(),
+                    BulkEndpoint::Match(matched) => {
+                        matched.value.canonical_encoded_len().map_err(|source| {
+                            BulkLoadErrorKind::SourceEncoding {
+                                row,
+                                source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(
+                                    source,
+                                ),
+                            }
+                        })?
+                    }
+                };
+                limit(row, "key_bytes", policy.max_key_bytes, len)?;
             }
         }
     }
@@ -213,8 +228,34 @@ fn transcript_row(
         BulkRow::Edge(edge) => {
             emit(&[1])?;
             framed(emit, edge.key.as_bytes())?;
-            framed(emit, edge.source.as_bytes())?;
-            framed(emit, edge.destination.as_bytes())?;
+            for endpoint in [&edge.source, &edge.destination] {
+                match endpoint {
+                    // Byte-identical to the key-only framing.
+                    BulkEndpoint::Key(key) => framed(emit, key.as_bytes())?,
+                    // No key length is u64::MAX, so this sentinel cannot
+                    // collide with a framed key.
+                    BulkEndpoint::Match(matched) => {
+                        emit(&u64::MAX.to_be_bytes())?;
+                        match matched.label {
+                            None => emit(&[0])?,
+                            Some(label) => {
+                                emit(&[1])?;
+                                emit(&label.0.to_be_bytes())?;
+                            }
+                        }
+                        emit(&matched.key.0.to_be_bytes())?;
+                        let bytes = matched.value.encode().map_err(|source| {
+                            BulkLoadErrorKind::SourceEncoding {
+                                row: ordinal,
+                                source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(
+                                    source,
+                                ),
+                            }
+                        })?;
+                        framed(emit, &bytes)?;
+                    }
+                }
+            }
             emit(&edge.relation.0.to_be_bytes())?;
             &edge.props
         }
@@ -232,6 +273,40 @@ fn transcript_row(
         framed(emit, &bytes)?;
     }
     Ok(())
+}
+
+/// The bytes `row` adds to its chunk's capsule: the canonical `CreateVertex`
+/// or `CreateEdge` row its template carries, as fgdb-delta-types encodes it.
+/// That is a tag, the identity, birth ordinal (and an edge's endpoints and
+/// relation) at fixed widths, a u32 count before the labels (u64 each) and
+/// the properties (u64 key, u32-counted value encoding each), and absent
+/// key and valid-time tags. Sorting can only drop a duplicate label, so this
+/// bounds the row from above.
+pub(super) fn template_len(ordinal: usize, row: &BulkRow) -> Result<usize, BulkLoadErrorKind> {
+    let props = |props: &[(
+        fgdb_delta_types::PropertyKeyId,
+        fgdb_types::CanonicalPropertyValue,
+    )]| {
+        props.iter().try_fold(4_usize, |len, (_, value)| {
+            let encoded = value
+                .encode()
+                .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                    row: ordinal,
+                    source,
+                })?;
+            Ok(len.saturating_add(8 + 4 + encoded.len()))
+        })
+    };
+    // Tag, identity, ordinal, label count and valid-time tag; an edge adds
+    // its endpoints and relation and the canonical-key tag but no labels.
+    const VERTEX: usize = 1 + 16 + 8 + 4 + 1;
+    const EDGE: usize = 1 + 16 + 8 + 16 + 8 + 16 + 1 + 1;
+    Ok(match row {
+        BulkRow::Vertex(vertex) => VERTEX
+            .saturating_add(vertex.labels.len().saturating_mul(8))
+            .saturating_add(props(&vertex.props)?),
+        BulkRow::Edge(edge) => EDGE.saturating_add(props(&edge.props)?),
+    })
 }
 
 /// The source-transcript bytes `row` adds to its chunk.
@@ -300,4 +375,99 @@ pub(super) fn read_verified<E: core::error::Error + Send + Sync + 'static>(
         expect_end(cx, source, seal.end())?;
     }
     Ok(chunk)
+}
+
+#[cfg(test)]
+mod template_len_tests {
+    use super::super::{BulkEdge, BulkVertex};
+    use super::{BulkRow, template_len};
+    use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, CanonicalText, EId, VId};
+
+    /// Each row's template bytes are exactly the canonical create row the
+    /// writer's template carries for it, labels deduplicated and both
+    /// collections sorted as the writer sorts them, over random rows with
+    /// every common scalar kind. A row whose labels repeat is bounded from
+    /// above: the writer drops the repeat.
+    #[test]
+    fn template_len_is_each_rows_canonical_create_bytes() {
+        let mut state = 0x7e3a_11e0_0000_0001_u64;
+        let mut random = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut checked = 0;
+        for at in 0..500_usize {
+            let mut props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> =
+                (0..random(5))
+                    .map(|key| {
+                        let value = match random(4) {
+                            0 => CanonicalScalar::Int(random(1 << 40) as i64 - (1 << 39)),
+                            1 => CanonicalScalar::Bool(random(2) == 0),
+                            2 => CanonicalScalar::Text(
+                                CanonicalText::new_ucs_basic(&"x".repeat(random(300) as usize))
+                                    .unwrap(),
+                            ),
+                            _ => CanonicalScalar::Null,
+                        };
+                        (PropertyKeyId(10 - key), value.into())
+                    })
+                    .collect();
+            let (row, canonical) = if at % 2 == 0 {
+                let mut labels: Vec<LabelId> = (0..random(4)).map(|l| LabelId(9 - l)).collect();
+                let row = BulkRow::Vertex(BulkVertex {
+                    key: format!("v{at}"),
+                    labels: labels.clone(),
+                    props: props.clone(),
+                });
+                labels.sort_unstable();
+                props.sort_by_key(|(key, _)| *key);
+                let canonical = DeltaRow::CreateVertex {
+                    vid: VId(u128::MAX),
+                    birth_ordinal: u64::MAX,
+                    labels,
+                    props,
+                    valid_time: None,
+                };
+                (row, canonical)
+            } else {
+                let row = BulkRow::Edge(BulkEdge {
+                    key: format!("e{at}"),
+                    source: "a".into(),
+                    destination: "b".into(),
+                    relation: RelationId(random(1 << 20)),
+                    props: props.clone(),
+                });
+                props.sort_by_key(|(key, _)| *key);
+                let BulkRow::Edge(edge) = &row else {
+                    unreachable!()
+                };
+                let canonical = DeltaRow::CreateEdge {
+                    eid: EId(u128::MAX),
+                    birth_ordinal: u64::MAX,
+                    src: VId(0),
+                    relation: edge.relation,
+                    dst: VId(0),
+                    canonical_key: None,
+                    props,
+                    valid_time: None,
+                };
+                (row, canonical)
+            };
+            let bytes = canonical.canonical_bytes().unwrap().len();
+            assert_eq!(template_len(at, &row).unwrap(), bytes, "{row:?}");
+            // A repeated label is counted, though the writer drops it.
+            if let BulkRow::Vertex(vertex) = &row
+                && let Some(&first) = vertex.labels.first()
+            {
+                let mut repeated = vertex.clone();
+                repeated.labels.push(first);
+                assert!(template_len(at, &BulkRow::Vertex(repeated)).unwrap() > bytes);
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 500);
+    }
 }

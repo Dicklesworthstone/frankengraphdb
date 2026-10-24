@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphInsertText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -107,25 +107,25 @@ fn standalone_return_reads_exact_created_vertex_edge_and_frozen_properties() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Int(3))]
+                properties: vec![(P, CanonicalScalar::Int(3).into())]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(101),
                 labels: vec![],
-                properties: vec![(P, CanonicalScalar::Int(8))]
+                properties: vec![(P, CanonicalScalar::Int(8).into())]
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_000),
                 relation: R,
                 source: VId(100),
                 destination: VId(101),
-                properties: vec![(P, CanonicalScalar::Int(9))]
+                properties: vec![(P, CanonicalScalar::Int(9).into())]
             },
         ]
     );
     assert_eq!(batch.returning().rows.snapshot_records, 0);
     assert_eq!(batch.returning().rows.result_rows, 1);
-    assert_eq!(prepare("CREATE (n {p:1}) RETURN n.p").columns(), &["p"]);
+    assert_eq!(prepare("CREATE (n {p:1}) RETURN n.p").columns(), &["n.p"]);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn query_parameter_table_is_shared_once_across_creation_return_and_paging() {
         statement,
         R,
         &[("tail", GqlParameterType::List)],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -251,8 +251,10 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "CREATE (n:Copy) RETURN CASE WHEN TRUE THEN 1 ELSE missing END AS bad",
         "CREATE (n:Copy) RETURN n AS duplicate,n AS duplicate",
         "CREATE (n:Copy) RETURN n AS renamed,renamed AS bad",
-        "CREATE (n:Copy) RETURN count(*) AS count",
-        "CREATE (n:Copy) RETURN labels(n) AS labels",
+        "CREATE (n:Copy) RETURN count(DISTINCT *) AS count",
+        // `RETURN labels(n)` of a created vertex is supported since
+        // fgdb-iufb7 (GraphInsertBinding::VertexLabels); its law is in
+        // insertion_property_maps.rs.
         "CREATE (a)-[e:R]->(b) RETURN type(e) AS kind",
         "CREATE (a)-[a:R]->(b) RETURN a",
         "CREATE (a)-[e:R]->(e) RETURN a",
@@ -265,7 +267,7 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "CREATE (:Copy) RETURN *",
     ] {
         let calls = Cell::new(0);
-        let result = PreparedGraphInsertQueryText::prepare(statement, R, |kind, name| {
+        let result = PreparedGraphInsertQueryText::prepare(statement, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         });
@@ -291,7 +293,7 @@ fn return_parent_depth_is_admitted_before_catalog_resolution() {
     assert!(PreparedGraphInsertText::prepare(&statement, R, symbols).is_ok());
     statement.push_str(" RETURN n");
     let calls = Cell::new(0);
-    let error = PreparedGraphInsertQueryText::prepare(&statement, R, |kind, name| {
+    let error = PreparedGraphInsertQueryText::prepare(&statement, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -373,7 +375,7 @@ fn empty_sources_never_allocate_and_return_star_has_only_visible_bindings() {
     );
 }
 
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 
 fn run_matched(
@@ -419,7 +421,7 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
          CREATE (c:Copy {p:a.p+$step}),(a)-[e:R {q:$step}]->(c) \
          RETURN a,b,c,e,a.p AS source,c.p AS copied,b.q AS return_only",
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -440,10 +442,10 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
         (VId(2), R, VId(3)),
     ];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
-        ((VId(2), Q), CanonicalScalar::Int(7)),
-        ((VId(3), Q), CanonicalScalar::Int(8)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+        ((VId(2), Q), CanonicalScalar::Int(7).into()),
+        ((VId(3), Q), CanonicalScalar::Int(8).into()),
     ]);
     let batch = run_matched(&query, &vertices, &edges, &props).unwrap();
     assert_eq!(
@@ -498,7 +500,7 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
 
 #[test]
 fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
-    let props = Props::from([((VId(1), Q), CanonicalScalar::Int(11))]);
+    let props = Props::from([((VId(1), Q), CanonicalScalar::Int(11).into())]);
     let batch = run_matched(
         &prepare("MATCH (n) CREATE (c {p:7}) RETURN n.q AS q,n,c ORDER BY n"),
         &[VId(1), VId(2)],
@@ -547,8 +549,8 @@ fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
         edge_query.column_types(),
         &[
             GraphSetColumnType::Edge,
-            GraphSetColumnType::Scalar,
-            GraphSetColumnType::Scalar
+            GraphSetColumnType::Stored,
+            GraphSetColumnType::Stored
         ]
     );
 }
@@ -610,12 +612,12 @@ fn empty_match_is_a_no_op_and_return_errors_expose_no_partial_proposal() {
 // therefore changes an independently spelled expected answer.
 fn imported_props() -> Props {
     Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
-        ((VId(3), P), CanonicalScalar::Int(2)),
-        ((VId(1), Q), CanonicalScalar::Int(10)),
-        ((VId(2), Q), CanonicalScalar::Int(20)),
-        ((VId(3), Q), CanonicalScalar::Int(30)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
+        ((VId(3), P), CanonicalScalar::Int(2).into()),
+        ((VId(1), Q), CanonicalScalar::Int(10).into()),
+        ((VId(2), Q), CanonicalScalar::Int(20).into()),
+        ((VId(3), Q), CanonicalScalar::Int(30).into()),
     ])
 }
 
@@ -677,6 +679,315 @@ fn imported_correlations_share_where_and_map_lowering_and_all_keys_are_required(
 }
 
 #[test]
+fn imported_map_endpoints_preserve_duplicate_rows_and_nonunique_matches() {
+    let source = "UNWIND [{src:2,dst:1,weight:90},{src:1,dst:2,weight:5},\
+                         {src:2,dst:1,weight:91},{src:null,dst:1,weight:0},\
+                         {dst:1,weight:0},{src:'2',dst:1,weight:0}] AS row ";
+    let tail = "CREATE (a)-[e:R {q:row.weight}]->(b) \
+                RETURN row.weight AS weight,a,b,e.q AS stored ORDER BY weight,a,b";
+    let map = prepare(&format!(
+        "{source} MATCH (a {{p:row.src}}), (b {{p:row.dst}}) {tail}"
+    ));
+    let predicate = prepare(&format!(
+        "{source} MATCH (a), (b) WHERE a.p=row.src AND row.dst=b.p {tail}"
+    ));
+    assert_eq!(map.canonical_bytes(), predicate.canonical_bytes());
+    let batch = run_matched(&map, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    assert_eq!(
+        values(&batch),
+        [
+            (5, 1, 2),
+            (5, 1, 3),
+            (90, 2, 1),
+            (90, 3, 1),
+            (91, 2, 1),
+            (91, 3, 1)
+        ]
+        .into_iter()
+        .map(|(weight, source, destination)| vec![
+            int(weight),
+            GraphValue::Vertex(VId(source)),
+            GraphValue::Vertex(VId(destination)),
+            int(weight),
+        ])
+        .collect::<Vec<_>>()
+    );
+    assert_eq!(batch.insertion().stats().created_vertices, 0);
+    assert_eq!(batch.insertion().stats().created_edges, 6);
+    assert_eq!(batch.returning().rows.snapshot_records, 3);
+    // Allocation follows imported occurrence order, before RETURN sorts it.
+    // Every nonunique endpoint is retained and both row repetitions create.
+    for (row, (source, destination, weight)) in [
+        (2, 1, 90),
+        (3, 1, 90),
+        (1, 2, 5),
+        (1, 3, 5),
+        (2, 1, 91),
+        (3, 1, 91),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let GraphInsertIntent::Edge {
+            edge,
+            source: actual_source,
+            destination: actual_destination,
+            properties,
+            ..
+        } = &batch.insertion().intents()[row]
+        else {
+            panic!("one edge per imported match")
+        };
+        assert_eq!(*edge, EId(1_000 + row as u128 * 16));
+        assert_eq!(
+            (*actual_source, *actual_destination),
+            (VId(source), VId(destination))
+        );
+        assert_eq!(properties, &vec![(Q, CanonicalScalar::Int(weight).into())]);
+    }
+}
+
+#[test]
+fn bulk_map_document_creates_edges_through_one_native_input_above_scalar_literal_limit() {
+    let rows = (0..256)
+        .map(|weight| {
+            GraphValue::map(vec![
+                ("src".into(), int(1)),
+                ("dst".into(), int(2)),
+                ("weight".into(), int(weight)),
+                (
+                    "payload".into(),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(512)).unwrap()),
+                ),
+            ])
+            .unwrap()
+        })
+        .collect();
+    let arguments = GqlParameters::new().with_list("rows", rows).unwrap();
+    let fgdb_gql::GqlParameterValue::List(document) = arguments.get("rows").unwrap() else {
+        panic!("list document")
+    };
+    assert!(document.canonical_bytes().len() > 65_536);
+    let query = PreparedGraphInsertQueryText::prepare(
+        "UNWIND $rows AS row MATCH (a {p:row.src}), (b {p:row.dst}) \
+         CREATE (a)-[e:R {q:row.weight}]->(b) RETURN e.q AS weight",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&arguments)
+    .unwrap();
+    let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    assert_eq!(batch.insertion().stats().created_edges, 512);
+    assert_eq!(batch.returning().rows.snapshot_records, 3);
+    assert_eq!(
+        values(&batch),
+        (0..256)
+            .flat_map(|weight| [vec![int(weight)], vec![int(weight)]])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn imported_nested_map_keys_keep_public_slots_and_parameter_templates() {
+    let text = "UNWIND $rows AS row MATCH (a {p:row.key.p}) \
+                CREATE (c:Copy {p:row.payload+a.q}) \
+                RETURN row.payload AS payload,a,c,c.p AS stored ORDER BY c";
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
+    let calls_after_prepare = calls.get();
+    let map = |keys: &[&str], values: Vec<GraphValue>| GraphValue::Map {
+        keys: keys.iter().map(|key| (*key).into()).collect(),
+        values: values.into_boxed_slice(),
+    };
+    let arguments = GqlParameters::new()
+        .with_list(
+            "rows",
+            vec![
+                map(&["key", "payload"], vec![map(&["p"], vec![int(2)]), int(7)]),
+                map(&["key", "payload"], vec![map(&["p"], vec![int(1)]), int(8)]),
+                map(&["key", "payload"], vec![int(0), int(9)]),
+            ],
+        )
+        .unwrap();
+    let invalid = template.bind_parameters(&arguments).unwrap();
+    assert!(run_matched(&invalid, &[VId(1), VId(2), VId(3)], &[], &imported_props()).is_err());
+    let valid = GqlParameters::new()
+        .with_list(
+            "rows",
+            vec![
+                map(&["key", "payload"], vec![map(&["p"], vec![int(2)]), int(7)]),
+                map(&["key", "payload"], vec![map(&["p"], vec![int(1)]), int(8)]),
+                map(
+                    &["key", "payload"],
+                    vec![GraphValue::Scalar(CanonicalScalar::Null), int(9)],
+                ),
+            ],
+        )
+        .unwrap();
+    let query = template.bind_parameters(&valid).unwrap();
+    assert_eq!(
+        calls.get(),
+        calls_after_prepare,
+        "binding never resolves names again"
+    );
+    assert_eq!(query.columns(), &["payload", "a", "c", "stored"]);
+    let batch = run_matched(&query, &[VId(1), VId(2), VId(3)], &[], &imported_props()).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![
+                int(7),
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(100)),
+                int(27)
+            ],
+            vec![
+                int(7),
+                GraphValue::Vertex(VId(3)),
+                GraphValue::Vertex(VId(116)),
+                int(37)
+            ],
+            vec![
+                int(8),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(132)),
+                int(18)
+            ],
+        ]
+    );
+}
+
+#[test]
+fn imported_map_return_reads_its_entries_and_no_other_leaf_does() {
+    // RETURN reads an imported map's entries as CREATE does (fgdb-0s2pq). A
+    // missing key reads NULL; an entry and a created property mix freely.
+    let query = prepare(
+        "UNWIND [{p:1,t:5},{p:2}] AS row CREATE (c {q:row.p}) \
+         RETURN row.p AS p,row.t AS t,row.p+c.q AS sum,c.q AS stored ORDER BY p",
+    );
+    assert_eq!(query.columns(), &["p", "t", "sum", "stored"]);
+    let batch = run(&query).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![int(1), int(5), int(2), int(1)],
+            vec![
+                int(2),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                int(4),
+                int(2)
+            ],
+        ]
+    );
+    // UNWIND types its column Any, so a non-map element fails when read, as
+    // openCypher's property access on an integer does.
+    assert!(run(&prepare("UNWIND [1] AS row CREATE (c) RETURN row.p AS p")).is_err());
+    // Only the imported leaf reads `.key`: a later endpoint in the same RETURN
+    // still refuses before the catalog, and a scalar WITH import still refuses.
+    for text in [
+        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN row.p AS p,startNode(e).p",
+        "UNWIND [{p:1}] AS row CREATE (a)-[e:R]->(b) RETURN startNode(e).p,row.p AS p",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    assert!(
+        PreparedGraphInsertQueryText::prepare("WITH 1 AS x CREATE (c) RETURN x.p", R, symbols)
+            .is_err()
+    );
+}
+
+#[test]
+fn imported_map_correlations_refuse_scope_and_depth_changes_before_catalog() {
+    for text in [
+        "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p OR a.q=1 CREATE (c) RETURN c",
+        "UNWIND [{p:1}] AS row MATCH (a) WHERE NOT a.p=row.p CREATE (c) RETURN c",
+        "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p+1 CREATE (c) RETURN c",
+        "UNWIND [{p:1}] AS row MATCH (a) OPTIONAL MATCH (b {p:row.p}) CREATE (c) RETURN c",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    let long_key = "p".repeat(fgdb_gql::algebra::MAX_PATTERN_NAME_BYTES + 1);
+    for predicate in [format!("a.{long_key}=row.p"), format!("row.p=a.{long_key}")] {
+        let text =
+            format!("UNWIND [{{p:1}}] AS row MATCH (a) WHERE {predicate} CREATE (c) RETURN c");
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(&text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err()
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "join lookahead retains normal graph name admission"
+        );
+    }
+    let mut text = String::from("UNWIND [{p:1}] AS row ");
+    for index in 1..fgdb_gql::MAX_GRAPH_SET_DEPTH - 6 {
+        text.push_str(&format!("UNWIND [1] AS x{index} "));
+    }
+    text.push_str("MATCH (a {p:row.p}) CREATE (c) RETURN c");
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "computed keys and cleanup count toward native depth"
+    );
+    // Each side fits independently, but the temporary joined row contains
+    // the imported map, 32 computed keys and 32 graph fields: 65 columns.
+    let fields = (0..32)
+        .map(|key| format!("p{key}:row.p{key}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let text = format!("UNWIND [{{p0:1}}] AS row MATCH (a {{{fields}}}) CREATE (c) RETURN c");
+    let calls = Cell::new(0);
+    assert!(
+        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "transient joined width is a definition bound"
+    );
+}
+
+#[test]
 fn imported_match_preserves_uncorrelated_bags_and_keeps_anonymous_bindings_private() {
     // This was the formerly unsupported UNWIND/MATCH case in the refusal
     // corpus. It is now a positive execution law, not a deleted assertion.
@@ -706,7 +1017,7 @@ fn imported_parameters_are_shared_and_null_or_wrong_kind_keys_never_match() {
         "UNWIND $keys AS x MATCH (a {p:x}) WHERE a.q > $floor \
          CREATE (c {q:a.q+$floor}) RETURN x,c.q AS q,$keys AS original",
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -779,7 +1090,7 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphInsertQueryText::prepare(text, R, |kind, name| {
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -795,7 +1106,7 @@ fn imported_match_rejects_ambiguous_scopes_and_overdeep_joins_before_catalog_cal
     text.push_str("MATCH (a {p:x0}) CREATE (c) RETURN c");
     let calls = Cell::new(0);
     assert!(
-        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name| {
+        PreparedGraphInsertQueryText::prepare(&text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })

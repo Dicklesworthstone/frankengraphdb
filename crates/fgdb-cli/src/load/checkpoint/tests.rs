@@ -1,4 +1,4 @@
-use super::super::{JsonParser, Saved};
+use super::super::{Saved, parse_json};
 use super::*;
 use fgdb_types::{EId, VId};
 use std::collections::BTreeMap;
@@ -30,6 +30,7 @@ fn saved(rows: usize) -> Saved {
         base_marker: "ab".repeat(32),
         source_hash: "cd".repeat(32),
         rows_per_chunk: 2,
+        identity_hash: None,
     }
 }
 fn limits(saved: &Saved) -> Limits {
@@ -130,26 +131,26 @@ fn streamed_v1_encoding_matches_legacy_with_full_width_ids_and_escaped_keys() {
 
 #[test]
 fn decode_limits_apply_before_large_strings_numbers_and_value_trees_are_retained() {
-    assert!(JsonParser::parse_limited("[0,1]", 3, 1).is_ok());
+    assert!(parse_json("[0,1]", 3, 1).is_ok());
     assert!(
-        JsonParser::parse_limited("[0,1]", 2, 1)
+        parse_json("[0,1]", 2, 1)
             .unwrap_err()
             .contains("value limit")
     );
-    assert!(JsonParser::parse_limited("\"λ\"", 1, 2).is_ok());
+    assert!(parse_json("\"λ\"", 1, 2).is_ok());
     assert!(
-        JsonParser::parse_limited("\"λ\"", 1, 1)
+        parse_json("\"λ\"", 1, 1)
             .unwrap_err()
             .contains("string limit")
     );
-    assert!(JsonParser::parse_limited("\"\\uD83D\\uDCA1\"", 1, 4).is_ok());
+    assert!(parse_json("\"\\uD83D\\uDCA1\"", 1, 4).is_ok());
     assert!(
-        JsonParser::parse_limited("\"\\uD83D\\uDCA1\"", 1, 3)
+        parse_json("\"\\uD83D\\uDCA1\"", 1, 3)
             .unwrap_err()
             .contains("string limit")
     );
     assert!(
-        JsonParser::parse_limited("123", 1, 2)
+        parse_json("123", 1, 2)
             .unwrap_err()
             .contains("number limit")
     );
@@ -544,4 +545,294 @@ fn output_limit_failure_cannot_replace_a_preexisting_checkpoint() {
     };
     assert!(persist_controlled(&path, new.view(), bounds, &mut || Ok(())).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), legacy(&old));
+}
+
+// The V1 laws above remain compatibility tests; production writes V2.
+#[derive(Clone)]
+struct CountedRows {
+    position: usize,
+    count: usize,
+    visits: std::rc::Rc<std::cell::Cell<usize>>,
+    fail_at: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+}
+impl Iterator for CountedRows {
+    type Item = Result<BulkRow, &'static str>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position == self.count {
+            return None;
+        }
+        self.visits.set(self.visits.get() + 1);
+        let index = self.position;
+        self.position += 1;
+        if self.fail_at.get() == Some(index) {
+            return Some(Err("injected source failure"));
+        }
+        Some(Ok(BulkRow::Vertex(fgdb::BulkVertex {
+            key: format!("v{index}"),
+            labels: Vec::new(),
+            props: Vec::new(),
+        })))
+    }
+}
+fn counted_rows(count: usize) -> CountedRows {
+    CountedRows {
+        position: 0,
+        count,
+        visits: Default::default(),
+        fail_at: Default::default(),
+    }
+}
+
+#[test]
+fn compact_checkpoints_visit_each_source_row_once_and_write_bounded_records() {
+    const ROWS: usize = 1000;
+    let bounds = limits(&saved(ROWS));
+    let mut final_hash = None;
+    for size in [1, 2, 31, 256, ROWS] {
+        let source = counted_rows(ROWS);
+        let visits = source.visits.clone();
+        let mut prefix = Prefix::new(source);
+        let mut value = saved(0);
+        value.rows_per_chunk = size;
+        value.identity_hash = Some(prefix.advance(&value.checkpoint).unwrap());
+        let mut written = encode(&value, bounds).unwrap().len();
+        for start in (0..ROWS).step_by(size) {
+            let end = (start + size).min(ROWS);
+            for index in start..end {
+                value
+                    .checkpoint
+                    .vertices
+                    .insert(format!("v{index}"), VId(index as u128 + 1));
+            }
+            value.checkpoint.next_row = end;
+            value.checkpoint.committed_chunks += 1;
+            value.checkpoint.frontier.0 += 1;
+            value.identity_hash = Some(prefix.advance(&value.checkpoint).unwrap());
+            let bytes = encode(&value, bounds).unwrap();
+            assert!(bytes.len() < MAX_COMPACT_BYTES);
+            let decoded = Saved::decode(std::str::from_utf8(&bytes).unwrap(), bounds).unwrap();
+            assert!(decoded.checkpoint.vertices.is_empty());
+            assert!(decoded.checkpoint.edges.is_empty());
+            assert_eq!(decoded.identity_hash, value.identity_hash);
+            assert_eq!(decoded.checkpoint.next_row, end);
+            assert_eq!(bytes, encode(&decoded, bounds).unwrap());
+            written += bytes.len();
+            assert_eq!(visits.get(), end, "chunk size {size}");
+        }
+        assert!(written < MAX_COMPACT_BYTES * (ROWS.div_ceil(size) + 1));
+        // Re-saving a completed checkpoint neither replays nor invents rows.
+        assert_eq!(
+            prefix.advance(&value.checkpoint).unwrap(),
+            value.identity_hash.clone().unwrap()
+        );
+        assert_eq!(visits.get(), ROWS);
+        if let Some(expected) = &final_hash {
+            assert_eq!(value.identity_hash.as_ref(), Some(expected));
+        } else {
+            final_hash = value.identity_hash;
+        }
+    }
+}
+
+#[test]
+fn prefix_preparation_errors_preserve_both_digest_and_source_position() {
+    let source = counted_rows(3);
+    let failure = source.fail_at.clone();
+    failure.set(Some(1));
+    let mut prefix = Prefix::new(source);
+    let empty = prefix.digest;
+    let good = saved(3);
+    assert!(prefix.advance(&good.checkpoint).is_err());
+    assert_eq!(prefix.next_row, 0);
+    assert_eq!(prefix.digest, empty);
+    failure.set(None);
+    let mut missing = saved(3);
+    missing.checkpoint.vertices.remove("v1");
+    missing
+        .checkpoint
+        .vertices
+        .insert("not-in-source".into(), VId(9));
+    assert!(prefix.advance(&missing.checkpoint).is_err());
+    assert_eq!(prefix.next_row, 0);
+    assert_eq!(prefix.digest, empty);
+    let actual = prefix.advance(&good.checkpoint).unwrap();
+    assert_eq!(
+        actual,
+        Prefix::new(counted_rows(3))
+            .advance(&good.checkpoint)
+            .unwrap()
+    );
+    assert!(prefix.advance(&saved(2).checkpoint).is_err());
+    assert_eq!(prefix.next_row, 3);
+    assert_eq!(prefix.advance(&good.checkpoint).unwrap(), actual);
+    let mut short = Prefix::new(counted_rows(2));
+    assert!(short.advance(&good.checkpoint).is_err());
+    assert_eq!(short.next_row, 0);
+    assert_eq!(short.digest, empty);
+}
+
+#[test]
+fn identity_transcript_distinguishes_kind_key_order_and_all_128_id_bits() {
+    let entries = [(0_u8, "z\0λ💡", u128::MAX), (1, "a\n\\\"", u128::MAX - 1)];
+    let mut expected = fgdb_crypto::hash(b"fgdb.cli.load.identity-prefix.v2\0").0;
+    let mut actual = expected;
+    for (kind, key, id) in entries {
+        // Independent record framing, not identity_step or a map serialization.
+        let mut transcript = b"fgdb.cli.load.identity-prefix.v2\0".to_vec();
+        transcript.extend(expected);
+        transcript.push(kind);
+        transcript.extend((key.len() as u64).to_be_bytes());
+        transcript.extend(key.as_bytes());
+        transcript.extend(id.to_be_bytes());
+        expected = fgdb_crypto::hash(&transcript).0;
+        actual = identity_step(&actual, kind, key, id).unwrap();
+        assert_eq!(actual, expected);
+    }
+    let origin = fgdb_crypto::hash(IDENTITY_PREFIX_DOMAIN).0;
+    let first = identity_step(&origin, 0, "a", 1).unwrap();
+    for other in [
+        identity_step(&origin, 1, "a", 1).unwrap(),
+        identity_step(&origin, 0, "a\0", 1).unwrap(),
+        identity_step(&origin, 0, "a", 1_u128 << 64 | 1).unwrap(),
+        identity_step(&origin, 0, "b", 1).unwrap(),
+        identity_step(&first, 0, "a", 1).unwrap(),
+    ] {
+        assert_ne!(first, other);
+    }
+    let source = vec![
+        Ok::<_, &str>(BulkRow::Vertex(fgdb::BulkVertex {
+            key: entries[0].1.into(),
+            labels: vec![],
+            props: vec![],
+        })),
+        Ok(BulkRow::Edge(fgdb::BulkEdge {
+            key: entries[1].1.into(),
+            source: fgdb::BulkEndpoint::Key(entries[0].1.into()),
+            destination: fgdb::BulkEndpoint::Key(entries[0].1.into()),
+            relation: fgdb_delta_types::RelationId(1),
+            props: vec![],
+        })),
+    ];
+    let cp = BulkLoadCheckpoint {
+        vertices: [(entries[0].1.into(), VId(entries[0].2))].into(),
+        edges: [(entries[1].1.into(), EId(entries[1].2))].into(),
+        next_row: 2,
+        frontier: CommitSeq(1),
+        committed_chunks: 1,
+    };
+    assert_eq!(
+        Prefix::new(source.into_iter()).advance(&cp).unwrap(),
+        super::super::hex(&expected)
+    );
+}
+
+#[test]
+fn compact_decoder_refuses_forged_shape_counters_and_noncanonical_commitments() {
+    let mut good = saved(3);
+    good.identity_hash = Some(
+        Prefix::new(counted_rows(3))
+            .advance(&good.checkpoint)
+            .unwrap(),
+    );
+    let bounds = limits(&good);
+    let bytes = String::from_utf8(encode(&good, bounds).unwrap()).unwrap();
+    assert!(bytes.starts_with("{\"v\":2,"));
+    for changed in [
+        bytes.replace("\"v\":2", "\"v\":3"),
+        bytes.replace("\"v\":2", "\"v\":2,\"vertices\":{}"),
+        bytes.replace("\"identity_hash\"", "\"unknown_hash\""),
+        bytes.replace("\"next_row\":3", "\"next_row\":4"),
+        bytes.replace("\"committed_chunks\":2", "\"committed_chunks\":1"),
+        bytes.replace("\"frontier\":9", "\"frontier\":8"),
+        bytes.replace(good.identity_hash.as_deref().unwrap(), &"Z".repeat(64)),
+        bytes.replace(good.identity_hash.as_deref().unwrap(), "abc"),
+        format!("{bytes}{}", " ".repeat(MAX_COMPACT_BYTES)),
+    ] {
+        assert!(Saved::decode(&changed, bounds).is_err(), "{changed}");
+    }
+    let oversized = format!("{bytes}{}", " ".repeat(MAX_COMPACT_BYTES));
+    let generous = Limits::new(10_000, 40_000, 1024).unwrap();
+    assert!(
+        Saved::decode(&oversized, generous)
+            .err()
+            .unwrap()
+            .contains("compact checkpoint exceeds format bound")
+    );
+    // Legacy files are still decoded with full map validation, not V2 rules.
+    assert!(
+        Saved::decode(std::str::from_utf8(&legacy(&saved(3))).unwrap(), bounds)
+            .unwrap()
+            .identity_hash
+            .is_none()
+    );
+}
+
+#[test]
+fn compact_publication_and_legacy_upgrade_preserve_old_or_complete_new_bytes() {
+    for upgrade in [false, true] {
+        let path = location();
+        let mut old = saved(2);
+        if !upgrade {
+            old.identity_hash = Some(
+                Prefix::new(counted_rows(2))
+                    .advance(&old.checkpoint)
+                    .unwrap(),
+            );
+        }
+        let mut new = saved(3);
+        new.identity_hash = Some(
+            Prefix::new(counted_rows(3))
+                .advance(&new.checkpoint)
+                .unwrap(),
+        );
+        let bounds = limits(&new);
+        let old_bytes = encode(&old, bounds).unwrap();
+        let new_bytes = encode(&new, bounds).unwrap();
+        persist_controlled(&path, old.view(), bounds, &mut || Ok(())).unwrap();
+        let mut calls = 0;
+        persist_controlled(&path, new.view(), bounds, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), new_bytes);
+        for stop in 1..=calls {
+            persist_controlled(&path, old.view(), bounds, &mut || Ok(())).unwrap();
+            let mut seen = 0;
+            assert!(
+                persist_controlled(&path, new.view(), bounds, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(io::Error::from(io::ErrorKind::Interrupted))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            assert_eq!(seen, stop);
+            let bytes = std::fs::read(&path).unwrap();
+            let expected = if stop >= calls - 1 {
+                &new_bytes
+            } else {
+                &old_bytes
+            };
+            assert_eq!(bytes.as_slice(), expected.as_slice());
+            assert!(Saved::decode(std::str::from_utf8(&bytes).unwrap(), bounds).is_ok());
+        }
+        persist_controlled(&path, old.view(), bounds, &mut || Ok(())).unwrap();
+        assert!(
+            persist_controlled(
+                &path,
+                new.view(),
+                Limits {
+                    bytes: new_bytes.len() - 1,
+                    ..bounds
+                },
+                &mut || Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), old_bytes);
+    }
 }

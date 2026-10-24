@@ -227,14 +227,83 @@ impl<Row: Ord> core::fmt::Debug for ProjectedRows<Row> {
 }
 
 impl super::GlaExecutionStats {
-    /// The aggregate operator shares the evaluator's transactional, checked
-    /// meter instead of reimplementing its limit or overflow arithmetic.
-    pub(crate) fn charge_event(
+    /// Continue an execution's checked evaluator allowance through an operator
+    /// or an external materialization barrier. The caller retains these exact
+    /// accumulated counters and the original limits; this operation never
+    /// resets either counter and leaves both unchanged when admission fails.
+    #[inline]
+    pub fn charge_event(
         &mut self,
         limits: super::GlaExecutionLimits,
         event: super::GlaExecutionEvent,
     ) -> Result<(), super::GlaLimitExceeded> {
         super::charge(self, limits, event)
+    }
+
+    /// `n` Work events in one step: the same total, and the same refusal
+    /// (every unit up to the limit admitted, the next observing limit + 1),
+    /// as `n` calls of [`Self::charge_event`] with Work.
+    pub fn charge_work_units(
+        &mut self,
+        limits: super::GlaExecutionLimits,
+        n: u64,
+    ) -> Result<(), super::GlaLimitExceeded> {
+        let observed = u128::from(self.work_units) + u128::from(n);
+        if n > 0 && observed > u128::from(limits.max_work_units) {
+            self.work_units = self.work_units.max(limits.max_work_units);
+            return Err(super::GlaLimitExceeded {
+                dimension: super::GlaLimitDimension::WorkUnits,
+                limit: limits.max_work_units,
+                observed: u128::from(self.work_units) + 1,
+            });
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
+    /// `n` scratch entries' scratch charge in one step: the same total and
+    /// refusal (every entry up to the limit admitted, the next observing
+    /// limit + 1) as the scratch half of `n` ScratchEntry charges.
+    pub fn charge_scratch_entries(
+        &mut self,
+        limits: super::GlaExecutionLimits,
+        n: u64,
+    ) -> Result<(), super::GlaLimitExceeded> {
+        let observed = u128::from(self.scratch_entries) + u128::from(n);
+        if n > 0 && observed > u128::from(limits.max_scratch_entries) {
+            self.scratch_entries = self.scratch_entries.max(limits.max_scratch_entries);
+            return Err(super::GlaLimitExceeded {
+                dimension: super::GlaLimitDimension::ScratchEntries,
+                limit: limits.max_scratch_entries,
+                observed: u128::from(self.scratch_entries) + 1,
+            });
+        }
+        self.scratch_entries = observed as u64;
+        Ok(())
+    }
+}
+
+/// A governed execution's host checkpoint: one unit per evaluator event.
+/// A plain closure is called once per event, before the event's own limits
+/// are judged and before the evaluator continues.
+///
+/// A host that takes runs (`RUNS`) instead accepts its units for up to an
+/// evaluator run of events at once, through `units(n)`, after the evaluator
+/// has gone past them: always in event order, before any refusal of a later
+/// event or the outcome is reported, and never after the host has refused.
+/// `units(n)` must refuse at the unit that `n` calls of `unit` would refuse.
+pub trait GovernedCheckpoint<C> {
+    /// Whether this host takes evaluator runs.
+    const RUNS: bool = false;
+    fn unit(&mut self) -> Result<(), C>;
+    fn units(&mut self, n: u64) -> Result<(), C> {
+        (0..n).try_for_each(|_| self.unit())
+    }
+}
+
+impl<C, F: FnMut() -> Result<(), C>> GovernedCheckpoint<C> for F {
+    fn unit(&mut self) -> Result<(), C> {
+        self()
     }
 }
 
@@ -265,7 +334,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
         R: FnMut(
             fgdb_types::VId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<&'a fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
         P: FnMut(
             &[crate::algebra::ValueProjection],
@@ -283,6 +352,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
                 |operator: &GlaOperator,
                  bindings: &[Option<fgdb_types::VId>],
                  _paths: &[Option<crate::algebra::GraphPath>],
+                 _collected: &[Option<crate::algebra::GraphValue>],
                  _projected: &mut ProjectedRows<crate::algebra::GraphValueRow>,
                  control: &mut C|
                  -> Result<bool, E> {

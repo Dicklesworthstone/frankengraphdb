@@ -384,7 +384,7 @@ fn property_oracle(vertices: &[fgdb::VertexRow], edges: &[EdgeRecord]) -> Vec<Ve
             row.props
                 .iter()
                 .find(|(found, _)| *found == key)
-                .map(|(_, scalar)| scalar.clone())
+                .map(|(_, scalar)| scalar.as_scalar().expect("scalar fixture").clone())
                 .unwrap_or(CanonicalScalar::Null),
         )
     };

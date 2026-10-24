@@ -259,3 +259,40 @@ fn a_one_hop_count_from_a_hub_costs_no_work_per_unrelated_vertex() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn projected_neighbour_properties_skip_unrelated_vertex_update_history() {
+    let ((), report) = run_async_under_lab(0x6875_6204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = hub_with(&commit, 1, 1).await;
+        let text = "MATCH (a:Person {p: 0})-[:R]->(b) RETURN b.p ORDER BY b.p";
+        let params = GqlParameters::new();
+        let expected: Vec<_> = (1..=DEGREE as i64).collect();
+        assert_eq!(
+            ints(&db.query(&cx, text, &params, symbols, generous()).unwrap()),
+            expected
+        );
+        let before = minimal_work(&db, &cx, text);
+        // These patches belong entirely to an isolated vertex. A projection
+        // reads every neighbour's row, but none of these historical versions.
+        for step in 1..=64 {
+            let mut update = WriteBatch::new(R);
+            update.set_vertex_property(VId(UNRELATED), P, Some(CanonicalScalar::Int(-step)));
+            db.write(&commit, update).await.unwrap();
+        }
+        let after = minimal_work(&db, &cx, text);
+        assert_eq!(
+            ints(&db.query(&cx, text, &params, symbols, generous()).unwrap()),
+            expected
+        );
+        // This permits several extra directory comparisons per result while
+        // refusing one search of every new patch per hydrated endpoint.
+        assert!(
+            after.saturating_sub(before) < DEGREE as u64 * 4,
+            "projection needed {before} work units before unrelated updates, {after} after"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

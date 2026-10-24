@@ -160,6 +160,10 @@ fn chains_branches_cycles_paths_and_private_probes_match_the_eager_engine() {
             "MATCH p=(a)-[e:R]->(b)-[f:R]->(c) RETURN p AS path, nodes(p) AS vertices, edges(p) AS relationships ORDER BY path DESC LIMIT 5",
             "MATCH (a)-[e:R]->(b) WHERE EXISTS { MATCH (b)-[x:R]->(z) WHERE x.p > 0 } RETURN b.q AS payload, e.p AS cost ORDER BY cost DESC NULLS LAST",
             "MATCH (a)-[e:R]->(b) WHERE NOT EXISTS { MATCH (b)-[x:R]->(z) WHERE x.p > 0 } RETURN b AS target, e.p AS cost ORDER BY cost DESC NULLS FIRST",
+            "MATCH (a)-[e:R]->(b) RETURN b AS target ORDER BY e.p DESC NULLS LAST, b.q ASC",
+            "MATCH (a)-[e:R]-(b) RETURN a.p AS cost ORDER BY b.q ASC NULLS FIRST, e.p DESC",
+            "MATCH (a)-[e:R]->(b)-[f:R]->(c) RETURN c AS target ORDER BY f.p DESC NULLS FIRST, a.q ASC SKIP 1 LIMIT 5",
+            "MATCH p=(a)-[e:R]->(b)-[f:R]->(c) RETURN c AS target ORDER BY length(p) DESC, nodes(p) DESC, f.p ASC NULLS FIRST LIMIT 7",
         ] {
             let wanted = expected(&view, &cx, text);
             for run_rows in [1, 3] {
@@ -484,6 +488,7 @@ fn unsupported_edge_instructions_remain_ineligible_even_with_zero_limits() {
             "MATCH (a)-[e:R]->(b) OPTIONAL MATCH (b)-[f:R]->(c) RETURN e AS edge, a AS source LIMIT 0",
             "MATCH (a)-[:R*1..2]->(b) RETURN b AS target LIMIT 0",
             "MATCH (a)-[e:R]->(b) RETURN type(e) AS kind LIMIT 0",
+            "MATCH (a)-[e:R]->(b) RETURN a AS source ORDER BY type(e) LIMIT 0",
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;

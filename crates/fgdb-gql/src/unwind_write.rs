@@ -5,13 +5,29 @@
 //! atomic program. It does not execute source text or interpolate row values.
 //! Native UNWIND CREATE/INSERT and CREATE RETURN keep their existing compiler.
 //!
-//! The admitted source is a nonempty list of maps (null rows and missing fields
-//! yield null). Referenced fields must be scalar and have one exact non-null
-//! kind per column; no numeric coercion is introduced. Nested field access,
-//! alias rebinding, multiple statements and empty batches are not admitted.
+//! The admitted source is a nonempty list of native values. A bare alias binds
+//! a scalar; static selectors traverse maps/lists (missing fields yield null).
+//! Selected operands must be scalar and have one exact non-null
+//! kind per column; no numeric coercion is introduced. Static nested map fields
+//! and signed list indexes select scalar leaves without copying their containers.
+//! Chained UNWIND clauses expand nested lists, retaining earlier aliases as
+//! borrowed bindings. Each stage is bounded before any native program escapes.
+//! The root may select a list from a parameter document using the same static
+//! map keys and signed indexes as later sources, without copying that document.
+//! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
+//!
+//! Vertex SET/REMOVE batches that write their MATCH's selection fields freeze
+//! all selections and assignment inputs against the entry transaction overlay,
+//! then apply their field updates in input order. MERGE and already-admitted
+//! disjoint row updates retain sequential visibility. Feedback involving
+//! relationship updates or multi-element deletion still refuses typed.
 
 mod controlled;
+mod expansion;
+mod offsets;
 pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
+pub(crate) use expansion::UnwindSource;
+pub(crate) use offsets::UnwindSourceOffset;
 
 use crate::algebra::GraphValue;
 use crate::{
@@ -26,18 +42,56 @@ use fgdb_types::CanonicalScalar;
 pub const MAX_UNWIND_BOUND_PARAMETER_BYTES: usize =
     crate::parameters::MAX_GQL_PARAMETER_TRANSCRIPT_BYTES;
 
+/// Definition bound on a row-field path, including its first map key. This is
+/// independent of the caller's existing list/map value-depth admission limit.
+pub const MAX_UNWIND_FIELD_STEPS: usize = 64;
+
+/// Maximum UNWIND clauses, including the root parameter source. Each later
+/// source is a static path from an earlier alias, not a graph read or a query.
+pub const MAX_UNWIND_SOURCES: usize = 8;
+
+/// The next two-letter native parameter name not already in `reserved`.
+/// Parsing names row fields with it; binding names a row map's key fields.
+pub(crate) fn fresh_parameter(
+    reserved: &mut std::collections::BTreeSet<String>,
+    cursor: &mut usize,
+) -> Option<String> {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    while *cursor < LETTERS.len() * LETTERS.len() {
+        let index = *cursor;
+        *cursor += 1;
+        let name = String::from_utf8(vec![
+            LETTERS[index / LETTERS.len()],
+            LETTERS[index % LETTERS.len()],
+        ])
+        .expect("ASCII parameter name");
+        if reserved.insert(name.clone()) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphUnwindRowError {
     ExpectedMap,
+    ExpectedMapField,
+    ExpectedListField,
     ExpectedScalarField,
     IncompatibleFieldTypes,
+    /// A row map assigned with `+=` names a different key set than row 0's.
+    /// One native template serves every row, and a missing key would assign
+    /// NULL where `+=` leaves the field unchanged.
+    MapKeysDiffer,
+    /// A row map key that is not a plain property name.
+    UnsupportedMapKey,
 }
 
 /// Errors contain coordinates and typed causes, never source text or row values.
 #[derive(Debug)]
 pub enum GraphUnwindWriteError {
     Syntax(GraphWriteScriptError),
-    /// The named UNWIND source is missing or is not a list parameter.
+    /// The named UNWIND source is missing, or a bare source is not a list parameter.
     SourceParameter,
     /// Supplied names must be exactly the names referenced by the original text.
     ArgumentNames,
@@ -47,6 +101,21 @@ pub enum GraphUnwindWriteError {
         limit: usize,
         observed: usize,
     },
+    /// A multirow MATCH mutation could change a later input row's selection.
+    /// Its shape is outside the closed frozen vertex-update profile, so
+    /// sequential execution would be a different query. It refuses before binding.
+    RowFeedsLaterMatch {
+        statement: usize,
+    },
+    /// A source failed before scalar binding. `row` addresses the selected root
+    /// list; `clause` is zero-based. Root selection failures use row/clause zero.
+    Expansion {
+        row: usize,
+        clause: usize,
+        offset: usize,
+        kind: GraphUnwindRowError,
+    },
+    /// A scalar field failed in the flattened, deterministic argument sequence.
     Row {
         row: usize,
         offset: usize,
@@ -70,13 +139,28 @@ impl core::fmt::Display for GraphUnwindWriteError {
             Self::Syntax(source) | Self::Definition(source) => source.fmt(f),
             Self::SourceParameter => f.write_str("UNWIND requires its named list parameter"),
             Self::ArgumentNames => f.write_str("UNWIND argument names do not match its definition"),
-            Self::Empty => f.write_str("UNWIND write batch requires at least one input row"),
+            Self::Empty => {
+                f.write_str("UNWIND write batch requires at least one expanded input row")
+            }
             Self::TooManyRows { limit, observed } => {
                 write!(f, "UNWIND write batch has {observed} rows; limit {limit}")
             }
+            Self::RowFeedsLaterMatch { statement } => write!(
+                f,
+                "UNWIND statement {statement} requires a frozen MATCH across its input rows"
+            ),
             Self::Row { row, offset, kind } => {
                 write!(f, "UNWIND input row {row} at byte {offset}: {kind:?}")
             }
+            Self::Expansion {
+                row,
+                clause,
+                offset,
+                kind,
+            } => write!(
+                f,
+                "UNWIND root row {row}, clause {clause} at byte {offset}: {kind:?}"
+            ),
             Self::Parameter { row, source } => {
                 write!(f, "UNWIND input row {row}: {source}")
             }
@@ -135,9 +219,16 @@ impl<
     }
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UnwindFieldAccess {
+    Key(String),
+    Index(i64),
+}
+
 #[derive(Clone)]
 pub(crate) struct UnwindField {
-    pub(crate) key: String,
+    pub(crate) source: usize,
+    pub(crate) path: Box<[UnwindFieldAccess]>,
     pub(crate) parameter: String,
     pub(crate) offset: usize,
 }
@@ -153,14 +244,18 @@ pub(crate) struct UnwindField {
 pub struct GraphUnwindWriteText {
     pub(crate) original: String,
     pub(crate) lowered: String,
+    pub(crate) source_offsets: Box<[UnwindSourceOffset]>,
     pub(crate) source_parameter: String,
+    pub(crate) source_path: Box<[UnwindFieldAccess]>,
     pub(crate) source_offset: usize,
+    pub(crate) sources: Box<[UnwindSource]>,
     pub(crate) external_parameters: Box<[String]>,
     pub(crate) fields: Box<[UnwindField]>,
 }
 impl core::fmt::Debug for GraphUnwindWriteText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphUnwindWriteText")
+            .field("sources", &(self.sources.len() + 1))
             .field("fields", &self.fields.len())
             .field("parameters", &(self.external_parameters.len() + 1))
             .field("definition", &"[REDACTED]")
@@ -174,7 +269,8 @@ impl GraphUnwindWriteText {
         &self.original
     }
 
-    /// Admit and bind at most 64 rows into one native atomic write program.
+    /// Admit at most 64 rows at each UNWIND boundary and bind the final rows
+    /// into one native atomic write program.
     pub fn bind(
         &self,
         arguments: &GqlParameters,
@@ -194,13 +290,33 @@ impl GraphUnwindWriteText {
     /// all precede catalog resolution. Every row binds before a program escapes.
     ///
     /// Null does not fix a column's kind: a later non-null value does. An absent
-    /// map key remains null. A list/map/identity used as a scalar field refuses.
+    /// map key or out-of-range signed list index remains null, including through
+    /// later selectors. Negative indexes count from the end. A non-null value
+    /// of the wrong container kind or a non-scalar final leaf refuses before
+    /// catalog resolution. Containers and unselected siblings are never cloned.
     /// Global parameters retain their exact original types. The cap is clamped
     /// to the ordinary batch executor's 65,536-statement hard ceiling.
+    /// It applies independently at EVERY UNWIND boundary, so a later empty
+    /// list cannot conceal an unbounded intermediate expansion. Missing/null
+    /// sources and empty lists produce no child bindings; a list's null item
+    /// does produce a binding. Scalar, map and list items retain their earlier
+    /// aliases. An alias used as a mutation operand must resolve to a scalar;
+    /// an alias used as another UNWIND source must resolve to a list or null.
+    /// A list-valued alias can be expanded directly or indexed with a static
+    /// signed index. No collection is coerced to a stored scalar property.
+    /// An entirely empty expansion retains the explicit Empty refusal.
     ///
-    /// Original UTF-8 byte offsets survive lowering, including comments and
-    /// strings. Execution uses the ordinary program executor and its existing
+    /// Original UTF-8 diagnostics and batch locations survive lowering, even
+    /// when a one-byte alias needs a longer generated parameter token. Native
+    /// definition size limits still apply to the lowered statement. Execution
+    /// uses the ordinary program executor and its existing
     /// rollback, authorization, cancellation, allocation and commit semantics.
+    /// Vertex updates that write their own MATCH's property or label domain
+    /// freeze all row selections and RHS values against the entry overlay,
+    /// then stage fields in input order. Relationship feedback and deletion
+    /// whose MATCH depends on edges or another vertex binding still refuse.
+    /// Disjoint updates, simple single-vertex deletion and MERGE retain
+    /// sequential program semantics.
     pub fn bind_with_limit(
         &self,
         arguments: &GqlParameters,
@@ -208,7 +324,19 @@ impl GraphUnwindWriteText {
         max_rows: usize,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
-        self.bind_with_limit_controlled(arguments, relation, max_rows, resolve, |_| {
+        self.bind_with_limit_resolver(arguments, relation, max_rows, resolve)
+    }
+
+    /// As [`Self::bind_with_limit`], with a host resolver whose pinned tzdb
+    /// the batch's statements use (fgdb-txbg9).
+    pub fn bind_with_limit_resolver(
+        &self,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        max_rows: usize,
+        resolve: impl crate::GraphSymbolResolver,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
+        self.bind_with_limit_controlled_resolver(arguments, relation, max_rows, resolve, |_| {
             Ok::<(), core::convert::Infallible>(())
         })
         .map_err(|error| match error {
@@ -218,27 +346,91 @@ impl GraphUnwindWriteText {
     }
 }
 
-fn scalar_field<'a>(
+fn scalar_field<'a, C>(
     row: &'a GraphValue,
     field: &UnwindField,
     row_index: usize,
-) -> Result<Option<&'a CanonicalScalar>, GraphUnwindWriteError> {
-    let Some((keys, values)) = row.as_map() else {
-        // Row shape was admitted by the caller; null.field is null.
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<Option<&'a CanonicalScalar>, GraphUnwindBindError<C>> {
+    let Some(current) = field_value(row, &field.path, field.offset, row_index, control)? else {
         return Ok(None);
     };
-    let Ok(index) = keys.binary_search_by(|key| key.as_ref().cmp(field.key.as_str())) else {
-        return Ok(None);
-    };
-    match &values[index] {
+    match current {
         GraphValue::Scalar(value) => Ok(Some(value)),
         _ => Err(GraphUnwindWriteError::Row {
             row: row_index,
             offset: field.offset,
             kind: GraphUnwindRowError::ExpectedScalarField,
-        }),
+        }
+        .into()),
     }
 }
+
+// One selector implementation for nested list sources and scalar leaves.
+// It borrows containers and charges before the same bounded lookups as before.
+fn field_value<'a, C>(
+    row: &'a GraphValue,
+    path: &[UnwindFieldAccess],
+    offset: usize,
+    row_index: usize,
+    control: &mut impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+) -> Result<Option<&'a GraphValue>, GraphUnwindBindError<C>> {
+    let refusal = |kind| GraphUnwindWriteError::Row {
+        row: row_index,
+        offset,
+        kind,
+    };
+    let mut current = row;
+    if path.is_empty() {
+        // A direct scalar/list alias is a real operand lookup too. Admission
+        // and expansion retain one cumulative control, including bare aliases.
+        control(GraphUnwindBindEvent::Work(1)).map_err(GraphUnwindBindError::Interrupted)?;
+    }
+    for access in path {
+        // Both the admission pass and expansion pass debit the SAME host
+        // allowance before each bounded lookup. No container is materialized.
+        control(GraphUnwindBindEvent::Work(1)).map_err(GraphUnwindBindError::Interrupted)?;
+        if current.is_null() {
+            return Ok(None);
+        }
+        current = match access {
+            UnwindFieldAccess::Key(name) => {
+                let Some((keys, values)) = current.as_map() else {
+                    return Err(refusal(GraphUnwindRowError::ExpectedMapField).into());
+                };
+                let Ok(index) = keys.binary_search_by(|key| key.as_ref().cmp(name.as_str())) else {
+                    return Ok(None);
+                };
+                &values[index]
+            }
+            UnwindFieldAccess::Index(index) => {
+                let GraphValue::List(values) = current else {
+                    return Err(refusal(GraphUnwindRowError::ExpectedListField).into());
+                };
+                // unsigned_abs handles i64::MIN; checked conversion/subtraction
+                // also works on narrower hosts and never wraps an invalid index.
+                let position = if *index < 0 {
+                    usize::try_from(index.unsigned_abs())
+                        .ok()
+                        .and_then(|distance| values.len().checked_sub(distance))
+                } else {
+                    usize::try_from(*index).ok()
+                };
+                let Some(value) = position.and_then(|position| values.get(position)) else {
+                    return Ok(None);
+                };
+                value
+            }
+        };
+    }
+    Ok(Some(current))
+}
+
+#[cfg(test)]
+mod nested_tests;
+
+#[cfg(test)]
+mod scalar_tests;
 
 #[cfg(test)]
 mod tests {
@@ -359,7 +551,7 @@ mod tests {
         assert!(matches!(
             parsed.bind(&arguments, RelationId(1), &mut catalog),
             Err(GraphUnwindWriteError::Row {
-                kind: GraphUnwindRowError::ExpectedMap,
+                kind: GraphUnwindRowError::ExpectedMapField,
                 ..
             })
         ));
@@ -451,7 +643,10 @@ mod tests {
         let keys: Vec<&str> = parsed
             .fields
             .iter()
-            .map(|field| field.key.as_str())
+            .map(|field| match &field.path[0] {
+                UnwindFieldAccess::Key(key) => key.as_str(),
+                UnwindFieldAccess::Index(_) => panic!("field starts with a map key"),
+            })
             .collect();
         assert_eq!(keys, ["id", "to"]);
         assert!(!parsed.lowered.contains("row."));
@@ -477,18 +672,67 @@ mod tests {
         }
     }
 
+    /// An edge-only CREATE after a vertex-only MATCH runs row by row
+    /// (fgdb-0s2pq); a relationship read, a new or labelled vertex, OPTIONAL,
+    /// a pattern predicate or a RETURN keeps the native pipeline.
+    #[test]
+    fn only_an_edge_only_create_after_a_vertex_only_match_is_intercepted() {
+        for query in [
+            "UNWIND $rows AS row MATCH (a:Source {p: row.from}), (b:Source {p: row.to}) \
+             CREATE (a)-[:R {p: row.w}]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) MATCH (b {id: row.b}) \
+             CREATE (a)-[:R]->(b), (b)<-[:R]-(a)",
+            "UNWIND $rows AS row MATCH (a), (b) WHERE a.id = row.a AND b.id = row.b \
+             CREATE (a)-[:R]->(b)",
+        ] {
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(query)
+                    .unwrap()
+                    .is_some(),
+                "{query}"
+            );
+        }
+        for query in [
+            "UNWIND $rows AS row MATCH (a)-[:R]->(b {id: row.b}) CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) CREATE (a)-[:R]->(c)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) CREATE (a)-[:R]->(:N {id: row.b})",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             CREATE (a)-[:R]->(b:N)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             CREATE (a)-[:R]->(b) RETURN a",
+            "UNWIND $rows AS row OPTIONAL MATCH (a {id: row.a}) MATCH (b {id: row.b}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             WHERE NOT exists((a)-->(b)) CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH p = (a {id: row.a}) CREATE (a)-[:R]->(a)",
+        ] {
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(query)
+                    .unwrap()
+                    .is_none(),
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn imported_row_cannot_be_rebound_or_used_as_an_identity() {
         for query in [
             "UNWIND $rows AS row MERGE (row:Entity {id:row.id})",
             "UNWIND $rows AS row MATCH (row) SET row.name='x'",
-            "UNWIND $rows AS row MERGE (n:Entity {id:row})",
-            "UNWIND $rows AS row MERGE (n:Entity {id:row.id.part})",
+            "UNWIND $rows AS row MERGE (n:Entity {id:row.id[$index]})",
         ] {
-            assert!(matches!(
-                GraphUnwindWriteText::parse(query),
-                Err(GraphUnwindWriteError::Syntax(_))
-            ));
+            // A lexical definition alone is not executable. Short scalar
+            // aliases now lower to parameter operands; the native compiler
+            // still refuses them in graph binding/identity positions.
+            let result = GraphUnwindWriteText::parse(query).and_then(|parsed| {
+                parsed.bind(
+                    &rows(vec![map(&[("id", CanonicalScalar::Int(1))])]),
+                    RelationId(1),
+                    |_, _| panic!("invalid binding cannot enter catalog"),
+                )
+            });
+            assert!(result.is_err(), "{query}");
         }
     }
 

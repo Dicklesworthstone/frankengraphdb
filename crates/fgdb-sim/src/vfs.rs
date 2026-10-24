@@ -1053,6 +1053,23 @@ impl<V: Vfs> FaultVfs<V> {
         self.lab.lock().namespace.len()
     }
 
+    /// The inode-table key of the NAME `path`: its canonical parent joined
+    /// with its file name. For a regular file this is the key `open` uses
+    /// (`canonicalize(path)`), so a rename or removal through a path that
+    /// differs from the canonical one (macOS `/var` vs `/private/var`) still
+    /// moves or drops the right inode. A symlink's own name is not its
+    /// target's key, so removing or renaming the link leaves the target alone.
+    /// `None` when the parent does not resolve: no inode can be keyed there.
+    async fn name_key(&self, path: &Path) -> Option<PathBuf> {
+        let name = path.file_name()?;
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let parent = self.backing.canonicalize(parent).await.ok()?;
+        Some(parent.join(name))
+    }
+
     fn record_namespace(&self, owing: Vec<PathBuf>, kind: NamespaceKind) {
         // An operation with no parent to sync (a root-level path) has no
         // barrier to model; it is durable the moment the backing store
@@ -1852,11 +1869,14 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let key = self.name_key(path).await;
         self.backing.remove_file(path).await?;
-        self.inodes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(path);
+        if let Some(key) = key {
+            self.inodes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
+        }
         if let Some(durable) = durable {
             self.record_namespace(
                 path.parent().map(Path::to_path_buf).into_iter().collect(),
@@ -1879,12 +1899,17 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let (from_key, to_key) = (self.name_key(from).await, self.name_key(to).await);
         self.backing.rename(from, to).await?;
         {
             let mut inodes = self.inodes.lock().unwrap_or_else(|p| p.into_inner());
-            inodes.remove(to);
-            if let Some(inode) = inodes.remove(from) {
-                inodes.insert(to.to_path_buf(), inode);
+            if let Some(to_key) = &to_key {
+                inodes.remove(to_key);
+            }
+            if let Some(inode) = from_key.and_then(|from_key| inodes.remove(&from_key))
+                && let Some(to_key) = to_key
+            {
+                inodes.insert(to_key, inode);
             }
         }
         let mut owing: Vec<PathBuf> = from

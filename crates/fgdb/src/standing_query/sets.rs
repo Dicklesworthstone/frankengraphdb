@@ -34,11 +34,14 @@ pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
         StandingQuery::Constant(query) => Some(query.definition.columns()),
         StandingQuery::Closure(query) => Some(query.columns()),
         StandingQuery::Components(query) => Some(query.columns()),
+        StandingQuery::CoreNumbers(query) => query.columns(),
+        StandingQuery::TriangleCounts(query) => Some(query.columns()),
         StandingQuery::Set(query) => Some(&query.columns),
         StandingQuery::Join(query) => Some(query.columns()),
         StandingQuery::Projection(query) => Some(query.columns()),
         StandingQuery::Filter(query) => Some(query.columns()),
         StandingQuery::Window(query) => Some(query.columns()),
+        StandingQuery::Group(query) => query.row_schema().map(|(columns, _)| columns),
         _ => None,
     }
 }
@@ -54,9 +57,22 @@ pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphS
         StandingQuery::Projection(query) => query.spec().column_types().get(column).copied(),
         StandingQuery::Filter(query) => query.spec().column_types().get(column).copied(),
         StandingQuery::Window(query) => query.spec().input_types().get(column).copied(),
+        StandingQuery::Group(query) => query
+            .row_schema()
+            .and_then(|(_, types)| types.get(column).copied()),
         StandingQuery::Constant(query) => query.definition.column_types().get(column).copied(),
         StandingQuery::Closure(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
         StandingQuery::Components(_) => (column < 2).then_some(GraphSetColumnType::Vertex),
+        StandingQuery::TriangleCounts(_) => match column {
+            0 => Some(GraphSetColumnType::Vertex),
+            1 => Some(GraphSetColumnType::Scalar),
+            _ => None,
+        },
+        StandingQuery::CoreNumbers(query) if query.has_value_rows() => match column {
+            0 => Some(GraphSetColumnType::Vertex),
+            1 => Some(GraphSetColumnType::Scalar),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -66,11 +82,14 @@ pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Constant(query) => Some(&query.rows),
         StandingQuery::Closure(query) => Some(query.rows()),
         StandingQuery::Components(query) => Some(query.value_rows()),
+        StandingQuery::CoreNumbers(query) => query.value_rows(),
+        StandingQuery::TriangleCounts(query) => Some(query.rows()),
         StandingQuery::Set(query) => Some(&query.rows),
         StandingQuery::Join(query) => Some(query.rows()),
         StandingQuery::Projection(query) => Some(query.rows()),
         StandingQuery::Filter(query) => Some(query.rows()),
         StandingQuery::Window(query) => Some(query.rows()),
+        StandingQuery::Group(query) => query.value_rows(),
         _ => None,
     }
 }
@@ -80,11 +99,14 @@ pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Constant(query) => query.last_delta.as_ref(),
         StandingQuery::Closure(query) => query.delta(),
         StandingQuery::Components(query) => query.value_delta(),
+        StandingQuery::CoreNumbers(query) => query.value_delta(),
+        StandingQuery::TriangleCounts(query) => query.delta(),
         StandingQuery::Set(query) => query.last_delta.as_ref(),
         StandingQuery::Join(query) => query.delta(),
         StandingQuery::Projection(query) => query.delta(),
         StandingQuery::Filter(query) => query.delta(),
         StandingQuery::Window(query) => query.delta(),
+        StandingQuery::Group(query) => query.value_delta(),
         _ => None,
     }
 }
@@ -261,8 +283,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// EXCEPT with ALL/DISTINCT bag semantics. Operands keep their own DISTINCT,
     /// ordering and page BEFORE composition. Canonical full-row equality makes
     /// NULL equal NULL here; scalar and vertex domains are never coerced.
-    /// Column positions/types must agree, even for empty inputs. Output names
-    /// come from the left operand. The same handle may supply both operands.
+    /// Column positions must agree. Equal concrete domains remain concrete;
+    /// an Any operand keeps the output open, even for empty inputs or EXCEPT.
+    /// Different concrete domains still refuse. Output names come from the
+    /// left operand. The same handle may supply both operands.
     ///
     /// Shared parents are maintained once. Sets and joins may feed each other in
     /// an append-ordered acyclic circuit. Each commit uses both complete input
@@ -356,20 +380,21 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(StandingQueryError::Maintenance)?;
                 let l = column_type(left, column).ok_or(StandingQueryError::Unsupported)?;
                 let r = column_type(right, column).ok_or(StandingQueryError::Unsupported)?;
-                if l != r {
-                    return Err(StandingQueryError::SetSchema(
-                        GraphSetBuildError::ColumnType {
-                            column,
-                            left: l,
-                            right: r,
-                        },
-                    ));
-                }
+                // Use the native compiler's declared-domain rule, not the
+                // present data or a left-biased schema. In particular, Any
+                // from UNWIND must remain open across later committed ticks.
+                let common = l.common_set_domain(r).ok_or(StandingQueryError::SetSchema(
+                    GraphSetBuildError::ColumnType {
+                        column,
+                        left: l,
+                        right: r,
+                    },
+                ))?;
                 meter
                     .units(ZSetEvent::ScratchEntry, 2 + name.len().div_ceil(64))
                     .map_err(StandingQueryError::Maintenance)?;
                 names.push(name.clone());
-                types.push(l);
+                types.push(common);
             }
             let left = rows(left).ok_or(StandingQueryError::Unsupported)?;
             let right = rows(right).ok_or(StandingQueryError::Unsupported)?;
@@ -472,3 +497,6 @@ impl<V: Vfs + Clone> Database<V> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod domain_tests;

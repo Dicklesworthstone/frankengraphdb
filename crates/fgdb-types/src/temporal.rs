@@ -14,6 +14,18 @@
 
 use crate::ids::ObjectId;
 
+pub mod calendar;
+mod date;
+mod duration;
+mod time;
+
+pub use date::{CanonicalDate, DateError};
+pub use duration::{CanonicalDuration, DurationError, DurationUnit, SECONDS_PER_AVERAGE_MONTH};
+pub use time::{
+    CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime, NANOS_PER_DAY, TimeError,
+    format_utc_offset, parse_utc_offset,
+};
+
 /// Maximum absolute UTC offset admitted by `STRICT_PORTABLE`.
 ///
 /// Eighteen hours is the closed range used by ISO-style fixed-offset temporal
@@ -95,7 +107,9 @@ impl TimestampZone {
 pub struct CanonicalTimestamp {
     instant_utc_nanos: i128,
     utc_offset_seconds: i32,
-    zone: Option<TimestampZone>,
+    /// Boxed: inline zone metadata (an identifier and a 32-byte tzdb ID) was
+    /// the second-widest `CanonicalScalar` variant, sizing every scalar.
+    zone: Option<Box<TimestampZone>>,
 }
 
 impl CanonicalTimestamp {
@@ -141,10 +155,33 @@ impl CanonicalTimestamp {
         Ok(Self {
             instant_utc_nanos,
             utc_offset_seconds,
-            zone: Some(TimestampZone {
+            zone: Some(Box::new(TimestampZone {
                 identifier: zone_identifier.into(),
                 tzdb_oid,
-            }),
+            })),
+        })
+    }
+
+    /// Reconstructs a stored zoned timestamp from its committed components
+    /// (`instant_utc_nanos`, `utc_offset_seconds`, `zone_identifier`, and
+    /// `tzdb_oid`), validating instant/offset ranges and canonical zone syntax
+    /// without consulting a live [`TzdbResolver`].
+    pub fn from_stored_zoned(
+        instant_utc_nanos: i128,
+        utc_offset_seconds: i32,
+        zone_identifier: &str,
+        tzdb_oid: ObjectId,
+    ) -> Result<Self, TimestampConstructionError> {
+        validate_instant(instant_utc_nanos)?;
+        validate_offset(utc_offset_seconds)?;
+        validate_zone_identifier(zone_identifier)?;
+        Ok(Self {
+            instant_utc_nanos,
+            utc_offset_seconds,
+            zone: Some(Box::new(TimestampZone {
+                identifier: zone_identifier.into(),
+                tzdb_oid,
+            })),
         })
     }
 
@@ -160,7 +197,7 @@ impl CanonicalTimestamp {
 
     /// Returns the zoned metadata, if this is not an offset-only timestamp.
     pub fn zone(&self) -> Option<&TimestampZone> {
-        self.zone.as_ref()
+        self.zone.as_deref()
     }
 
     /// Returns the local-wall nanosecond coordinate represented by the stored

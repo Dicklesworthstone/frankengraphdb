@@ -11,7 +11,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 
@@ -140,7 +141,11 @@ fn assert_state(
             let (a, b) = (by_id[&a], by_id[&b]);
             if !a.labels.contains(&SOURCE)
                 || !b.props.iter().any(|(key, value)| {
-                    *key == SELECTED && matches!(value, CanonicalScalar::Int(1))
+                    *key == SELECTED
+                        && matches!(
+                            value,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+                        )
                 })
             {
                 continue;
@@ -149,15 +154,15 @@ fn assert_state(
                 .props
                 .iter()
                 .find(|(key, _)| *key == BUCKET)
-                .map(|(_, value)| value.clone())
+                .map(|(_, value)| value.as_scalar().expect("scalar fixture").clone())
                 .unwrap_or(CanonicalScalar::Null);
             let amount = b
                 .props
                 .iter()
                 .find(|(key, _)| *key == AMOUNT)
                 .and_then(|(_, value)| match value {
-                    CanonicalScalar::Int(value) => Some(*value),
-                    CanonicalScalar::Null => None,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Null) => None,
                     _ => panic!("integer-only fixture"),
                 });
             expected
@@ -338,6 +343,111 @@ fn parser_and_transactions_feed_the_same_committed_one_hop_maintainer() {
 }
 
 #[test]
+fn untyped_standing_inputs_follow_new_relations_mixed_joins_and_cascades() {
+    let ((), report) = run_async_under_lab(0x7e08, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let statements = [
+            "MATCH (a)-->(b) RETURN count(*) AS n",
+            "MATCH (a)-->(b)-->(c) RETURN count(*) AS n",
+            "MATCH (a)-[:R]->(b)-->(c) RETURN count(*) AS n",
+            "MATCH (a) OPTIONAL MATCH (a)-->(b)-->(c) RETURN count(*) AS n",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b)-->(c) } RETURN count(*) AS n",
+        ];
+        let mut queries = Vec::new();
+        for text in statements {
+            let query = PreparedGraphAggregateText::prepare(text, |kind, name| {
+                ((kind, name) == (GraphSymbolKind::Relation, "R"))
+                    .then_some(GraphSymbol::Relation(R))
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let handle = db
+                .register_standing_query(&cx, query.clone(), policy())
+                .unwrap();
+            queries.push((query, handle));
+        }
+        let verify = |db: &Database<MemVfs>| {
+            let edges = db.edges().unwrap();
+            let vertices = db.vertices().unwrap();
+            let paths = |source: VId, only_r: bool| {
+                edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.entry.src == source && (!only_r || edge.entry.relation == R)
+                    })
+                    .map(|first| {
+                        // Each two-hop MATCH binds its edges under DIFFERENT EDGES.
+                        edges
+                            .iter()
+                            .filter(|second| {
+                                second.entry.src == first.entry.dst
+                                    && second.entry.eid != first.entry.eid
+                            })
+                            .count() as u64
+                    })
+                    .sum::<u64>()
+            };
+            let counts = [
+                edges.len() as u64,
+                vertices.iter().map(|v| paths(v.vid, false)).sum(),
+                vertices.iter().map(|v| paths(v.vid, true)).sum(),
+                vertices.iter().map(|v| paths(v.vid, false).max(1)).sum(),
+                vertices.iter().filter(|v| paths(v.vid, false) != 0).count() as u64,
+            ];
+            for ((query, handle), count) in queries.iter().zip(counts) {
+                let maintained = db.standing_query(&cx, handle).unwrap();
+                assert_eq!(maintained.frontier(), db.frontier().unwrap());
+                let rows: Vec<_> = maintained.rows().iter().collect();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].0.get(0).unwrap().as_count(), Some(count));
+                assert_eq!(rows[0].1, &ZWeight::ONE);
+                let full = db
+                    .execute_graph_aggregate_governed(&cx, query, policy())
+                    .unwrap();
+                assert_eq!(full.value.len(), 1);
+                assert_eq!(full.value[0].get(0).unwrap().as_count(), Some(count));
+            }
+        };
+        verify(&db);
+        let mut first = WriteBatch::new(R);
+        for id in 1..=4 {
+            first.create_vertex(VId(id), vec![], vec![]);
+        }
+        first.add_edge(EId(1), VId(1), VId(2), vec![]);
+        first.add_edge(EId(2), VId(2), VId(2), vec![]);
+        db.write(&commit, first).await.unwrap();
+        verify(&db);
+        let mut second = WriteBatch::new(OTHER);
+        second.add_edge(EId(3), VId(2), VId(3), vec![]);
+        second.add_edge(EId(4), VId(3), VId(1), vec![]);
+        db.write(&commit, second).await.unwrap();
+        verify(&db);
+        let mut new_relation = WriteBatch::new(RelationId(77));
+        new_relation.add_edge(EId(5), VId(4), VId(1), vec![]);
+        new_relation.add_edge(EId(6), VId(1), VId(4), vec![]);
+        db.write(&commit, new_relation).await.unwrap();
+        verify(&db);
+        let mut remove = WriteBatch::new(OTHER);
+        remove.delete_edge(EId(3));
+        db.write(&commit, remove).await.unwrap();
+        verify(&db);
+        let mut cascade = WriteBatch::new(R);
+        cascade.delete_vertex(VId(2));
+        db.write(&commit, cascade).await.unwrap();
+        verify(&db);
+        for (_, handle) in &queries {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+        }
+        verify(&db);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn unchanged_regions_do_not_increase_endpoint_maintenance_work() {
     let ((), report) = run_async_under_lab(0x7e03, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -420,13 +530,28 @@ fn initialization_admits_edges_and_failed_maintenance_can_rebuild() {
             .register_standing_query(&cx, query.clone(), policy())
             .unwrap();
         let stats = *db.standing_query(&cx, &probe).unwrap().last_maintenance();
-        let exact = GqlQueryPolicy::new(100_000, 10_000, stats.work_units, stats.scratch_entries);
+        // Numeric definitions own a private row source and a group node. A
+        // per-node grant must cover both, not only the final group's usage.
+        let nodes: Vec<_> = db
+            .standing_query_node_stats(&cx, &probe)
+            .unwrap()
+            .copied()
+            .collect();
+        assert!(nodes.len() > 1);
+        assert_eq!(nodes.last(), Some(&stats));
+        let (work, scratch) = nodes.iter().fold((0_u64, 0_u64), |(work, scratch), stats| {
+            (
+                work.max(stats.work_units),
+                scratch.max(stats.scratch_entries),
+            )
+        });
+        let exact = GqlQueryPolicy::new(100_000, 10_000, work, scratch);
         let handle = db
             .register_standing_query(&cx, query.clone(), exact)
             .unwrap();
         for cap in [
-            GqlQueryPolicy::new(100_000, 10_000, stats.work_units - 1, stats.scratch_entries),
-            GqlQueryPolicy::new(100_000, 10_000, stats.work_units, stats.scratch_entries - 1),
+            GqlQueryPolicy::new(100_000, 10_000, work - 1, scratch),
+            GqlQueryPolicy::new(100_000, 10_000, work, scratch - 1),
         ] {
             assert!(db.register_standing_query(&cx, query.clone(), cap).is_err());
         }

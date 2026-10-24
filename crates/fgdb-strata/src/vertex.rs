@@ -28,10 +28,13 @@
 //! the DECODER independently refuses the same shapes, so a hand-built patch
 //! cannot smuggle an order the encoder would never emit.
 
+use std::sync::Arc;
+
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
-    CanonicalScalar, CanonicalScalarResolver, CommitSeq, ScalarDecodeError, ScalarEncodeError, VId,
+    CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarResolver,
+    CommitSeq, ScalarDecodeError, ScalarEncodeError, ScalarProfileVersion, VId,
 };
 
 /// `FGSV` — FrankenGraph Strata Vertex patch.
@@ -49,6 +52,77 @@ pub const VERTEX_PATCH_FORMAT_V1: u16 = 1;
 /// Format version. Durable formats are versioned from day one (§16.6):
 /// additive-minor, breaking-major.
 pub const VERTEX_PATCH_FORMAT_V2: u16 = 2;
+/// V2 plus property values of scalar profile version 2 (fgdb-hbi8s). An
+/// exact additive minor: a patch is V3 if and only if a row holds such a
+/// value ([`vertex_patch_format_for`]), so every other patch keeps its V2
+/// bytes and identity, and an older reader refuses V3 by name.
+pub const VERTEX_PATCH_FORMAT_V3: u16 = 3;
+/// V3 plus List and Map property values (fgdb-k3nub), encoded as
+/// [`CanonicalPropertyValue`] bytes whose scalars keep their scalar bytes.
+/// Exact, as V3 is: a patch is V4 if and only if a row holds a collection, so
+/// every scalar-only patch keeps its V2 or V3 bytes and identity.
+pub const VERTEX_PATCH_FORMAT_V4: u16 = 4;
+
+/// The one format `rows` may be written in.
+pub fn vertex_patch_format_for(rows: &[VertexRow]) -> u16 {
+    let values = || {
+        rows.iter()
+            .flat_map(|row| row.props.iter().map(|(_, value)| value))
+    };
+    if values().any(CanonicalPropertyValue::is_collection) {
+        return VERTEX_PATCH_FORMAT_V4;
+    }
+    let profile = values()
+        .map(CanonicalPropertyValue::required_scalar_profile)
+        .max()
+        .unwrap_or(ScalarProfileVersion::V1);
+    if profile > ScalarProfileVersion::V1 {
+        VERTEX_PATCH_FORMAT_V3
+    } else {
+        VERTEX_PATCH_FORMAT_V2
+    }
+}
+
+/// One property value's patch bytes. A scalar is its scalar encoding, with
+/// the scalar error; a collection is its [`CanonicalPropertyValue`] encoding.
+pub(crate) fn encode_property_value(
+    at: usize,
+    value: &CanonicalPropertyValue,
+) -> Result<Vec<u8>, VertexPatchError> {
+    match value.as_scalar() {
+        Some(scalar) => scalar
+            .encode()
+            .map_err(|error| VertexPatchError::ScalarEncode { at, error }),
+        None => value
+            .encode()
+            .map_err(|error| VertexPatchError::PropertyValue { at, error }),
+    }
+}
+
+/// Decode one property value: a List or Map tag through
+/// [`CanonicalPropertyValue::decode`], every other value exactly as the
+/// scalar decoder reads it.
+fn decode_property_value(
+    at: usize,
+    encoded: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<CanonicalPropertyValue, VertexPatchError> {
+    if CanonicalPropertyValue::is_collection_encoding(encoded) {
+        return match resolver {
+            Some(resolver) => CanonicalPropertyValue::decode_with_resolver(encoded, resolver),
+            None => CanonicalPropertyValue::decode_stored(encoded),
+        }
+        .map_err(|error| VertexPatchError::PropertyValue { at, error });
+    }
+    // This is the closed graph-value decoder; no JWT or signature state exists here.
+    // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
+    match resolver {
+        Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
+        None => CanonicalScalar::decode_stored(encoded),
+    }
+    .map(CanonicalPropertyValue::Scalar)
+    .map_err(|error| VertexPatchError::ScalarDecode { at, error })
+}
 
 /// Durable object kind for a Tier-D vertex row patch — part of the §5.1
 /// logical-identity header, separate from the payload framing for the same
@@ -87,8 +161,9 @@ pub struct VertexRow {
     pub retired_at: Option<CommitSeq>,
     /// Strictly ascending label memberships at creation.
     pub labels: Vec<LabelId>,
-    /// Strictly ascending by key; values are canonical scalars.
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    /// Strictly ascending by key; values are canonical scalars, Lists and
+    /// Maps (fgdb-k3nub).
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 impl VertexRow {
@@ -112,6 +187,8 @@ impl VertexRow {
 
 /// Canonical patch rows, retaining the ordering proved by decoding or packing.
 /// Immutable access keeps `(vid, created_at)` ordering valid for point search.
+/// Clones share the same immutable row allocation, including labels and scalar
+/// payloads, so retaining an old generation does not copy every decoded row.
 /// This proves row shape, not content identity, root admission or authorization.
 ///
 /// ```compile_fail
@@ -122,7 +199,7 @@ impl VertexRow {
 /// }
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VertexPatchRows(Vec<VertexRow>);
+pub struct VertexPatchRows(Arc<Vec<VertexRow>>);
 
 impl core::ops::Deref for VertexPatchRows {
     type Target = [VertexRow];
@@ -146,7 +223,9 @@ impl IntoIterator for VertexPatchRows {
     type IntoIter = std::vec::IntoIter<VertexRow>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        // Consuming unique rows transfers their existing allocations. Explicit
+        // ownership while another immutable reader shares them requires a copy.
+        Arc::unwrap_or_clone(self.0).into_iter()
     }
 }
 
@@ -157,6 +236,10 @@ pub enum VertexPatchError {
     NotAVertexPatch,
     /// A format version this build does not implement.
     UnsupportedFormat { format: u16 },
+    /// A supported format that is not the one the rows require
+    /// ([`vertex_patch_format_for`]): V2 over a profile-2 value, V3 over rows
+    /// V2 encodes, V2 or V3 over a collection, or V4 over scalar-only rows.
+    FormatMismatch { format: u16, required: u16 },
     /// The bytes end before the declared rows do.
     Truncated { at: usize },
     /// Bytes remain after the declared rows — a concatenation or damage,
@@ -197,6 +280,11 @@ pub enum VertexPatchError {
     ScalarEncode { at: usize, error: ScalarEncodeError },
     /// A property value's bytes refused canonical decoding.
     ScalarDecode { at: usize, error: ScalarDecodeError },
+    /// A List or Map property value refused canonical encoding or decoding.
+    PropertyValue {
+        at: usize,
+        error: CanonicalPropertyValueError,
+    },
     /// The bytes are well-formed and WRONG — not the patch that was asked
     /// for. Kept distinct exactly as in `BlockError::IdentityMismatch`.
     IdentityMismatch {
@@ -212,6 +300,10 @@ impl core::fmt::Display for VertexPatchError {
             Self::UnsupportedFormat { format } => {
                 write!(f, "vertex patch format {format} is not implemented")
             }
+            Self::FormatMismatch { format, required } => write!(
+                f,
+                "vertex patch format {format} declared over rows that require format {required}"
+            ),
             Self::Truncated { at } => {
                 write!(
                     f,
@@ -272,6 +364,9 @@ impl core::fmt::Display for VertexPatchError {
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
             }
+            Self::PropertyValue { at, error } => {
+                write!(f, "row {at} collection property value: {error}")
+            }
             Self::IdentityMismatch { expected, actual } => {
                 write!(f, "bytes are {actual:?}, not the requested {expected:?}")
             }
@@ -302,7 +397,7 @@ pub(crate) fn validate_patch_row(at: usize, row: &VertexRow) -> Result<(), Verte
 fn validate_content(
     at: usize,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), VertexPatchError> {
     if labels.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(VertexPatchError::NonCanonicalLabels { at });
@@ -319,7 +414,7 @@ fn validate_content(
 /// This resource limit does not narrow the canonical scalar or patch format.
 pub fn admit_row_content(
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), VertexPatchError> {
     validate_content(0, labels, props)?;
     let mut content = Vec::new();
@@ -338,7 +433,7 @@ pub fn admit_row_content(
 fn encode_content(
     at: usize,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
     out: &mut Vec<u8>,
 ) -> Result<(), VertexPatchError> {
     let label_count =
@@ -350,11 +445,9 @@ fn encode_content(
     let prop_count = u32::try_from(props.len()).expect("prop count bounded by canonical admission");
     out.extend_from_slice(&prop_count.to_le_bytes());
     for (key, value) in props {
-        let encoded = value
-            .encode()
-            .map_err(|error| VertexPatchError::ScalarEncode { at, error })?;
+        let encoded = encode_property_value(at, value)?;
         out.extend_from_slice(&key.0.to_le_bytes());
-        let len = u32::try_from(encoded.len()).expect("scalar profile bounds its encoding");
+        let len = u32::try_from(encoded.len()).expect("value bounds limit its encoding");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(&encoded);
     }
@@ -401,7 +494,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
     }
     let mut out = Vec::new();
     out.extend_from_slice(&VERTEX_PATCH_MAGIC);
-    out.extend_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+    out.extend_from_slice(&vertex_patch_format_for(rows).to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for (at, row) in rows.iter().enumerate() {
         validate_succession(at, rows[..at].last(), row)?;
@@ -443,7 +536,7 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
                     .checked_add(row_bytes)
                     .is_none_or(|bytes| bytes > crate::store::MAX_STORED_OBJECT_BYTES))
         {
-            packed.push(VertexPatchRows(core::mem::take(&mut pending)));
+            packed.push(VertexPatchRows(Arc::new(core::mem::take(&mut pending))));
             pending_bytes = header_bytes as u64;
         }
         validate_succession(pending.len(), pending.last(), &row)?;
@@ -451,7 +544,7 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
         pending.push(row);
     }
     if !pending.is_empty() {
-        packed.push(VertexPatchRows(pending));
+        packed.push(VertexPatchRows(Arc::new(pending)));
     }
     Ok(packed)
 }
@@ -522,12 +615,47 @@ pub(crate) fn decode_patch_inner(
     bytes: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
 ) -> Result<VertexPatchRows, VertexPatchError> {
+    decode_patch_fields(bytes, resolver, PatchPropertyAccess::Decode)
+}
+
+/// Project vertex identity, lifetime and labels from an already admitted patch.
+///
+/// Only the buffered reader may use this after its complete root admission
+/// authenticated the patch, validated every property and format profile, and
+/// proved its history. The current fault must match that admitted extent's
+/// checksum. This is not a validator for untrusted bytes: property values are
+/// skipped using their stored lengths, and the returned empty property vectors
+/// mean "not requested", never "the vertex has no properties".
+///
+/// Framing, row order, labels and lifetime use the full decoder's parser and
+/// checks. Full public decode/read entry points always decode every property
+/// and independently verify the format profile.
+pub(crate) fn decode_admitted_patch_topology(
+    bytes: &[u8],
+) -> Result<VertexPatchRows, VertexPatchError> {
+    decode_patch_fields(bytes, None, PatchPropertyAccess::SkipAdmitted)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatchPropertyAccess {
+    Decode,
+    SkipAdmitted,
+}
+
+fn decode_patch_fields(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    properties: PatchPropertyAccess,
+) -> Result<VertexPatchRows, VertexPatchError> {
     let mut cursor = Cursor { bytes, at: 0 };
     if cursor.take::<4>()? != VERTEX_PATCH_MAGIC {
         return Err(VertexPatchError::NotAVertexPatch);
     }
     let format = cursor.u16()?;
-    if format != VERTEX_PATCH_FORMAT_V2 {
+    if !matches!(
+        format,
+        VERTEX_PATCH_FORMAT_V2 | VERTEX_PATCH_FORMAT_V3 | VERTEX_PATCH_FORMAT_V4
+    ) {
         return Err(VertexPatchError::UnsupportedFormat { format });
     }
     let declared = cursor.u32()?;
@@ -547,19 +675,28 @@ pub(crate) fn decode_patch_inner(
             labels.push(LabelId(cursor.u64()?));
         }
         let prop_count = cursor.u32()?;
-        let mut props = Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize);
+        let mut props = match properties {
+            PatchPropertyAccess::Decode => {
+                Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize)
+            }
+            PatchPropertyAccess::SkipAdmitted => Vec::new(),
+        };
+        let mut previous_key = None;
         for _ in 0..prop_count {
             let key = PropertyKeyId(cursor.u64()?);
             let len = cursor.u32()? as usize;
             let encoded = cursor.take_slice(len)?;
-            // This is the closed graph-value decoder; no JWT or signature state exists here.
-            // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
-            let value = match resolver {
-                Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
-                None => CanonicalScalar::decode(encoded),
+            match properties {
+                PatchPropertyAccess::Decode => {
+                    props.push((key, decode_property_value(at, encoded, resolver)?));
+                }
+                PatchPropertyAccess::SkipAdmitted => {
+                    if previous_key.is_some_and(|previous| previous >= key) {
+                        return Err(VertexPatchError::NonCanonicalProps { at });
+                    }
+                    previous_key = Some(key);
+                }
             }
-            .map_err(|error| VertexPatchError::ScalarDecode { at, error })?;
-            props.push((key, value));
         }
         let row = VertexRow {
             vid,
@@ -578,7 +715,17 @@ pub(crate) fn decode_patch_inner(
             extra: bytes.len() - cursor.at,
         });
     }
-    Ok(VertexPatchRows(rows))
+    // The full value decoder admits every tag this build knows under every
+    // header, so its header is checked against what the rows hold. A topology
+    // projection inherits this proof only from the admitted immutable extent;
+    // its deliberately omitted properties cannot determine a format profile.
+    if properties == PatchPropertyAccess::Decode {
+        let required = vertex_patch_format_for(&rows);
+        if format != required {
+            return Err(VertexPatchError::FormatMismatch { format, required });
+        }
+    }
+    Ok(VertexPatchRows(Arc::new(rows)))
 }
 
 /// The §5.1 logical object identity of a patch's canonical bytes, namespaced
@@ -703,4 +850,426 @@ pub(crate) fn read_patch_inner(
         });
     }
     decode_patch_inner(bytes, resolver)
+}
+
+#[cfg(test)]
+mod shared_rows_tests {
+    use super::*;
+
+    fn sample_rows() -> Vec<VertexRow> {
+        vec![
+            VertexRow {
+                vid: VId(1),
+                birth_ordinal: 7,
+                created_at: CommitSeq(2),
+                retired_at: Some(CommitSeq(5)),
+                labels: vec![LabelId(2), LabelId(9)],
+                props: vec![
+                    (
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![0x5a; 1024]).unwrap().into(),
+                    ),
+                    (
+                        PropertyKeyId(8),
+                        CanonicalScalar::ucs_basic_text("shared history")
+                            .unwrap()
+                            .into(),
+                    ),
+                ],
+            },
+            VertexRow {
+                vid: VId(1),
+                birth_ordinal: 7,
+                created_at: CommitSeq(5),
+                retired_at: None,
+                labels: vec![LabelId(9)],
+                props: vec![(PropertyKeyId(3), CanonicalScalar::Int(42).into())],
+            },
+        ]
+    }
+
+    #[test]
+    fn decoded_and_packed_patch_clones_share_rows_and_nested_allocations() {
+        let expected = sample_rows();
+        let encoded = encode_patch(&expected).unwrap();
+        let decoded = decode_patch(&encoded).unwrap();
+        let mut packed = pack_rows(expected.clone()).unwrap();
+        assert_eq!(packed.len(), 1);
+        for rows in [decoded, packed.pop().unwrap()] {
+            assert_eq!(&*rows, expected.as_slice());
+            let cloned = rows.clone();
+            assert_eq!(
+                rows.as_ptr(),
+                cloned.as_ptr(),
+                "a retained patch must not allocate another row array"
+            );
+            for (before, after) in rows.iter().zip(cloned.iter()) {
+                assert_eq!(before.labels.as_ptr(), after.labels.as_ptr());
+                assert_eq!(before.props.as_ptr(), after.props.as_ptr());
+            }
+            assert_eq!(encode_patch(&cloned).unwrap(), encoded);
+            drop(rows);
+            assert_eq!(&*cloned, expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn consuming_unique_rows_transfers_storage_and_shared_rows_remain_independent() {
+        let expected = sample_rows();
+        let unique = VertexPatchRows(Arc::new(expected.clone()));
+        let row_address = unique.as_ptr();
+        let labels_address = unique[0].labels.as_ptr();
+        let props_address = unique[0].props.as_ptr();
+        let owned = unique.into_iter();
+        assert_eq!(owned.as_slice().as_ptr(), row_address);
+        assert_eq!(owned.as_slice()[0].labels.as_ptr(), labels_address);
+        assert_eq!(owned.as_slice()[0].props.as_ptr(), props_address);
+        assert_eq!(owned.collect::<Vec<_>>(), expected);
+
+        let shared = VertexPatchRows(Arc::new(expected.clone()));
+        let sibling = shared.clone();
+        assert_eq!(shared.as_ptr(), sibling.as_ptr());
+        let mut owned = shared.into_iter().collect::<Vec<_>>();
+        assert_ne!(owned.as_ptr(), sibling.as_ptr());
+        assert_ne!(owned[0].labels.as_ptr(), sibling[0].labels.as_ptr());
+        assert_ne!(owned[0].props.as_ptr(), sibling[0].props.as_ptr());
+        owned[0].labels.clear();
+        owned[0].props[0].1 = CanonicalScalar::Int(-1).into();
+        assert_eq!(&*sibling, expected.as_slice());
+    }
+}
+
+#[cfg(test)]
+mod admitted_topology_tests {
+    use super::*;
+    use fgdb_types::{
+        CanonicalDate, CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalText,
+        CanonicalTimestamp, CollationResolver, CollationResolverError, NonBinaryTextBinding,
+        TzdbResolver,
+    };
+    use std::cell::Cell;
+
+    fn rows(value: CanonicalPropertyValue) -> Vec<VertexRow> {
+        vec![
+            VertexRow {
+                vid: VId(101),
+                birth_ordinal: 17,
+                created_at: CommitSeq(3),
+                retired_at: Some(CommitSeq(5)),
+                labels: vec![LabelId(2), LabelId(11)],
+                props: vec![
+                    (PropertyKeyId(41), value.clone()),
+                    (
+                        PropertyKeyId(59),
+                        CanonicalScalar::bytes(vec![0x13; 257]).unwrap().into(),
+                    ),
+                ],
+            },
+            VertexRow {
+                vid: VId(101),
+                birth_ordinal: 17,
+                created_at: CommitSeq(5),
+                retired_at: Some(CommitSeq(9)),
+                labels: vec![LabelId(23), LabelId(41)],
+                props: vec![(PropertyKeyId(41), value)],
+            },
+            VertexRow {
+                vid: VId(u128::MAX),
+                birth_ordinal: 29,
+                created_at: CommitSeq(7),
+                retired_at: None,
+                labels: vec![],
+                props: vec![],
+            },
+        ]
+    }
+
+    fn format_values() -> Vec<(u16, CanonicalPropertyValue)> {
+        let date = CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).unwrap());
+        let nested = CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("nested").unwrap(),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        date.clone().into(),
+                        CanonicalScalar::bytes(vec![0, 1, 0xff]).unwrap().into(),
+                    ])
+                    .unwrap(),
+                ),
+            )])
+            .unwrap(),
+        );
+        vec![
+            (VERTEX_PATCH_FORMAT_V2, CanonicalScalar::Int(-1815).into()),
+            (VERTEX_PATCH_FORMAT_V3, date.into()),
+            (VERTEX_PATCH_FORMAT_V4, nested),
+        ]
+    }
+
+    fn assert_projection(bytes: &[u8], admitted: &VertexPatchRows) {
+        let topology = decode_admitted_patch_topology(bytes).unwrap();
+        let expected: Vec<_> = admitted
+            .iter()
+            .map(|row| VertexRow {
+                vid: row.vid,
+                birth_ordinal: row.birth_ordinal,
+                created_at: row.created_at,
+                retired_at: row.retired_at,
+                labels: row.labels.clone(),
+                props: Vec::new(),
+            })
+            .collect();
+        assert_eq!(&*topology, expected.as_slice());
+        assert_eq!(span_of_rows(&topology), span_of_rows(admitted));
+        for (projected, complete) in topology.iter().zip(admitted.iter()) {
+            assert_eq!(
+                projected.props.capacity(),
+                0,
+                "skipping values must not reserve a property vector"
+            );
+            for cut in [0, 2, 3, 4, 5, 7, 8, 9, 10, u64::MAX] {
+                assert_eq!(
+                    projected.visible_at(CommitSeq(cut)),
+                    complete.visible_at(CommitSeq(cut)),
+                    "vertex {:?}, cut {cut}",
+                    complete.vid,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_readable_format_matches_full_decode_without_property_allocations() {
+        for (format, value) in format_values() {
+            let expected = rows(value);
+            let bytes = encode_patch(&expected).unwrap();
+            assert_eq!(bytes[4..6], format.to_le_bytes());
+            let admitted = decode_patch(&bytes).unwrap();
+            assert_eq!(&*admitted, expected.as_slice());
+            assert_projection(&bytes, &admitted);
+        }
+        assert_projection(
+            &encode_patch(&[]).unwrap(),
+            &decode_patch(&encode_patch(&[]).unwrap()).unwrap(),
+        );
+    }
+
+    #[derive(Default)]
+    struct Resolver {
+        calls: Cell<usize>,
+    }
+
+    impl Resolver {
+        fn called(&self) {
+            self.calls.set(self.calls.get() + 1);
+        }
+    }
+
+    impl CollationResolver for Resolver {
+        fn artifact_available(&self, object_id: &ObjectId) -> bool {
+            self.called();
+            [1, 2, 3, 4]
+                .into_iter()
+                .any(|id| *object_id == ObjectId([id; 32]))
+        }
+
+        fn canonical_sort_key_len(
+            &self,
+            _: &NonBinaryTextBinding,
+            text: &str,
+        ) -> Result<usize, CollationResolverError> {
+            self.called();
+            Ok(text.len())
+        }
+
+        fn write_canonical_sort_key(
+            &self,
+            _: &NonBinaryTextBinding,
+            text: &str,
+            output: &mut [u8],
+        ) -> Result<usize, CollationResolverError> {
+            self.called();
+            if output.len() != text.len() {
+                return Err(CollationResolverError::new(1));
+            }
+            output.copy_from_slice(text.as_bytes());
+            Ok(output.len())
+        }
+
+        fn canonical_sort_key_matches(
+            &self,
+            _: &NonBinaryTextBinding,
+            text: &str,
+            candidate: &[u8],
+        ) -> Result<bool, CollationResolverError> {
+            self.called();
+            Ok(candidate == text.as_bytes())
+        }
+    }
+
+    impl TzdbResolver for Resolver {
+        fn contains_tzdb(&self, tzdb_oid: &ObjectId) -> bool {
+            self.called();
+            *tzdb_oid == ObjectId([9; 32])
+        }
+
+        fn canonical_utc_offset_seconds(
+            &self,
+            tzdb_oid: &ObjectId,
+            zone_identifier: &str,
+            instant_utc_nanos: i128,
+        ) -> Option<i32> {
+            self.called();
+            (*tzdb_oid == ObjectId([9; 32])
+                && zone_identifier == "America/New_York"
+                && instant_utc_nanos == 1_735_689_600_123_456_789)
+                .then_some(-18_000)
+        }
+    }
+
+    #[test]
+    fn admitted_artifact_properties_need_no_resolver_when_only_topology_is_requested() {
+        let resolver = Resolver::default();
+        let text = CanonicalScalar::Text(
+            CanonicalText::new_non_binary(
+                "already admitted",
+                NonBinaryTextBinding::new(
+                    ObjectId([1; 32]),
+                    ObjectId([2; 32]),
+                    ObjectId([3; 32]),
+                    ObjectId([4; 32]),
+                ),
+                &resolver,
+            )
+            .unwrap(),
+        );
+        let timestamp = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -18_000,
+                "America/New_York",
+                ObjectId([9; 32]),
+                &resolver,
+            )
+            .unwrap(),
+        );
+        for value in [
+            text.clone().into(),
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![text.into(), timestamp.into()]).unwrap(),
+            ),
+        ] {
+            let expected = rows(value);
+            let bytes = encode_patch(&expected).unwrap();
+            let before = resolver.calls.get();
+            let admitted = decode_patch_with_resolver(&bytes, &resolver).unwrap();
+            assert_eq!(&*admitted, expected.as_slice());
+            assert!(resolver.calls.get() > before);
+            assert!(
+                decode_patch(&bytes).is_err(),
+                "full decode must still require the non-binary text artifacts"
+            );
+            let after_admission = resolver.calls.get();
+            assert_projection(&bytes, &admitted);
+            assert_eq!(resolver.calls.get(), after_admission);
+        }
+    }
+
+    #[test]
+    fn skipped_payloads_still_require_complete_framing_and_no_trailing_bytes() {
+        for (_, value) in format_values() {
+            let bytes = encode_patch(&rows(value)).unwrap();
+            for end in 0..bytes.len() {
+                assert!(
+                    matches!(
+                        decode_admitted_patch_topology(&bytes[..end]),
+                        Err(VertexPatchError::Truncated { .. })
+                    ),
+                    "strict prefix {end} of {} bytes must refuse",
+                    bytes.len()
+                );
+            }
+            let mut appended = bytes;
+            appended.push(0x91);
+            assert_eq!(
+                decode_admitted_patch_topology(&appended),
+                Err(VertexPatchError::TrailingBytes { extra: 1 }),
+            );
+        }
+    }
+
+    #[test]
+    fn projected_fields_keep_the_full_decoders_structural_refusals() {
+        let expected = rows(CanonicalScalar::Int(7).into());
+        let original = encode_patch(&expected).unwrap();
+        let second_row = encode_patch(&expected[..1]).unwrap().len();
+        // Offsets are the independently specified FGSV framing: 10-byte
+        // header; vid u128; birth/creation/retirement u64; label count u32.
+        for (at, replacement, error) in [
+            (0, b"FGSB".to_vec(), VertexPatchError::NotAVertexPatch),
+            (
+                4,
+                99_u16.to_le_bytes().to_vec(),
+                VertexPatchError::UnsupportedFormat { format: 99 },
+            ),
+            (
+                6,
+                (MAX_PATCH_ROWS + 1).to_le_bytes().to_vec(),
+                VertexPatchError::ImplausibleRowCount {
+                    declared: MAX_PATCH_ROWS + 1,
+                },
+            ),
+            (
+                34,
+                0_u64.to_le_bytes().to_vec(),
+                VertexPatchError::CreatedAtZero { at: 0 },
+            ),
+            (
+                42,
+                3_u64.to_le_bytes().to_vec(),
+                VertexPatchError::RetiredBeforeCreated {
+                    at: 0,
+                    created_at: CommitSeq(3),
+                    retired_at: CommitSeq(3),
+                },
+            ),
+            (
+                62,
+                2_u64.to_le_bytes().to_vec(),
+                VertexPatchError::NonCanonicalLabels { at: 0 },
+            ),
+            (
+                second_row,
+                100_u128.to_le_bytes().to_vec(),
+                VertexPatchError::NonCanonicalOrder { at: 1 },
+            ),
+        ] {
+            let mut bytes = original.clone();
+            bytes[at..at + replacement.len()].copy_from_slice(&replacement);
+            assert_eq!(decode_patch(&bytes), Err(error.clone()));
+            assert_eq!(decode_admitted_patch_topology(&bytes), Err(error));
+        }
+    }
+
+    #[test]
+    fn ordinary_decode_still_checks_property_contents_and_exact_format_profile() {
+        let mut bytes = encode_patch(&rows(CanonicalScalar::Int(7).into())).unwrap();
+        // The first property starts after the row's two labels, property
+        // count, eight-byte key and four-byte payload length.
+        bytes[86] = 0xff;
+        assert!(matches!(
+            decode_patch(&bytes),
+            Err(VertexPatchError::ScalarDecode { at: 0, .. })
+        ));
+        let (_, temporal) = format_values().remove(1);
+        let mut bytes = encode_patch(&rows(temporal)).unwrap();
+        bytes[4..6].copy_from_slice(&VERTEX_PATCH_FORMAT_V2.to_le_bytes());
+        assert_eq!(
+            decode_patch(&bytes),
+            Err(VertexPatchError::FormatMismatch {
+                format: VERTEX_PATCH_FORMAT_V2,
+                required: VERTEX_PATCH_FORMAT_V3,
+            })
+        );
+    }
 }

@@ -163,6 +163,7 @@ active_logical_object_kinds! {
     PartitionManifest = 0x0581 => "PartitionManifest",
     DecisionPolicyEpoch = 0x0582 => "DecisionPolicyEpoch",
     DeltaRootSegment = 0x058b => "DeltaRootSegment",
+    DeltaRootIndexSegment = 0x058c => "DeltaRootIndexSegment",
 }
 
 /// Implemented by every durable logical object type that references can

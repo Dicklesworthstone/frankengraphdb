@@ -21,6 +21,10 @@
 //! - A read that ignored its relation or its source would still satisfy a
 //!   one-vertex fixture. The controls below use a second relation and an isolated
 //!   vertex, and both must come back empty.
+// A root walk's run-ahead proof window nests the store's futures past the
+// default recursion limit when this crate proves one Send (see fgdb-strata's
+// lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
@@ -234,8 +238,8 @@ fn user_graph_plaintext_is_redacted_from_diagnostic_containers_and_errors() {
     let mismatch = CompareAndSetMismatch {
         elem: ElementId::Vertex(VId(41)),
         name: key,
-        expected: Some(value.clone()),
-        actual: Some(value),
+        expected: Some(value.clone().into()),
+        actual: Some(value.into()),
     };
     let mismatch_debug = format!("{mismatch:?}");
     assert!(
@@ -406,9 +410,11 @@ fn written_labels_and_properties_are_readable_and_survive_a_reopen() {
                 vec![
                     (
                         name_key,
-                        CanonicalScalar::ucs_basic_text("ada").expect("admissible")
+                        CanonicalScalar::ucs_basic_text("ada")
+                            .expect("admissible")
+                            .into()
                     ),
-                    (born_key, CanonicalScalar::Int(1815)),
+                    (born_key, CanonicalScalar::Int(1815).into()),
                 ]
             );
             let bare = db
@@ -685,10 +691,10 @@ fn identical_create_duplicates_collapse_and_conflicts_still_refuse() {
             .expect("identical duplicates collapse");
         let row = db.vertex(VId(1)).expect("reads").expect("live");
         assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
-        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1))]);
+        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1).into())]);
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(key, CanonicalScalar::Int(9))]
+            vec![(key, CanonicalScalar::Int(9).into())]
         );
 
         let mut conflict = WriteBatch::new(KNOWS);
@@ -1110,11 +1116,11 @@ fn cas_expected_none_on_a_live_element_sets_the_property() {
             .expect("expected=None on an absent property is a match");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(9))]
+            vec![(rank, CanonicalScalar::Int(9).into())]
         );
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(8))]
+            vec![(rank, CanonicalScalar::Int(8).into())]
         );
 
         let mut again = WriteBatch::new(KNOWS);
@@ -1131,7 +1137,7 @@ fn cas_expected_none_on_a_live_element_sets_the_property() {
             .expect("expected=None after the property exists is a NoOp mismatch");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(9))],
+            vec![(rank, CanonicalScalar::Int(9).into())],
             "NoOp mismatch must leave the matched value"
         );
         assert!(db.vertex(VId(3)).expect("reads").is_some());
@@ -1165,21 +1171,21 @@ fn set_property_after_compact_updates_the_live_row() {
             .expect("set after compact must see the live row");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(key, CanonicalScalar::Int(9))]
+            vec![(key, CanonicalScalar::Int(9).into())]
         );
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(key, CanonicalScalar::Int(8))]
+            vec![(key, CanonicalScalar::Int(8).into())]
         );
         drop(db);
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(key, CanonicalScalar::Int(9))]
+            vec![(key, CanonicalScalar::Int(9).into())]
         );
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(key, CanonicalScalar::Int(8))]
+            vec![(key, CanonicalScalar::Int(8).into())]
         );
     });
 }
@@ -1207,7 +1213,7 @@ fn vertex_patch_byte_packing_preserves_history_across_compact_and_rebuild() {
         assert_eq!(original.len(), 256);
         for row in &original {
             assert_eq!(row.labels, vec![LabelId(3)]);
-            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1))]);
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1).into())]);
         }
         let mut update = WriteBatch::new(KNOWS);
         for id in 1..=256 {
@@ -1217,7 +1223,7 @@ fn vertex_patch_byte_packing_preserves_history_across_compact_and_rebuild() {
         let current = db.vertices().expect("updated rows");
         assert_eq!(current.len(), 256);
         for row in &current {
-            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2).into())]);
         }
         let historical = db.vertices_at(first).expect("historical rows");
         for (before, after) in original.iter().zip(&historical) {
@@ -1321,7 +1327,7 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
                 .expect("read after refusal")
                 .expect("seed")
                 .props,
-            vec![(key, CanonicalScalar::Int(1))]
+            vec![(key, CanonicalScalar::Int(1).into())]
         );
         let mut supported = WriteBatch::new(KNOWS);
         let transient = CanonicalScalar::bytes(vec![0x41; 20_000]).expect("canonical scalar");
@@ -1342,7 +1348,7 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
         assert_eq!(db.frontier().expect("reopened frontier"), CommitSeq(2));
         assert_eq!(
             db.vertex(VId(1)).expect("rebuilt row").expect("seed").props,
-            vec![(key, CanonicalScalar::Int(2))]
+            vec![(key, CanonicalScalar::Int(2).into())]
         );
     });
 }
@@ -1380,10 +1386,10 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
         assert_eq!(historical.len(), 3);
         assert_eq!(current.len(), 3);
         for row in &historical {
-            assert_eq!(row.props, vec![(key, before.clone())]);
+            assert_eq!(row.props, vec![(key, before.clone().into())]);
         }
         for row in &current {
-            assert_eq!(row.props, vec![(key, after.clone())]);
+            assert_eq!(row.props, vec![(key, after.clone().into())]);
         }
         db.compact(cx)
             .await
@@ -1403,7 +1409,7 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
             assert_eq!(db.edges().expect("reopened current"), current);
             assert_eq!(
                 db.vertex(VId(1)).expect("vertex").expect("live").props,
-                vec![(key, after.clone())]
+                vec![(key, after.clone().into())]
             );
         }
     });
@@ -1440,7 +1446,9 @@ fn legacy_oversized_property_history_is_preserved_on_rebuild_refusal() {
                     valid_time: None,
                     props: vec![(
                         PropertyKeyId(7),
-                        CanonicalScalar::bytes(vec![0x41; 20_000]).expect("canonical scalar"),
+                        CanonicalScalar::bytes(vec![0x41; 20_000])
+                            .expect("canonical scalar")
+                            .into(),
                     )],
                 }],
             }],
@@ -1513,14 +1521,14 @@ fn admitted_property_rows_rebuild_after_post_d2_publication_failure() {
         assert_eq!(db.frontier().expect("frontier"), CommitSeq(1));
         assert_eq!(
             db.vertex(VId(1)).expect("read").expect("live").props,
-            vec![(key, value.clone())]
+            vec![(key, value.clone().into())]
         );
         let edges = db.edges().expect("recovered edges");
         assert_eq!(edges.len(), 3);
         assert!(
             edges
                 .iter()
-                .all(|edge| edge.props == vec![(key, value.clone())])
+                .all(|edge| edge.props == vec![(key, value.clone().into())])
         );
     });
 }
@@ -1725,7 +1733,7 @@ fn a_same_commit_propertied_family_past_the_patch_row_ceiling_reopens() {
         for n in 1..=count {
             assert_eq!(
                 db.edge(EId(n)).expect("reads").expect("live").props,
-                vec![(key, CanonicalScalar::Int(n as i64))],
+                vec![(key, CanonicalScalar::Int(n as i64).into())],
                 "eid={n} must keep its property before drop"
             );
         }
@@ -1734,7 +1742,7 @@ fn a_same_commit_propertied_family_past_the_patch_row_ceiling_reopens() {
         for n in 1..=count {
             assert_eq!(
                 db.edge(EId(n)).expect("reads").expect("live").props,
-                vec![(key, CanonicalScalar::Int(n as i64))],
+                vec![(key, CanonicalScalar::Int(n as i64).into())],
                 "eid={n} must survive reopen past the property-patch ceiling"
             );
         }
@@ -1820,7 +1828,7 @@ fn label_and_property_updates_are_readable_and_survive_a_reopen() {
             db.write(cx, label).await.expect("label update commits");
 
             let row = db.vertex(VId(1)).expect("reads").expect("readable");
-            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2).into())]);
             assert_eq!(row.labels, vec![LabelId(3), LabelId(5)]);
 
             // Unset the property and remove the original label.
@@ -1875,13 +1883,13 @@ fn same_batch_create_and_update_shows_only_the_final_content() {
         db.write(cx, batch).await.expect("commits");
 
         let row = db.vertex(VId(1)).expect("reads").expect("readable");
-        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+        assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2).into())]);
         assert_eq!(row.labels, vec![LabelId(9)]);
         drop(db);
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("survives").props,
-            vec![(key, CanonicalScalar::Int(2))]
+            vec![(key, CanonicalScalar::Int(2).into())]
         );
     });
 }
@@ -1920,7 +1928,15 @@ fn edge_lookups_answer_by_identity_and_survive_a_reopen() {
                 (VId(1), KNOWS, VId(2))
             );
             assert!(edge.entry.retired_at.is_none());
-            assert_eq!(edge.props, props, "the durable patch answers the props");
+            assert_eq!(
+                edge.props,
+                props
+                    .iter()
+                    .cloned()
+                    .map(|(key, value)| (key, value.into()))
+                    .collect::<Vec<_>>(),
+                "the durable patch answers the props"
+            );
             assert!(
                 db.edge(EId(99)).expect("reads").is_none(),
                 "an edge that was never created has no version"
@@ -1953,7 +1969,7 @@ fn edge_lookups_answer_by_identity_and_survive_a_reopen() {
         let survivor = db.edge(EId(12)).expect("reads").expect("survives");
         assert_eq!(
             survivor.props,
-            vec![(since, CanonicalScalar::Int(2024))],
+            vec![(since, CanonicalScalar::Int(2024).into())],
             "edge properties survive a from-scratch reopen"
         );
     });
@@ -2222,12 +2238,12 @@ fn a_crash_at_any_protocol_instant_leaves_the_whole_batch_or_none() {
                     .expect("reads")
                     .expect("survives")
                     .props,
-                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected))],
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected).into())],
                 "{point:?}: the vertex update must share the batch's fate"
             );
             assert_eq!(
                 db.edge(EId(10)).expect("reads").expect("survives").props,
-                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected))],
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(expected).into())],
                 "{point:?}: the edge update must share the batch's fate"
             );
             // A write that reported success must be wholly present: "all or
@@ -2387,19 +2403,32 @@ fn post_d2_publication_failure_blocks_the_stale_handle_and_reopen_recovers() {
 /// its segments.
 #[test]
 fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
-    const FAMILIES: u128 = 300;
-    fn families(commit: u128) -> WriteBatch {
+    segmented_root_publication_faults_recover(300, 0xd500, 0);
+}
+
+/// **THE SAME MATRIX ACROSS AN INDEX BOUNDARY (fgdb-5gzaa).** 2,100 families
+/// per commit put the first commit at 2,100 block references and the faulted
+/// second at 4,200, so the faulted publication seals the first full index
+/// segment (4,096 references) beside its segments, and recovery re-seals it
+/// with a cold cache. The reopened root resolves through that index segment.
+#[test]
+fn three_level_root_publication_faults_recover_and_reopen_through_an_index_segment() {
+    segmented_root_publication_faults_recover(2_100, 0x5a00, 1);
+}
+
+fn segmented_root_publication_faults_recover(per_commit: u128, seed: u64, index_segments: usize) {
+    let families = move |commit: u128| {
         let mut batch = WriteBatch::new(KNOWS);
         if commit == 0 {
             batch.create_vertex(VId(1), vec![], vec![]);
         }
-        for k in 0..FAMILIES {
-            let src = 1_000 * (commit + 1) + k;
+        for k in 0..per_commit {
+            let src = 10_000 * (commit + 1) + k;
             batch.create_vertex(VId(src), vec![], vec![]);
             batch.add_edge(EId(src), VId(src), VId(1), vec![]);
         }
         batch
-    }
+    };
     for (ordinal, stage) in [
         fgdb::DerivedPublicationStage::PublishPartitionRoot,
         fgdb::DerivedPublicationStage::PublishManifest,
@@ -2409,7 +2438,7 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
     .into_iter()
     .enumerate()
     {
-        under_lab(0xd500 + ordinal as u64, move |cx| async move {
+        under_lab(seed + ordinal as u64, move |cx| async move {
             let cx = &cx;
             let vfs = fgdb::MemVfs::new().expect("memory vfs");
             let path = vfs.database_dir();
@@ -2447,8 +2476,8 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
                 "{stage:?}"
             );
             for commit in 0..3 {
-                for k in 0..FAMILIES {
-                    let src = VId(1_000 * (commit + 1) + k);
+                for k in 0..per_commit {
+                    let src = VId(10_000 * (commit + 1) + k);
                     assert_eq!(
                         db.neighbours(src, KNOWS).expect("reads"),
                         vec![VId(1)],
@@ -2466,10 +2495,21 @@ fn two_level_root_publication_faults_recover_and_reopen_through_segments() {
                 .await
                 .expect("the root resolves through its segments");
             assert!(
-                root.blocks.len() >= 3 * FAMILIES as usize,
+                root.blocks.len() >= 3 * per_commit as usize,
                 "{stage:?}: {} blocks is fewer than the fixture's families",
                 root.blocks.len()
             );
+            // Writers emit V5; the stored frame names exactly the full index
+            // segments the block list has.
+            let frame = fgdb_strata::root::decode_root_frame(
+                &store.get_root_bytes(cx, root_id).await.expect("root bytes"),
+            )
+            .expect("decodes");
+            let named = match frame {
+                fgdb_strata::root::RootFrame::V5(frame) => Some(frame.block_index.len()),
+                _ => None,
+            };
+            assert_eq!(named, Some(index_segments), "{stage:?}");
         });
     }
 }
@@ -2708,7 +2748,15 @@ fn reads_answer_as_of_any_committed_sequence() {
         // nothing after.
         for alive in [s1, s2] {
             let record = db.edge_at(EId(10), alive).expect("reads").expect("alive");
-            assert_eq!(record.props, props, "history answers the durable row");
+            assert_eq!(
+                record.props,
+                props
+                    .iter()
+                    .cloned()
+                    .map(|(key, value)| (key, value.into()))
+                    .collect::<Vec<_>>(),
+                "history answers the durable row"
+            );
         }
         for dead in [s3, s4, s5] {
             assert!(db.edge_at(EId(10), dead).expect("reads").is_none());
@@ -2832,7 +2880,14 @@ fn the_graph_enumerates_at_every_committed_sequence() {
         }
         // The scanned property row is the durable one.
         let scanned = db.edges_at(s2).expect("reads");
-        assert_eq!(scanned[0].props, props);
+        assert_eq!(
+            scanned[0].props,
+            props
+                .iter()
+                .cloned()
+                .map(|(key, value)| (key, value.into()))
+                .collect::<Vec<_>>()
+        );
 
         // The future refuses for both scan families.
         let future = CommitSeq(s3.0 + 1);
@@ -2898,9 +2953,9 @@ fn every_publish_leaves_a_resolvable_manifest() {
             .await
             .expect("the manifest resolves");
         assert_eq!(resolved.len(), 1, "one partition in the spine");
-        // Roots publish as format V4 (fgdb-d5vo4); a cold re-encode derives
+        // Roots publish as format V5 (fgdb-5gzaa); a cold re-encode derives
         // the same identity the warm, segment-cached writer published.
-        let root_bytes = fgdb_strata::root::encode_root_v4(
+        let root_bytes = fgdb_strata::root::encode_root_v5(
             &resolved[0].1,
             &K_OID,
             NAMESPACE,
@@ -2993,13 +3048,20 @@ fn edge_property_updates_version_the_row_without_respending_the_identity() {
                 .expect("alive at every probed sequence")
                 .props
         };
-        assert_eq!(props_at(s1), vec![(weight, CanonicalScalar::Int(1))]);
+        assert_eq!(props_at(s1), vec![(weight, CanonicalScalar::Int(1).into())]);
         assert_eq!(
             props_at(s2),
-            vec![(weight, CanonicalScalar::Int(2)), (label, text.clone())],
+            vec![
+                (weight, CanonicalScalar::Int(2).into()),
+                (label, text.clone().into())
+            ],
             "the frontier of s2 answers the updated row"
         );
-        assert_eq!(props_at(s3), vec![(label, text)], "the unset key is gone");
+        assert_eq!(
+            props_at(s3),
+            vec![(label, text.into())],
+            "the unset key is gone"
+        );
         let record = db.edge(EId(10)).expect("reads").expect("alive");
         assert_eq!(
             record.entry.retired_at, None,
@@ -3016,7 +3078,7 @@ fn edge_property_updates_version_the_row_without_respending_the_identity() {
             .edge_at(EId(11), s4)
             .expect("reads")
             .expect("alive at s4");
-        assert_eq!(folded.props, vec![(weight, CanonicalScalar::Int(8))]);
+        assert_eq!(folded.props, vec![(weight, CanonicalScalar::Int(8).into())]);
         assert_eq!(
             folded.entry.created_at, s4,
             "one statement, born at its commit"
@@ -3104,7 +3166,7 @@ fn order_sensitive_batches_fold_to_a_target_disjoint_net() {
             .expect("v4 live");
         assert_eq!(
             folded.props,
-            vec![(key, CanonicalScalar::Int(7))],
+            vec![(key, CanonicalScalar::Int(7).into())],
             "net after-image is the last write"
         );
 
@@ -4039,7 +4101,15 @@ fn delta_index_is_maintained_on_write_and_rebuilt_at_open() {
         let before_drop_len = after_second.len();
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        assert!(matches!(
+            reopened.delta_since(CommitSeq::ORIGIN),
+            Err(fgdb::ReadError::DeltaCursorRetired { .. })
+        ));
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes the complete committed window");
         let rebuilt = reopened.delta_index().expect("rebuilt index");
         assert_eq!(
             (
@@ -4095,7 +4165,11 @@ fn a_post_d2_publication_failure_still_rebuilds_the_delta_index_on_reopen() {
         );
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes history after authoritative recovery");
         let rebuilt = reopened.delta_index().expect("rebuilt after post-D2 fail");
         let frontier = reopened.delta_frontier().expect("reopened frontier");
         assert_eq!(
@@ -4174,7 +4248,11 @@ fn empty_net_ensure_still_occupies_the_delta_window() {
         );
         drop(db);
 
-        let reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        let mut reopened = Database::open(cx, &dir, keys()).await.expect("reopens");
+        reopened
+            .ensure_delta_window(cx, CommitSeq::ORIGIN)
+            .await
+            .expect("materializes empty-net commits as well as mutations");
         let rebuilt = reopened.delta_index().expect("rebuilt");
         let rebuilt_rows: Vec<(CommitSeq, usize)> = reopened
             .delta_since(CommitSeq::ORIGIN)
@@ -4494,7 +4572,7 @@ fn compare_and_set_matches_aborts_and_noops() {
         db.write(cx, hit).await.expect("matching CAS writes");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(7))],
+            vec![(rank, CanonicalScalar::Int(7).into())],
             "vid=1 rank expected 5->7, got {:?}",
             db.vertex(VId(1)).expect("reads").expect("live").props
         );
@@ -4512,7 +4590,7 @@ fn compare_and_set_matches_aborts_and_noops() {
             .expect("same-value CAS is a successful no-op");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(7))]
+            vec![(rank, CanonicalScalar::Int(7).into())]
         );
 
         let before = db.frontier().expect("frontier");
@@ -4534,8 +4612,8 @@ fn compare_and_set_matches_aborts_and_noops() {
                 WriteError::CompareAndSetMismatch(mismatch)
                     if mismatch.elem == ElementId::Vertex(VId(1))
                         && mismatch.name == rank
-                        && mismatch.expected == Some(CanonicalScalar::Int(5))
-                        && mismatch.actual == Some(CanonicalScalar::Int(7))
+                        && mismatch.expected == Some(CanonicalScalar::Int(5).into())
+                        && mismatch.actual == Some(CanonicalScalar::Int(7).into())
             ),
             "AbortWrite must name elem=vid1 expected=5 actual=7, got {refusal:?}"
         );
@@ -4546,7 +4624,7 @@ fn compare_and_set_matches_aborts_and_noops() {
         );
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(7))],
+            vec![(rank, CanonicalScalar::Int(7).into())],
             "AbortWrite must leave rank at 7"
         );
 
@@ -4564,7 +4642,7 @@ fn compare_and_set_matches_aborts_and_noops() {
             .expect("NoOp mismatch continues the batch");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(7))],
+            vec![(rank, CanonicalScalar::Int(7).into())],
             "NoOp mismatch must leave rank at 7"
         );
         assert!(
@@ -4586,7 +4664,7 @@ fn compare_and_set_matches_aborts_and_noops() {
             .expect("CAS must see the same-batch set");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
-            vec![(rank, CanonicalScalar::Int(6))],
+            vec![(rank, CanonicalScalar::Int(6).into())],
             "same-batch set-then-CAS must land 6"
         );
 
@@ -4642,8 +4720,8 @@ fn same_batch_create_then_cas_sees_descending_property_keys() {
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("live").props,
             vec![
-                (low, CanonicalScalar::Int(9)),
-                (high, CanonicalScalar::Int(2))
+                (low, CanonicalScalar::Int(9).into()),
+                (high, CanonicalScalar::Int(2).into())
             ]
         );
     });
@@ -4732,7 +4810,7 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
         db.write(cx, hit).await.expect("matching edge CAS writes");
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(weight, CanonicalScalar::Int(7))],
+            vec![(weight, CanonicalScalar::Int(7).into())],
             "eid=10 weight expected 5->7, got {:?}",
             db.edge(EId(10)).expect("reads").expect("live").props
         );
@@ -4756,8 +4834,8 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
                 WriteError::CompareAndSetMismatch(mismatch)
                     if mismatch.elem == ElementId::Edge(EId(10))
                         && mismatch.name == weight
-                        && mismatch.expected == Some(CanonicalScalar::Int(5))
-                        && mismatch.actual == Some(CanonicalScalar::Int(7))
+                        && mismatch.expected == Some(CanonicalScalar::Int(5).into())
+                        && mismatch.actual == Some(CanonicalScalar::Int(7).into())
             ),
             "AbortWrite must name elem=eid10 expected=5 actual=7, got {refusal:?}"
         );
@@ -4768,7 +4846,7 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
         );
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(weight, CanonicalScalar::Int(7))],
+            vec![(weight, CanonicalScalar::Int(7).into())],
             "AbortWrite must leave weight at 7"
         );
 
@@ -4786,7 +4864,7 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
             .expect("NoOp mismatch continues the batch");
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(weight, CanonicalScalar::Int(7))],
+            vec![(weight, CanonicalScalar::Int(7).into())],
             "NoOp mismatch must leave weight at 7"
         );
         assert!(
@@ -4808,7 +4886,7 @@ fn compare_and_set_edge_matches_aborts_and_noops() {
             .expect("edge CAS must see the same-batch set");
         assert_eq!(
             db.edge(EId(10)).expect("reads").expect("live").props,
-            vec![(weight, CanonicalScalar::Int(6))],
+            vec![(weight, CanonicalScalar::Int(6).into())],
             "same-batch set-then-CAS must land 6"
         );
 

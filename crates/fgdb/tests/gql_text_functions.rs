@@ -2,7 +2,7 @@
 //! the canonical transaction workspace, rather than an alternate interpreter.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
@@ -11,7 +11,7 @@ use fgdb_gql::{
     PreparedGraphSetText, PreparedTemporalGraphSetText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -36,6 +36,7 @@ fn text(value: &str) -> CanonicalScalar {
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "t") => Some(GraphSymbol::Property(T)),
         (GraphSymbolKind::Property, "u") => Some(GraphSymbol::Property(U)),
         _ => None,
@@ -186,16 +187,56 @@ fn every_text_operator_filters_and_projects_committed_properties() {
                 "TRIM(n.t) = 'Alphaβ'",
                 vec![VId(1)],
             ),
+            // The comma form counts from 0 (openCypher, fgdb-qkeq2).
             (
                 "SUBSTRING(n.t,2,3)",
-                vec![text("lph"), text("lph"), text(""), Null, text(""), Null],
-                "SUBSTRING(n.t,2,3) = 'lph'",
+                vec![text("pha"), text("pha"), text(""), Null, text(""), Null],
+                "SUBSTRING(n.t,2,3) = 'pha'",
                 vec![VId(1), VId(2)],
             ),
             (
                 "CHAR_LENGTH(n.t)",
                 vec![Int(6), Int(6), Int(0), Null, Int(1), Null],
                 "CHAR_LENGTH(n.t) = 6",
+                vec![VId(1), VId(2)],
+            ),
+            // openCypher left, right, replace, length and two-argument
+            // substring (fgdb-20foe).
+            (
+                "left(n.t,2)",
+                vec![text("Al"), text("al"), text(""), Null, text("x"), Null],
+                "left(n.t,2) = 'al'",
+                vec![VId(2)],
+            ),
+            (
+                "right(n.t,2)",
+                vec![text("aβ"), text("aβ"), text(""), Null, text("x"), Null],
+                "right(n.t,1) = 'β'",
+                vec![VId(1), VId(2)],
+            ),
+            (
+                "replace(n.t,'a',n.u)",
+                vec![
+                    text("AlphAlphaβ"),
+                    text("βlphββ"),
+                    text(""),
+                    Null,
+                    Null,
+                    Null,
+                ],
+                "replace(n.t,'a',n.u) = 'βlphββ'",
+                vec![VId(2)],
+            ),
+            (
+                "length(n.t)",
+                vec![Int(6), Int(6), Int(0), Null, Int(1), Null],
+                "length(n.t) = 6",
+                vec![VId(1), VId(2)],
+            ),
+            (
+                "substring(n.t,3)",
+                vec![text("haβ"), text("haβ"), text(""), Null, text(""), Null],
+                "substring(n.t,3) = 'haβ'",
                 vec![VId(1), VId(2)],
             ),
             (
@@ -271,6 +312,12 @@ fn null_on_either_side_stays_unknown_in_return_and_is_not_true_in_where() {
             "SUBSTRING(NULL,1,1)",
             "SUBSTRING(n.t,NULL,1)",
             "SUBSTRING(n.t,1,NULL)",
+            "substring(n.t,NULL)",
+            "left(NULL,1)",
+            "right(n.t,NULL)",
+            "replace(NULL,'a','x')",
+            "replace(n.t,NULL,'x')",
+            "replace(n.t,'a',NULL)",
             "NULL IN ['Alphaβ','x']",
             "n.t IN [NULL]",
         ] {
@@ -344,7 +391,7 @@ fn unicode_scalar_offsets_case_expansion_and_unicode_whitespace_are_observable()
         batch.create_vertex(VId(3), vec![], vec![(T, text("Iİß"))]);
         db.write(&commit, batch).await.unwrap();
         let scalar = query(
-            "MATCH (n) RETURN n,CHAR_LENGTH(n.t) AS size,SUBSTRING(n.t,2,3) AS middle,SUBSTRING(n.t,20,1) AS beyond,SUBSTRING(n.t,1,0) AS empty ORDER BY n",
+            "MATCH (n) RETURN n,CHAR_LENGTH(n.t) AS size,SUBSTRING(n.t FROM 2 FOR 3) AS middle,SUBSTRING(n.t FROM 20 FOR 1) AS beyond,SUBSTRING(n.t FROM 1 FOR 0) AS empty ORDER BY n",
         );
         assert_eq!(
             cells(
@@ -361,7 +408,8 @@ fn unicode_scalar_offsets_case_expansion_and_unicode_whitespace_are_observable()
         // Locale-independent Unicode mapping, not Turkish locale rules or case
         // folding: I -> i, İ -> i + COMBINING DOT ABOVE, ß -> SS on uppercase.
         // Combining marks count separately from their base scalar, not as one
-        // grapheme; SUBSTRING uses 1-based scalar offsets, not UTF-8 byte offsets.
+        // grapheme; SUBSTRING ... FROM uses 1-based scalar offsets, not UTF-8
+        // byte offsets.
         let casing = query(
             "MATCH (n) RETURN n,UPPER(TRIM(n.t)) AS upper,LOWER(TRIM(n.t)) AS lower ORDER BY n",
         );
@@ -418,7 +466,7 @@ fn temporal_text_predicates_and_projections_use_the_selected_committed_version()
             (
                 first,
                 vec![VId(1)],
-                vec![vec![text("ALPHAΒ:lp"), CanonicalScalar::Int(6)]],
+                vec![vec![text("ALPHAΒ:ph"), CanonicalScalar::Int(6)]],
             ),
             (second, vec![], vec![]),
         ] {
@@ -465,8 +513,8 @@ fn query_selected_text_assignments_are_frozen_staged_and_durably_committed() {
         assert_eq!(result.target_vertices, 2);
         assert_eq!(result.effects, 4);
         let expected = vec![
-            vec![text("ALPHAΒ!"), text("lp")],
-            vec![text("ALPHAΒ!"), text("lp")],
+            vec![text("ALPHAΒ!"), text("ph")],
+            vec![text("ALPHAΒ!"), text("ph")],
             vec![text(""), text("")],
             vec![CanonicalScalar::Null, text("x")],
             vec![text("x"), CanonicalScalar::Null],
@@ -560,6 +608,158 @@ fn governed_rows_and_string_growth_alone_refuse_at_their_typed_limits() {
                 "{dimension:?}"
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-20foe: the statement router reaches openCypher left, right, replace,
+/// length(text) and two-argument substring in every read family the CLI
+/// probes refused them in, length(p) of a path keeps its hop count beside
+/// length(text), and SET stores their values from the frozen row.
+#[test]
+fn opencypher_text_functions_route_through_reads_paths_and_set() {
+    let ((), report) = run_async_under_lab(0x7e87_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(1), vec![], vec![(T, text("hello"))]);
+        batch.create_vertex(VId(2), vec![], vec![(T, text("é🦀b"))]);
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        use CanonicalScalar::Int;
+        for (statement, expected) in [
+            ("RETURN left('hello', 2) AS x", vec![vec![text("he")]]),
+            ("RETURN right('hello', 2) AS x", vec![vec![text("lo")]]),
+            (
+                "RETURN replace('hello', 'e', 'x') AS x",
+                vec![vec![text("hxllo")]],
+            ),
+            ("RETURN length('abc') AS x", vec![vec![Int(3)]]),
+            ("RETURN substring('hello', 2) AS x", vec![vec![text("llo")]]),
+            (
+                "UNWIND ['ab', 'é🦀b'] AS s RETURN left(s, 1) AS l, length(s) AS n",
+                vec![vec![text("a"), Int(2)], vec![text("é"), Int(3)]],
+            ),
+            (
+                "MATCH p = (a)-[:R]->(b) RETURN length(p) AS hops, length(a.t) AS chars, \
+                 right(b.t, 2) AS tail",
+                vec![vec![Int(1), Int(5), text("🦀b")]],
+            ),
+            (
+                "MATCH (n) WITH n.t AS t WHERE length(t) > 3 RETURN replace(t, 'l', 'L') AS x",
+                vec![vec![text("heLLo")]],
+            ),
+            (
+                "MATCH (n) RETURN left(min(n.t), 1) AS x, length(max(n.t)) AS n",
+                vec![vec![text("h"), Int(3)]],
+            ),
+        ] {
+            let QueryResult::Rows { rows, .. } = db
+                .query(&cx, statement, &GqlParameters::new(), symbols, policy())
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            else {
+                panic!("{statement}: not a read");
+            };
+            let rows: Vec<Vec<CanonicalScalar>> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| {
+                            cell.as_value()
+                                .and_then(|value| value.as_scalar())
+                                .cloned()
+                                .unwrap_or_else(|| panic!("{statement}: {cell:?}"))
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(rows, expected, "{statement}");
+        }
+        // SET reads the frozen row: n.u is the original text's tail.
+        let mutation = PreparedGraphMutationText::prepare(
+            "MATCH (n) WHERE length(n.t) = 5 \
+             SET n.t = left(n.t, 1) + replace(substring(n.t, 1), 'l', 'L'), n.u = right(n.t, 3)",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let result = txn
+            .execute_graph_mutation_governed(
+                &mut db,
+                &cx,
+                &mutation,
+                GraphMutationPolicy::new(policy(), 100),
+            )
+            .unwrap();
+        assert_eq!(result.target_vertices, 1);
+        txn.commit(&mut db, &commit).await.unwrap();
+        let read = query("MATCH (n) RETURN n,n.t AS t,n.u AS u ORDER BY n");
+        assert_eq!(
+            cells(
+                &db.execute_graph_set_governed(&cx, &read, policy())
+                    .unwrap()
+                    .value
+            ),
+            vec![
+                vec![text("heLLo"), text("llo")],
+                vec![text("é🦀b"), CanonicalScalar::Null],
+            ]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher: STARTS WITH, ENDS WITH and CONTAINS over a stored value that is
+/// not text are NULL in RETURN, as they are UNKNOWN in WHERE (TCK String8-10
+/// [8]). One vertex whose property holds an integer no longer fails the whole
+/// projection.
+#[test]
+fn text_predicates_over_non_text_values_are_null_in_return() {
+    let ((), report) = run_async_under_lab(0x7e87_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, t) in [
+            (1, text("Alpha")),
+            (2, CanonicalScalar::Int(5)),
+            (3, CanonicalScalar::Bool(true)),
+        ] {
+            batch.create_vertex(VId(id), vec![], vec![(T, t)]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let projection = query(
+            "MATCH (n) RETURN n, n.t STARTS WITH 'A' AS s, n.t ENDS WITH 'a' AS e, \
+             n.t CONTAINS 'lp' AS c, 'Alpha' STARTS WITH n.t AS r ORDER BY n",
+        );
+        let null = || CanonicalScalar::Null;
+        assert_eq!(
+            cells(
+                &db.execute_graph_set_governed(&cx, &projection, policy())
+                    .unwrap()
+                    .value
+            ),
+            vec![
+                vec![CanonicalScalar::Bool(true); 4],
+                vec![null(), null(), null(), null()],
+                vec![null(), null(), null(), null()],
+            ]
+        );
+        let filtered = query("MATCH (n) WHERE n.t STARTS WITH 'A' RETURN n");
+        assert_eq!(
+            ids(&db
+                .execute_graph_set_governed(&cx, &filtered, policy())
+                .unwrap()
+                .value),
+            vec![VId(1)]
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

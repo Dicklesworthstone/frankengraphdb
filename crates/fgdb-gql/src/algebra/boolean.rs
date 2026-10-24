@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::sync::Arc;
 
 pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
@@ -21,6 +21,9 @@ pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
 #[derive(Clone, Copy)]
 pub enum GraphBooleanOperand<'a> {
     Vertex(&'a str),
+    /// A captured single-step relationship as an element: a scalar
+    /// expression input (id(r)), a NULL test, or an edge equality.
+    Edge(&'a str),
     Property {
         variable: &'a str,
         key: PropertyKeyId,
@@ -76,7 +79,7 @@ pub enum GraphBooleanError {
     TooManyPredicates { limit: usize, observed: usize },
     InvalidStack { instruction: usize },
     InvalidVariableName,
-    InvalidVertexComparison,
+    InvalidElementComparison,
     InvalidExpressionColumn,
     Scalar(ScalarPredicateError),
 }
@@ -96,8 +99,8 @@ impl core::fmt::Display for GraphBooleanError {
                 write!(f, "invalid Boolean stack at instruction {instruction}")
             }
             Self::InvalidVariableName => f.write_str("invalid Boolean variable name"),
-            Self::InvalidVertexComparison => {
-                f.write_str("vertex operands require vertex equality or inequality")
+            Self::InvalidElementComparison => {
+                f.write_str("vertex and edge operands require equality or inequality of one kind")
             }
             Self::InvalidExpressionColumn => {
                 f.write_str("Boolean expression references an unknown value column")
@@ -118,6 +121,7 @@ impl core::error::Error for GraphBooleanError {
 #[derive(Clone, PartialEq, Eq)]
 enum Operand<S> {
     Vertex(S),
+    Edge(S),
     Property { variable: S, key: PropertyKeyId },
     EdgeProperty { variable: S, key: PropertyKeyId },
     Literal(ScalarPredicate),
@@ -150,6 +154,7 @@ impl<S> Operand<S> {
     ) -> Result<Operand<T>, E> {
         Ok(match self {
             Self::Vertex(slot) => Operand::Vertex(map(slot, false)?),
+            Self::Edge(slot) => Operand::Edge(map(slot, true)?),
             Self::Property { variable, key } => Operand::Property {
                 variable: map(variable, false)?,
                 key: *key,
@@ -235,6 +240,7 @@ fn name(value: &str) -> Result<String, GraphBooleanError> {
 fn own(operand: GraphBooleanOperand<'_>) -> Result<Operand<String>, GraphBooleanError> {
     Ok(match operand {
         GraphBooleanOperand::Vertex(variable) => Operand::Vertex(name(variable)?),
+        GraphBooleanOperand::Edge(variable) => Operand::Edge(name(variable)?),
         GraphBooleanOperand::Property { variable, key } => Operand::Property {
             variable: name(variable)?,
             key,
@@ -324,17 +330,21 @@ impl GraphBooleanExpression {
                     comparison,
                     right,
                 } => {
-                    let left_vertex = matches!(left, GraphBooleanOperand::Vertex(_));
-                    let right_vertex = matches!(right, GraphBooleanOperand::Vertex(_));
-                    if (left_vertex || right_vertex)
-                        && !(left_vertex
-                            && right_vertex
-                            && matches!(
-                                comparison,
-                                IntegerComparison::Equal | IntegerComparison::NotEqual
-                            ))
+                    // An element compares only for (in)equality. Against a
+                    // value of another kind it is unequal (fgdb-v6ku6).
+                    let element = |operand: &GraphBooleanOperand<'_>| {
+                        matches!(
+                            operand,
+                            GraphBooleanOperand::Vertex(_) | GraphBooleanOperand::Edge(_)
+                        )
+                    };
+                    if (element(&left) || element(&right))
+                        && !matches!(
+                            comparison,
+                            IntegerComparison::Equal | IntegerComparison::NotEqual
+                        )
                     {
-                        return Err(GraphBooleanError::InvalidVertexComparison);
+                        return Err(GraphBooleanError::InvalidElementComparison);
                     }
                     Instruction::Compare {
                         left: own(left)?,
@@ -401,13 +411,14 @@ impl GraphBooleanExpression {
         })
     }
 
-    /// Whether any operand reads a captured relationship property. Such a
-    /// program needs the element-property executor, never a vertex-only one.
+    /// Whether any operand reads a captured relationship, its identity or a
+    /// property. Such a program needs the element executor, which supplies
+    /// the captured paths, never a vertex-only one.
     #[must_use]
     #[allow(dead_code)]
-    pub(crate) fn contains_edge_property(&self) -> bool {
+    pub(crate) fn contains_captured_edge(&self) -> bool {
         fn operand<S>(operand: &Operand<S>) -> bool {
-            matches!(operand, Operand::EdgeProperty { .. })
+            matches!(operand, Operand::Edge(_) | Operand::EdgeProperty { .. })
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
@@ -446,7 +457,7 @@ impl BoundBooleanExpression {
                 variable.ordinal() == 0
             }
             Operand::Literal(_) => true,
-            Operand::EdgeProperty { .. } => false,
+            Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         };
         let mut selected = None;
         for instruction in self.program.iter() {
@@ -481,11 +492,12 @@ impl BoundBooleanExpression {
         }
         selected
     }
-    /// Whether any already-bound operand reads a captured relationship property.
+    /// Whether any already-bound operand reads a captured relationship, its
+    /// identity or a property.
     #[must_use]
-    pub(crate) fn contains_edge_property(&self) -> bool {
+    pub(crate) fn contains_captured_edge(&self) -> bool {
         fn operand<S>(operand: &Operand<S>) -> bool {
-            matches!(operand, Operand::EdgeProperty { .. })
+            matches!(operand, Operand::Edge(_) | Operand::EdgeProperty { .. })
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
@@ -540,13 +552,25 @@ impl Truth {
 
 enum Value<'a> {
     Scalar(Option<&'a CanonicalScalar>),
+    /// A stored List or Map property (fgdb-k3nub): present, never NULL.
+    Stored(&'a CanonicalPropertyValue),
     Vertex(Option<VId>),
+    Edge(Option<EId>),
 }
-impl Value<'_> {
+impl<'a> Value<'a> {
+    fn property(value: Option<&'a CanonicalPropertyValue>) -> Self {
+        match value {
+            None => Self::Scalar(None),
+            Some(CanonicalPropertyValue::Scalar(scalar)) => Self::Scalar(Some(scalar)),
+            Some(value) => Self::Stored(value),
+        }
+    }
     fn is_null(&self) -> bool {
         match self {
             Self::Vertex(value) => value.is_none(),
+            Self::Edge(value) => value.is_none(),
             Self::Scalar(value) => value.is_none_or(|v| matches!(v, CanonicalScalar::Null)),
+            Self::Stored(_) => false,
         }
     }
 }
@@ -554,8 +578,11 @@ fn resolve<'source: 'borrow, 'borrow, E>(
     operand: &'borrow Operand<BindingSlot>,
     bindings: &[Option<VId>],
     paths: &[Option<super::GraphPath>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'source CanonicalScalar>, E>,
-    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'source CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'source CanonicalPropertyValue>, E>,
+    edge_property: &mut impl FnMut(
+        EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'source CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Value<'borrow>, E> {
     control(GlaExecutionEvent::Work)?;
@@ -563,46 +590,62 @@ fn resolve<'source: 'borrow, 'borrow, E>(
         Operand::Vertex(slot) => {
             Value::Vertex(bindings.get(slot.ordinal() as usize).copied().flatten())
         }
-        Operand::Property { variable, key } => Value::Scalar(
+        Operand::Property { variable, key } => Value::property(
             match bindings.get(variable.ordinal() as usize).copied().flatten() {
                 Some(vertex) => property(vertex, *key)?,
                 None => None,
             },
         ),
-        Operand::EdgeProperty { variable, key } => Value::Scalar(
-            match paths
-                .get(variable.ordinal() as usize)
-                .and_then(Option::as_ref)
-            {
-                Some(path) => {
-                    let [(edge, _)] = path.steps() else {
-                        unreachable!("edge property captures contain exactly one relationship")
-                    };
-                    edge_property(*edge, *key)?
-                }
+        Operand::Edge(slot) => Value::Edge(captured_edge(paths, *slot)),
+        Operand::EdgeProperty { variable, key } => {
+            Value::property(match captured_edge(paths, *variable) {
+                Some(edge) => edge_property(edge, *key)?,
                 None => None,
-            },
-        ),
+            })
+        }
         Operand::Literal(value) => Value::Scalar(Some(value.value())),
     })
 }
-fn compare(left: &Value<'_>, right: &Value<'_>, comparison: IntegerComparison) -> Truth {
+/// The one relationship of a captured single-step path, or None for a NULL
+/// capture (an OPTIONAL MATCH miss).
+fn captured_edge(paths: &[Option<super::GraphPath>], slot: BindingSlot) -> Option<EId> {
+    let path = paths.get(slot.ordinal() as usize)?.as_ref()?;
+    let [(edge, _)] = path.steps() else {
+        unreachable!("edge captures contain exactly one relationship")
+    };
+    Some(*edge)
+}
+fn compare<E: From<crate::GraphIntegerError>>(
+    left: &Value<'_>,
+    right: &Value<'_>,
+    comparison: IntegerComparison,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Truth, E> {
     if left.is_null() || right.is_null() {
-        return Truth::Unknown;
+        return Ok(Truth::Unknown);
     }
-    match (left, right) {
-        (Value::Vertex(Some(left)), Value::Vertex(Some(right))) => {
-            Truth::from(Some(if comparison == IntegerComparison::Equal {
-                left == right
-            } else {
-                left != right
-            }))
-        }
+    let element = |equal: bool| {
+        Truth::from(Some(if comparison == IntegerComparison::Equal {
+            equal
+        } else {
+            !equal
+        }))
+    };
+    Ok(match (left, right) {
+        (Value::Vertex(Some(left)), Value::Vertex(Some(right))) => element(left == right),
+        (Value::Edge(Some(left)), Value::Edge(Some(right))) => element(left == right),
         (Value::Scalar(Some(left)), Value::Scalar(Some(right))) => {
             Truth::from(comparison.evaluate_scalar_pair(Some(*left), Some(*right)))
         }
-        _ => Truth::Unknown,
-    }
+        // Two stored collections compare as composite values do: element by
+        // element, three-valued (fgdb-9cawv, fgdb-k3nub). Against a scalar, a
+        // vertex or an edge, a collection is of another domain, as any other
+        // pair of unrelated kinds is: unequal, and unordered (fgdb-v6ku6).
+        (Value::Stored(left), Value::Stored(right)) => Truth::from(
+            crate::algebra_exec::compare_stored(comparison, left, right, control)?,
+        ),
+        _ => Truth::from(comparison.across_domains()),
+    })
 }
 
 impl BoundBooleanExpression {
@@ -653,7 +696,7 @@ impl BoundBooleanExpression {
     pub(crate) fn evaluate<'a, E: From<crate::GraphIntegerError>>(
         &self,
         bindings: &[Option<VId>],
-        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
         self.evaluate_elements(
@@ -669,8 +712,11 @@ impl BoundBooleanExpression {
         &self,
         bindings: &[Option<VId>],
         paths: &[Option<super::GraphPath>],
-        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
         let mut stack = [Truth::Unknown; MAX_PATTERN_PREDICATES];
@@ -690,7 +736,7 @@ impl BoundBooleanExpression {
                             crate::algebra_exec::charge_payload(value, control)?;
                         }
                     }
-                    compare(&left, &right, *comparison)
+                    compare(&left, &right, *comparison, control)?
                 }
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
                     resolve(operand, bindings, paths, property, edge_property, control)?.is_null()
@@ -704,6 +750,7 @@ impl BoundBooleanExpression {
                         control(GlaExecutionEvent::ScratchEntry)?;
                     }
                     let mut values = Vec::with_capacity(columns.len());
+                    let mut collection = false;
                     for column in columns {
                         let value = match resolve(
                             column,
@@ -714,11 +761,25 @@ impl BoundBooleanExpression {
                             control,
                         )? {
                             Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
+                            Value::Edge(Some(edge)) => GraphValue::Edge(edge),
                             Value::Scalar(Some(value)) => {
-                                crate::algebra_exec::charge_payload(value, control)?;
+                                // This operand is owned by the scalar VM, so
+                                // every payload quantum must be admitted for
+                                // allocation as well as comparison work before
+                                // cloning text, bytes or a timestamp zone.
+                                crate::algebra_exec::charge_payload(value, &mut |event| {
+                                    control(event)?;
+                                    control(GlaExecutionEvent::ScratchEntry)
+                                })?;
                                 GraphValue::Scalar(value.clone())
                             }
-                            Value::Vertex(None) | Value::Scalar(None) => {
+                            // The scalar VM reads a stored collection as the
+                            // List or Map it is (size(), IN, indexing).
+                            Value::Stored(value) => {
+                                collection = true;
+                                GraphValue::admit_property_value(value, control)?
+                            }
+                            Value::Vertex(None) | Value::Edge(None) | Value::Scalar(None) => {
                                 GraphValue::Scalar(CanonicalScalar::Null)
                             }
                         };
@@ -732,6 +793,17 @@ impl BoundBooleanExpression {
                         Ok(CanonicalScalar::Bool(value)) => Truth::from(Some(value)),
                         Err(GraphIntegerEvaluationError::Value(error))
                             if error.kind.is_arithmetic_exception() =>
+                        {
+                            return Err(E::from(error));
+                        }
+                        // The scalar program cannot read a stored List or
+                        // Map operand (size(n.list), n.list[0] here): it
+                        // raises, as the same expression in RETURN does. As
+                        // UNKNOWN it silently dropped every row whose
+                        // property holds a collection (fgdb-bqri3).
+                        Err(GraphIntegerEvaluationError::Value(error))
+                            if collection
+                                && error.kind == crate::GraphIntegerErrorKind::NonScalar =>
                         {
                             return Err(E::from(error));
                         }
@@ -815,6 +887,10 @@ fn append_operand(operand: &Operand<BindingSlot>, bytes: &mut Vec<u8>) {
             bytes.push(0);
             bytes.extend_from_slice(&slot.ordinal().to_be_bytes());
         }
+        Operand::Edge(slot) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&slot.ordinal().to_be_bytes());
+        }
         Operand::Property { variable, key } => {
             bytes.push(1);
             bytes.extend_from_slice(&variable.ordinal().to_be_bytes());
@@ -844,7 +920,10 @@ impl BoundBooleanExpression {
                     Instruction::Compare { left, right, .. } => ([Some(left), Some(right)], &[]),
                     Instruction::IsNull { operand, .. } => ([Some(operand), None], &[]),
                     Instruction::Expression { columns, .. } => ([None, None], columns),
-                    _ => ([None, None], &[]),
+                    Instruction::Truth(_)
+                    | Instruction::And
+                    | Instruction::Or
+                    | Instruction::Not => ([None, None], &[]),
                 };
             pair.into_iter().flatten().chain(columns)
         })
@@ -860,7 +939,7 @@ impl BoundBooleanExpression {
                 (slot.ordinal() as usize) < width
             }
             Operand::Literal(_) => true,
-            Operand::EdgeProperty { .. } => false,
+            Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         })
     }
 
@@ -878,6 +957,20 @@ impl BoundBooleanExpression {
         })
     }
 
+    /// Captured-edge properties are a separate domain from vertex properties,
+    /// including eager scalar inputs that do not determine the final truth.
+    pub(crate) fn referenced_edge_properties(
+        &self,
+    ) -> impl Iterator<Item = (BindingSlot, PropertyKeyId)> + '_ {
+        self.operands().filter_map(|operand| match operand {
+            Operand::EdgeProperty { variable, key } => Some((*variable, *key)),
+            Operand::Vertex(_)
+            | Operand::Edge(_)
+            | Operand::Property { .. }
+            | Operand::Literal(_) => None,
+        })
+    }
+
     /// Evaluate a complete caller-owned vertex frame through the SAME engine
     /// as snapshot GLA. Some(true) means WHERE accepts; Some(false) includes
     /// SQL FALSE and UNKNOWN. None is a profile refusal (captured-edge input
@@ -890,7 +983,7 @@ impl BoundBooleanExpression {
     pub fn evaluate_vertex_binding<'a, E: From<crate::GraphIntegerError>>(
         &self,
         bindings: &[Option<VId>],
-        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<bool>, E> {
         control(GlaExecutionEvent::Work)?;
@@ -901,7 +994,7 @@ impl BoundBooleanExpression {
                     (slot.ordinal() as usize) < bindings.len()
                 }
                 Operand::Literal(_) => true,
-                Operand::EdgeProperty { .. } => false,
+                Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
             };
             if !supported {
                 return Ok(None);
@@ -948,6 +1041,49 @@ mod tests {
     }
 
     #[test]
+    fn scalar_operand_payload_is_allocation_admitted_before_the_vm_copies_it() {
+        let value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"large".repeat(100)).unwrap(),
+        );
+        let scalar =
+            crate::GraphIntegerExpression::prepare_scalar(&[crate::GraphIntegerOp::ScalarColumn(
+                0,
+            )])
+            .unwrap();
+        let columns = [Arg::Property {
+            variable: "a",
+            key: PropertyKeyId(1),
+        }];
+        let expression = bound(&[Op::Expression {
+            expression: &scalar,
+            columns: &columns,
+        }]);
+        let read = std::cell::Cell::new(false);
+        let mut after_read = Vec::new();
+        let result = expression.evaluate(
+            &[Some(VId(1))],
+            &mut |_, _| {
+                read.set(true);
+                Ok(Some(&value))
+            },
+            &mut |event| {
+                if read.get() {
+                    after_read.push(event);
+                    if after_read.len() == 2 {
+                        return Err(Failure::Source("allocation refused"));
+                    }
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(Failure::Source("allocation refused")));
+        assert_eq!(
+            after_read,
+            [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry]
+        );
+    }
+
+    #[test]
     fn complete_three_valued_truth_tables_and_de_morgan_laws() {
         let values = [Truth::False, Truth::Unknown, Truth::True];
         let and = [[0, 0, 0], [0, 1, 1], [0, 1, 2]];
@@ -970,7 +1106,7 @@ mod tests {
                         .evaluate(
                             &[],
                             &mut |_, _| {
-                                Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                                Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
                                     "unexpected source",
                                 ))
                             },
@@ -983,6 +1119,9 @@ mod tests {
         }
     }
 
+    /// NOT keeps a missing or NULL operand UNKNOWN. A Bool against an Int
+    /// is of another domain (fgdb-v6ku6): unequal, so NOT `=` admits it and
+    /// NOT `<>` does not, and unordered, so NOT of an ordering stays UNKNOWN.
     #[test]
     fn negation_does_not_admit_missing_null_or_incompatible_values() {
         let expected = CanonicalScalar::Int(7);
@@ -1015,16 +1154,18 @@ mod tests {
                 Op::Not,
             ]);
             for value in &values {
+                let stored = value.clone().map(CanonicalPropertyValue::Scalar);
                 let actual = program
                     .evaluate(
                         &[Some(VId(0))],
-                        &mut |_, _| Ok::<_, Failure<()>>(value.as_ref()),
+                        &mut |_, _| Ok::<_, Failure<()>>(stored.as_ref()),
                         &mut |_| Ok(()),
                     )
                     .unwrap();
                 let expected = match value {
                     Some(CanonicalScalar::Int(n)) => !comparison.accepts(*n, 7),
                     Some(CanonicalScalar::Float(n)) => !comparison.accepts(n.get() as i64, 7),
+                    Some(CanonicalScalar::Bool(_)) => comparison == IntegerComparison::Equal,
                     _ => false,
                 };
                 assert_eq!(actual, expected);
@@ -1040,7 +1181,7 @@ mod tests {
         assert!(
             null.evaluate(
                 &[None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("null read")),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("null read")),
                 &mut |_| Ok(())
             )
             .unwrap()
@@ -1049,7 +1190,7 @@ mod tests {
 
     #[test]
     fn mixed_numeric_literals_do_not_round_large_integer_properties() {
-        let actual = CanonicalScalar::Int(9_007_199_254_740_993);
+        let actual = CanonicalPropertyValue::from(CanonicalScalar::Int(9_007_199_254_740_993));
         let literal =
             CanonicalScalar::Float(fgdb_types::CanonicalF64::new(9_007_199_254_740_992.0));
         for (comparison, expected) in [
@@ -1103,7 +1244,7 @@ mod tests {
                 &mut |vid, _| {
                     assert_eq!(vid, VId(u128::MAX));
                     reads += 1;
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unreadable"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("unreadable"))
                 },
                 &mut |_| Ok(()),
             );
@@ -1154,14 +1295,79 @@ mod tests {
             Err(GraphBooleanError::InvalidVariableName)
         ));
         let literal = CanonicalScalar::Int(1);
-        assert!(matches!(
+        // An element has no order, against anything.
+        for (left, comparison, right) in [
+            (Arg::Edge("r"), IntegerComparison::Less, Arg::Edge("s")),
+            (
+                Arg::Vertex("a"),
+                IntegerComparison::Greater,
+                Arg::Vertex("b"),
+            ),
+            (
+                Arg::Literal(&literal),
+                IntegerComparison::LessOrEqual,
+                Arg::Edge("r"),
+            ),
+        ] {
+            assert!(matches!(
+                GraphBooleanExpression::prepare(&[Op::Compare {
+                    left,
+                    comparison,
+                    right
+                }]),
+                Err(GraphBooleanError::InvalidElementComparison)
+            ));
+        }
+        // An element is unequal to a value of another kind (fgdb-v6ku6).
+        for (left, right) in [
+            (Arg::Vertex("a"), Arg::Literal(&literal)),
+            (Arg::Literal(&literal), Arg::Vertex("a")),
+            (
+                Arg::Vertex("a"),
+                Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(3),
+                },
+            ),
+        ] {
+            for (comparison, expected) in [
+                (IntegerComparison::Equal, false),
+                (IntegerComparison::NotEqual, true),
+            ] {
+                let program = bound(&[Op::Compare {
+                    left,
+                    comparison,
+                    right,
+                }]);
+                let stored = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
+                assert_eq!(
+                    program
+                        .evaluate(
+                            &[Some(VId(1))],
+                            &mut |_, _| Ok::<_, Failure<()>>(Some(&stored)),
+                            &mut |_| Ok(())
+                        )
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(
             GraphBooleanExpression::prepare(&[Op::Compare {
-                left: Arg::Vertex("a"),
+                left: Arg::Edge("r"),
                 comparison: IntegerComparison::Equal,
-                right: Arg::Literal(&literal)
-            }]),
-            Err(GraphBooleanError::InvalidVertexComparison)
-        ));
+                right: Arg::Vertex("a"),
+            }])
+            .is_ok()
+        );
+        assert!(
+            GraphBooleanExpression::prepare(&[Op::Compare {
+                left: Arg::Edge("r"),
+                comparison: IntegerComparison::NotEqual,
+                right: Arg::Edge("s"),
+            }])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1228,12 +1434,13 @@ mod tests {
             },
             Op::Or,
         ]);
+        let stored = CanonicalPropertyValue::Scalar(value.clone());
         let mut calls = 0;
         assert!(
             expression
                 .evaluate(
                     &[Some(VId(0)), None],
-                    &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                    &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                     &mut |_| {
                         calls += 1;
                         Ok(())
@@ -1246,7 +1453,7 @@ mod tests {
             let mut at = 0;
             let result = expression.evaluate(
                 &[Some(VId(0)), None],
-                &mut |_, _| Ok(Some(&value)),
+                &mut |_, _| Ok(Some(&stored)),
                 &mut |_| {
                     at += 1;
                     if at == stop {
@@ -1409,7 +1616,7 @@ mod tests {
         let mut reads = 0;
         let mut source = |_, _| {
             reads += 1;
-            Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected source"))
+            Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("unexpected source"))
         };
         assert_eq!(
             expression
@@ -1472,6 +1679,7 @@ mod tests {
             Some(CanonicalScalar::Int(7)),
             Some(CanonicalScalar::Int(8)),
         ] {
+            let actual = actual.map(CanonicalPropertyValue::Scalar);
             let expected = expression
                 .evaluate(
                     &[Some(VId(1))],
@@ -1504,16 +1712,17 @@ mod tests {
         assert_eq!(
             eager.evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("source")),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("source")),
                 &mut |_| Ok(())
             ),
             Err(Failure::Source("source"))
         );
+        let stored = CanonicalPropertyValue::Scalar(value.clone());
         let mut calls = 0;
         let expected = eager
             .evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                 &mut |_| {
                     calls += 1;
                     Ok(())
@@ -1525,7 +1734,7 @@ mod tests {
             assert_eq!(
                 eager.evaluate_vertex_binding(
                     &[Some(VId(1))],
-                    &mut |_, _| Ok(Some(&value)),
+                    &mut |_, _| Ok(Some(&stored)),
                     &mut |_| {
                         seen += 1;
                         if seen == stop {
@@ -1542,7 +1751,7 @@ mod tests {
                 eager
                     .evaluate_vertex_binding(
                         &[Some(VId(1))],
-                        &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                        &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                         &mut |_| Ok(())
                     )
                     .unwrap(),

@@ -100,7 +100,7 @@ fn a_commit_whose_read_was_overwritten_aborts_typed() {
                 .vertex(&db, VId(1))
                 .expect("overlay reads")
                 .expect("the seeded vertex is visible");
-            assert_eq!(observed.props, vec![(PROP, int(0))]);
+            assert_eq!(observed.props, vec![(PROP, int(0).into())]);
             let mut disjoint = WriteBatch::new(KNOWS);
             disjoint.create_vertex(VId(3), vec![LabelId(5)], vec![(PROP, int(3))]);
             txn_a
@@ -144,7 +144,7 @@ fn a_commit_whose_read_was_overwritten_aborts_typed() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "the winner's overwrite is durable"
         );
         assert!(
@@ -174,7 +174,7 @@ fn a_disjoint_concurrent_commit_does_not_abort_the_reader() {
                 .vertex(&db, VId(1))
                 .expect("overlay reads")
                 .expect("the seeded vertex is visible");
-            assert_eq!(observed.props, vec![(PROP, int(0))]);
+            assert_eq!(observed.props, vec![(PROP, int(0).into())]);
             let mut update = WriteBatch::new(KNOWS);
             update.set_vertex_property(VId(1), PROP, Some(int(5)));
             txn_a.write(&mut db, update).expect("stages the update");
@@ -200,12 +200,12 @@ fn a_disjoint_concurrent_commit_does_not_abort_the_reader() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(5))],
+            vec![(PROP, int(5).into())],
             "the reader's update is durable"
         );
         assert_eq!(
             db.vertex(VId(2)).expect("reads").expect("row").props,
-            vec![(PROP, int(2))],
+            vec![(PROP, int(2).into())],
             "the concurrent create is durable beside it — both committed"
         );
     });

@@ -434,8 +434,13 @@ fn visible_budget_allows_hidden_groups_and_atomic_swaps_then_rebuilds_after_refu
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Ruling (a) on fgdb-v6ku6 (dc51c241): `=` between two present values of
+/// different value domains is FALSE, not a failure. A Bool group key under
+/// `key = 1` therefore filters the group: neither the FALSE conjunction nor
+/// the TRUE disjunction fails the view, its rebuild or a new registration,
+/// and every view equals a fresh native recomputation.
 #[test]
-fn invalid_having_domains_are_not_hidden_by_false_filters_or_true_disjunctions() {
+fn a_having_equality_across_value_domains_is_false_not_a_failure() {
     let ((), report) = run_async_under_lab(0x6a54, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -493,31 +498,26 @@ fn invalid_having_domains_are_not_hidden_by_false_filters_or_true_disjunctions()
         invalid.set_vertex_property(VId(1), GROUP, Some(CanonicalScalar::Bool(true)));
         let bad_at = db.write(&commit, invalid).await.unwrap();
         assert_ne!(bad_at, basis);
-        for (handle, definition) in &registered {
-            assert!(matches!(db.standing_query(&query, handle),
-                Err(StandingQueryError::Unavailable { frontier, reason: StandingQueryFailure::NonIntegerHaving }) if frontier == basis));
-            assert!(matches!(
-                db.rebuild_standing_query(&query, handle, policy()),
-                Err(StandingQueryError::Maintenance(
-                    StandingQueryFailure::NonIntegerHaving
-                ))
-            ));
-            assert!(matches!(
-                db.register_standing_query(&query, definition.clone(), policy()),
-                Err(StandingQueryError::Maintenance(
-                    StandingQueryFailure::NonIntegerHaving
-                ))
-            ));
+        // The FALSE conjunction keeps no group; TRUE OR (key = 1) keeps it.
+        for ((handle, definition), rows) in registered.iter().zip([0, 1]) {
+            check(&db, &query, handle, definition);
+            assert_eq!(
+                db.standing_query(&query, handle).unwrap().rows().len(),
+                rows
+            );
+            assert_eq!(
+                db.rebuild_standing_query(&query, handle, policy()).unwrap(),
+                bad_at
+            );
+            check(&db, &query, handle, definition);
+            db.register_standing_query(&query, definition.clone(), policy())
+                .unwrap();
         }
         let mut repair = WriteBatch::new(R);
         repair.set_vertex_property(VId(1), GROUP, Some(CanonicalScalar::Int(1)));
         let at = db.write(&commit, repair).await.unwrap();
         for (handle, definition) in &registered {
-            // Advancing the source does not silently skip the failed tick.
-            assert!(matches!(
-                db.standing_query(&query, handle),
-                Err(StandingQueryError::Unavailable { .. })
-            ));
+            check(&db, &query, handle, definition);
             assert_eq!(
                 db.rebuild_standing_query(&query, handle, policy()).unwrap(),
                 at

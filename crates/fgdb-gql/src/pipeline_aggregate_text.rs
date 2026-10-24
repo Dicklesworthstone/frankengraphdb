@@ -26,13 +26,33 @@ pub struct GraphPipelineAggregateTextError {
     pub offset: usize,
     pub kind: GraphPipelineAggregateTextErrorKind,
 }
+impl core::fmt::Display for GraphPipelineAggregateTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Input(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+            Self::Having(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphPipelineAggregateTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Input(kind) => kind.class(),
+            Self::Build(_) | Self::Having(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphPipelineAggregateTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphPipelineAggregateTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "aggregate pipeline at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphPipelineAggregateTextError {
@@ -72,13 +92,13 @@ pub(crate) struct PipelineSummary {
 /// Grouping keys and aggregate arguments accept the shared row expressions:
 /// typed parameters, literals, checked integer arithmetic, conditionals and
 /// lists. COUNT(*), COUNT, SUM/SUM_INT, AVG/AVG_INT, MIN, MAX, COLLECT and argument
-/// DISTINCT use the existing exact engine. AS is optional for direct aggregates;
-/// native default names are count/sum/avg/min/max/collect and must be unique.
+/// DISTINCT use the existing exact engine. An unaliased item is named by its
+/// source text, as in openCypher (`count(*)`, `n.p`); names must be unique.
 ///
 /// Without GROUP BY, distinct whole nonaggregate RETURN expressions are keys
 /// in first-use order. Explicit GROUP BY remains authoritative and may include
 /// hidden keys. It accepts input expressions and unshadowed RETURN key aliases;
-/// existing WITH aliases retain their meaning. Computed RETURN keys require AS.
+/// existing WITH aliases retain their meaning.
 /// Repeated key expressions share storage while retaining their output slots.
 /// HAVING is three-valued Boolean over returned aliases and
 /// literals/parameters; ORDER BY also uses returned aliases. Keys may be renamed
@@ -104,6 +124,9 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) input: BoundReadInput,
     pub(crate) keys: Vec<usize>,
     pub(crate) output_keys: Vec<usize>,
+    /// Each projected key's first RETURN alias, by evaluation key position,
+    /// where it differs from the input column's name (fgdb-cxjqp).
+    pub(crate) key_aliases: Vec<(usize, String)>,
     pub(crate) summaries: Vec<PipelineSummary>,
     pub(crate) output_distinct: bool,
     pub(crate) names: Vec<String>,
@@ -115,6 +138,22 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) count: Option<ReadPageNumber>,
     pub(crate) aggregate_at: usize,
     pub(crate) having_at: usize,
+    /// Present when a RETURN item combines aggregate results (fgdb-4avot).
+    pub(crate) output: Option<Box<PipelineOutput>>,
+}
+
+/// A RETURN with an item that combines aggregate results (`sum(v) * 10 /
+/// count(v)`, fgdb-4avot).
+#[derive(Clone)]
+pub(crate) struct PipelineOutput {
+    /// Every item, in written order, over the evaluation row of all keys then
+    /// all summaries. Output rows carry these values only, and the slots
+    /// address them in order.
+    pub(crate) items: Vec<crate::set_text::ReadProjectionTemplate>,
+    /// ORDER BY over a combined item ranks this computed tuple: each key is
+    /// a written item's position (with_projected_order_by), and the
+    /// evaluation `ordering` is then empty. Otherwise this is empty.
+    pub(crate) ordering: Vec<crate::algebra::GraphValueOrder>,
 }
 impl core::fmt::Debug for PreparedGraphPipelineAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -230,6 +269,21 @@ impl PreparedGraphPipelineAggregateText {
                 count.append_template_transcript(&mut bytes);
             }
         }
+        // Only a computed output extends the transcript, so every plan
+        // without one keeps its exact bytes.
+        if let Some(output) = &self.output {
+            bytes.extend_from_slice(b"fgdb:pipeline-aggregate-output:v1\0");
+            crate::set_text::append_projection_transcript(&mut bytes, &output.items);
+            if !output.ordering.is_empty() {
+                bytes.extend_from_slice(b"fgdb:pipeline-aggregate-projected-order:v1\0");
+                ordinal(&mut bytes, output.ordering.len());
+                for order in &output.ordering {
+                    ordinal(&mut bytes, order.column);
+                    bytes.push(u8::from(order.descending));
+                    bytes.push(u8::from(order.nulls_first));
+                }
+            }
+        }
         bytes
     }
 
@@ -241,6 +295,7 @@ impl PreparedGraphPipelineAggregateText {
             for stage in stages {
                 operators.push(match stage {
                     ReadStageTemplate::Aggregate { .. } => "Aggregate",
+                    ReadStageTemplate::InputRows { .. } => "InputRows",
                     ReadStageTemplate::Unwind { .. } => "Unwind",
                     ReadStageTemplate::Call { .. } => "ProcedureCall",
                     ReadStageTemplate::Project { .. } => "ProjectValues",
@@ -305,7 +360,12 @@ impl PreparedGraphPipelineAggregateText {
         if !self.having.is_empty() {
             operators.push("SelectHaving");
         }
-        if !self.ordering.is_empty() {
+        if !self.ordering.is_empty()
+            || self
+                .output
+                .as_ref()
+                .is_some_and(|output| !output.ordering.is_empty())
+        {
             operators.push("OrderByAggregate");
         }
         if self.output_distinct {

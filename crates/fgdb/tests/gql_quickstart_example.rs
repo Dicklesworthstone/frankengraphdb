@@ -2,9 +2,26 @@ mod quickstart {
     include!("../examples/gql_quickstart.rs");
 }
 
-use fgdb::QueryValue;
+use fgdb::{DatabaseKeys, IdentityPermutation, QueryValue};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId};
+
+/// The demonstration keys `examples/gql_quickstart.rs` opens its database
+/// with; its `keys()` is private to the included module.
+fn keys() -> DatabaseKeys {
+    DatabaseKeys::new(
+        [0x71; 32],
+        DatabaseSecurityNamespaceId([0x72; 32]),
+        [0x73; 32],
+    )
+}
+
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> u64 {
+    IdentityPermutation::vertices(&keys())
+        .permute(counter)
+        .unwrap()
+}
 
 fn int(value: i64) -> QueryValue {
     QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
@@ -21,6 +38,16 @@ fn null() -> QueryValue {
 #[test]
 fn every_quickstart_step_has_exact_expected_rows() {
     let steps = quickstart::run().expect("quickstart must execute without skipped errors");
+    // The first INSERT allocates its vertices in declaration order, so Ada
+    // holds engine vertex counter 1 and Charles counter 2. collect() keeps the
+    // scan order, which is ascending vertex identity.
+    let mut team_one = [(engine_vertex(1), "Ada"), (engine_vertex(2), "Charles")];
+    team_one.sort();
+    let team_one = team_one
+        .iter()
+        .map(|(_, name)| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap()))
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     // Hand-computed from the eight people and five KNOWS/four WORKS_AT edges.
     // Writes have no result columns/rows; subsequent reads verify their effects.
     let expected = vec![
@@ -79,13 +106,7 @@ fn every_quickstart_step_has_exact_expected_rows() {
         ("merge created value", vec![vec![int(1918)]]),
         (
             "collect list",
-            vec![vec![QueryValue::Value(GraphValue::List(
-                vec![
-                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("Ada").unwrap()),
-                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("Charles").unwrap()),
-                ]
-                .into_boxed_slice(),
-            ))]],
+            vec![vec![QueryValue::Value(GraphValue::List(team_one))]],
         ),
         (
             "unwind list",

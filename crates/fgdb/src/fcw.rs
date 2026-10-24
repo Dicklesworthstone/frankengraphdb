@@ -285,6 +285,7 @@ mod tests {
             resource_effect_digest: Digest([0x37; 32]),
             payload_availability_certificate_oid: None,
             flags: 0,
+            identity_counters: None,
         }
     }
 
@@ -411,8 +412,8 @@ mod tests {
         DeltaRow::Property {
             elem,
             property: PropertyKeyId(3),
-            before: Some(CanonicalScalar::Int(10)),
-            after: Some(CanonicalScalar::Int(15)),
+            before: Some(CanonicalScalar::Int(10).into()),
+            after: Some(CanonicalScalar::Int(15).into()),
         }
     }
 

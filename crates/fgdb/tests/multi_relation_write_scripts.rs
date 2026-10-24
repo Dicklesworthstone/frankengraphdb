@@ -13,8 +13,8 @@ use fgdb_gql::{
     GraphWriteProgramPolicy, PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const KNOWS: RelationId = RelationId(1);
@@ -23,7 +23,7 @@ const WORKS_AT: RelationId = RelationId(3);
 const NAME: PropertyKeyId = PropertyKeyId(1);
 const SINCE: PropertyKeyId = PropertyKeyId(2);
 
-type Properties = Vec<(PropertyKeyId, CanonicalScalar)>;
+type Properties = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 type LogicalVertex = (CanonicalScalar, Vec<LabelId>, Properties);
 type LogicalEdge = (RelationId, CanonicalScalar, CanonicalScalar, Properties);
 
@@ -158,6 +158,8 @@ fn graph<V: Vfs + Clone>(db: &Database<V>) -> LogicalGraph {
                 .find(|(key, _)| *key == NAME)
                 .unwrap()
                 .1
+                .as_scalar()
+                .expect("scalar name")
                 .clone();
             (row.vid, name)
         })
@@ -190,8 +192,8 @@ fn text(value: &str) -> CanonicalScalar {
 
 fn properties(name: String, since: u64) -> Properties {
     vec![
-        (NAME, text(&name)),
-        (SINCE, CanonicalScalar::Int(since as i64)),
+        (NAME, text(&name).into()),
+        (SINCE, CanonicalScalar::Int(since as i64).into()),
     ]
 }
 
@@ -303,6 +305,43 @@ fn insert_and_create_multi_relation_statements_match_split_commits_across_seeds(
                     "{verb}, seed {seed}"
                 );
             }
+        });
+        assert!(report.lab_test_passed(), "seed {seed}: {report:?}");
+    }
+}
+
+/// TCK Create3 [8]: a later statement of one script creates a vertex and a
+/// typed edge to it after an earlier statement staged an edge group of
+/// another relation. That vertex is no shared prefix of independent groups,
+/// so only ordered composition gives the edge its endpoint; the script
+/// builds the same graph as one statement does.
+#[test]
+fn a_later_statement_creates_typed_edges_to_its_own_new_vertices() {
+    for seed in 0..2_u64 {
+        let ((), report) = run_async_under_lab(0x9e57_0101 + seed, move |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&contexts.commit(), keys(0x71))
+                .await
+                .unwrap();
+            let mut ids = identity_counter(0);
+            let script = format!(
+                "CREATE (a:Person {{name:'A{seed}', since:{}}}), \
+                 (b:Person {{name:'B{seed}', since:{}}}), (c:City {{name:'C{seed}', since:{}}}), \
+                 (a)-[:KNOWS {{name:'K{seed}', since:{}}}]->(b), \
+                 (a)-[:LIVES_IN {{name:'L{seed}', since:{}}}]->(c); \
+                 MATCH (b:Person) WHERE b.name='B{seed}' \
+                 CREATE (b)-[:WORKS_AT {{name:'W{seed}', since:{}}}]->\
+                 (w:Company {{name:'W{seed}', since:{}}});",
+                10 + seed,
+                20 + seed,
+                30 + seed,
+                2000 + seed,
+                2100 + seed,
+                2200 + seed,
+                40 + seed,
+            );
+            run_scripts(&mut db, &contexts, &[(KNOWS, script)], &mut ids).await;
+            assert_eq!(graph(&db), expected_graph(seed), "seed {seed}");
         });
         assert!(report.lab_test_passed(), "seed {seed}: {report:?}");
     }
@@ -488,13 +527,14 @@ fn check_multi_relation_recovery(direct_insert: bool) {
                 fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
             }
             for rebuilding in [false, true] {
-                let reopened = if rebuilding {
+                let mut reopened = if rebuilding {
                     Database::open_rebuilding(&commit, &path, keys(0x63))
                         .await
                         .unwrap()
                 } else {
                     Database::open(&commit, &path, keys(0x63)).await.unwrap()
                 };
+                reopened.ensure_delta_window(&commit, basis).await.unwrap();
                 assert_eq!(
                     reopened.frontier().unwrap(),
                     CommitSeq(basis.0 + u64::from(committed)),

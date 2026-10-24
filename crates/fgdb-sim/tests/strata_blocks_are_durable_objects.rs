@@ -105,7 +105,7 @@ fn block_bytes() -> (Vec<u8>, ObjectId) {
         .seal(strata_keys)
         .expect("seals")
         .expect("a non-empty block");
-    (sealed.bytes.clone(), sealed.block_id)
+    (sealed.bytes.to_vec(), sealed.block_id)
 }
 
 /// Locate the selected symbol payloads before any mutation and prove that the

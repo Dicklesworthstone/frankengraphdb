@@ -12433,7 +12433,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // post-erratum addition and the historical witness reconstructs without
     // it. Filtered separately from post_erratum_a09_field so that cohort's
     // three-schema membership note stays a true accounting. ACCOUNTING:
-    // exactly 36 transcript lines — the 9 fgdb-d5vo4 two-level root rows
+    // exactly 44 transcript lines — the 8 fgdb-5gzaa three-level root rows
+    // (DeltaPartitionRoot block_index_segments + patch_index_segments, and
+    // the 6 rows of the newly minted DeltaRootIndexSegment: graph/branch/
+    // partition/class/segments/canonical_index_digest), the 9 fgdb-d5vo4
+    // two-level root rows
     // (DeltaPartitionRoot block_segments + patch_segments, and the 7 rows of
     // the newly minted DeltaRootSegment: graph/branch/partition/class/
     // block_refs/vertex_patch_refs/canonical_segment_digest), the fgdb-90hw
@@ -12451,6 +12455,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             "PartitionManifest"
                 | "DeltaPartitionRoot"
                 | "DeltaRootSegment"
+                | "DeltaRootIndexSegment"
                 | "DeltaBlockVersion"
                 | "VertexRowPatch"
                 | "EdgePropertyPatch"
@@ -13054,7 +13059,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // fields of the newly minted DeltaRootSegment — claimed by
         // post_erratum_ge6a_reachability_field (extended to DeltaRootSegment,
         // which had zero rows before). The reconstruction remains 225.
-        pre_erratum.fields.len() + 958,
+        // 958 -> 966 (fgdb-5gzaa): the three-level root's eight rows —
+        // DeltaPartitionRoot block_index_segments/patch_index_segments and the
+        // six fields of the newly minted DeltaRootIndexSegment — claimed by
+        // post_erratum_ge6a_reachability_field (extended to
+        // DeltaRootIndexSegment, which had zero rows before). The
+        // reconstruction remains 225.
+        pre_erratum.fields.len() + 966,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

@@ -323,13 +323,15 @@ fn operand_windows_wide_identities_schema_and_owner_checks_are_not_sampled_from_
         let scalar = db
             .register_standing_rows(&cx, query("MATCH (n) RETURN n.p AS p"), policy())
             .unwrap();
+        // A property column carries the stored-value domain since
+        // fgdb-k3nub: a scalar, or a stored List or Map.
         assert!(matches!(
             db.register_standing_set(&cx, &vertex, &scalar, SetOperation::UnionAll, policy()),
             Err(StandingQueryError::SetSchema(
                 GraphSetBuildError::ColumnType {
                     column: 0,
                     left: GraphSetColumnType::Vertex,
-                    right: GraphSetColumnType::Scalar,
+                    right: GraphSetColumnType::Stored,
                 }
             ))
         ));

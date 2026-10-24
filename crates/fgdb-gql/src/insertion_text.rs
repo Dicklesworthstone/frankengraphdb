@@ -22,13 +22,37 @@ pub struct GraphInsertTextError {
     pub offset: usize,
     pub kind: GraphInsertTextErrorKind,
 }
+impl core::fmt::Display for GraphInsertTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Relation(kind) => kind.fmt(f),
+            Self::Expression(kind) => kind.fmt(f),
+            Self::Build(error) => error.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphInsertTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::Expression(kind) => kind.class(),
+            Self::Build(_) | Self::ReturnBuild(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphInsertTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphInsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph insertion text at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphInsertTextError {}

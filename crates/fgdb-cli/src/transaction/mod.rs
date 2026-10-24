@@ -7,61 +7,141 @@
 //! precommit errors discard both effects and buffered output. Issued identities
 //! are never reclaimed, and ambiguous completion is never reported as abort.
 //!
-//! A --write step may contain one native CREATE/INSERT ... RETURN query,
-//! including MATCH-selected or UNWIND-driven creation. Its rows are frozen at
-//! that step, carry kind=write and statements=1, and share the transaction-wide
-//! row/output allowances with --query results. All RETURN expressions and
-//! output admission precede the sole completion boundary; LIMIT affects rows,
-//! never creations. Other write steps retain their multi-statement programs.
+//! A --write step may contain one native CREATE/INSERT, matched mutation, or
+//! vertex MERGE query with RETURN. Its rows are frozen at that step, carry
+//! kind=write and statements=1, and share the transaction-wide row/output
+//! allowances with --query results. All RETURN expressions and output admission
+//! precede the sole completion boundary; LIMIT affects rows, never effects.
+//! Other write steps retain their multi-statement programs.
+//! A --write with --from-query runs its read-once/bind-all batch in this SAME
+//! transaction. The source sees earlier staged writes. One source statement
+//! and every expanded script statement count toward the existing 64-statement
+//! cap; savepoint rollback never refunds this execution admission.
+//!
+//! --savepoint, --rollback-to and --release steps drive WriteTxn's savepoints.
+//! Names follow its rules: case-sensitive, a reused name shadows the older one
+//! until released, and an unknown name is refused before any step runs.
+//! Rolling back to a savepoint discards the effects of later steps and, like
+//! --rollback, the rows and records they buffered; their reads remain conflict
+//! witnesses and identities they issued are not reclaimed.
 
+use super::query_write::{self, PreparedQueryWrite, QueryWriteOptions};
+use super::write_returning::{self, Returning};
 use super::{
-    Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted, value_cell,
+    Failure, Options, cell, execution_failure, human_value, parameter, quoted, refusal, value_cell,
 };
 use asupersync::fs::Vfs;
 use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::insertion::GraphInsertPolicy;
-use fgdb_gql::{
-    BoundNativeGraphWrite, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
-    PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-};
+use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GraphWriteProgramPolicy};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
 
 pub(super) const MAX_STATEMENTS: usize = 64;
 const MAX_INPUT_BYTES: usize = 1_048_576;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum StepKind {
+    Query,
+    Write,
+    Savepoint,
+    RollbackTo,
+    Release,
+}
+impl StepKind {
+    /// The step flag this kind is spelled with, if any.
+    pub(super) fn of_flag(flag: &str) -> Option<Self> {
+        Some(match flag {
+            "--query" => Self::Query,
+            "--write" => Self::Write,
+            "--savepoint" => Self::Savepoint,
+            "--rollback-to" => Self::RollbackTo,
+            "--release" => Self::Release,
+            _ => return None,
+        })
+    }
+}
+
 pub(super) struct Step {
-    write: bool,
+    kind: StepKind,
+    /// GQL text for a query or write; the savepoint name otherwise.
     text: String,
     pub(super) raw_params: Vec<(String, String)>,
+    query_write: QueryWriteOptions,
 }
 impl Step {
-    pub(super) fn new(write: bool, text: String) -> Self {
+    pub(super) fn new(kind: StepKind, text: String) -> Self {
         Self {
-            write,
+            kind,
             text,
             raw_params: Vec::new(),
+            query_write: QueryWriteOptions::default(),
         }
+    }
+    /// Only GQL steps bind parameters.
+    pub(super) fn takes_params(&self) -> bool {
+        SavepointOp::of(self.kind).is_none()
+    }
+
+    pub(super) fn set_query_write_flag(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
+        if self.kind != StepKind::Write {
+            return Err(Failure::usage(
+                "transaction query-fed flags must follow --write",
+            ));
+        }
+        self.query_write.set(flag, raw)
     }
 }
 
 pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
     if steps.is_empty() || steps.len() > MAX_STATEMENTS {
         return Err(Failure::usage(
-            "transaction requires 1..=64 --write/--query steps",
+            "transaction requires 1..=64 --write/--query/savepoint steps",
         ));
     }
+    // Replay WriteTxn's savepoint stack over the names alone, so an unknown
+    // name is a usage error before the transaction begins rather than a
+    // refusal after earlier steps have staged effects.
+    let mut live: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
     for step in steps {
+        step.query_write.validate(false)?;
+        if step.query_write.enabled() && step.kind != StepKind::Write {
+            return Err(Failure::usage(
+                "transaction query-fed flags must follow --write",
+            ));
+        }
         if step.text.trim().is_empty() {
             return Err(Failure::usage("transaction step must not be empty"));
         }
-        for size in std::iter::once(step.text.len()).chain(
-            step.raw_params
-                .iter()
-                .flat_map(|(name, value)| [name.len(), value.len()]),
-        ) {
+        if !step.takes_params() && !step.raw_params.is_empty() {
+            return Err(Failure::usage(
+                "transaction --param must follow --query or --write",
+            ));
+        }
+        match step.kind {
+            StepKind::Savepoint => live.push(&step.text),
+            StepKind::RollbackTo | StepKind::Release => {
+                let index = live
+                    .iter()
+                    .rposition(|name| *name == step.text)
+                    .ok_or_else(|| Failure::usage("transaction names an unknown savepoint"))?;
+                live.truncate(if step.kind == StepKind::RollbackTo {
+                    index + 1
+                } else {
+                    index
+                });
+            }
+            StepKind::Query | StepKind::Write => {}
+        }
+        for size in [step.text.len(), step.query_write.input_bytes()]
+            .into_iter()
+            .chain(
+                step.raw_params
+                    .iter()
+                    .flat_map(|(name, value)| [name.len(), value.len()]),
+            )
+        {
             bytes = bytes
                 .checked_add(size)
                 .ok_or_else(|| Failure::usage("transaction input limit exceeded"))?;
@@ -89,7 +169,33 @@ impl Default for Limits {
 enum PreparedStep {
     Read(Box<PreparedNativeRead>, GqlParameters),
     Write(Box<BoundNativeGraphWrite>),
-    Returning(Box<PreparedGraphInsertQuery>),
+    QueryWrite(Box<PreparedQueryWrite>),
+    Returning(Returning),
+    /// A --savepoint, --rollback-to or --release step and its name.
+    Savepoint(SavepointOp, String),
+}
+#[derive(Clone, Copy)]
+enum SavepointOp {
+    Save,
+    RollbackTo,
+    Release,
+}
+impl SavepointOp {
+    fn of(kind: StepKind) -> Option<Self> {
+        match kind {
+            StepKind::Savepoint => Some(Self::Save),
+            StepKind::RollbackTo => Some(Self::RollbackTo),
+            StepKind::Release => Some(Self::Release),
+            StepKind::Query | StepKind::Write => None,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Save => "savepoint",
+            Self::RollbackTo => "rollback_to",
+            Self::Release => "release",
+        }
+    }
 }
 fn prepare(
     options: &Options,
@@ -102,40 +208,54 @@ fn prepare(
     for (index, step) in options.steps.iter().enumerate() {
         cx.checkpoint().map_err(Failure::query)?;
         let prepared_step = (|| {
+            if let Some(op) = SavepointOp::of(step.kind) {
+                // Not a native statement: it counts toward the step cap only.
+                return Ok(PreparedStep::Savepoint(op, step.text.clone()));
+            }
+            refusal::unsupported_construct(&step.text)?;
             let mut params = GqlParameters::new();
             for (name, raw) in &step.raw_params {
                 params
                     .insert(name, parameter(raw, resolver)?)
                     .map_err(Failure::query)?;
             }
-            if step.write {
-                // Native token framing, never substring matching or a failed
-                // read retried as a write. Each step keeps its own argument map.
-                if PreparedGraphInsertQueryText::has_return_clause(&step.text)
-                    .map_err(Failure::query)?
+            if step.kind == StepKind::Write {
+                if let Some(query) =
+                    query_write::prepare_statement(&step.text, &params, &step.query_write, options)?
                 {
-                    let declarations: Vec<_> = params.parameter_types().collect();
-                    let query = PreparedGraphInsertQueryText::prepare_with_parameter_types(
-                        &step.text,
-                        options.coordinate,
-                        &declarations,
-                        |kind, name| options.resolve(kind, name),
-                    )
-                    .map_err(Failure::query)?
-                    .bind_parameters(&params)
-                    .map_err(Failure::query)?;
+                    // Reserve this source and all later fixed statements now.
+                    // The actual expansion is admitted at execution, before
+                    // source rows bind or any dependent script can stage.
                     statements = statements
                         .checked_add(1)
                         .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
-                    return Ok(PreparedStep::Returning(Box::new(query)));
+                    return Ok(PreparedStep::QueryWrite(Box::new(query)));
                 }
-                let bound = BoundNativeGraphWrite::bind(
+                // Native token framing, never substring matching or a failed
+                // read retried as a write. Each step keeps its own argument map.
+                if let Some(query) =
+                    write_returning::prepare_statement(&step.text, &params, options)?
+                {
+                    statements = statements
+                        .checked_add(1)
+                        .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
+                    return Ok(PreparedStep::Returning(query));
+                }
+                let bound = BoundNativeGraphWrite::bind_with_resolver(
                     &step.text,
                     &params,
                     options.coordinate,
-                    |kind, name| options.resolve(kind, name),
+                    options,
                 )
-                .map_err(Failure::query)?;
+                .map_err(|error| {
+                    // A read given to --write would otherwise surface only as
+                    // a write-grammar error at its first read keyword.
+                    if PreparedNativeRead::prepare(&step.text, &params, options).is_ok() {
+                        Failure::usage("a read statement: pass it with --query, not --write")
+                    } else {
+                        Failure::statement(error)
+                    }
+                })?;
                 // Count expanded UNWIND statements, not merely the one textual
                 // clause, against this invocation's existing 64-statement cap.
                 statements = statements
@@ -143,8 +263,26 @@ fn prepare(
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
                 Ok(PreparedStep::Write(Box::new(bound)))
             } else {
-                let query = PreparedNativeRead::prepare(&step.text, &params, options)
-                    .map_err(execution_failure)?;
+                let query =
+                    PreparedNativeRead::prepare(&step.text, &params, options).map_err(|error| {
+                        // Likewise a write given to --query: preparing it as a
+                        // write only classifies the text; nothing executes.
+                        let write = matches!(
+                            write_returning::prepare_statement(&step.text, &params, options),
+                            Ok(Some(_))
+                        ) || BoundNativeGraphWrite::bind_with_resolver(
+                            &step.text,
+                            &params,
+                            options.coordinate,
+                            options,
+                        )
+                        .is_ok();
+                        if write {
+                            Failure::usage("a write statement: pass it with --write, not --query")
+                        } else {
+                            execution_failure(error)
+                        }
+                    })?;
                 if matches!(
                     query.facade_class(),
                     NativeReadClass::TemporalPattern
@@ -170,11 +308,10 @@ fn prepare(
     Ok((prepared, statements))
 }
 fn at_step(index: usize, error: Failure) -> Failure {
-    Failure::new(
-        error.code,
-        error.class,
-        format!("transaction step {}: {}", index + 1, error.message),
-    )
+    Failure {
+        message: format!("transaction step {}: {}", index + 1, error.message),
+        ..error
+    }
 }
 
 struct BufferedOutput {
@@ -234,7 +371,7 @@ fn buffer_rows(
 }
 
 // The two row-producing step types share framing and scalar encoding, not
-// storage execution. Insertion rows are borrowed during encoding: they are
+// storage execution. Returning rows are borrowed during encoding: they are
 // never cloned into another complete QueryResult just to drive transport.
 fn buffer_row_header(
     output: &mut BufferedOutput,
@@ -290,7 +427,7 @@ fn buffer_row(
     }
 }
 
-fn buffer_insert_rows(
+fn buffer_returning_rows(
     output: &mut BufferedOutput,
     columns: &[String],
     rows: Vec<GraphValueRow>,
@@ -353,7 +490,9 @@ async fn run_with_limits<V: Vfs + Clone>(
     crash: Option<fgdb::CrashPoint>,
 ) -> Result<(), Failure> {
     let cx = contexts.query();
-    let (steps, statements) = prepare(options, resolver, &cx)?;
+    // Fixed statements and one source per feed were reserved by preparation.
+    // Expanded writes are added cumulatively, never refunded by savepoints.
+    let (steps, mut statements) = prepare(options, resolver, &cx)?;
     let mut txn = db.begin(&contexts.txn()).map_err(execution_failure)?;
     let basis = txn.basis().0;
     let mut output = BufferedOutput {
@@ -361,6 +500,9 @@ async fn run_with_limits<V: Vfs + Clone>(
         limit: limits.output_bytes,
     };
     let mut count = 0u64;
+    // Parallel to WriteTxn's savepoint stack: each live savepoint's name, and
+    // the buffered output length and row count just after its own record.
+    let mut marks: Vec<(String, usize, u64)> = Vec::new();
     let staged = (|| {
         for (index, step) in steps.iter().enumerate() {
             let result = (|| {
@@ -371,12 +513,10 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .rows
                             .checked_sub(count)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
-                        // Source/work/scratch bounds are per native operation;
-                        // the delivered row allowance spans the entire transaction.
-                        let allowance = GqlQueryPolicy {
-                            rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
-                            ..policy()
-                        };
+                        // Preserve the configured source/work/scratch bounds.
+                        // Both the per-step row limit and the remaining
+                        // transaction-wide delivery allowance must hold.
+                        let allowance = options.budget.policy_with_result_cap(remaining);
                         let rows = query
                             .execute_in_transaction(&txn, db, &cx, params, allowance)
                             .map_err(execution_failure)?;
@@ -391,21 +531,12 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .rows
                             .checked_sub(count)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
-                        // Only final RETURN rows consume this allowance; source
-                        // occurrences/creations retain native insertion limits.
-                        let allowance = GqlQueryPolicy {
-                            rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
-                            ..policy()
-                        };
-                        let (_, rows) = txn
-                            .execute_graph_insert_query_engine_governed(
-                                db,
-                                &cx,
-                                query,
-                                GraphInsertPolicy::new(allowance, 100_000, 100_000),
-                            )
-                            .map_err(execution_failure)?;
-                        let added = buffer_insert_rows(
+                        // Only final RETURN rows consume delivery capacity.
+                        // Execution limits remain caller-selected; effect and
+                        // creation limits remain the native write limits.
+                        let allowance = options.budget.policy_with_result_cap(remaining);
+                        let rows = query.execute_in_transaction(&mut txn, db, &cx, allowance)?;
+                        let added = buffer_returning_rows(
                             &mut output,
                             query.columns(),
                             rows.value,
@@ -419,13 +550,50 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .filter(|n| *n <= limits.rows)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
                     }
+                    PreparedStep::QueryWrite(query) => {
+                        let remaining =
+                            MAX_STATEMENTS.checked_sub(statements).ok_or_else(|| {
+                                Failure::query("transaction exceeds 64 native statements")
+                            })?;
+                        let execution =
+                            query.execute_in_transaction(&mut txn, db, &cx, remaining)?;
+                        let added = execution.stats.completed_statements;
+                        statements = statements
+                            .checked_add(added)
+                            .filter(|total| *total <= MAX_STATEMENTS)
+                            .ok_or_else(|| {
+                                Failure::query("transaction exceeds 64 native statements")
+                            })?;
+                        // The source was reserved during preparation. Report
+                        // it with this step's expansion, not as delivered rows.
+                        // Savepoint rollback removes this record, but neither
+                        // it nor --rollback refunds the statement allowance.
+                        if robot {
+                            output.line(&format!(
+                                r#"{{"v":1,"event":"statement","index":{},"kind":"write","view":"transaction_local","basis":{basis},"statements":{}}}"#,
+                                index + 1, added + 1,
+                            ))?;
+                        } else {
+                            output.line(&format!(
+                                "statement {}: {} source row(s), {} staged write statement(s)",
+                                index + 1,
+                                execution.input_rows,
+                                added,
+                            ))?;
+                        }
+                    }
                     PreparedStep::Write(bound) => {
                         let stats = txn
                             .execute_graph_write_program_engine_governed(
                                 db,
                                 &cx,
                                 bound.program(),
-                                GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+                                GraphWriteProgramPolicy::new(
+                                    options.budget.policy(),
+                                    100_000,
+                                    100_000,
+                                    100_000,
+                                ),
                             )
                             .map_err(|error| execution_failure(bound.execution_error(error)))?;
                         if robot {
@@ -439,6 +607,56 @@ async fn run_with_limits<V: Vfs + Clone>(
                                 index + 1,
                                 stats.completed_statements
                             ))?;
+                        }
+                    }
+                    PreparedStep::Savepoint(op, name) => {
+                        let live = |marks: &[(String, usize, u64)]| {
+                            marks
+                                .iter()
+                                .rposition(|(saved, ..)| saved == name)
+                                .ok_or_else(|| {
+                                    Failure::usage("transaction names an unknown savepoint")
+                                })
+                        };
+                        match op {
+                            SavepointOp::Save => {
+                                txn.savepoint(db, name).map_err(execution_failure)?;
+                            }
+                            SavepointOp::RollbackTo => {
+                                let at = live(&marks)?;
+                                txn.rollback_to_savepoint(db, name)
+                                    .map_err(execution_failure)?;
+                                // Later steps' rows and records are previews of
+                                // discarded effects, so they go too.
+                                output.bytes.truncate(marks[at].1);
+                                count = marks[at].2;
+                                marks.truncate(at + 1);
+                            }
+                            SavepointOp::Release => {
+                                let at = live(&marks)?;
+                                txn.release_savepoint(db, name).map_err(execution_failure)?;
+                                marks.truncate(at);
+                            }
+                        }
+                        if robot {
+                            output.line(&format!(
+                                r#"{{"v":1,"event":"statement","index":{},"kind":"{}","view":"transaction_local","basis":{basis},"name":{}}}"#,
+                                index + 1,
+                                op.label(),
+                                quoted(name),
+                            ))?;
+                        } else {
+                            output.line(&format!(
+                                "statement {}: {} {}",
+                                index + 1,
+                                op.label(),
+                                name.chars()
+                                    .flat_map(char::escape_default)
+                                    .collect::<String>()
+                            ))?;
+                        }
+                        if matches!(op, SavepointOp::Save) {
+                            marks.push((name.clone(), output.bytes.len(), count));
                         }
                     }
                 }
@@ -502,6 +720,8 @@ async fn run_with_limits<V: Vfs + Clone>(
         })
 }
 
+#[cfg(test)]
+mod query_write_tests;
 #[cfg(test)]
 mod returning_tests;
 #[cfg(test)]

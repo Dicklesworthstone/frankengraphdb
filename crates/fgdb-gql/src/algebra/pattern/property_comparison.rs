@@ -29,7 +29,7 @@ impl GraphPatternBuilder {
     pub fn trail_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -48,8 +48,9 @@ impl GraphPatternBuilder {
     /// product: ordinary connectivity and identity constraints still apply.
     ///
     /// The comparison executes inside its scope before OPTIONAL establishes a
-    /// match and before an EXISTS witness or aggregate input is accepted. Null,
-    /// missing and unlike scalar kinds reject every ordinary comparison. Use
+    /// match and before an EXISTS witness or aggregate input is accepted. Null
+    /// and missing values reject every ordinary comparison; values of
+    /// different domains are unequal, so only `<>` accepts them. Use
     /// prepare_values (vertex columns are allowed) or its scoped variants;
     /// predicate-only identity execution cannot supply these property reads.
     pub fn compare_properties(
@@ -108,6 +109,7 @@ impl GraphPatternBuilder {
         if self.property_comparisons.is_empty()
             && self.path_captures.is_empty()
             && self.path_predicates.is_empty()
+            && !self.constrains_edges()
             && !self
                 .edges
                 .iter()

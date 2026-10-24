@@ -2,13 +2,17 @@
 //! constructed, including for a hub row. The decoded implementation remains
 //! an independent differential oracle, not a hidden fallback.
 
-use crate::execute::{KernelOutput, KernelValues};
+use crate::execute::{
+    KernelOutput, KernelValues, hash_bfs_decision_card, hash_component_decision_card,
+    hash_result_value,
+};
 use crate::sealed_control::Control;
 use crate::{
     AdapterPath, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
     FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxOutput, FnxParameters, FnxResult,
-    FnxValue, PageRankOptions, SealedGraphView, SealedNeighborCursor, SealedProjectionError,
+    FnxValue, FoundationAlgorithm, PageRankOptions, SealedGraphView, SealedNeighborCursor,
+    SealedProjectionError,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::SealedError;
@@ -23,6 +27,12 @@ mod clustering;
 mod components;
 #[path = "sealed_cooperative.rs"]
 mod cooperative;
+#[path = "sealed_core.rs"]
+mod core_number;
+#[path = "sealed_distance.rs"]
+mod distance;
+#[path = "sealed_eigenvector.rs"]
+mod eigenvector;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 
@@ -237,6 +247,101 @@ fn directional_pass_work(n: usize, retained: usize, direction: Directedness) -> 
     }
 }
 
+// Sealing already authenticated and reduced every selected row. Degree
+// centrality can consume that immutable directory without opening incidences.
+// A simple undirected non-loop contributes two adjacency entries, and a loop
+// contributes one. This exact parity/count law detects every retained loop
+// without multiplying a potentially full-width count.
+fn require_loop_free_degree(edges: usize, adjacency_entries: usize) -> Result<()> {
+    if !adjacency_entries.is_multiple_of(2) || adjacency_entries / 2 != edges {
+        return Err(ExecutionError::SelfLoopRefused.into());
+    }
+    Ok(())
+}
+
+fn execution_pass_work(call: &FnxCallSpec, graph: &SealedGraphView) -> Result<usize> {
+    if matches!(
+        call.algorithm(),
+        FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+    ) {
+        // One admitted degree per vertex, initialization and completion.
+        add(graph.node_count(), 2)
+    } else {
+        directional_pass_work(
+            graph.node_count(),
+            graph.scan_incidence_bound(),
+            graph.spec().directedness,
+        )
+    }
+}
+
+// Synchronous and cooperative drivers share the normalization, owned output
+// and witness. They differ only in how they checkpoint/yield between degrees.
+struct DegreeCentrality {
+    values: Vec<f64>,
+    nodes: usize,
+    reciprocal: f64,
+}
+impl DegreeCentrality {
+    fn new(nodes: usize) -> Result<Self> {
+        Ok(Self {
+            values: reserve(nodes)?,
+            nodes,
+            // The pinned fnx kernel multiplies by this reciprocal. Per-row
+            // division can produce different score bits.
+            reciprocal: if nodes > 1 {
+                1.0 / (nodes - 1) as f64
+            } else {
+                1.0
+            },
+        })
+    }
+
+    fn push(&mut self, degree: Option<usize>) -> Result<()> {
+        let degree = degree.ok_or(ExecutionError::InvalidUpstreamResult)?;
+        if self.values.len() == self.nodes || degree >= self.nodes {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        self.values.push(if self.nodes == 1 {
+            1.0
+        } else {
+            degree as f64 * self.reciprocal
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> Result<KernelOutput> {
+        if self.values.len() != self.nodes {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        Ok(KernelOutput {
+            values: KernelValues::Scores(self.values),
+            row_count: self.nodes,
+            witness: ComplexityWitness {
+                algorithm: "degree_centrality".to_owned(),
+                complexity_claim: "O(|V|) admitted degree-directory reads".to_owned(),
+                nodes_touched: self.nodes,
+                edges_scanned: 0,
+                queue_peak: 0,
+            },
+        })
+    }
+}
+
+fn degree_centrality(
+    graph: &impl Rows,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
+    checkpoint()?;
+    let mut output = DegreeCentrality::new(graph.node_count())?;
+    for source in 0..graph.node_count() {
+        checkpoint()?;
+        output.push(graph.degree(source))?;
+    }
+    checkpoint()?;
+    output.finish()
+}
+
 fn pagerank(
     graph: &impl Rows,
     options: PageRankOptions,
@@ -244,7 +349,7 @@ fn pagerank(
 ) -> Result<KernelOutput> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
-        algorithm: "pagerank_power_iteration".to_owned(),
+        algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -286,7 +391,7 @@ fn pagerank(
         next.push(0.0);
     }
     let base = (1.0 - options.alpha()) / population;
-    for _ in 0..options.max_iter() {
+    for iteration in 0..options.max_iter() {
         let mut dangling_mass = 0.0;
         for source in 0..n {
             checkpoint()?;
@@ -332,7 +437,7 @@ fn pagerank(
         }
         std::mem::swap(&mut ranks, &mut next);
         witness.nodes_touched = add(witness.nodes_touched, n)?;
-        if delta < population * options.tolerance() {
+        if options.iteration_complete(iteration + 1, delta, population) {
             return Ok(KernelOutput {
                 values: KernelValues::Scores(ranks),
                 row_count: n,
@@ -434,6 +539,13 @@ impl FnxCallSpec {
                 | FnxAlgorithm::StronglyConnectedComponents
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::Foundation(
+                    FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::ClosenessCentrality
+                        | FoundationAlgorithm::HarmonicCentrality
+                        | FoundationAlgorithm::CoreNumber
+                        | FoundationAlgorithm::EigenvectorCentrality
+                )
         )
     }
 
@@ -457,8 +569,13 @@ impl FnxCallSpec {
     }
 
     /// Execute registered ranks, distances, components and local triangles or
-    /// clustering directly from authenticated compressed rows. Every graph pass
-    /// and row pull is fallible; component labels and sources are stable VIds.
+    /// clustering, centralities and core numbers from authenticated compressed rows.
+    /// Degree centrality uses the admitted degree directory without opening
+    /// rows; core peeling opens each row once with O(|V|) integer workspace.
+    /// Eigenvector iteration keeps two score vectors and canonical reductions.
+    /// Closeness and harmonic centrality reuse one FIFO and distance vector
+    /// for all sources; their retained-history work bound applies to every pass.
+    /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
     pub fn execute_sealed(
@@ -507,9 +624,37 @@ impl FnxCallSpec {
         ) {
             return clustering::execute(self, cx, graph, limits, memory, &admission);
         }
-        let pass =
-            directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
+        ) {
+            return core_number::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
+        ) {
+            return eigenvector::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(
+                FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality
+            )
+        ) {
+            return distance::execute(self, cx, graph, limits, memory, &admission);
+        }
+        let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+            FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                admission.rows(n)?;
+                (
+                    "fgdb-prism/sealed-degree-directory-v1",
+                    pass,
+                    mul(n, size_of::<f64>())?,
+                    None,
+                )
+            }
             FnxAlgorithm::PageRank(options) => {
                 admit("iterations", options.max_iter(), limits.max_iterations)?;
                 admission.rows(n)?;
@@ -569,9 +714,18 @@ impl FnxCallSpec {
             workspace,
             memory.max_kernel_workspace_bytes,
         )?;
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+        ) {
+            require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+        }
         let rows = SealedRows { cx, graph };
         let mut control = || checkpoint(cx);
         let output = match self.algorithm() {
+            FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                degree_centrality(&rows, &mut control)?
+            }
             FnxAlgorithm::PageRank(options) => pagerank(&rows, options, &mut control)?,
             FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => bfs(
                 &rows,
@@ -735,26 +889,10 @@ impl EncodedRows {
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
-            match value {
-                FnxValue::Vertex(vertex) => {
-                    result_hash.update(&[0]);
-                    result_hash.update(&vertex.0.to_le_bytes());
-                }
-                FnxValue::Score(score) => {
-                    result_hash.update(&[1]);
-                    result_hash.update(&score.to_bits().to_le_bytes());
-                }
-                FnxValue::Integer(value) => {
-                    result_hash.update(&[2]);
-                    result_hash.update(&value.to_le_bytes());
-                }
-                FnxValue::Float(value) => {
-                    result_hash.update(&[3]);
-                    result_hash.update(&value.to_bits().to_le_bytes());
-                }
-            }
+            hash_result_value(result_hash, value);
             row.push(value);
         }
         self.rows.push(row);
@@ -797,7 +935,9 @@ fn finish_encoded(
     if graph.spec().directedness != Directedness::Directed
         && !matches!(
             call.algorithm(),
-            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
+            FnxAlgorithm::Triangles
+                | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
         )
     {
         witness
@@ -805,7 +945,7 @@ fn finish_encoded(
             .push_str("; plus O(p * H * log(1+H)) incoming locator work, p = graph passes");
     }
     let mut hash = Hasher::new();
-    hash.update(b"fgdb:prism:call-certificate:v3");
+    hash.update(b"fgdb:prism:call-certificate:v5");
     hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
     hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
     hash_text(&mut hash, kernel);
@@ -829,6 +969,8 @@ fn finish_encoded(
     }
     hash_text(&mut hash, &witness.algorithm);
     hash_text(&mut hash, &witness.complexity_claim);
+    hash_bfs_decision_card(&mut hash, None, checkpoint)?;
+    hash_component_decision_card(&mut hash, None, checkpoint)?;
     checkpoint()?;
     Ok(FnxResult {
         columns,
@@ -849,6 +991,8 @@ fn finish_encoded(
             input_edges: graph.input_edge_count(),
             estimated_work,
             kernel_workspace_bytes: workspace,
+            bfs_decision_card: None,
+            component_decision_card: None,
             witness,
             digest: hash.finalize(),
         },
@@ -864,8 +1008,13 @@ fn source_digest() -> Digest {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
         for source in [
+            include_str!("execute.rs"),
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
+            include_str!("sealed_core.rs"),
+            include_str!("sealed_distance.rs"),
+            include_str!("sealed_eigenvector.rs"),
+            include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
@@ -981,6 +1130,148 @@ mod tests {
         .unwrap()
     }
 
+    // The degree driver may read admitted metadata but cannot decode a row.
+    struct DegreeRows<'a>(&'a SnapshotGraphView);
+    impl Rows for DegreeRows<'_> {
+        type Cursor<'a>
+            = DecodedRow<'a>
+        where
+            Self: 'a;
+        fn node_count(&self) -> usize {
+            self.0.node_count()
+        }
+        fn degree(&self, source: usize) -> Option<usize> {
+            self.0.neighbors_indices(source).map(<[usize]>::len)
+        }
+        fn open(&self, _: usize) -> Result<Self::Cursor<'_>> {
+            panic!("degree centrality must not open an incidence cursor")
+        }
+    }
+
+    #[test]
+    fn degree_directory_matches_pinned_fnx_bits_on_every_small_simple_graph() {
+        for n in 0..=5 {
+            let vertices: Vec<_> = (0..n).map(|i| VId(u128::MAX - i as u128)).collect();
+            let pairs: Vec<_> = (0..n)
+                .flat_map(|source| ((source + 1)..n).map(move |target| (source, target)))
+                .collect();
+            for mask in 0usize..(1 << pairs.len()) {
+                let edges: Vec<_> = pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1usize << *bit) != 0)
+                    .map(|(bit, &(source, target))| ProjectionEdge {
+                        eid: EId(bit as u128),
+                        source: vertices[source],
+                        target: vertices[target],
+                        weight: 1.0,
+                    })
+                    .collect();
+                let graph = SnapshotGraphView::build(
+                    SnapshotBinding {
+                        root: ObjectId([0x61; 32]),
+                        as_of: CommitSeq(2),
+                    },
+                    &vertices,
+                    &edges,
+                    ProjectionSpec {
+                        directedness: Directedness::Undirected,
+                        parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                        self_loops: SelfLoopPolicy::Keep,
+                    },
+                    ProjectionLimits {
+                        max_vertices: 5,
+                        max_input_edges: 10,
+                        max_adjacency_entries: 20,
+                        max_workspace_bytes: 1 << 20,
+                    },
+                )
+                .unwrap();
+                let mut oracle = fnx_classes::Graph::strict();
+                for index in 0..n {
+                    oracle.add_node(graph.get_node_name(index).unwrap());
+                }
+                for edge in &edges {
+                    let source = graph.vertex_ordinal(edge.source).unwrap();
+                    let target = graph.vertex_ordinal(edge.target).unwrap();
+                    oracle
+                        .add_edge(
+                            graph.get_node_name(source).unwrap(),
+                            graph.get_node_name(target).unwrap(),
+                        )
+                        .unwrap();
+                }
+                let expected = fnx_algorithms::degree_centrality(&oracle);
+                let output = degree_centrality(&DegreeRows(&graph), &mut || Ok(())).unwrap();
+                let KernelValues::Scores(scores) = output.values else {
+                    panic!("degree scores");
+                };
+                assert_eq!(scores.len(), expected.scores.len());
+                for entry in expected.scores {
+                    let index = graph.get_node_index(&entry.node).unwrap();
+                    assert_eq!(
+                        scores[index].to_bits(),
+                        entry.score.to_bits(),
+                        "n={n}, mask={mask}, vertex={index}"
+                    );
+                }
+                assert_eq!(output.row_count, n);
+                assert_eq!(output.witness.nodes_touched, n);
+                assert_eq!(output.witness.edges_scanned, 0);
+                assert_eq!(output.witness.queue_peak, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn degree_loop_guard_uses_exact_reduced_counts_without_overflow() {
+        for nonloops in 0..10 {
+            for loops in 0..10 {
+                let result = require_loop_free_degree(nonloops + loops, 2 * nonloops + loops);
+                if loops == 0 {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::Execution(ExecutionError::SelfLoopRefused))
+                    ));
+                }
+            }
+        }
+        require_loop_free_degree(usize::MAX / 2, usize::MAX - 1).unwrap();
+        assert!(matches!(
+            require_loop_free_degree(usize::MAX, usize::MAX),
+            Err(Error::Execution(ExecutionError::SelfLoopRefused))
+        ));
+    }
+
+    #[test]
+    fn every_degree_directory_checkpoint_refuses_without_returning_scores() {
+        let graph = projection(0);
+        let mut total = 0;
+        degree_centrality(&DegreeRows(&graph), &mut || {
+            total += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(total, graph.node_count() + 2);
+        for stop in 1..=total {
+            let mut seen = 0;
+            let result = degree_centrality(&DegreeRows(&graph), &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(Error::Cancelled(
+                        std::io::Error::other("degree stop").into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(Error::Cancelled(_))));
+            assert_eq!(seen, stop);
+        }
+    }
+
     #[test]
     fn cursor_pagerank_is_bit_identical_to_pinned_fnx_on_every_three_node_topology() {
         for mask in 0..512 {
@@ -1009,6 +1300,47 @@ mod tests {
                 }
                 assert_eq!(output.witness.nodes_touched, oracle.witness.nodes_touched);
                 assert_eq!(output.witness.edges_scanned, oracle.witness.edges_scanned);
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_fixed_iteration_pagerank_matches_decoded_bits_on_every_three_node_topology() {
+        for mask in 0..512 {
+            let graph = projection(mask);
+            for weighted in [false, true] {
+                for iterations in [1, 2, 5] {
+                    let options =
+                        PageRankOptions::fixed_iterations(0.85, iterations, weighted).unwrap();
+                    let decoded = FnxCallSpec::pagerank(options)
+                        .execute(&graph, limits(), || Ok::<(), std::convert::Infallible>(()))
+                        .unwrap();
+                    let output = pagerank(&DecodedRows(&graph), options, &mut || Ok(())).unwrap();
+                    let KernelValues::Scores(scores) = output.values else {
+                        panic!("scores");
+                    };
+                    assert_eq!(scores.len(), decoded.rows.len());
+                    for (&actual, row) in scores.iter().zip(&decoded.rows) {
+                        let crate::FnxValue::Score(expected) = row[1] else {
+                            panic!("decoded score");
+                        };
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "mask={mask} weighted={weighted} iterations={iterations}"
+                        );
+                    }
+                    assert_eq!(output.witness.algorithm, "pagerank_fixed_iterations");
+                    assert_eq!(
+                        output.witness.nodes_touched,
+                        decoded.certificate.witness.nodes_touched
+                    );
+                    assert_eq!(
+                        output.witness.edges_scanned,
+                        decoded.certificate.witness.edges_scanned
+                    );
+                    assert_eq!(output.witness.nodes_touched, 3 * iterations);
+                }
             }
         }
     }
@@ -1259,6 +1591,21 @@ mod tests {
             for call in [
                 FnxCallSpec::triangles(),
                 FnxCallSpec::clustering_coefficient(),
+                FnxCallSpec::bind(
+                    "CALL fnx.degree_centrality() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.core_number() YIELD vertex,core",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.eigenvector_centrality() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
             ] {
                 assert!(call.supports_sealed_execution());
                 assert_eq!(

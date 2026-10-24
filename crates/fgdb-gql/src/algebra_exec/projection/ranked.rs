@@ -90,7 +90,7 @@ fn compare_rows(left: &dyn RankedKey, right: &dyn RankedKey) -> Ordering {
         };
         // NULL placement does not reverse when direction reverses.
         let order = null_order.unwrap_or_else(|| {
-            let order = a.cmp(&b);
+            let order = a.cmp_orderability(b);
             if column.descending {
                 order.reverse()
             } else {
@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use crate::algebra::{GlaOperator, GraphColumn, GraphPatternBuilder};
     use fgdb_delta_types::PropertyKeyId;
-    use fgdb_types::VId;
+    use fgdb_types::{CanonicalPropertyValue, VId};
 
     fn fixture() -> Vec<GraphValueRow> {
         let mut b = GraphPatternBuilder::new();
@@ -264,12 +264,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        let scores = [
-            CanonicalScalar::Int(3),
-            CanonicalScalar::Int(1),
-            CanonicalScalar::Int(3),
-            CanonicalScalar::Null,
-            CanonicalScalar::Int(2),
+        let scores: [CanonicalPropertyValue; 5] = [
+            CanonicalScalar::Int(3).into(),
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(3).into(),
+            CanonicalScalar::Null.into(),
+            CanonicalScalar::Int(2).into(),
         ];
         p.plan()
             .execute_with_properties_control(

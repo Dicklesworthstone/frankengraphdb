@@ -67,8 +67,196 @@ impl WriteTxn {
     }
 }
 
+impl WriteTxn {
+    /// `MERGE ... RETURN ...` as one atomic operation: unique MERGE, its
+    /// selected ON clause and trailing SET, then the one RETURN row. Its
+    /// property reads are point reads of the chosen vertex after every
+    /// clause, recorded as read witnesses like the clauses' own reads and
+    /// charged to the same evaluator allowance. A RETURN failure restores
+    /// the workspace prefix, so a refused statement stages nothing.
+    /// Complete property maps borrow the effective row and retain a full
+    /// element witness, covering additions of keys that were absent at read.
+    /// Only final projected rows consume the result-row allowance; LIMIT 0
+    /// still selects, creates or updates the vertex under the source limits.
+    pub fn execute_graph_vertex_upsert_query_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphVertexUpsertQuery,
+        policy: fgdb_gql::GraphVertexUpsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> UpsertQueryResult<A> {
+        let workspace = MutationProgramWorkspace::new(self);
+        let (stats, outcome) = workspace.txn.execute_graph_vertex_upsert_governed(
+            database,
+            cx,
+            query.upsert(),
+            vertex_upsert_query_selection_policy(policy),
+            allocate,
+        )?;
+        let rows = cx.with_restriction(|| {
+            vertex_upsert_returning(
+                query,
+                stats,
+                outcome,
+                policy,
+                || cx.checkpoint(),
+                |key, control| {
+                    vertex_upsert_returned_property(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        key,
+                        control,
+                    )
+                },
+                |control| {
+                    vertex_upsert_properties(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        query.property_catalog(),
+                        |_| true,
+                        || {
+                            cx.checkpoint()
+                                .map_err(fgdb_gql::GqlQueryError::Interrupted)
+                        },
+                        control,
+                    )
+                },
+                |control| {
+                    vertex_upsert_labels(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        query.property_catalog(),
+                        |_| true,
+                        || {
+                            cx.checkpoint()
+                                .map_err(fgdb_gql::GqlQueryError::Interrupted)
+                        },
+                        control,
+                    )
+                },
+            )
+        })?;
+        workspace.accept();
+        Ok((stats, outcome, rows))
+    }
+
+    /// MERGE RETURN with identities reserved by the owning database.
+    pub fn execute_graph_vertex_upsert_query_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphVertexUpsertQuery,
+        policy: fgdb_gql::GraphVertexUpsertPolicy,
+    ) -> UpsertQueryResult<WriteTxnError> {
+        let source = |error| {
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphVertexUpsertError::Merge(
+                fgdb_gql::GraphVertexMergeError::Source(error),
+            ))
+        };
+        self.ensure_database(database).map_err(source)?;
+        let allocate = database.engine_allocator(cx).map_err(source)?;
+        self.execute_graph_vertex_upsert_query_governed(database, cx, query, policy, allocate)
+    }
+}
+
+/// MATCH occurrences and the creation arm's unit row are private inputs.
+/// Native and authorized RETURN wrappers preserve every source, evaluator
+/// and effect limit, then use the original policy for the final projection.
+fn vertex_upsert_query_selection_policy(
+    mut policy: fgdb_gql::GraphVertexUpsertPolicy,
+) -> fgdb_gql::GraphVertexUpsertPolicy {
+    policy.merge.query.rows = policy.merge.query.rows.max_snapshot_records().map_or(
+        fgdb_gql::GqlExecutionBudget::UNLIMITED,
+        fgdb_gql::GqlExecutionBudget::snapshot_records,
+    );
+    policy
+}
+
 type VertexUpsertActionResult<T, E, A, C> =
     Result<T, fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexUpsertError<E, A>, C>>;
+
+// Both native and authorized adapters supply point reads of the same selected
+// vertex. Continue the upsert's evaluator allowance through RETURN, never a new
+// MATCH or a fresh projection budget. Hidden-property and hidden-label masking
+// belong to the authorized callbacks, before their storage reads.
+#[allow(clippy::too_many_arguments)]
+fn vertex_upsert_returning<E, A, C>(
+    query: &fgdb_gql::PreparedGraphVertexUpsertQuery,
+    stats: fgdb_gql::GraphVertexUpsertStats,
+    outcome: fgdb_gql::GraphVertexMergeOutcome,
+    policy: fgdb_gql::GraphVertexUpsertPolicy,
+    mut checkpoint: impl FnMut() -> Result<(), C>,
+    mut property: impl FnMut(
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+    mut properties: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+    mut labels: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
+{
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
+        GraphVertexReturnBinding, GraphVertexUpsertError,
+    };
+    let mut evaluator = stats.merge.evaluator;
+    let limits = policy.merge.query.evaluator;
+    let mut row = Vec::with_capacity(query.bindings().len());
+    {
+        let mut control = |event| {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            let work = u128::from(evaluator.work_units) + 1;
+            let scratch = u128::from(evaluator.scratch_entries)
+                + u128::from(event == GlaExecutionEvent::ScratchEntry);
+            for (observed, limit, dimension) in [
+                (work, limits.max_work_units, GlaLimitDimension::WorkUnits),
+                (
+                    scratch,
+                    limits.max_scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                if observed > u128::from(limit) {
+                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension,
+                        limit,
+                        observed,
+                    }));
+                }
+            }
+            evaluator = GlaExecutionStats {
+                work_units: work as u64,
+                scratch_entries: scratch as u64,
+            };
+            Ok(())
+        };
+        for binding in query.bindings() {
+            row.push(match binding {
+                GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
+                GraphVertexReturnBinding::Property(key) => property(*key, &mut control)?,
+                GraphVertexReturnBinding::Properties => properties(&mut control)?,
+                GraphVertexReturnBinding::Labels => labels(&mut control)?,
+            });
+        }
+    }
+    query
+        .project_governed(
+            row,
+            stats.merge.match_selection,
+            evaluator,
+            policy.merge.query,
+            checkpoint,
+        )
+        .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))
+}
 
 // Both adapters supply authority-appropriate reads and native staging. This
 // collector owns only scalar evaluation and clause boundaries, never a graph.
@@ -147,13 +335,24 @@ fn vertex_upsert_actions<E, A, C>(
             control(GlaExecutionEvent::ScratchEntry)?; // proposal before allocation
             match definition {
                 GraphVertexUpsertAction::SetProperty { key, value } => {
-                    point_payload_admission(value.value(), &mut |event| {
+                    point_scalar_payload_admission(value.value(), &mut |event| {
                         control(match event {
                             SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
                             _ => GlaExecutionEvent::Work,
                         })
                     })?;
                     batch.set_vertex_property(outcome.vertex(), *key, Some(value.value().clone()));
+                }
+                // A constant List (fgdb-k3nub), admitted element by element
+                // before the copy.
+                GraphVertexUpsertAction::SetStored { key, value } => {
+                    point_payload_admission(value, &mut |event| {
+                        control(match event {
+                            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                            _ => GlaExecutionEvent::Work,
+                        })
+                    })?;
+                    batch.set_vertex_property_value(outcome.vertex(), *key, Some(value.clone()));
                 }
                 GraphVertexUpsertAction::SetExpression {
                     key,
@@ -213,6 +412,57 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
         fgdb_gql::GlaExecutionEvent,
     ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
 ) -> VertexUpsertActionResult<CanonicalScalar, WriteTxnError, A, C> {
+    // A MERGE action reads its operands as scalars; a stored List or Map
+    // refuses rather than read as NULL (fgdb-k3nub).
+    vertex_upsert_property_read(transaction, database, vertex, property, control, |stored| {
+        match stored {
+            None => Ok(CanonicalScalar::Null),
+            Some(value) => value.as_scalar().cloned().ok_or_else(|| {
+                fgdb_gql::GqlQueryError::from(fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredCollection,
+                })
+            }),
+        }
+    })
+}
+
+/// A MERGE RETURN reads a stored List or Map as itself (fgdb-k3nub), as a
+/// MATCH RETURN does; only a MERGE action needs a scalar operand.
+fn vertex_upsert_returned_property<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    property: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    vertex_upsert_property_read(transaction, database, vertex, property, control, |stored| {
+        match stored {
+            None => Ok(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null)),
+            Some(value) => fgdb_gql::algebra::GraphValue::from_property_value(value).ok_or(
+                fgdb_gql::GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                }),
+            ),
+        }
+    })
+}
+
+fn vertex_upsert_property_read<V: Vfs + Clone, A, C, T>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    property: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    convert: impl FnOnce(
+        Option<&fgdb_types::CanonicalPropertyValue>,
+    ) -> VertexUpsertActionResult<T, WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<T, WriteTxnError, A, C> {
     use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
     control(GlaExecutionEvent::Work)?;
@@ -243,7 +493,146 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
     source_control(SourceEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     source_control(SourceEvent::ScratchEntry)?;
-    let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+    let value = convert(projected.property)?;
     attempt.accepted = true;
     Ok(value)
+}
+
+// Whole maps observe the full element, including currently absent keys. The
+// conservative witness is necessary even for an empty map; present-key point
+// witnesses alone would permit a concurrent property insertion to go unseen.
+fn vertex_upsert_properties<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    catalog: Option<&fgdb_gql::ReverseSymbolCatalog>,
+    mut visible: impl FnMut(fgdb_delta_types::PropertyKeyId) -> bool,
+    mut poll: impl FnMut() -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
+    control(GlaExecutionEvent::Work)?;
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut source_control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+    };
+    let source_error = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+    let projected = transaction.vertex_properties_with_control(
+        database,
+        vertex,
+        &mut visible,
+        &mut poll,
+        &mut source_control,
+        &source_error,
+    )?;
+    // Admission applies on every read, including a warm/empty witness. No
+    // callback runs while the observation set is borrowed. Failure in naming,
+    // payload admission, copying or later RETURN retains this witness too.
+    source_control(SourceEvent::ScratchEntry)?;
+    transaction.read_set.borrow_mut().insert(element);
+    let value = match projected {
+        Some(projected) => crate::gql_exec::property_maps::collect(
+            projected.effective_properties(),
+            catalog,
+            visible,
+            &mut source_control,
+            &|error| source_error(WriteTxnError::Read(error)),
+        )?,
+        None => {
+            source_control(SourceEvent::ScratchEntry)?;
+            GraphValue::Scalar(CanonicalScalar::Null)
+        }
+    };
+    attempt.accepted = true;
+    Ok(value)
+}
+
+// labels() of the MERGE vertex after every clause (fgdb-iufb7). Like a whole
+// map, the list observes the full element: a concurrent label insertion must
+// not go unseen, so the conservative element witness applies even to an empty
+// list. Hidden labels are skipped before naming or charges, and an unnamed
+// visible label refuses; it is never omitted.
+fn vertex_upsert_labels<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    catalog: Option<&fgdb_gql::ReverseSymbolCatalog>,
+    mut visible: impl FnMut(LabelId) -> bool,
+    mut poll: impl FnMut() -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+    use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
+    control(GlaExecutionEvent::Work)?;
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut source_control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+    };
+    let source_error = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+    let projected = transaction.vertex_labels_with_control(
+        database,
+        vertex,
+        &mut visible,
+        &mut poll,
+        &mut source_control,
+        &source_error,
+    )?;
+    source_control(SourceEvent::ScratchEntry)?;
+    transaction.read_set.borrow_mut().insert(element);
+    let value = match projected {
+        Some(projected) => {
+            let unmapped =
+                |label| source_error(WriteTxnError::Read(ReadError::UnmappedLabel(label)));
+            let mut names = Vec::new();
+            for label in projected.effective_labels() {
+                if !visible(label) {
+                    continue;
+                }
+                source_control(SourceEvent::Work)?;
+                let name = catalog
+                    .and_then(|catalog| catalog.labels.get(&label))
+                    .ok_or_else(|| unmapped(label))?;
+                for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    source_control(SourceEvent::ScratchEntry)?;
+                }
+                let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped(label))?;
+                names.push(GraphValue::Scalar(text));
+            }
+            GraphValue::List(names.into_boxed_slice())
+        }
+        None => {
+            source_control(SourceEvent::ScratchEntry)?;
+            GraphValue::Scalar(CanonicalScalar::Null)
+        }
+    };
+    attempt.accepted = true;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod vertex_upsert_property_maps_tests {
+    include!("vertex_upsert_property_maps_tests.rs");
 }

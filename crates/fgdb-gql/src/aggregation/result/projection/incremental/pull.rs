@@ -74,6 +74,13 @@ impl PreparedGraphAggregate {
         Some(physical)
     }
 
+    /// Both ordering domains require the ranked completed-group owner. A
+    /// projected key is not an evaluation-column key, and must not disappear
+    /// into the canonical unordered page path merely because ordering is empty.
+    pub(crate) fn has_streamed_ordering(&self) -> bool {
+        !self.ordering.is_empty() || !self.projected_ordering.is_empty()
+    }
+
     /// Plain reductions keep their original event sequence and move-only
     /// delivery. Clauses require a complete pre-delivery validation pass, even
     /// when the result window is empty or earlier groups fill the requested page.
@@ -107,13 +114,13 @@ impl PreparedGraphAggregate {
         self.project_complete_output(&row, control).map(Some)
     }
 
-    fn transforms_streamed_columns(&self) -> bool {
+    pub(crate) fn transforms_streamed_columns(&self) -> bool {
         self.output_projection.is_some()
             || self.key_output.is_some()
             || self.output_aggregates != self.aggregates.len()
     }
 
-    fn qualifies_streamed_output<E, C>(
+    pub(crate) fn qualifies_streamed_output<E, C>(
         &self,
         row: &GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
@@ -187,13 +194,23 @@ impl StreamedGroupRanking {
         row: GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<(), QueryError<E, C>> {
+        self.push_with_elements(query, row, &mut crate::set_ops::no_element_reads, control)
+    }
+
+    pub(crate) fn push_with_elements<E, C>(
+        &mut self,
+        query: &PreparedGraphAggregate,
+        row: GraphAggregateRow,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<(), QueryError<E, C>> {
         if !query.qualifies_streamed_output(&row, control)? {
             return Ok(());
         }
         // Evaluate even a losing, skipped, or LIMIT-0 group's expressions.
         // Early rank elimination must never conceal a later typed failure.
         let projected = if query.transforms_streamed_columns() {
-            Some(query.project_complete_output(&row, control)?)
+            Some(query.project_complete_output_with_elements(&row, read, control)?)
         } else {
             None
         };
@@ -307,8 +324,38 @@ impl StreamedGroupRanking {
         right: &RankedGroup,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Ordering, E> {
+        // push() evaluated every qualified group's output exactly once, before
+        // prefix elimination, including an empty prefix. Compare retained exact
+        // cells, never re-evaluate expressions here. Preparation checks indices.
+        for order in query.projected_ordering() {
+            let a = left
+                .projected
+                .as_ref()
+                .expect("projected ordering has a checked output projection");
+            let b = right
+                .projected
+                .as_ref()
+                .expect("projected ordering has a checked output projection");
+            let result = compare_cell(
+                result_cell(&a.values()[order.column]),
+                result_cell(&b.values()[order.column]),
+                order.descending,
+                if order.nulls_first {
+                    GraphNullPlacement::First
+                } else {
+                    GraphNullPlacement::Last
+                },
+                true,
+                control,
+            )?;
+            if result != Ordering::Equal {
+                return Ok(result);
+            }
+        }
         // Use the canonical exact comparator, not derived enum Ord, floats,
         // subtraction, or a projected output's possibly missing sort column.
+        // Ordering setters exclude mixed domains. Projected ties reach only
+        // the full ascending group-key tiebreak, even under descending order.
         Ok(left
             .complete
             .compare_incremental_order(&right.complete, query.ordering(), control)?
@@ -378,6 +425,241 @@ mod tests {
     use crate::algebra::{GraphColumn, GraphPatternBuilder};
     use crate::{GraphIntegerBinary, GraphIntegerExpression, GraphIntegerOp, GraphSetProjection};
     use fgdb_delta_types::PropertyKeyId;
+
+    fn projected_definition(
+        offset: u64,
+        count: Option<u64>,
+        descending: bool,
+        nulls: GraphNullPlacement,
+    ) -> PreparedGraphAggregate {
+        definition(offset, count, descending, nulls)
+            .with_output_projection(vec![
+                GraphSetProjection::new("score", GraphSetValue::Column(2)),
+                GraphSetProjection::new("count", GraphSetValue::Column(1)),
+                GraphSetProjection::new("key", GraphSetValue::Column(0)),
+            ])
+            .unwrap()
+            .with_projected_order_by(&[
+                crate::algebra::GraphValueOrder {
+                    column: 0,
+                    descending,
+                    nulls_first: nulls == GraphNullPlacement::First,
+                },
+                crate::algebra::GraphValueOrder {
+                    column: 1,
+                    descending: true,
+                    nulls_first: false,
+                },
+            ])
+            .unwrap()
+    }
+
+    fn projected_row(row: GraphAggregateRow) -> GraphAggregateRow {
+        GraphAggregateRow::from_group_values(
+            vec![],
+            vec![
+                row.values()[1].clone(),
+                row.values()[0].clone(),
+                GraphAggregateValue::Value(row.keys()[0].clone()),
+            ],
+        )
+    }
+
+    #[test]
+    fn projected_rank_windows_match_independent_fractions_and_bound_live_candidates() {
+        for descending in [false, true] {
+            for nulls in [GraphNullPlacement::First, GraphNullPlacement::Last] {
+                for offset in [0, 1, 8, 64, u64::MAX] {
+                    for count in [None, Some(0), Some(1), Some(4), Some(u64::MAX)] {
+                        let q = projected_definition(offset, count, descending, nulls);
+                        let before = q.canonical_bytes();
+                        let physical = q.prepare_streamed_output().unwrap();
+                        assert!(physical.has_streamed_ordering());
+                        assert!(physical.ordering().is_empty());
+                        let mut expected = rows();
+                        expected.sort_by(|a, b| oracle_order(a, b, descending, nulls));
+                        let expected: Vec<_> = expected
+                            .into_iter()
+                            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+                            .take(
+                                count
+                                    .and_then(|n| usize::try_from(n).ok())
+                                    .unwrap_or(usize::MAX),
+                            )
+                            .map(projected_row)
+                            .collect();
+                        for reverse in [false, true] {
+                            let mut input = rows();
+                            if reverse {
+                                input.reverse();
+                            }
+                            let mut rank = physical.streamed_group_ranking(input.len());
+                            let mut control = |event| {
+                                assert_ne!(event, GlaExecutionEvent::ResultRow);
+                                Ok::<_, QueryError<(), ()>>(())
+                            };
+                            for row in input {
+                                rank.push(&physical, row, &mut control).unwrap();
+                                assert!(rank.heap.len() <= rank.prefix);
+                                assert!(rank.heap.len() <= 37);
+                            }
+                            assert_eq!(rank.finish(&physical, &mut control).unwrap(), expected);
+                        }
+                        assert_eq!(q.canonical_bytes(), before);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projected_prefix_compares_wide_fractions_without_binary64_rounding() {
+        let m = i128::from(i64::MAX);
+        let make = |key, numerator, denominator| {
+            GraphAggregateRow::from_group_values(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
+                vec![
+                    GraphAggregateValue::Count(2),
+                    GraphAggregateValue::Average(
+                        GraphExactAverage::new(numerator, denominator).unwrap(),
+                    ),
+                ],
+            )
+        };
+        // These averages differ by 1/2 but round to the same binary64 value.
+        let a = make(0, 2 * m - 2, 2);
+        let b = make(1, 2 * m - 1, 2);
+        let q = projected_definition(0, Some(1), true, GraphNullPlacement::Last);
+        let mut rank = q.streamed_group_ranking(2);
+        let mut control = |_| Ok::<_, QueryError<(), ()>>(());
+        rank.push(&q, a, &mut control).unwrap();
+        rank.push(&q, b.clone(), &mut control).unwrap();
+        assert_eq!(rank.heap.len(), 1);
+        assert_eq!(
+            rank.finish(&q, &mut control).unwrap(),
+            vec![projected_row(b)]
+        );
+    }
+
+    #[test]
+    fn projected_distinct_refills_best_classes_before_skipping_and_limiting() {
+        let q = definition(1, Some(2), false, GraphNullPlacement::Last)
+            .with_output_projection(vec![GraphSetProjection::new(
+                "score",
+                GraphSetValue::Column(2),
+            )])
+            .unwrap()
+            .with_projected_order_by(&[crate::algebra::GraphValueOrder {
+                column: 0,
+                descending: true,
+                nulls_first: false,
+            }])
+            .unwrap()
+            .with_distinct_output(true);
+        let scores = [1, 1, 3, 2, 4, 4, 2, 3, 5, 5, 1];
+        for reverse in [false, true] {
+            let mut input: Vec<_> = scores
+                .iter()
+                .enumerate()
+                .map(|(key, &score)| {
+                    GraphAggregateRow::from_group_values(
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(key as i64))],
+                        vec![
+                            GraphAggregateValue::Count(1),
+                            GraphAggregateValue::Average(GraphExactAverage::new(score, 1).unwrap()),
+                        ],
+                    )
+                })
+                .collect();
+            if reverse {
+                input.reverse();
+            }
+            let mut rank = q.streamed_group_ranking(input.len());
+            let mut control = |_| Ok::<_, QueryError<(), ()>>(());
+            for row in input {
+                rank.push(&q, row, &mut control).unwrap();
+                assert!(rank.heap.len() <= 3);
+            }
+            let actual = rank.finish(&q, &mut control).unwrap();
+            let expected: Vec<_> = [4, 3]
+                .into_iter()
+                .map(|score| {
+                    GraphAggregateRow::from_group_values(
+                        vec![],
+                        vec![GraphAggregateValue::Average(
+                            GraphExactAverage::new(score, 1).unwrap(),
+                        )],
+                    )
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn projected_rank_checkpoints_fail_stop_and_retry_with_identical_results() {
+        for distinct in [false, true] {
+            let q = projected_definition(1, Some(3), true, GraphNullPlacement::First)
+                .with_distinct_output(distinct)
+                .prepare_streamed_output()
+                .unwrap();
+            let (expected, calls) = interrupted_run(&q, usize::MAX);
+            assert_eq!(expected.as_ref().unwrap().len(), 3);
+            for stop in 1..=calls {
+                let (result, seen) = interrupted_run(&q, stop);
+                assert_eq!(result, Err(GqlQueryError::Interrupted(stop)));
+                assert_eq!(seen, stop);
+            }
+            assert_eq!(interrupted_run(&q, usize::MAX), (expected, calls));
+        }
+    }
+
+    #[test]
+    fn projected_rank_never_hides_late_errors_behind_a_full_or_empty_page() {
+        for (offset, count) in [(0, Some(0)), (0, Some(1)), (u64::MAX, Some(u64::MAX))] {
+            let q = definition(offset, count, true, GraphNullPlacement::Last)
+                .with_output_projection(vec![GraphSetProjection::new(
+                    "score",
+                    GraphSetValue::Integer(
+                        GraphIntegerExpression::prepare(&[
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Column(1),
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+                        ])
+                        .unwrap(),
+                    ),
+                )])
+                .unwrap()
+                .with_projected_order_by(&[crate::algebra::GraphValueOrder {
+                    column: 0,
+                    descending: true,
+                    nulls_first: false,
+                }])
+                .unwrap()
+                .prepare_streamed_output()
+                .unwrap();
+            let make = |key, count| {
+                GraphAggregateRow::from_group_values(
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
+                    vec![
+                        GraphAggregateValue::Count(count),
+                        GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
+                    ],
+                )
+            };
+            let mut rank = q.streamed_group_ranking(2);
+            let mut control = |_| Ok::<_, QueryError<(), ()>>(());
+            rank.push(&q, make(0, 2), &mut control).unwrap();
+            assert!(matches!(
+                rank.push(&q, make(1, 1), &mut control),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression { column: 0, .. }
+                ))
+            ));
+        }
+    }
 
     fn definition(
         offset: u64,

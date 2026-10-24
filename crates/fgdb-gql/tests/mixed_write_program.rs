@@ -14,7 +14,7 @@ use fgdb_gql::{
     PreparedGraphInsertText, PreparedGraphMutationProgram, PreparedGraphMutationText,
     PreparedGraphWriteProgram,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 use std::cell::{Cell, RefCell};
 
 type Error = GraphWriteProgramError<&'static str, &'static str, usize>;
@@ -61,7 +61,7 @@ fn source(
         [VId(1), VId(2)],
         [],
         |_, _| Ok(true),
-        |_, _| Ok::<Option<&CanonicalScalar>, _>(None),
+        |_, _| Ok::<Option<&CanonicalPropertyValue>, _>(None),
         allowance,
         || Ok(()),
     )

@@ -43,6 +43,11 @@ pub enum ChildKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChildTerminus {
     EphemeralCancelledBeforeRegistration,
+    /// A session-owned ephemeral result stream (a SnapshotQuery-class read or
+    /// an in-process subscription) reached its END or a stream-scoped ERROR.
+    /// Nothing durable is retained, so there is nothing to detach; legal only
+    /// for query and subscription children.
+    EphemeralCompleted,
     TransactionOwnershipDetached,
     SemanticTerminalDurable,
     AdmittedRecoveryRooted,
@@ -126,7 +131,11 @@ impl Connection {
             // ubs:ignore -- connection-phase enum state, not secret material.
             FrameKind::SelectDatabase => self.phase == Phase::Authenticated,
             FrameKind::AuthRefresh => matches!(self.phase, Phase::Authenticated | Phase::Ready),
-            FrameKind::Prepare | FrameKind::Execute => self.phase == Phase::Ready,
+            FrameKind::Prepare
+            | FrameKind::Execute
+            | FrameKind::ExecuteBatch
+            | FrameKind::ExecutePrepared
+            | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel
             | FrameKind::ResultAck
             | FrameKind::ResultRelease
@@ -268,6 +277,9 @@ impl Connection {
         }
         let legal = match terminus {
             ChildTerminus::EphemeralCancelledBeforeRegistration => true,
+            ChildTerminus::EphemeralCompleted => {
+                matches!(child.kind, ChildKind::Query | ChildKind::Subscription)
+            }
             ChildTerminus::TransactionOwnershipDetached => child.kind == ChildKind::Transaction,
             ChildTerminus::SemanticTerminalDurable | ChildTerminus::AdmittedRecoveryRooted => {
                 matches!(child.kind, ChildKind::Query | ChildKind::Transaction)

@@ -222,11 +222,55 @@ fn intermediate_groups_do_not_spend_public_rows_and_all_work_remains_cumulative(
 fn numeric_failures_remain_visible_beneath_empty_output_pages() {
     for text in [
         "UNWIND [9223372036854775807, 1] AS n WITH sum(n) AS s RETURN s LIMIT 0",
-        "UNWIND [1, 2] AS n WITH avg(n) AS a RETURN a LIMIT 0",
         "UNWIND [1, 'bad'] AS n WITH sum(n) AS s RETURN s LIMIT 0",
         "UNWIND [1, 0] AS n WITH sum(1 / n) AS s RETURN s LIMIT 0",
     ] {
         assert!(run(&prepared(text), policy()).is_err(), "{text}");
+    }
+    // An integer AVG is no failure: WITH carries it as a Float (fgdb-y255t).
+    assert!(values("UNWIND [1, 2] AS n WITH avg(n) AS a RETURN a LIMIT 0").is_empty());
+}
+
+/// fgdb-y255t, option C: a WITH alias of an integer AVG is openCypher's
+/// Float, the binary64 nearest the exact mean, rounded once. A filter and
+/// arithmetic after the WITH read that Float. IEEE division of two exactly
+/// representable integers is the independent nearest-binary64 expectation.
+#[test]
+fn a_with_average_is_its_correctly_rounded_binary64() {
+    let float = |value: f64| {
+        GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+    };
+    for (text, expected) in [
+        (
+            "UNWIND [1, 3, 3] AS x WITH avg(x) AS a RETURN a",
+            vec![row(vec![float(7.0 / 3.0)])],
+        ),
+        (
+            "UNWIND [1, 3, 3] AS x WITH avg(x) AS a WHERE a > 2 RETURN a",
+            vec![row(vec![float(7.0 / 3.0)])],
+        ),
+        (
+            "UNWIND [1, 3, 3] AS x WITH avg(x) AS a WHERE a > 3 RETURN a",
+            vec![],
+        ),
+        (
+            "UNWIND [1, 3, 3] AS x WITH avg(x) AS a RETURN a * 3 AS b",
+            vec![row(vec![float(7.0 / 3.0 * 3.0)])],
+        ),
+        (
+            "UNWIND [2, 4] AS x WITH avg(x) AS a RETURN a",
+            vec![row(vec![float(3.0)])],
+        ),
+        (
+            "UNWIND [1, 2, 1, 4] AS x WITH x % 2 AS k, avg(x) AS a RETURN k, a ORDER BY k",
+            vec![row(vec![int(0), float(3.0)]), row(vec![int(1), float(1.0)])],
+        ),
+        (
+            "UNWIND [NULL] AS x WITH avg(x) AS a RETURN a",
+            vec![row(vec![GraphValue::Scalar(CanonicalScalar::Null)])],
+        ),
+    ] {
+        assert_eq!(values(text), expected, "{text}");
     }
 }
 

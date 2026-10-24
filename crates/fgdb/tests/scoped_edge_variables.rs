@@ -5,7 +5,7 @@
 //! `graph()`.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, QueryError, QueryResult, QueryValue, WriteBatch};
+use fgdb::{Database, DatabaseKeys, QueryError, QueryResult, QueryValue, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
@@ -263,8 +263,6 @@ fn optional_relationship_forms_without_a_null_safe_meaning_refuse() {
             // unsupported, or rebind a relationship as a vertex.
             "MATCH (x)-[r:R]->(y) OPTIONAL MATCH (y)-[r:R]->(z) RETURN x AS x",
             "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R]->(b) MATCH (r)-[:R]->(c) RETURN a AS a",
-            // A quantified OPTIONAL edge is not a single relationship.
-            "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R*1..2]->(b) RETURN r AS r",
             // EXISTS locals never export.
             "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[x:R]->(q) } RETURN x AS x",
         ] {
@@ -274,6 +272,35 @@ fn optional_relationship_forms_without_a_null_safe_meaning_refuse() {
                 "{statement}: {result:?}"
             );
         }
+        // A quantified OPTIONAL edge binds the list of its relationships
+        // (named variable-length relationships, landed with lane37), and NULL
+        // where a has no path. Enumerated by hand over graph(): from a, the
+        // 1-hop lists [11], [14], [12] and the 2-hop lists [11, 13], [14, 13];
+        // from b, [13]; c and d have no outgoing R, so one NULL row each.
+        let edges = |ids: &[u128]| GraphValue::Edges(ids.iter().map(|&id| EId(id)).collect());
+        let null = || GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            bag(cells(
+                db.query(
+                    cx,
+                    "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R*1..2]->(b) RETURN r AS r",
+                    &params,
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            )),
+            bag(vec![
+                vec![edges(&[11])],
+                vec![edges(&[14])],
+                vec![edges(&[12])],
+                vec![edges(&[11, 13])],
+                vec![edges(&[14, 13])],
+                vec![edges(&[13])],
+                vec![null()],
+                vec![null()],
+            ])
+        );
     });
 }
 
@@ -319,6 +346,60 @@ fn writes_through_optional_relationships_skip_null_rows() {
                 vec![edge(13), int(0)],
                 vec![edge(14), int(6)],
             ])
+        );
+    });
+}
+
+/// `type(r)` and `labels(n)` as grouping keys and WITH values read catalog
+/// names, whichever facade answers, even when the statement spells no
+/// relation or label. A `type(r)` key used to group by the edge itself (one
+/// row per edge), and `WITH type(r) AS t` used to read NULL.
+#[test]
+fn type_and_label_keys_group_by_catalog_names() {
+    run(async |commit, cx, _| {
+        const S: RelationId = RelationId(2);
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut other = WriteBatch::new(S);
+        other.add_edge(EId(20), VId(3), VId(4), vec![]);
+        db.write(commit, other).await.unwrap();
+        let bind = || {
+            RelationBind::new()
+                .with_relation("R", R)
+                .with_relation("S", S)
+                .with_label("Person", PERSON)
+                .with_property("name", NAME)
+                .with_property("w", W)
+        };
+        let params = GqlParameters::new();
+        let query = |text: &str| {
+            bag(cells(
+                db.query(cx, text, &params, bind(), policy()).expect(text),
+            ))
+        };
+        let types = bag(vec![vec![text("R"), int(4)], vec![text("S"), int(1)]]);
+        for statement in [
+            "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS c",
+            "MATCH (a)-[r]->(b) RETURN type(r), count(*)",
+            "MATCH (a)-[r]->(b) WITH type(r) AS t RETURN t, count(*) AS c",
+        ] {
+            assert_eq!(query(statement), types, "{statement}");
+        }
+        let person = GraphValue::List(vec![text("Person")].into_boxed_slice());
+        for statement in [
+            "MATCH (n) RETURN labels(n) AS l, count(*) AS c",
+            "MATCH (n) WITH labels(n) AS l RETURN l, count(*) AS c",
+        ] {
+            assert_eq!(
+                query(statement),
+                vec![vec![person.clone(), int(4)]],
+                "{statement}"
+            );
+        }
+        // type(r) beside r is a second key, not a replacement: one group per edge.
+        assert_eq!(
+            query("MATCH (a)-[r]->(b) RETURN type(r) AS t, r AS r, count(*) AS c").len(),
+            5
         );
     });
 }

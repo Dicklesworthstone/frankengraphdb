@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphSetFilterError, GraphSetOperand as Arg, GraphSetPredicateOp as Op, GraphSetProjection,
     GraphSetQuantifier, GraphSetValue, MAX_GRAPH_SET_DEPTH, PreparedGraphSet,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::{Cell, RefCell};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -51,6 +51,10 @@ fn run(
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
     let checkpoint = RefCell::new(checkpoint);
+    let stored: Vec<CanonicalPropertyValue> = values
+        .iter()
+        .map(|value| CanonicalPropertyValue::from(value.clone()))
+        .collect();
     query.execute_governed(
         policy,
         |pattern, remaining| {
@@ -59,7 +63,7 @@ fn run(
                 (0..values.len()).map(|at| VId(at as u128)),
                 [],
                 |_, _| Ok::<_, &'static str>(true),
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )
@@ -94,12 +98,17 @@ fn scalar_filters_use_three_valued_comparisons_not_set_total_order() {
             if negate {
                 ops.push(Op::Not);
             }
-            let expected = [1_i64, 2]
+            let mut expected = [1_i64, 2]
                 .into_iter()
                 .enumerate()
                 .filter(|(_, n)| comparison.accepts(*n, 1) != negate)
                 .map(|(at, _)| VId(at as u128 + 1))
                 .collect::<Vec<_>>();
+            // TRUE is of another domain than 1 (fgdb-v6ku6): `=` is FALSE and
+            // `<>` TRUE, so NOT applies; an ordering stays UNKNOWN either way.
+            if comparison.across_domains() == Some(!negate) {
+                expected.push(VId(3));
+            }
             assert_eq!(
                 ids(
                     &run(&leaf().filter(&ops).unwrap(), &values, wide(), &mut || Ok(
@@ -251,7 +260,7 @@ fn complete_schema_stack_and_depth_validation_precedes_execution() {
         Err(GraphSetFilterError::UnknownInput { column: 2, .. })
     ));
     for (right, comparison) in [
-        (Arg::Column(1), IntegerComparison::Equal),
+        (Arg::Column(1), IntegerComparison::Less),
         (Arg::Column(0), IntegerComparison::Less),
     ] {
         assert!(matches!(
@@ -262,6 +271,29 @@ fn complete_schema_stack_and_depth_validation_precedes_execution() {
             }]),
             Err(GraphSetFilterError::InvalidVertexComparison { .. })
         ));
+    }
+    // A vertex is unequal to a property value of another domain (fgdb-v6ku6):
+    // `=` keeps no row, `<>` every row whose value is not NULL.
+    let values = [
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Bool(true),
+    ];
+    for (comparison, expected) in [
+        (IntegerComparison::Equal, vec![]),
+        (IntegerComparison::NotEqual, vec![VId(1), VId(2)]),
+    ] {
+        let query = leaf()
+            .filter(&[Op::Compare {
+                left: Arg::Column(0),
+                comparison,
+                right: Arg::Column(1),
+            }])
+            .unwrap();
+        assert_eq!(
+            ids(&run(&query, &values, wide(), &mut || Ok(())).unwrap().value),
+            expected
+        );
     }
     let mut deepest = leaf();
     for _ in 1..MAX_GRAPH_SET_DEPTH {

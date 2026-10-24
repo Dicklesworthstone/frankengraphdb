@@ -4,8 +4,8 @@
 use asupersync::lab::run_async_under_lab;
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
-    BulkEdge, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex,
-    CrashPoint, Database, DatabaseKeys,
+    BulkEdge, BulkEndpoint, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
+    BulkVertex, CrashPoint, Database, DatabaseKeys,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -16,7 +16,8 @@ use fgdb_gql::{
 use fgdb_strata::edge_props::EdgePropertyPatchError;
 use fgdb_strata::vertex::VertexPatchError;
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -75,13 +76,13 @@ fn query_policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(1_000_000, 1_000_000, 100_000_000, 100_000_000)
 }
 
-fn int_property(props: &[(PropertyKeyId, CanonicalScalar)], key: PropertyKeyId) -> i64 {
+fn int_property(props: &[(PropertyKeyId, CanonicalPropertyValue)], key: PropertyKeyId) -> i64 {
     match props
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, value)| value)
     {
-        Some(CanonicalScalar::Int(value)) => *value,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => *value,
         other => panic!("expected integer property {key:?}, got {other:?}"),
     }
 }
@@ -91,8 +92,8 @@ fn vertex(n: usize, payload: i64) -> BulkRow {
         key: format!("v{n}"),
         labels: vec![if n.is_multiple_of(2) { PERSON } else { OTHER }],
         props: vec![
-            (K, CanonicalScalar::Int(n as i64)),
-            (P, CanonicalScalar::Int(payload)),
+            (K, CanonicalScalar::Int(n as i64).into()),
+            (P, CanonicalScalar::Int(payload).into()),
         ],
     })
 }
@@ -106,12 +107,12 @@ fn edge(
 ) -> BulkRow {
     BulkRow::Edge(BulkEdge {
         key: format!("e{n}"),
-        source: format!("v{source}"),
-        destination: format!("v{destination}"),
+        source: format!("v{source}").into(),
+        destination: format!("v{destination}").into(),
         relation,
         props: vec![
-            (K, CanonicalScalar::Int(n as i64)),
-            (P, CanonicalScalar::Int(payload)),
+            (K, CanonicalScalar::Int(n as i64).into()),
+            (P, CanonicalScalar::Int(payload).into()),
         ],
     })
 }
@@ -157,14 +158,15 @@ fn crash_rows() -> Vec<BulkRow> {
     rows
 }
 
-type LogicalVertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type LogicalVertices =
+    BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type LogicalEdges = BTreeMap<
     String,
     (
         String,
         String,
         RelationId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ),
 >;
 
@@ -236,8 +238,8 @@ fn expected_state(rows: &[BulkRow]) -> (LogicalVertices, LogicalEdges) {
                         .insert(
                             row.key.clone(),
                             (
-                                row.source.clone(),
-                                row.destination.clone(),
+                                row.source.key().unwrap().to_owned(),
+                                row.destination.key().unwrap().to_owned(),
                                 row.relation,
                                 row.props.clone(),
                             )
@@ -291,8 +293,8 @@ async fn native_create(db: &mut Database, contexts: &PurposeContexts, rows: &[Bu
                 )),
                 BulkRow::Edge(row) if row.relation == relation => Some(format!(
                     "MATCH (a),(b) WHERE a.k={} AND b.k={} CREATE (a)-[:{} {{k:{},p:{}}}]->(b)",
-                    row.source.strip_prefix('v').unwrap(),
-                    row.destination.strip_prefix('v').unwrap(),
+                    row.source.key().unwrap().strip_prefix('v').unwrap(),
+                    row.destination.key().unwrap().strip_prefix('v').unwrap(),
                     if relation == R { "R" } else { "S" },
                     int_property(&row.props, K),
                     int_property(&row.props, P),
@@ -436,8 +438,8 @@ fn three_seed_ten_thousand_edge_bulk_matches_native_create_and_gql() {
                     .iter()
                     .filter_map(|row| match row {
                         BulkRow::Edge(row) if row.relation == relation => Some(vec![
-                            row.source[1..].parse().unwrap(),
-                            row.destination[1..].parse().unwrap(),
+                            row.source.key().unwrap()[1..].parse().unwrap(),
+                            row.destination.key().unwrap()[1..].parse().unwrap(),
                         ]),
                         _ => None,
                     })
@@ -516,6 +518,9 @@ fn chunk_one_crash_matrix_recovers_exact_whole_chunks_and_resumes() {
                     fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
                 }
                 let mut db = Database::open(&contexts.commit(), &path, keys())
+                    .await
+                    .unwrap();
+                db.ensure_delta_window(&contexts.commit(), basis)
                     .await
                     .unwrap();
                 let recovered = db.frontier().unwrap();
@@ -674,11 +679,11 @@ fn duplicate_key_namespace_is_global_across_vertices_and_edges() {
     });
 }
 
-fn oversized_props() -> Vec<(PropertyKeyId, CanonicalScalar)> {
+fn oversized_props() -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
     // Each scalar is valid; their combined indivisible storage row is not.
     vec![
-        (K, CanonicalScalar::bytes(vec![0x41; 8000]).unwrap()),
-        (P, CanonicalScalar::bytes(vec![0x42; 9000]).unwrap()),
+        (K, CanonicalScalar::bytes(vec![0x41; 8000]).unwrap().into()),
+        (P, CanonicalScalar::bytes(vec![0x42; 9000]).unwrap().into()),
     ]
 }
 
@@ -704,8 +709,8 @@ fn oversized_edge_row_beyond_first_chunk_is_typed_and_atomic() {
         let mut rows = crash_rows();
         rows.push(BulkRow::Edge(BulkEdge {
             key: "huge".to_owned(),
-            source: "v0".to_owned(),
-            destination: "v1".to_owned(),
+            source: "v0".into(),
+            destination: "v1".into(),
             relation: S,
             props: oversized_props(),
         }));
@@ -781,5 +786,277 @@ fn vertex_only_chunks_empty_input_and_completed_resume_do_not_invent_commits() {
         assert_eq!(db.frontier().unwrap(), checkpoint.frontier);
         assert_eq!(db.delta_since(basis).unwrap().count(), 3);
         assert_eq!(logical_state(&db, &checkpoint), expected_state(&rows));
+    });
+}
+
+fn zone(key: &str, label: LabelId, k: i64) -> BulkRow {
+    BulkRow::Vertex(BulkVertex {
+        key: key.to_owned(),
+        labels: vec![label],
+        props: vec![(K, CanonicalScalar::Int(k).into())],
+    })
+}
+
+fn matched(label: Option<LabelId>, k: i64) -> BulkEndpoint {
+    BulkEndpoint::matching(label, K, CanonicalScalar::Int(k))
+}
+
+fn trip(n: i64, source: BulkEndpoint, destination: BulkEndpoint) -> BulkRow {
+    BulkRow::Edge(BulkEdge {
+        key: format!("t{n}"),
+        source,
+        destination,
+        relation: R,
+        props: vec![(P, CanonicalScalar::Int(n).into())],
+    })
+}
+
+/// Ten PERSON zones k=0..9 plus an OTHER vertex that shares k=5.
+fn zone_rows() -> Vec<BulkRow> {
+    (0..10)
+        .map(|k| zone(&format!("z{k}"), PERSON, k))
+        .chain([zone("other5", OTHER, 5)])
+        .collect()
+}
+
+/// A second load, one row per chunk: the vertex `fresh7` (also a PERSON with
+/// k=7) commits before the trips that name k=7 by match, which must still
+/// resolve to the zone committed before this load began.
+fn trip_rows() -> Vec<BulkRow> {
+    vec![
+        zone("fresh7", PERSON, 7),
+        trip(0, matched(Some(PERSON), 1), matched(Some(PERSON), 2)),
+        trip(1, matched(Some(PERSON), 7), "fresh7".into()),
+        trip(2, matched(Some(OTHER), 5), matched(None, 9)),
+        trip(3, "fresh7".into(), matched(Some(PERSON), 7)),
+    ]
+}
+
+fn assert_trips<V: asupersync::fs::Vfs + Clone>(
+    db: &Database<V>,
+    zones: &BulkLoadCheckpoint,
+    trips: &BulkLoadCheckpoint,
+) {
+    let zone = |key: &str| zones.vertices[key];
+    let fresh = trips.vertices["fresh7"];
+    assert_ne!(fresh, zone("z7"));
+    for (key, src, dst) in [
+        ("t0", zone("z1"), zone("z2")),
+        ("t1", zone("z7"), fresh),
+        ("t2", zone("other5"), zone("z9")),
+        ("t3", fresh, zone("z7")),
+    ] {
+        let row = db.edge(trips.edges[key]).unwrap().unwrap();
+        assert_eq!(
+            (row.entry.src, row.entry.dst, row.entry.relation),
+            (src, dst, R),
+            "{key}"
+        );
+    }
+}
+
+/// An edge endpoint can name a vertex an EARLIER load committed, by label and
+/// property value, resolved as of this load's basis (fgdb-srnr7).
+#[test]
+fn match_endpoints_name_vertices_committed_before_the_load() {
+    under_lab(0xb71c_0101, |contexts| async move {
+        let (query, commit) = (contexts.query(), contexts.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let zones = db
+            .bulk_load(&query, &commit, zone_rows(), BulkLoadPolicy::new(4, R))
+            .await
+            .unwrap();
+        let before = db.frontier().unwrap();
+        let vertices = db.vertices().unwrap();
+        // Refusals happen in preflight: nothing commits.
+        for (endpoint, unresolved) in [
+            (matched(Some(PERSON), 99), true),
+            (matched(Some(OTHER), 7), true),
+            (BulkEndpoint::matching(None, K, CanonicalScalar::Null), true),
+            // Both the PERSON zone and the OTHER vertex carry k=5.
+            (matched(None, 5), false),
+        ] {
+            let mut rows = trip_rows();
+            rows.push(trip(9, "fresh7".into(), endpoint.clone()));
+            let error = db
+                .bulk_load(&query, &commit, rows, BulkLoadPolicy::new(1, R))
+                .await
+                .unwrap_err();
+            match (&error.kind, unresolved) {
+                (
+                    BulkLoadErrorKind::UnresolvedEndpoint {
+                        row,
+                        edge,
+                        endpoint: e,
+                    },
+                    true,
+                )
+                | (
+                    BulkLoadErrorKind::AmbiguousEndpoint {
+                        row,
+                        edge,
+                        endpoint: e,
+                    },
+                    false,
+                ) => {
+                    // The refused edge is the sixth source row.
+                    assert_eq!((*row, edge.as_str(), e), (5, "t9", &endpoint));
+                }
+                other => panic!("{endpoint:?}: {other:?}"),
+            }
+            assert_eq!(error.committed.committed_chunks, 0, "{endpoint:?}");
+            assert!(error.pending.is_none(), "{endpoint:?}");
+            assert_eq!(db.frontier().unwrap(), before, "{endpoint:?}");
+            assert_eq!(db.vertices().unwrap(), vertices, "{endpoint:?}");
+        }
+        let trips = db
+            .bulk_load(&query, &commit, trip_rows(), BulkLoadPolicy::new(1, R))
+            .await
+            .unwrap();
+        assert_eq!(trips.committed_chunks, 5);
+        assert_trips(&db, &zones, &trips);
+    });
+}
+
+/// A crash after the load's own k=7 vertex committed and a resume from the
+/// recovered checkpoint reach the same edges as the uninterrupted load: the
+/// basis is recomputed from the checkpoint, never from the advanced frontier.
+#[test]
+fn match_endpoints_resume_against_the_original_basis() {
+    under_lab(0xb71c_0102, |contexts| async move {
+        let (query, commit) = (contexts.query(), contexts.commit());
+        let path = scratch("match-resume");
+        let mut db = Database::create(&commit, &path, keys()).await.unwrap();
+        let zones = db
+            .bulk_load(&query, &commit, zone_rows(), BulkLoadPolicy::new(4, R))
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let error = db
+            .bulk_load_with_crash(
+                &query,
+                &commit,
+                trip_rows(),
+                BulkLoadPolicy::new(1, R),
+                Some((2, CrashPoint::BeforeCapsule)),
+            )
+            .await
+            .expect_err("the crash seam in the third chunk must be reached");
+        assert_eq!(error.committed.committed_chunks, 2);
+        drop(db);
+        let mut db = Database::open(&commit, &path, keys()).await.unwrap();
+        db.ensure_delta_window(&commit, basis).await.unwrap();
+        let recovered = db.frontier().unwrap();
+        let resume = match &error.pending {
+            Some(pending) if pending.frontier == recovered => pending.clone(),
+            _ => error.committed.clone(),
+        };
+        let mut policy = BulkLoadPolicy::new(1, R);
+        policy.resume = Some(resume);
+        let trips = db
+            .bulk_load(&query, &commit, trip_rows(), policy)
+            .await
+            .unwrap();
+        assert_eq!(trips.frontier, CommitSeq(basis.0 + 5));
+        assert_trips(&db, &zones, &trips);
+    });
+}
+
+/// Repeated property endpoints keep their exact scalar variant, label and
+/// property coordinate through preflight and multiple publication chunks.
+#[test]
+fn repeated_match_endpoints_keep_exact_identity_and_do_not_escape_the_load() {
+    under_lab(0xb71c_0103, |contexts| async move {
+        use fgdb_types::{CanonicalDecimal, CanonicalF64};
+
+        let (query, commit) = (contexts.query(), contexts.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let targets = [
+            (PERSON, K, CanonicalScalar::Int(7)),
+            (PERSON, K, CanonicalScalar::Float(CanonicalF64::new(7.0))),
+            (
+                PERSON,
+                K,
+                CanonicalScalar::Decimal(CanonicalDecimal::from_integer(7).unwrap()),
+            ),
+            (PERSON, K, CanonicalScalar::ucs_basic_text("7").unwrap()),
+            (PERSON, K, CanonicalScalar::bytes(vec![7]).unwrap()),
+            (OTHER, K, CanonicalScalar::Int(7)),
+            (PERSON, P, CanonicalScalar::Int(7)),
+        ];
+        let initial: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(index, (label, key, value))| {
+                BulkRow::Vertex(BulkVertex {
+                    key: format!("endpoint-{index}"),
+                    labels: vec![*label],
+                    props: vec![(*key, value.clone().into())],
+                })
+            })
+            .collect();
+        let committed = db
+            .bulk_load(&query, &commit, initial, BulkLoadPolicy::new(32, R))
+            .await
+            .unwrap();
+        let endpoint = |index: usize| {
+            let (label, key, value) = &targets[index];
+            BulkEndpoint::matching(Some(*label), *key, value.clone())
+        };
+        let input: Vec<_> = (0..128)
+            .map(|row| {
+                trip(
+                    row as i64,
+                    endpoint(row % targets.len()),
+                    endpoint((row + 1) % targets.len()),
+                )
+            })
+            .collect();
+        let loaded = db
+            .bulk_load(&query, &commit, input, BulkLoadPolicy::new(32, R))
+            .await
+            .unwrap();
+        assert_eq!(loaded.committed_chunks, 4);
+        for row in 0..128 {
+            let edge = db.edge(loaded.edges[&format!("t{row}")]).unwrap().unwrap();
+            // Independently known seed identities, not another endpoint-cache
+            // lookup, are the oracle for every materialized edge.
+            assert_eq!(
+                (edge.entry.src, edge.entry.dst),
+                (
+                    committed.vertices[&format!("endpoint-{}", row % targets.len())],
+                    committed.vertices[&format!("endpoint-{}", (row + 1) % targets.len())],
+                ),
+                "edge {row}",
+            );
+        }
+
+        // A later invocation has a new basis. A previously unique exact key
+        // is now ambiguous; no earlier invocation's memo may hide the change.
+        db.bulk_load(
+            &query,
+            &commit,
+            [zone("duplicate", PERSON, 7)],
+            BulkLoadPolicy::new(1, R),
+        )
+        .await
+        .unwrap();
+        let before = db.frontier().unwrap();
+        let error = db
+            .bulk_load(
+                &query,
+                &commit,
+                [trip(999, endpoint(0), endpoint(1))],
+                BulkLoadPolicy::new(1, R),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            BulkLoadErrorKind::AmbiguousEndpoint { row: 0, .. }
+        ));
+        assert_eq!(error.committed.committed_chunks, 0);
+        assert!(error.pending.is_none());
+        assert_eq!(db.frontier().unwrap(), before);
     });
 }

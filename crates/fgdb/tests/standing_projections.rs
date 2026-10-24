@@ -12,7 +12,10 @@ use fgdb_gql::{
     GraphIntegerOp as Op, GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol,
     GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
+};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -72,8 +75,12 @@ fn oracle<V: asupersync::fs::Vfs + Clone>(
     let mut out = BTreeMap::new();
     for row in db.vertices_at(db.frontier().unwrap()).unwrap() {
         let value = match row.props.iter().find(|(key, _)| *key == P).map(|(_, v)| v) {
-            Some(CanonicalScalar::Int(n)) => CanonicalScalar::Int(n % 2),
-            None | Some(CanonicalScalar::Null) => CanonicalScalar::Null,
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) => {
+                CanonicalScalar::Int(n % 2)
+            }
+            None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => {
+                CanonicalScalar::Null
+            }
             _ => unreachable!("oracle fixture domain"),
         };
         *out.entry(vec![GraphValue::Scalar(value)]).or_insert(0) += 1;

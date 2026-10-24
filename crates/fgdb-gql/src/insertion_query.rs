@@ -8,7 +8,7 @@ use crate::insertion::{
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
 use crate::{
     GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetBuildError, GraphSetColumnType,
-    GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier,
+    GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier, GraphSetSource,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 
@@ -19,21 +19,70 @@ use fgdb_delta_types::{ElementId, PropertyKeyId};
 pub enum GraphInsertBinding {
     Input(usize),
     CreatedVertex(usize),
-    VertexProperty { vertex: usize, key: PropertyKeyId },
+    VertexProperty {
+        vertex: usize,
+        key: PropertyKeyId,
+    },
     CreatedEdge(usize),
-    EdgeProperty { edge: usize, key: PropertyKeyId },
+    EdgeProperty {
+        edge: usize,
+        key: PropertyKeyId,
+    },
+    /// Complete checked CREATE fields, named by the query's property catalog.
+    VertexProperties(usize),
+    EdgeProperties(usize),
+    /// The created vertex's CREATE labels, named by the query's catalog in
+    /// label-identity order, as every labels() read names them (Graph3).
+    VertexLabels(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphInsertQueryBuildError {
-    Binding { binding: usize },
-    TooManyBindings { limit: usize, observed: usize },
+    Binding {
+        binding: usize,
+    },
+    TooManyBindings {
+        limit: usize,
+        observed: usize,
+    },
     Projection(RowProjectionBuildError),
+    Aggregate(crate::GraphAggregateBuildError),
     InputDepth(GraphSetBuildError),
+    /// A property of a returned created element has no trusted output name.
+    UnmappedProperty {
+        binding: usize,
+    },
+    /// Distinct property IDs cannot share one output name.
+    PropertyMapCatalog,
+    /// A label of a returned created vertex has no trusted output name.
+    UnmappedLabel {
+        binding: usize,
+    },
 }
 impl core::fmt::Display for GraphInsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "insertion RETURN definition: {self:?}")
+        match self {
+            Self::Binding { binding } => {
+                write!(f, "RETURN binding {binding} names no input column")
+            }
+            Self::TooManyBindings { limit, observed } => {
+                write!(f, "RETURN has {observed} bindings, limit {limit}")
+            }
+            Self::Projection(error) => error.fmt(f),
+            Self::Aggregate(error) => error.fmt(f),
+            Self::InputDepth(error) => error.fmt(f),
+            Self::UnmappedProperty { binding } => write!(
+                f,
+                "a property of created element {binding} has no bound name to return it under"
+            ),
+            Self::PropertyMapCatalog => f.write_str(
+                "two properties share one name, so a returned property map is ambiguous",
+            ),
+            Self::UnmappedLabel { binding } => write!(
+                f,
+                "a label of created vertex {binding} has no bound name to return it under"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphInsertQueryBuildError {}
@@ -96,12 +145,17 @@ pub struct PreparedGraphInsertQuery {
     insertion: PreparedGraphInsert,
     bindings: Vec<GraphInsertBinding>,
     projection: Vec<GraphSetProjection>,
+    grouping: Option<crate::set_ops::WriteReturnGroup>,
     quantifier: GraphSetQuantifier,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// A WITH after the CREATE (`CREATE (n ...) WITH n WHERE ... RETURN`):
+    /// row stages over the head's owned rows, whose schema is the output.
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphInsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -117,6 +171,37 @@ impl PreparedGraphInsertQuery {
         bindings: Vec<GraphInsertBinding>,
         projection: Vec<GraphSetProjection>,
         quantifier: GraphSetQuantifier,
+    ) -> Result<Self, GraphInsertQueryBuildError> {
+        Self::prepare_with_grouping(insertion, bindings, projection, quantifier, None, None)
+    }
+
+    /// Complete maps of newly created elements use these trusted property
+    /// names. Names and their uniqueness are admitted before source access or
+    /// identity allocation; names are never guessed from creation text.
+    pub fn prepare_with_property_catalog(
+        insertion: PreparedGraphInsert,
+        bindings: Vec<GraphInsertBinding>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+        catalog: crate::ReverseSymbolCatalog,
+    ) -> Result<Self, GraphInsertQueryBuildError> {
+        Self::prepare_with_grouping(
+            insertion,
+            bindings,
+            projection,
+            quantifier,
+            None,
+            Some(std::sync::Arc::new(catalog)),
+        )
+    }
+
+    pub(crate) fn prepare_with_grouping(
+        insertion: PreparedGraphInsert,
+        bindings: Vec<GraphInsertBinding>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+        grouping: Option<crate::set_ops::WriteReturnGroupSpec>,
+        property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     ) -> Result<Self, GraphInsertQueryBuildError> {
         let limit = crate::algebra::MAX_PATTERN_VERTICES;
         if bindings.len() > limit {
@@ -140,20 +225,86 @@ impl PreparedGraphInsertQuery {
                     (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Vertex)
                 }
                 GraphInsertBinding::VertexProperty { vertex, .. } => {
-                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Scalar)
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Stored)
                 }
                 GraphInsertBinding::CreatedEdge(edge) => {
                     (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Edge)
                 }
                 GraphInsertBinding::EdgeProperty { edge, .. } => {
-                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Scalar)
+                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Stored)
+                }
+                GraphInsertBinding::VertexProperties(vertex) => {
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::Any)
+                }
+                GraphInsertBinding::EdgeProperties(edge) => {
+                    (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Any)
+                }
+                GraphInsertBinding::VertexLabels(vertex) => {
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::List)
                 }
             };
             input_types.push(kind.ok_or(GraphInsertQueryBuildError::Binding { binding: at })?);
         }
-        // Use the ordinary complete expression/name/schema admission, including
-        // references hidden in lazy branches. The snapshot VM is shared below.
-        let checked = RowProjectionSpec::new(input_types, projection.clone(), quantifier)
+        let maps = bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                GraphInsertBinding::VertexProperties(_) | GraphInsertBinding::EdgeProperties(_)
+            )
+        });
+        let labels = bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphInsertBinding::VertexLabels(_)));
+        let property_catalog = if maps || labels {
+            if maps && let Some(catalog) = &property_catalog {
+                let mut names = std::collections::BTreeSet::new();
+                if !catalog.properties.values().all(|name| names.insert(name)) {
+                    return Err(GraphInsertQueryBuildError::PropertyMapCatalog);
+                }
+            }
+            // Every name a created vertex's labels() returns is admitted here,
+            // before source access or identity allocation.
+            for (at, binding) in bindings.iter().enumerate() {
+                if let Some(labels) = insertion.return_label_ids(*binding) {
+                    for label in labels {
+                        if !property_catalog.as_ref().is_some_and(|catalog| {
+                            catalog.labels.get(label).is_some_and(|name| {
+                                fgdb_types::CanonicalScalar::ucs_basic_text(name).is_ok()
+                            })
+                        }) {
+                            return Err(GraphInsertQueryBuildError::UnmappedLabel { binding: at });
+                        }
+                    }
+                }
+            }
+            for (at, binding) in bindings.iter().enumerate() {
+                if let Some(keys) = insertion.return_property_keys(*binding) {
+                    for key in keys {
+                        if !property_catalog
+                            .as_ref()
+                            .is_some_and(|catalog| catalog.properties.contains_key(key))
+                        {
+                            return Err(GraphInsertQueryBuildError::UnmappedProperty {
+                                binding: at,
+                            });
+                        }
+                    }
+                }
+            }
+            property_catalog
+        } else {
+            None
+        };
+        let grouping = grouping
+            .map(|group| group.prepare(input_types.clone()))
+            .transpose()
+            .map_err(GraphInsertQueryBuildError::Aggregate)?;
+        let output_input = grouping
+            .as_ref()
+            .map(|group| group.column_types().to_vec())
+            .unwrap_or(input_types);
+        // Complete expression/name/schema admission includes lazy branches.
+        // Grouped outputs address native keys then aggregates, not bindings.
+        let checked = RowProjectionSpec::new(output_input, projection.clone(), quantifier)
             .map_err(GraphInsertQueryBuildError::Projection)?;
         let columns = checked.columns().map(str::to_owned).collect();
         let types = checked.column_types().to_vec();
@@ -161,18 +312,29 @@ impl PreparedGraphInsertQuery {
             insertion,
             bindings,
             projection,
+            grouping,
             quantifier,
             columns,
             types,
             order: Vec::new(),
             offset: 0,
             count: None,
+            property_catalog,
+            tail: None,
         })
     }
 
     #[must_use]
     pub const fn insertion(&self) -> &PreparedGraphInsert {
         &self.insertion
+    }
+    /// The frozen occurrence bindings, including private continuation columns.
+    /// Authorized hosts use these before execution to admit property reads on
+    /// created elements; a hidden WITH column is subject to the same scope as
+    /// a delivered RETURN column.
+    #[must_use]
+    pub fn bindings(&self) -> &[GraphInsertBinding] {
+        &self.bindings
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -211,6 +373,15 @@ impl PreparedGraphInsertQuery {
         self
     }
 
+    /// Continue the head (now a WITH) with row stages over its owned rows.
+    /// The statement's output schema becomes the tail's.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
+        self
+    }
+
     /// Source selection, frozen properties, all identities and RETURN share one
     /// work/scratch allowance. The result-row allowance applies only AFTER
     /// projection, DISTINCT, ORDER BY and paging; it never limits creation.
@@ -225,8 +396,40 @@ impl PreparedGraphInsertQuery {
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        self.execute_governed_with_source(policy, source, allocate, checkpoint)
+    }
+
+    /// CREATE and its complete RETURN tail with one explicit graph source
+    /// owner. Factor-aware and ordinary sources use the same private proposal,
+    /// expression validation, allocation boundary and cumulative allowance.
+    pub fn execute_governed_with_source<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        self.execute_governed_over(None, policy, source, allocate, checkpoint)
+    }
+
+    /// One step of a chained write (`CREATE (a) WITH a CREATE (b)`): `rows`
+    /// are the rows the previous write of the same statement returned, and
+    /// this CREATE's relational input reads them through its one owned leaf.
+    /// The host must have staged that write first, so reads see its effects.
+    /// `None` is [`Self::execute_governed_with_source`].
+    pub fn execute_governed_over<E, A, C>(
+        &self,
+        rows: Option<Vec<GraphValueRow>>,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        // Every engine below (creation, aggregate, ordering, tail) sees one
+        // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
+        let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut creation_policy = policy;
         creation_policy.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
@@ -239,26 +442,51 @@ impl PreparedGraphInsertQuery {
             .execute_returning(
                 creation_policy,
                 &self.bindings,
+                self.property_catalog.as_deref(),
+                rows,
                 source,
                 allocate,
                 &mut checkpoint,
             )
             .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
         let prefix = insertion.stats();
+        let mut returning = GqlQueryExecution {
+            value,
+            rows: prefix.selection,
+            evaluator: prefix.evaluator,
+        };
+        if let Some(grouping) = &self.grouping {
+            returning = crate::set_ops::finish_owned_aggregate(
+                returning,
+                policy.query,
+                grouping,
+                &mut checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+        }
+        // A WITH head's rows are private input to its tail.
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy.query)
+        } else {
+            policy.query
+        };
         let returning = crate::set_ops::finish_owned_projection(
-            GqlQueryExecution {
-                value,
-                rows: prefix.selection,
-                evaluator: prefix.evaluator,
-            },
-            policy.query,
+            returning,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
-            checkpoint,
+            &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?;
+        let returning = match &self.tail {
+            None => returning,
+            Some(tail) => {
+                crate::set_ops::finish_owned_tail(returning, tail, policy.query, checkpoint)
+                    .map_err(|error| error.map_source(GraphInsertQueryError::Returning))?
+            }
+        };
         Ok(GraphInsertQueryBatch {
             insertion,
             returning,
@@ -281,6 +509,9 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::VertexProperty { vertex, key } => (2, vertex, Some(key)),
                 GraphInsertBinding::CreatedEdge(edge) => (3, edge, None),
                 GraphInsertBinding::EdgeProperty { edge, key } => (4, edge, Some(key)),
+                GraphInsertBinding::VertexProperties(vertex) => (5, vertex, None),
+                GraphInsertBinding::EdgeProperties(edge) => (6, edge, None),
+                GraphInsertBinding::VertexLabels(vertex) => (7, vertex, None),
             };
             bytes.push(tag);
             bytes.extend_from_slice(&(index as u64).to_be_bytes());
@@ -302,6 +533,36 @@ impl PreparedGraphInsertQuery {
         bytes.push(u8::from(self.count.is_some()));
         if let Some(count) = self.count {
             bytes.extend_from_slice(&count.to_be_bytes());
+        }
+        if let Some(grouping) = &self.grouping {
+            grouping.append_canonical_bytes(&mut bytes);
+        }
+        if self.bindings.iter().any(|binding| {
+            matches!(
+                binding,
+                GraphInsertBinding::VertexProperties(_) | GraphInsertBinding::EdgeProperties(_)
+            )
+        }) {
+            crate::algebra::append_property_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphInsertBinding::VertexLabels(_)))
+        {
+            crate::algebra::append_label_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
+        }
+        if let Some(tail) = &self.tail {
+            bytes.extend_from_slice(b"fgdb:write-tail:v1\0");
+            let tail = tail.canonical_bytes();
+            bytes.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&tail);
         }
         bytes
     }

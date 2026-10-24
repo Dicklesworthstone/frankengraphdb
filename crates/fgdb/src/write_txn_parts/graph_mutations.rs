@@ -54,6 +54,210 @@ impl WriteTxn {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, true)
     }
 
+    /// Stage `MATCH ... SET/REMOVE/DETACH DELETE ... RETURN ...` as one
+    /// atomic operation. The selection, every proposal, the RETURN bindings,
+    /// projection, DISTINCT, ordering and page are complete before anything
+    /// is staged, and a failure stages nothing. Each RETURN row is one
+    /// selection occurrence; its property reads see this statement's own
+    /// assignments (the pre-statement value otherwise), never a rescan.
+    ///
+    /// Rows are transaction-local, like the staged effects: publish them only
+    /// once finish/commit succeeds. RETURN row limits apply to the final rows
+    /// and never limit which occurrences are updated. The returned execution
+    /// counters already include the mutation phase.
+    pub fn execute_graph_mutation_query_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphMutationQuery,
+        policy: fgdb_gql::GraphMutationPolicy,
+    ) -> Result<
+        (
+            fgdb_gql::GraphMutationStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        ),
+        TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
+    > {
+        use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationQueryError};
+        let mutation = query.mutation();
+        self.admit_mutation(database, mutation.relation())
+            .map_err(|error| {
+                GqlQueryError::Source(GraphMutationQueryError::Mutation(
+                    GraphMutationError::Source(error),
+                ))
+            })?;
+        cx.with_restriction(|| {
+            let proposal =
+                self.collect_graph_mutation_query_over(database, cx, query, policy, None)?;
+            let (batch, returning) = proposal.into_parts();
+            let stats = self.stage_mutation_intents(
+                database,
+                cx,
+                mutation.relation(),
+                batch,
+                policy,
+                GraphMutationQueryError::Mutation,
+            )?;
+            Ok((stats, returning))
+        })
+    }
+
+    /// Even an empty/zero-budget selection cannot bypass ownership, health,
+    /// basis or the existing relation-coordinate contract.
+    fn admit_mutation<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<(), WriteTxnError> {
+        self.ensure_database(database)?;
+        let live = database.frontier().map_err(WriteTxnError::from)?;
+        if live != self.basis {
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            });
+        }
+        if let Some(first) = self.staged.first()
+            && !self.program_multi_relation
+            && self
+                .staged
+                .iter()
+                .all(|batch| batch.relation == first.relation)
+            && relation != first.relation
+        {
+            return Err(WriteTxnError::RelationMismatch {
+                expected: first.relation,
+                found: relation,
+            });
+        }
+        Ok(())
+    }
+
+    /// Append one statement's complete proposal as a single ordinary batch and
+    /// return its statistics. A plain DELETE statement instead takes the one
+    /// non-detaching DELETE completion: the incidence proof charges this
+    /// statement's allowance and its costs join the returned statistics.
+    fn stage_mutation_intents<V: Vfs + Clone, X>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        relation: fgdb_delta_types::RelationId,
+        proposal: fgdb_gql::GraphMutationBatch,
+        policy: fgdb_gql::GraphMutationPolicy,
+        wrap: impl Fn(fgdb_gql::GraphMutationError<WriteTxnError>) -> X,
+    ) -> Result<fgdb_gql::GraphMutationStats, TxnGqlError<X>> {
+        use fgdb_gql::{GqlQueryError, GraphDeleteError, GraphMutationError, GraphMutationIntent};
+        let mut stats = proposal.stats();
+        let intents = proposal.into_intents();
+        if intents.iter().any(|intent| {
+            matches!(
+                intent,
+                GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
+            )
+        }) {
+            // Preparation admits no other action beside a plain DELETE.
+            let mut vertices = Vec::new();
+            let mut edges = Vec::new();
+            for intent in intents {
+                match intent {
+                    GraphMutationIntent::Delete { vertex } => vertices.push(vertex),
+                    GraphMutationIntent::DeleteEdge { edge } => edges.push(edge),
+                    _ => {
+                        return Err(GqlQueryError::Source(wrap(
+                            GraphMutationError::InvalidSourceStatistics,
+                        )));
+                    }
+                }
+            }
+            // Proposals arrive sorted by element; the proof binary-searches.
+            vertices.sort_unstable();
+            edges.sort_unstable();
+            let deleted = fgdb_gql::GraphDeleteStats {
+                selection: stats.selection,
+                evaluator: stats.evaluator,
+                target_vertices: stats.target_vertices,
+                target_edges: stats.target_edges,
+            };
+            let (deleted, _, _) = self
+                .stage_delete_targets_controlled(
+                    database,
+                    relation,
+                    deleted,
+                    (vertices, edges),
+                    fgdb_gql::GraphDeletePolicy::new(policy.query, policy.max_effects),
+                    || cx.checkpoint(),
+                )
+                .map_err(|error| {
+                    error.map_source(|error| {
+                        wrap(match error {
+                            GraphDeleteError::Source(error) => GraphMutationError::Source(error),
+                            GraphDeleteError::IncidentRelationships => {
+                                GraphMutationError::IncidentRelationships
+                            }
+                            // The completion only counts; it never re-selects.
+                            GraphDeleteError::InvalidSourceStatistics
+                            | GraphDeleteError::InputSchema { .. }
+                            | GraphDeleteError::TargetLimit { .. } => {
+                                GraphMutationError::InvalidSourceStatistics
+                            }
+                        })
+                    })
+                })?;
+            stats.selection = deleted.selection;
+            stats.evaluator = deleted.evaluator;
+            return Ok(stats);
+        }
+        let mut batch = WriteBatch::new(relation);
+        for intent in intents {
+            // Only a private batch is changing here. Cancellation drops it
+            // whole and cannot expose a partially appended statement.
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            match intent {
+                GraphMutationIntent::Property { vertex, key, value } => {
+                    batch.set_vertex_property_value(vertex, key, value);
+                }
+                GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                    batch.set_edge_property_value(edge, key, value);
+                }
+                GraphMutationIntent::StoredProperty {
+                    target: ElementId::Vertex(vertex),
+                    key,
+                    value,
+                } => {
+                    batch.set_vertex_property_value(vertex, key, Some(value));
+                }
+                GraphMutationIntent::StoredProperty {
+                    target: ElementId::Edge(edge),
+                    key,
+                    value,
+                } => {
+                    batch.set_edge_property_value(edge, key, Some(value));
+                }
+                GraphMutationIntent::Label {
+                    vertex,
+                    label,
+                    present,
+                } => {
+                    batch.set_vertex_label(vertex, label, present);
+                }
+                GraphMutationIntent::DetachDelete { vertex } => {
+                    batch.delete_vertex(vertex);
+                }
+                GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. } => {
+                    unreachable!("plain DELETE statements stage above")
+                }
+            }
+        }
+        // Last cancellable boundary before synchronous atomic staging.
+        // Never report a new interruption after the workspace has changed.
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        if !batch.is_empty() {
+            self.write(database, batch)
+                .map_err(|error| GqlQueryError::Source(wrap(GraphMutationError::Source(error))))?;
+        }
+        Ok(stats)
+    }
+
     fn execute_graph_mutation_governed_inner<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -65,93 +269,123 @@ impl WriteTxn {
         WithAffectedIds<fgdb_gql::GraphMutationStats>,
         TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
-        use fgdb_gql::{GqlQueryError, GraphMutationError, GraphMutationIntent};
+        use fgdb_gql::{GqlQueryError, GraphMutationError};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));
-        // Even an empty/zero-budget selection cannot bypass ownership, health,
-        // basis or the existing relation-coordinate contract.
-        self.ensure_database(database).map_err(source)?;
-        let live = database
-            .frontier()
-            .map_err(WriteTxnError::from)
+        self.admit_mutation(database, mutation.relation())
             .map_err(source)?;
-        if live != self.basis {
-            return Err(source(WriteTxnError::SnapshotAdvanced {
-                pinned: self.basis,
-                live,
-            }));
-        }
-        if let Some(first) = self.staged.first()
-            && !self.program_multi_relation
-            && self
-                .staged
-                .iter()
-                .all(|batch| batch.relation == first.relation)
-            && mutation.relation() != first.relation
-        {
-            return Err(source(WriteTxnError::RelationMismatch {
-                expected: first.relation,
-                found: mutation.relation(),
-            }));
-        }
         cx.with_restriction(|| {
-            let proposal = mutation.execute_governed(
-                policy,
-                |pattern, budget| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, budget)
-                },
-                || cx.checkpoint(),
-            )?;
-            let stats = proposal.stats();
+            let proposal =
+                self.collect_graph_mutation_over(database, cx, mutation, policy, None)?;
             let (targets, edges) = if retain_targets {
-                let mut targets = std::collections::BTreeSet::new();
-                let mut edges = std::collections::BTreeSet::new();
-                for intent in proposal.intents() {
-                    match intent {
-                        GraphMutationIntent::Property { vertex, .. }
-                        | GraphMutationIntent::Label { vertex, .. }
-                        | GraphMutationIntent::DetachDelete { vertex } => {
-                            targets.insert(*vertex);
-                        }
-                        GraphMutationIntent::EdgeProperty { edge, .. } => {
-                            edges.insert(*edge);
-                        }
-                    }
-                }
-                (targets.into_iter().collect(), edges.into_iter().collect())
+                mutation_targets(&proposal)
             } else {
                 (Vec::new(), Vec::new())
             };
-            let mut batch = WriteBatch::new(mutation.relation());
-            for intent in proposal.into_intents() {
-                // Only a private batch is changing here. Cancellation drops it
-                // whole and cannot expose a partially appended statement.
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                match intent {
-                    GraphMutationIntent::Property { vertex, key, value } => {
-                        batch.set_vertex_property(vertex, key, value);
-                    }
-                    GraphMutationIntent::EdgeProperty { edge, key, value } => {
-                        batch.set_edge_property(edge, key, value);
-                    }
-                    GraphMutationIntent::Label {
-                        vertex,
-                        label,
-                        present,
-                    } => {
-                        batch.set_vertex_label(vertex, label, present);
-                    }
-                    GraphMutationIntent::DetachDelete { vertex } => {
-                        batch.delete_vertex(vertex);
-                    }
-                }
-            }
-            // Last cancellable boundary before synchronous atomic staging.
-            // Never report a new interruption after the workspace has changed.
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if !batch.is_empty() {
-                self.write(database, batch).map_err(source)?;
-            }
+            let stats = self.stage_mutation_intents(
+                database,
+                cx,
+                mutation.relation(),
+                proposal,
+                policy,
+                core::convert::identity,
+            )?;
             Ok((stats, targets, edges))
         })
     }
+
+    // Selection and computed-element RHS reads borrow one immutable workspace
+    // until the complete proposal exists. Chains and frozen UNWIND programs
+    // use this same owner, so a row never sees an earlier row's assignments.
+    fn collect_graph_mutation_over<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        mutation: &fgdb_gql::PreparedGraphMutation,
+        policy: fgdb_gql::GraphMutationPolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+    ) -> Result<
+        fgdb_gql::GraphMutationBatch,
+        TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
+    > {
+        let failure = std::cell::RefCell::new(None);
+        let result = mutation.execute_governed_over_reading(
+            owned,
+            policy,
+            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |element, key| {
+                self.element_property_with_checkpoint(database, cx, &failure, element, key)
+            },
+            || match failure.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => cx.checkpoint(),
+            },
+        );
+        match failure.into_inner() {
+            Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+            None => result,
+        }
+    }
+
+    fn collect_graph_mutation_query_over<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphMutationQuery,
+        policy: fgdb_gql::GraphMutationPolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+    ) -> Result<
+        fgdb_gql::GraphMutationQueryBatch,
+        TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
+    > {
+        let failure = std::cell::RefCell::new(None);
+        let result = query.execute_governed_over_reading(
+            owned,
+            policy,
+            |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |element, key| {
+                self.element_property_with_checkpoint(database, cx, &failure, element, key)
+            },
+            || match failure.borrow_mut().take() {
+                Some(error) => Err(error),
+                None => cx.checkpoint(),
+            },
+        );
+        match failure.into_inner() {
+            Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+            None => result,
+        }
+    }
+}
+
+/// The distinct vertices and edges a proposal has at least one intent for,
+/// each domain sorted.
+fn mutation_targets(
+    proposal: &fgdb_gql::GraphMutationBatch,
+) -> (Vec<fgdb_types::VId>, Vec<fgdb_types::EId>) {
+    use fgdb_gql::GraphMutationIntent;
+    let mut targets = std::collections::BTreeSet::new();
+    let mut edges = std::collections::BTreeSet::new();
+    for intent in proposal.intents() {
+        match intent {
+            GraphMutationIntent::Property { vertex, .. }
+            | GraphMutationIntent::StoredProperty {
+                target: ElementId::Vertex(vertex),
+                ..
+            }
+            | GraphMutationIntent::Label { vertex, .. }
+            | GraphMutationIntent::DetachDelete { vertex }
+            | GraphMutationIntent::Delete { vertex } => {
+                targets.insert(*vertex);
+            }
+            GraphMutationIntent::EdgeProperty { edge, .. }
+            | GraphMutationIntent::StoredProperty {
+                target: ElementId::Edge(edge),
+                ..
+            }
+            | GraphMutationIntent::DeleteEdge { edge } => {
+                edges.insert(*edge);
+            }
+        }
+    }
+    (targets.into_iter().collect(), edges.into_iter().collect())
 }

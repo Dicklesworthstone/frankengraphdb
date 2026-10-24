@@ -3,6 +3,8 @@
 //! Standalone creation supplies one zero-column occurrence to these same phases;
 //! it never fabricates a public GraphValueRow or calls a graph-source adapter.
 
+mod stored;
+
 use super::*;
 use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use crate::insertion_query::GraphInsertBinding;
@@ -13,7 +15,7 @@ use crate::{
 use std::collections::BTreeSet;
 
 type ResultOf<T, E, A, C> = Result<T, GqlQueryError<GraphInsertError<E, A>, C>>;
-type Fields = Vec<(PropertyKeyId, CanonicalScalar)>;
+type Fields = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 
 struct Meter<F> {
     policy: GqlQueryPolicy,
@@ -96,7 +98,15 @@ fn copy_scalar<E, A, C>(
     value: &CanonicalScalar,
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
 ) -> ResultOf<CanonicalScalar, E, A, C> {
-    // Reserve the field and its variable payload before its only clone.
+    charge_scalar(value, control)?;
+    Ok(value.clone())
+}
+
+// Reserve the field and its variable payload before its only clone.
+fn charge_scalar<E, A, C>(
+    value: &CanonicalScalar,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<(), E, A, C> {
     let sizes = match value {
         CanonicalScalar::Text(value) => [
             value.len(),
@@ -114,7 +124,72 @@ fn copy_scalar<E, A, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
         }
     }
-    Ok(value.clone())
+    Ok(())
+}
+
+// A stored List or Map charges one entry per collection node plus every
+// scalar's payload, exactly as its scalars would be charged one by one.
+fn charge_stored<E, A, C>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<(), E, A, C> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => charge_scalar(scalar, control),
+        CanonicalPropertyValue::List(list) => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for value in list.values() {
+                charge_stored(value, control)?;
+            }
+            Ok(())
+        }
+        CanonicalPropertyValue::Map(map) => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for entry in map.entries() {
+                let key = entry.key().as_str().len();
+                for _ in 0..key.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                charge_stored(entry.value(), control)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+// A computed or input value as the stored field a CREATE writes
+// (fgdb-k3nub). Reserve the complete copy before the canonical conversion:
+// converting a list clones its leaves even when the expression owns them.
+// Maps, graph elements and values beyond the canonical bounds still refuse.
+fn written<E, A, C>(
+    value: &GraphValue,
+    row: usize,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<CanonicalPropertyValue, E, A, C> {
+    stored::reserve(value, row, column, control)?;
+    value
+        .to_written_property()
+        .ok_or(GqlQueryError::Source(GraphInsertError::InputSchema {
+            row,
+            column,
+        }))
+}
+
+// A frozen field as the value a RETURN of the created element reads. Every
+// written value came from a bounded query value, so it converts back.
+fn stored_binding<E, A, C>(
+    value: &CanonicalPropertyValue,
+    row: usize,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    if let CanonicalPropertyValue::Scalar(scalar) = value {
+        return copy_scalar(scalar, control).map(GraphValue::Scalar);
+    }
+    charge_stored(value, control)?;
+    GraphValue::from_property_value(value).ok_or(GqlQueryError::Source(
+        GraphInsertError::InputSchema { row, column },
+    ))
 }
 
 fn fields<E, A, C>(
@@ -133,37 +208,47 @@ fn fields<E, A, C>(
     {
         control(GlaExecutionEvent::Work)?;
         // Use the same scalar/CASE VM as mutation, RETURN and aggregation.
-        // Computed values already own their charged payload; move, never copy.
+        // Computed scalars move; a collection's storage conversion copies its
+        // payload and must reserve that second ownership before conversion.
         let value = match expression.value() {
-            GraphSetValue::Column(column) => {
-                row.values()[*column]
-                    .as_scalar()
-                    .ok_or(GqlQueryError::Source(GraphInsertError::InputSchema {
-                        row: row_at,
-                        column: *column,
-                    }))?
-            }
+            GraphSetValue::Column(column) => match row.values()[*column].as_scalar() {
+                Some(scalar) => scalar,
+                // A list column (an UNWIND of lists, a collected list) is a
+                // stored list field (fgdb-k3nub).
+                None => {
+                    let stored = written(&row.values()[*column], row_at, *column, control)?;
+                    result.push((*key, stored));
+                    continue;
+                }
+            },
             GraphSetValue::Literal(value) => value.value(),
             GraphSetValue::Value(value) => match value.as_scalar() {
                 Some(scalar) => scalar,
-                // Only a scalar property field is expressible here; a vertex,
-                // edge, path or list projection is an input-schema refusal,
-                // never a silent truncation.
+                // A bound list constant is a stored list field. A vertex,
+                // edge, path or map is an input-schema refusal, never a silent
+                // truncation.
                 None => {
-                    return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
-                        row: row_at,
-                        column: property,
-                    }));
+                    let stored = written(value, row_at, property, control)?;
+                    result.push((*key, stored));
+                    continue;
                 }
             },
-            // A composite value (a list index, a map entry, size(), IN, a
-            // quantifier, reduce()) runs on the shared row evaluator. Only a
-            // scalar result is a property field; a list, map or graph element
-            // is an input-schema refusal, never a silent truncation.
-            composite @ (GraphSetValue::List(_)
+            // A composite value (a list literal, a list index, a map entry,
+            // size(), IN, a quantifier, reduce()) runs on the shared row
+            // evaluator. A scalar or a list of storable values is a property
+            // field; a map or a graph element is an input-schema refusal,
+            // never a silent truncation.
+            composite @ (GraphSetValue::TypedNull(_)
+            | GraphSetValue::List(_)
             | GraphSetValue::Index { .. }
             | GraphSetValue::Size(_)
             | GraphSetValue::In { .. }
+            | GraphSetValue::Equal { .. }
+            | GraphSetValue::Ordered { .. }
+            | GraphSetValue::Temporal { .. }
+            | GraphSetValue::Function { .. }
+            | GraphSetValue::Case { .. }
+            | GraphSetValue::Random { .. }
             | GraphSetValue::Local(_)
             | GraphSetValue::Comprehension { .. }
             | GraphSetValue::Quantifier { .. }
@@ -171,8 +256,10 @@ fn fields<E, A, C>(
             | GraphSetValue::Range { .. }
             | GraphSetValue::Reduce { .. }
             | GraphSetValue::MapLiteral { .. }
+            | GraphSetValue::MapOverlay { .. }
             | GraphSetValue::MapGet { .. }
-            | GraphSetValue::Keys(_)) => {
+            | GraphSetValue::Keys(_)
+            | GraphSetValue::Let { .. }) => {
                 let value = crate::set_ops::evaluate_value(composite, row, property, control)
                     .map_err(|failure| match failure {
                         crate::set_ops::ProjectionFailure::Control(error) => error,
@@ -185,13 +272,11 @@ fn fields<E, A, C>(
                             })
                         }
                     })?;
-                let GraphValue::Scalar(value) = value else {
-                    return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
-                        row: row_at,
-                        column: property,
-                    }));
+                let value = match value {
+                    GraphValue::Scalar(value) => CanonicalPropertyValue::Scalar(value),
+                    value => written(&value, row_at, property, control)?,
                 };
-                // Computed values already own their charged payload.
+                // The field cell is separate from any copied list payload.
                 control(GlaExecutionEvent::ScratchEntry)?;
                 result.push((*key, value));
                 continue;
@@ -211,11 +296,14 @@ fn fields<E, A, C>(
                         }
                     })?;
                 control(GlaExecutionEvent::ScratchEntry)?;
-                result.push((*key, value));
+                result.push((*key, CanonicalPropertyValue::Scalar(value)));
                 continue;
             }
         };
-        result.push((*key, copy_scalar(value, control)?));
+        result.push((
+            *key,
+            CanonicalPropertyValue::Scalar(copy_scalar(value, control)?),
+        ));
     }
     Ok(result)
 }
@@ -223,12 +311,13 @@ fn fields<E, A, C>(
 fn property_binding<E, A, C>(
     properties: &Fields,
     key: PropertyKeyId,
+    (row, column): (usize, usize),
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
 ) -> ResultOf<GraphValue, E, A, C> {
     for (candidate, value) in properties {
         control(GlaExecutionEvent::Work)?;
         if *candidate == key {
-            return copy_scalar(value, control).map(GraphValue::Scalar);
+            return stored_binding(value, row, column, control);
         }
         if *candidate > key {
             break;
@@ -238,24 +327,97 @@ fn property_binding<E, A, C>(
     Ok(GraphValue::Scalar(CanonicalScalar::Null))
 }
 
+/// Every field expression has already run once. Freeze a named map of those
+/// same stored values before any created identity is requested or published.
+fn properties_binding<E, A, C>(
+    properties: &Fields,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    (row, column): (usize, usize),
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    let mut named = std::collections::BTreeMap::new();
+    for (key, value) in properties {
+        control(GlaExecutionEvent::Work)?;
+        let name = catalog
+            .and_then(|catalog| catalog.properties.get(key))
+            .expect("created-map property names are admitted before execution");
+        control(GlaExecutionEvent::ScratchEntry)?;
+        named.insert(name.as_str(), value);
+    }
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut keys = Vec::<Box<str>>::new();
+    let mut values = Vec::new();
+    for (name, value) in named {
+        control(GlaExecutionEvent::Work)?;
+        for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let value = stored_binding(value, row, column, control)?;
+        keys.push(name.into());
+        values.push(value);
+    }
+    Ok(GraphValue::Map {
+        keys: keys.into_boxed_slice(),
+        values: values.into_boxed_slice(),
+    })
+}
+
+/// A created vertex has exactly its CREATE labels, sorted by identity at
+/// preparation, which also admitted every name. Name them as labels() does.
+fn labels_binding<E, A, C>(
+    labels: &[LabelId],
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut names = Vec::with_capacity(labels.len());
+    for label in labels {
+        control(GlaExecutionEvent::Work)?;
+        let name = catalog
+            .and_then(|catalog| catalog.labels.get(label))
+            .expect("created-vertex label names are admitted before execution");
+        for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let text = CanonicalScalar::ucs_basic_text(name)
+            .expect("created-vertex label names are admitted as UCS-basic text");
+        names.push(GraphValue::Scalar(text));
+    }
+    Ok(GraphValue::List(names.into_boxed_slice()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn freeze_bindings<E, A, C>(
     bindings: &[GraphInsertBinding],
     row: &[GraphValue],
+    row_at: usize,
+    templates: &[Vertex],
     vertices: &[Fields],
     edges: &[EdgeDraft],
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
 ) -> ResultOf<Vec<GraphValue>, E, A, C> {
     control(GlaExecutionEvent::ScratchEntry)?;
     let mut values = Vec::new();
-    for binding in bindings {
+    for (column, binding) in bindings.iter().enumerate() {
         control(GlaExecutionEvent::Work)?;
+        let at = (row_at, column);
         let value = match *binding {
             GraphInsertBinding::Input(column) => row[column].copy_with_control(control)?,
             GraphInsertBinding::VertexProperty { vertex, key } => {
-                property_binding(&vertices[vertex], key, control)?
+                property_binding(&vertices[vertex], key, at, control)?
             }
             GraphInsertBinding::EdgeProperty { edge, key } => {
-                property_binding(&edges[edge].properties, key, control)?
+                property_binding(&edges[edge].properties, key, at, control)?
+            }
+            GraphInsertBinding::VertexProperties(vertex) => {
+                properties_binding(&vertices[vertex], property_catalog, at, control)?
+            }
+            GraphInsertBinding::EdgeProperties(edge) => {
+                properties_binding(&edges[edge].properties, property_catalog, at, control)?
+            }
+            GraphInsertBinding::VertexLabels(vertex) => {
+                labels_binding(&templates[vertex].labels, property_catalog, control)?
             }
             GraphInsertBinding::CreatedVertex(_) | GraphInsertBinding::CreatedEdge(_) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -298,21 +460,57 @@ fn allocate_id<E, A, C>(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
-    mut source: impl FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    owned: Option<Vec<GraphValueRow>>,
+    mut source: impl GraphSetSource<E, C>,
     mut allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
+    // The insertion engine is compiled once per error-type triple, not once
+    // per caller closure type (fgdb-2goz): each callback is a trait object.
+    execute_erased(
+        insertion,
+        policy,
+        bindings,
+        property_catalog,
+        owned,
+        &mut source,
+        &mut allocate,
+        &mut checkpoint,
+    )
+}
+
+/// A selection source behind a trait object.
+type ErasedSource<'a, E, C> = &'a mut dyn GraphSetSource<E, C>;
+
+#[allow(clippy::too_many_arguments)]
+fn execute_erased<E, A, C>(
+    insertion: &PreparedGraphInsert,
+    policy: GraphInsertPolicy,
+    bindings: Option<&[GraphInsertBinding]>,
+    property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    owned: Option<Vec<GraphValueRow>>,
+    source: ErasedSource<'_, E, C>,
+    mut allocate: &mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+    mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
+) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
+    // A chained CREATE reads the previous write's rows through its relation's
+    // one owned leaf; an input with no such leaf refuses them, never drops them.
+    if owned.is_some() && !matches!(&insertion.input, Input::Relation(_)) {
+        return Err(GqlQueryError::Source(GraphInsertError::InputRelation(
+            GraphSetExecutionError::OwnedRowsUnavailable,
+        )));
+    }
     let (selected_rows, selection, evaluator) = match &insertion.input {
         Input::Pattern(pattern) => {
-            let selected = source(pattern, policy.query)
+            let selected = source
+                .pattern(pattern, policy.query)
                 .map_err(|error| error.map_source(GraphInsertError::Source))?;
             if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
                 return Err(GqlQueryError::Source(
@@ -322,9 +520,18 @@ pub(super) fn execute<E, A, C>(
             (selected.value, selected.rows, selected.evaluator)
         }
         Input::Relation(relation) => {
-            let selected = relation
-                .execute_governed(policy.query, &mut source, &mut checkpoint)
-                .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
+            let selected = match owned {
+                None => relation.execute_with_source(policy.query, source, &mut checkpoint),
+                Some(rows) => relation.execute_with_source(
+                    policy.query,
+                    &mut crate::set_ops::WithOwnedRows {
+                        source,
+                        rows: Some(rows),
+                    },
+                    &mut checkpoint,
+                ),
+            }
+            .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
             (selected.value, selected.rows, selected.evaluator)
         }
         Input::Unit => (
@@ -461,8 +668,11 @@ pub(super) fn execute<E, A, C>(
             returned.push(freeze_bindings(
                 bindings,
                 row,
+                row_at,
+                &insertion.vertices,
                 &vertices,
                 &edges,
+                property_catalog,
                 &mut |event| meter.event(event),
             )?);
         }

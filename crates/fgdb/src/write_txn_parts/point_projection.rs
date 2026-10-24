@@ -4,8 +4,78 @@
 #[derive(Default)]
 struct PointProjection<'a> {
     exists: bool,
-    property: Option<&'a CanonicalScalar>,
+    property: Option<&'a CanonicalPropertyValue>,
     label: bool,
+}
+
+/// A whole-property sibling of the scalar point projection. It borrows the
+/// selected historical row and canonical staged values; it never clones a
+/// vertex, inspects a hidden payload, or enumerates the host's known keys.
+struct PointProperties<'a> {
+    base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)],
+    edits: std::collections::BTreeMap<
+        fgdb_delta_types::PropertyKeyId,
+        Option<&'a CanonicalPropertyValue>,
+    >,
+}
+
+impl<'a> PointProperties<'a> {
+    fn new(base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)]) -> Self {
+        Self {
+            base,
+            edits: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn effective_properties(
+        &self,
+    ) -> impl Iterator<Item = (fgdb_delta_types::PropertyKeyId, &CanonicalPropertyValue)> {
+        self.base
+            .iter()
+            .filter(|(key, _)| !self.edits.contains_key(key))
+            .map(|(key, value)| (*key, value))
+            .chain(
+                self.edits
+                    .iter()
+                    .filter_map(|(key, value)| value.map(|value| (*key, value))),
+            )
+    }
+}
+
+/// The whole-label sibling of `PointProperties` (fgdb-iufb7): the selected
+/// historical row's labels and the prepared NET membership edits, borrowed.
+struct PointLabels<'a> {
+    base: &'a [LabelId],
+    edits: std::collections::BTreeMap<LabelId, bool>,
+}
+
+impl<'a> PointLabels<'a> {
+    fn new(base: &'a [LabelId]) -> Self {
+        Self {
+            base,
+            edits: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Effective labels in identity order: every unedited historical label
+    /// and every label a staged edit sets, each once.
+    fn effective_labels(&self) -> Vec<LabelId> {
+        let mut labels: Vec<_> = self
+            .base
+            .iter()
+            .copied()
+            .filter(|label| !self.edits.contains_key(label))
+            .chain(
+                self.edits
+                    .iter()
+                    .filter(|(_, member)| **member)
+                    .map(|(label, _)| *label),
+            )
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
 }
 
 // A controlled binary search over canonical sorted fields. No property value
@@ -34,7 +104,7 @@ impl<'a> PointProjection<'a> {
     fn from_fields<E>(
         field: PointReadField,
         labels: &[LabelId],
-        properties: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalScalar)],
+        properties: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)],
         control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let mut projected = Self {
@@ -42,6 +112,10 @@ impl<'a> PointProjection<'a> {
             ..Self::default()
         };
         match field {
+            // Authorization of a supplied element needs its lifetime without
+            // reading any property or label payload. Creation already set
+            // `exists`; canonical retirement resets the projection below.
+            PointReadField::VertexExistence => {}
             PointReadField::Property(requested) => {
                 projected.property = point_find(properties, requested, |(key, _)| *key, control)?
                     .map(|(_, value)| value);
@@ -49,7 +123,7 @@ impl<'a> PointProjection<'a> {
             PointReadField::Label(requested) => {
                 projected.label = point_find(labels, requested, |label| *label, control)?.is_some();
             }
-            _ => unreachable!("only explicit property and label accessors project a point"),
+            _ => unreachable!("only existence, property and label accessors project a point"),
         }
         Ok(projected)
     }
@@ -116,6 +190,129 @@ impl<'a> PointProjection<'a> {
 }
 
 impl WriteTxn {
+    /// Borrow the selected vertex's effective fields from the same admitted
+    /// basis and NET effects as individual point projections. Visibility must
+    /// also be supplied to the final property-map collector: the historical
+    /// slice is borrowed intact, and only visible edits are retained here.
+    fn vertex_properties_with_control<'a, V: Vfs + Clone, E>(
+        &'a self,
+        database: &'a Database<V>,
+        vertex: VId,
+        visible: &mut impl FnMut(fgdb_delta_types::PropertyKeyId) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<PointProperties<'a>>, E> {
+        use crate::gql_exec::source::{SourceEvent, find_vertex};
+        use fgdb_delta_types::DeltaRow;
+        let snapshot = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let mut properties = match find_vertex(snapshot, vertex, self.basis, control)? {
+            Some(row) => {
+                control(SourceEvent::SnapshotRecord)?;
+                Some(PointProperties::new(&row.props))
+            }
+            None => None,
+        };
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                poll()?;
+                for effect in &coordinate.rows {
+                    poll()?;
+                    // Scan only identity/key metadata before visibility. A
+                    // hidden staged field must not add a per-field charge or
+                    // own its payload, even when it is the coordinate's only
+                    // effect. The uncharged poll still makes traversal of
+                    // hidden/unrelated prefixes cancellable. These are
+                    // canonical net rows, never raw intents.
+                    match effect {
+                        DeltaRow::CreateVertex { vid, props, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            properties = Some(PointProperties::new(props));
+                        }
+                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            properties = None;
+                        }
+                        DeltaRow::Property {
+                            elem: ElementId::Vertex(vid),
+                            property,
+                            after,
+                            ..
+                        } if *vid == vertex && visible(*property) => {
+                            control(SourceEvent::Work)?;
+                            if let Some(properties) = &mut properties {
+                                control(SourceEvent::ScratchEntry)?;
+                                properties.edits.insert(*property, after.as_ref());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(properties)
+    }
+
+    /// Borrow the selected vertex's effective labels from the same admitted
+    /// basis and NET effects as `vertex_properties_with_control` (fgdb-iufb7).
+    /// A label `visible` rejects adds no charge and no retained edit; the
+    /// caller masks the historical labels the same way before naming them.
+    fn vertex_labels_with_control<'a, V: Vfs + Clone, E>(
+        &'a self,
+        database: &'a Database<V>,
+        vertex: VId,
+        visible: &mut impl FnMut(LabelId) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<PointLabels<'a>>, E> {
+        use crate::gql_exec::source::{SourceEvent, find_vertex};
+        use fgdb_delta_types::DeltaRow;
+        let snapshot = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let mut labels = match find_vertex(snapshot, vertex, self.basis, control)? {
+            Some(row) => {
+                control(SourceEvent::SnapshotRecord)?;
+                Some(PointLabels::new(&row.labels))
+            }
+            None => None,
+        };
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                poll()?;
+                for effect in &coordinate.rows {
+                    poll()?;
+                    match effect {
+                        DeltaRow::CreateVertex {
+                            vid,
+                            labels: created,
+                            ..
+                        } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            labels = Some(PointLabels::new(created));
+                        }
+                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            labels = None;
+                        }
+                        DeltaRow::LabelMembership {
+                            vid, label, after, ..
+                        } if *vid == vertex && visible(*label) => {
+                            control(SourceEvent::Work)?;
+                            if let Some(labels) = &mut labels {
+                                control(SourceEvent::ScratchEntry)?;
+                                labels.edits.insert(*label, *after);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(labels)
+    }
+
     fn point_projection<'a, V: Vfs + Clone>(
         &'a self,
         database: &'a Database<V>,
@@ -149,15 +346,13 @@ impl WriteTxn {
             .map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut projected = match element {
-            ElementId::Vertex(vid) => {
-                match find_vertex(&snapshot.patches, vid, self.basis, control)? {
-                    Some(row) => {
-                        control(SourceEvent::SnapshotRecord)?;
-                        PointProjection::from_fields(field, &row.labels, &row.props, control)?
-                    }
-                    None => PointProjection::default(),
+            ElementId::Vertex(vid) => match find_vertex(snapshot, vid, self.basis, control)? {
+                Some(row) => {
+                    control(SourceEvent::SnapshotRecord)?;
+                    PointProjection::from_fields(field, &row.labels, &row.props, control)?
                 }
-            }
+                None => PointProjection::default(),
+            },
             ElementId::Edge(eid) => {
                 // Topology and payload use the SAME winning historical
                 // coordinate, including retirement restatements. This is the
@@ -172,18 +367,20 @@ impl WriteTxn {
                 match coordinate {
                     Some((block, row)) => {
                         control(SourceEvent::SnapshotRecord)?;
-                        let properties: &[(fgdb_delta_types::PropertyKeyId, CanonicalScalar)] =
-                            match snapshot.block_props.get(block).and_then(Option::as_ref) {
-                                Some(block) => {
-                                    let locator = block.locators[row];
-                                    if locator == 0 {
-                                        &[]
-                                    } else {
-                                        &block.rows[usize::from(locator) - 1]
-                                    }
+                        let properties: &[(
+                            fgdb_delta_types::PropertyKeyId,
+                            CanonicalPropertyValue,
+                        )] = match snapshot.block_props.get(block).and_then(Option::as_ref) {
+                            Some(block) => {
+                                let locator = block.locators[row];
+                                if locator == 0 {
+                                    &[]
+                                } else {
+                                    &block.rows[usize::from(locator) - 1]
                                 }
-                                None => &[],
-                            };
+                            }
+                            None => &[],
+                        };
                         PointProjection::from_fields(field, &[], properties, control)?
                     }
                     None => PointProjection::default(),

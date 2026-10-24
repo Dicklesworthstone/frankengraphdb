@@ -1,6 +1,8 @@
 //! Simultaneous assignment reduction. Borrowed scalars point into the frozen
 //! selection/literals; computed scalars move into intent ownership without copies.
 
+mod stored;
+
 use super::*;
 use crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
 use crate::algebra_exec::charge_payload;
@@ -16,7 +18,7 @@ type ResultOf<T, E, C> = Result<T, GqlQueryError<GraphMutationError<E>, C>>;
 fn property_intent(
     target: ElementId,
     key: PropertyKeyId,
-    value: Option<CanonicalScalar>,
+    value: Option<CanonicalPropertyValue>,
 ) -> GraphMutationIntent {
     match target {
         ElementId::Vertex(vertex) => GraphMutationIntent::Property { vertex, key, value },
@@ -34,8 +36,11 @@ enum Value<'a> {
     Property(Option<&'a CanonicalScalar>),
     /// Canonical NULL is stored, never a property-removal intention.
     Computed(CanonicalScalar),
+    /// A checked list assignment, frozen under the same cumulative meter.
+    Stored(CanonicalPropertyValue),
     Label(bool),
-    Delete,
+    /// DETACH DELETE when true. Preparation keeps one mode per statement.
+    Delete(bool),
 }
 struct Proposal<'a> {
     value: Value<'a>,
@@ -47,6 +52,88 @@ struct Meter<F> {
     policy: GraphMutationPolicy,
     evaluator: GlaExecutionStats,
     checkpoint: F,
+}
+
+/// Record one element-field proposal: an equal repeat is one effect, a
+/// different value for the same field is a conflict, and every new field
+/// counts against the statement's effect limit.
+#[allow(clippy::too_many_arguments)]
+fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
+    proposals: &mut BTreeMap<(ElementId, Field), Proposal<'a>>,
+    meter: &mut Meter<F>,
+    target: ElementId,
+    field: Field,
+    value: Value<'a>,
+    row: usize,
+    action: usize,
+) -> ResultOf<(), E, C> {
+    if let Some(previous) = proposals.get(&(target, field)) {
+        if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
+            return Err(GqlQueryError::Source(
+                GraphMutationError::ConflictingAssignment {
+                    first_row: previous.row,
+                    first_action: previous.action,
+                    row,
+                    action,
+                },
+            ));
+        }
+        return Ok(());
+    }
+    let observed = proposals.len() as u128 + 1;
+    if observed > u128::from(meter.policy.max_effects) {
+        return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
+            limit: meter.policy.max_effects,
+            observed,
+        }));
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    proposals.insert((target, field), Proposal { value, row, action });
+    Ok(())
+}
+
+/// A composite read value over one input row: a SET right-hand side or a
+/// computed DELETE target (TCK Delete5).
+/// The host's element property reader for a mutation (fgdb-694ga): one
+/// stored property of a vertex or edge, read at the statement's frozen
+/// selection cut, before any of its own effects. `Ok(None)` is an absent
+/// property.
+pub(crate) type MutationElementReader<'r, E> =
+    dyn FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E> + 'r;
+
+fn evaluate_composite<E, C, F: FnMut() -> Result<(), C>>(
+    value: &crate::GraphSetValue,
+    row: &GraphValueRow,
+    row_at: usize,
+    action_at: usize,
+    meter: &mut Meter<F>,
+    elements: &mut Option<&mut MutationElementReader<'_, E>>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    // Without a host reader, `x.key` of a computed element stays a typed
+    // error, never a guessed NULL.
+    let mut read = |element: ElementId, key: PropertyKeyId| {
+        elements.as_mut().map(|read| {
+            (*read)(element, key)
+                .map_err(|error| GqlQueryError::Source(GraphMutationError::Source(error)))
+        })
+    };
+    crate::set_ops::evaluate_value_reading(
+        value,
+        row,
+        action_at,
+        &mut |event| meter.event(event),
+        &mut read,
+    )
+    .map_err(|failure| match failure {
+        crate::set_ops::ProjectionFailure::Control(error) => error,
+        crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+            GqlQueryError::Source(GraphMutationError::Arithmetic {
+                row: row_at,
+                action: action_at,
+                error,
+            })
+        }
+    })
 }
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ResultOf<(), E, C>
@@ -103,6 +190,11 @@ fn equal<E>(
             charge_payload(right, control)?;
             Ok(left == right)
         }
+        (Value::Stored(left), Value::Stored(right)) => {
+            stored::compare_payload(left, control)?;
+            stored::compare_payload(right, control)?;
+            Ok(left == right)
+        }
         (Value::Computed(computed), Value::Property(scalar))
         | (Value::Property(scalar), Value::Computed(computed)) => {
             charge_payload(computed, control)?;
@@ -112,7 +204,8 @@ fn equal<E>(
             Ok(Some(computed) == *scalar)
         }
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
-        (Value::Delete, Value::Delete) => Ok(true),
+        (Value::Delete(left), Value::Delete(right)) => Ok(left == right),
+        // A List never equals a scalar, and a field holds one kind of value.
         _ => Ok(false),
     }
 }
@@ -143,17 +236,422 @@ fn reserve_copy<E>(
     Ok(())
 }
 
-pub(super) fn execute<E, C>(
+/// The element a target cell names, or `None` for an absent OPTIONAL target.
+fn element(value: &crate::algebra::GraphValue) -> Option<ElementId> {
+    if let Some(vertex) = value.as_vertex() {
+        Some(ElementId::Vertex(vertex))
+    } else {
+        value.as_edge().map(ElementId::Edge)
+    }
+}
+
+/// The properties `SET target = {...}` unsets: every name in the target's
+/// frozen property map that `keep` does not name, resolved through the
+/// selection's reverse catalog (injective, checked at preparation).
+fn cleared_fields<E, C, F: FnMut() -> Result<(), C>>(
+    current: &crate::algebra::GraphValue,
+    keep: &[fgdb_delta_types::PropertyKeyId],
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    row: usize,
+    action: usize,
+    meter: &mut Meter<F>,
+) -> ResultOf<Vec<Field>, E, C> {
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row,
+            binding: action,
+        })
+    };
+    let catalog = catalog.ok_or_else(invalid)?;
+    let (names, _) = current.as_map().ok_or_else(invalid)?;
+    let mut fields = Vec::new();
+    for name in names {
+        meter.event(GlaExecutionEvent::Work)?;
+        let key = catalog
+            .properties
+            .iter()
+            .find(|(_, known)| known.as_bytes() == name.as_bytes())
+            .map(|(key, _)| *key)
+            .ok_or_else(invalid)?;
+        if !keep.contains(&key) {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            fields.push(Field::Property(key));
+        }
+    }
+    Ok(fields)
+}
+
+enum MapField<'a> {
+    Frozen(&'a crate::algebra::GraphValue),
+    Assigned(&'a CanonicalScalar),
+    Stored(&'a CanonicalPropertyValue),
+}
+
+/// Merge the final proposal range for this actual element into its frozen
+/// admitted map. No expression runs here and no graph source is consulted.
+/// Catalog names were checked for injectivity when the query was prepared,
+/// including IDs absent from the original map but introduced by this SET.
+#[allow(clippy::too_many_arguments)]
+fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
+    target: ElementId,
+    current: &crate::algebra::GraphValue,
+    row_at: usize,
+    binding_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    meter: &mut Meter<F>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    use crate::algebra::GraphValue;
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row: row_at,
+            binding: binding_at,
+        })
+    };
+    meter.event(GlaExecutionEvent::Work)?;
+    if proposals.contains_key(&(target, Field::Delete)) {
+        return Err(GqlQueryError::Source(
+            GraphMutationError::DeletedElementRead {
+                row: row_at,
+                binding: binding_at,
+            },
+        ));
+    }
+    let (old_keys, old_values) = current.as_map().ok_or_else(invalid)?;
+    if old_keys.len() != old_values.len() || old_keys.len() >= GraphValue::MAX_LIST_NODES {
+        return Err(invalid());
+    }
+    for (at, (key, value)) in old_keys.iter().zip(old_values).enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        // A frozen field is any stored value, a List or Map included
+        // (fgdb-k3nub); a graph element never is.
+        if !value.is_stored_value() || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes() {
+            return Err(invalid());
+        }
+    }
+    let mut updates = BTreeMap::new();
+    meter.event(GlaExecutionEvent::Work)?;
+    for ((_, field), proposal) in proposals
+        .range((target, Field::Property(PropertyKeyId(0)))..(target, Field::Label(LabelId(0))))
+    {
+        meter.event(GlaExecutionEvent::Work)?;
+        let Field::Property(key) = field else {
+            unreachable!("the property range ends before labels and deletion")
+        };
+        let name = catalog
+            .and_then(|catalog| catalog.properties.get(key))
+            .ok_or(GqlQueryError::Source(
+                GraphMutationError::UnmappedProperty {
+                    row: row_at,
+                    binding: binding_at,
+                },
+            ))?;
+        let value = match &proposal.value {
+            Value::Property(value) => value.map(MapField::Assigned),
+            Value::Computed(value) => Some(MapField::Assigned(value)),
+            Value::Stored(value) => Some(MapField::Stored(value)),
+            _ => unreachable!("property fields hold property proposals"),
+        };
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        updates.insert(name.as_str(), value);
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    let mut keys = Vec::<Box<str>>::new();
+    let mut values = Vec::new();
+    let mut append = |key: &str, value: MapField<'_>| -> ResultOf<(), E, C> {
+        meter.event(GlaExecutionEvent::Work)?;
+        if keys.len() >= GraphValue::MAX_LIST_NODES - 1 {
+            return Err(invalid());
+        }
+        // Reserve the key cell and its payload before either output grows.
+        for _ in 0..=key.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let value = match value {
+            MapField::Frozen(value) => value.copy_with_control(&mut |event| meter.event(event))?,
+            MapField::Assigned(value) => {
+                reserve_copy(value, &mut |event| meter.event(event))?;
+                GraphValue::Scalar(value.clone())
+            }
+            MapField::Stored(value) => {
+                stored::returned(value, row_at, binding_at, &mut |event| meter.event(event))?
+            }
+        };
+        keys.push(key.into());
+        values.push(value);
+        Ok(())
+    };
+    let mut old = 0;
+    for (key, value) in updates {
+        while old < old_keys.len() && old_keys[old].as_bytes() < key.as_bytes() {
+            append(&old_keys[old], MapField::Frozen(&old_values[old]))?;
+            old += 1;
+        }
+        if old < old_keys.len() && old_keys[old].as_ref() == key {
+            old += 1;
+        }
+        if let Some(value) = value {
+            append(key, value)?;
+        }
+    }
+    for at in old..old_keys.len() {
+        append(&old_keys[at], MapField::Frozen(&old_values[at]))?;
+    }
+    Ok(GraphValue::Map {
+        keys: keys.into_boxed_slice(),
+        values: values.into_boxed_slice(),
+    })
+}
+
+/// `labels(target)` after the statement: resolve each frozen name to its
+/// label identity, apply this element's label proposals, and name the result
+/// in identity order, exactly as a `labels()` read orders it. The query
+/// admitted a catalog with one name per identity.
+#[allow(clippy::too_many_arguments)]
+fn returned_labels<E, C, F: FnMut() -> Result<(), C>>(
+    target: ElementId,
+    current: &crate::algebra::GraphValue,
+    row_at: usize,
+    binding_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    meter: &mut Meter<F>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    use crate::algebra::GraphValue;
+    let unmapped = || {
+        GqlQueryError::Source(GraphMutationError::UnmappedLabel {
+            row: row_at,
+            binding: binding_at,
+        })
+    };
+    meter.event(GlaExecutionEvent::Work)?;
+    if proposals.contains_key(&(target, Field::Delete)) {
+        return Err(GqlQueryError::Source(
+            GraphMutationError::DeletedElementRead {
+                row: row_at,
+                binding: binding_at,
+            },
+        ));
+    }
+    let catalog = catalog.ok_or_else(unmapped)?;
+    let frozen = current.as_list().ok_or_else(unmapped)?;
+    let mut labels = std::collections::BTreeSet::new();
+    for name in frozen {
+        let id = catalog
+            .labels
+            .iter()
+            .find(|(_, candidate)| {
+                CanonicalScalar::ucs_basic_text(candidate.as_str())
+                    .is_ok_and(|text| name.as_scalar() == Some(&text))
+            })
+            .map(|(id, _)| *id)
+            .ok_or_else(unmapped)?;
+        for _ in 0..=catalog.labels.len() {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        labels.insert(id);
+    }
+    meter.event(GlaExecutionEvent::Work)?;
+    for ((_, field), proposal) in
+        proposals.range((target, Field::Label(LabelId(0)))..(target, Field::Delete))
+    {
+        meter.event(GlaExecutionEvent::Work)?;
+        let (Field::Label(label), Value::Label(present)) = (field, &proposal.value) else {
+            unreachable!("the label range holds label proposals")
+        };
+        if *present {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            labels.insert(*label);
+        } else {
+            labels.remove(label);
+        }
+    }
+    let mut names = Vec::with_capacity(labels.len());
+    for label in labels {
+        let name = catalog.labels.get(&label).ok_or_else(unmapped)?;
+        let text = CanonicalScalar::ucs_basic_text(name.as_str()).map_err(|_| unmapped())?;
+        reserve_copy(&text, &mut |event| meter.event(event))?;
+        names.push(GraphValue::Scalar(text));
+    }
+    Ok(GraphValue::List(names.into_boxed_slice()))
+}
+
+/// One RETURN input row per selection row, read after every proposal is
+/// known: a property the statement assigns reads its proposal, any other
+/// reads the frozen selection value. Values are copied, never moved, since
+/// the intents still own the proposals.
+fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
+    bindings: &[GraphMutationBinding],
+    row: &GraphValueRow,
+    row_at: usize,
+    proposals: &BTreeMap<(ElementId, Field), Proposal<'_>>,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    meter: &mut Meter<F>,
+) -> ResultOf<GraphValueRow, E, C> {
+    use crate::algebra::GraphValue;
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    let mut values = Vec::with_capacity(bindings.len());
+    for (binding_at, binding) in bindings.iter().enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        let value = match *binding {
+            GraphMutationBinding::Input(column) => {
+                row.values()[column].copy_with_control(&mut |event| meter.event(event))?
+            }
+            GraphMutationBinding::Property {
+                target,
+                key,
+                current,
+            } => match element(&row.values()[target]) {
+                None => {
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                }
+                Some(target) => {
+                    // Two ordered-map searches, charged as work like any
+                    // other proposal lookup.
+                    meter.event(GlaExecutionEvent::Work)?;
+                    if proposals.contains_key(&(target, Field::Delete)) {
+                        return Err(GqlQueryError::Source(
+                            GraphMutationError::DeletedElementRead {
+                                row: row_at,
+                                binding: binding_at,
+                            },
+                        ));
+                    }
+                    meter.event(GlaExecutionEvent::Work)?;
+                    match proposals.get(&(target, Field::Property(key))) {
+                        Some(Proposal {
+                            value: Value::Property(None),
+                            ..
+                        }) => {
+                            meter.event(GlaExecutionEvent::ScratchEntry)?;
+                            GraphValue::Scalar(CanonicalScalar::Null)
+                        }
+                        Some(Proposal {
+                            value: Value::Property(Some(scalar)),
+                            ..
+                        }) => {
+                            reserve_copy(scalar, &mut |event| meter.event(event))?;
+                            GraphValue::Scalar((*scalar).clone())
+                        }
+                        Some(Proposal {
+                            value: Value::Computed(scalar),
+                            ..
+                        }) => {
+                            reserve_copy(scalar, &mut |event| meter.event(event))?;
+                            GraphValue::Scalar(scalar.clone())
+                        }
+                        Some(Proposal {
+                            value: Value::Stored(value),
+                            ..
+                        }) => stored::returned(value, row_at, binding_at, &mut |event| {
+                            meter.event(event)
+                        })?,
+                        Some(_) => unreachable!("property fields hold property proposals"),
+                        None => row.values()[current]
+                            .copy_with_control(&mut |event| meter.event(event))?,
+                    }
+                }
+            },
+            GraphMutationBinding::Properties { target, current } => {
+                match element(&row.values()[target]) {
+                    None => {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                    Some(target) => returned_properties(
+                        target,
+                        &row.values()[current],
+                        row_at,
+                        binding_at,
+                        proposals,
+                        catalog,
+                        meter,
+                    )?,
+                }
+            }
+            GraphMutationBinding::Labels { target, current } => {
+                match element(&row.values()[target]) {
+                    None => {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                    Some(target) => returned_labels(
+                        target,
+                        &row.values()[current],
+                        row_at,
+                        binding_at,
+                        proposals,
+                        catalog,
+                        meter,
+                    )?,
+                }
+            }
+        };
+        values.push(value);
+    }
+    Ok(GraphValueRow::from_owned_values(values))
+}
+
+/// A selection source behind a trait object: called at most once.
+type ErasedSource<'a, E, C> = Box<
+    dyn FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+        + 'a,
+>;
+
+/// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every
+/// other statement. `elements` is the host's element property reader
+/// (fgdb-694ga); `None` keeps `x.key` of a computed element a typed error.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute<'a, E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
+    bindings: Option<&[GraphMutationBinding]>,
+    owned: Option<Vec<GraphValueRow>>,
     source: impl FnOnce(
         &PreparedGraphPattern<GraphValueRow>,
         GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a,
+    elements: Option<&mut MutationElementReader<'_, E>>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
-) -> ResultOf<GraphMutationBatch, E, C> {
+) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
+    // The mutation engine is compiled once per error-type pair, not once per
+    // caller closure type (fgdb-2goz): its source is boxed (one allocation
+    // per statement) and its checkpoint is a trait object.
+    execute_erased(
+        mutation,
+        policy,
+        bindings,
+        owned,
+        Box::new(source),
+        elements,
+        &mut checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_erased<E, C>(
+    mutation: &PreparedGraphMutation,
+    policy: GraphMutationPolicy,
+    bindings: Option<&[GraphMutationBinding]>,
+    owned: Option<Vec<GraphValueRow>>,
+    source: ErasedSource<'_, E, C>,
+    mut elements: Option<&mut MutationElementReader<'_, E>>,
+    mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
+) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let selected = mutation.select_governed(policy.query, source, &mut checkpoint)?;
+    let selected = mutation.select_governed(
+        policy.query,
+        owned,
+        source,
+        elements.as_deref_mut(),
+        &mut checkpoint,
+    )?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphMutationError::InvalidSourceStatistics,
@@ -220,24 +718,115 @@ pub(super) fn execute<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let target_value = &row.values()[action.target()];
-            let target = if let Some(vertex) = target_value.as_vertex() {
-                ElementId::Vertex(vertex)
-            } else if let Some(edge) = target_value.as_edge() {
-                ElementId::Edge(edge)
-            } else {
-                // Only canonical null can remain after the schema check. An
-                // absent OPTIONAL target does not execute an assignment RHS.
-                continue;
+            // A computed delete (TCK Delete5) deletes the element, or each
+            // element of the path, its value is; NULL deletes nothing.
+            let computed;
+            let target_value = match (action, action.target()) {
+                (GraphMutationAction::DeleteValue { value, .. }, _) => {
+                    computed = evaluate_composite(
+                        value,
+                        row,
+                        row_at,
+                        action_at,
+                        &mut meter,
+                        &mut elements,
+                    )?;
+                    if !(computed.is_null()
+                        || element(&computed).is_some()
+                        || matches!(computed, crate::algebra::GraphValue::Path(_)))
+                    {
+                        return Err(GqlQueryError::Source(
+                            GraphMutationError::NonElementDelete {
+                                row: row_at,
+                                action: action_at,
+                            },
+                        ));
+                    }
+                    &computed
+                }
+                (_, Some(column)) => &row.values()[column],
+                (_, None) => continue,
             };
-            let (field, value) = match action {
+            // DELETE p / DETACH DELETE p (TCK Delete3): every node of the
+            // path, and for a plain DELETE every relationship too, each its
+            // own delete proposal. DETACH removes the rest of their edges.
+            if let crate::algebra::GraphValue::Path(path) = target_value {
+                let detach = action.detaches();
+                let edges = path
+                    .steps()
+                    .iter()
+                    .filter(|_| !detach)
+                    .map(|(edge, _)| ElementId::Edge(*edge));
+                for target in edges.chain(path.nodes().map(ElementId::Vertex)) {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    propose(
+                        &mut proposals,
+                        &mut meter,
+                        target,
+                        Field::Delete,
+                        Value::Delete(detach),
+                        row_at,
+                        action_at,
+                    )?;
+                }
+                continue;
+            }
+            // A typed target column holds its element or canonical null (the
+            // schema check above); a dynamically typed one, any value. NULL
+            // changes nothing: an absent OPTIONAL target does not execute an
+            // assignment RHS. Anything else that is not an element, or a
+            // relationship as a label target, is a typed error.
+            let target = match element(target_value) {
+                Some(ElementId::Edge(_))
+                    if matches!(action, GraphMutationAction::SetLabel { .. }) =>
+                {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::NonElementTarget {
+                            row: row_at,
+                            action: action_at,
+                        },
+                    ));
+                }
+                Some(target) => target,
+                None if target_value.is_null() => continue,
+                None => {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::NonElementTarget {
+                            row: row_at,
+                            action: action_at,
+                        },
+                    ));
+                }
+            };
+            let proposed = match action {
+                GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(
+                    &row.values()[*current],
+                    keep,
+                    mutation.reverse_catalog(),
+                    row_at,
+                    action_at,
+                    &mut meter,
+                )?
+                .into_iter()
+                .map(|field| (field, Value::Property(None)))
+                .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let single = match action {
+                GraphMutationAction::ClearProperties { .. } => None,
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
-                        GraphMutationValue::Column(column) => Value::Property(Some(
-                            row.values()[*column]
-                                .as_scalar()
-                                .expect("complete input schema checked"),
-                        )),
+                        GraphMutationValue::Column(column) => {
+                            match row.values()[*column].as_scalar() {
+                                Some(value) => Value::Property(Some(value)),
+                                None => Value::Stored(stored::written(
+                                    &row.values()[*column],
+                                    row_at,
+                                    action_at,
+                                    &mut |event| meter.event(event),
+                                )?),
+                            }
+                        }
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
                             let value = expression
@@ -257,73 +846,69 @@ pub(super) fn execute<E, C>(
                             Value::Computed(value)
                         }
                         GraphMutationValue::Composite(value) => {
-                            let value = crate::set_ops::evaluate_value(
+                            let value = evaluate_composite(
                                 value,
                                 row,
+                                row_at,
                                 action_at,
-                                &mut |event| meter.event(event),
-                            )
-                            .map_err(|failure| match failure {
-                                crate::set_ops::ProjectionFailure::Control(error) => error,
-                                crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                                    GqlQueryError::Source(GraphMutationError::Arithmetic {
-                                        row: row_at,
-                                        action: action_at,
-                                        error,
-                                    })
-                                }
-                            })?;
-                            // Computed values already own their charged payload.
-                            let crate::algebra::GraphValue::Scalar(value) = value else {
-                                return Err(GqlQueryError::Source(
-                                    GraphMutationError::NonScalarValue {
-                                        row: row_at,
-                                        action: action_at,
-                                    },
-                                ));
-                            };
-                            Value::Computed(value)
+                                &mut meter,
+                                &mut elements,
+                            )?;
+                            // Scalars move. Lists reserve the distinct storage
+                            // representation before the canonical conversion.
+                            match value {
+                                crate::algebra::GraphValue::Scalar(value) => Value::Computed(value),
+                                value => Value::Stored(stored::written(
+                                    &value,
+                                    row_at,
+                                    action_at,
+                                    &mut |event| meter.event(event),
+                                )?),
+                            }
                         }
                     };
-                    (Field::Property(*key), value)
+                    Some((Field::Property(*key), value))
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => {
-                    (Field::Property(*key), Value::Property(None))
+                    Some((Field::Property(*key), Value::Property(None)))
                 }
                 GraphMutationAction::SetLabel { label, present, .. } => {
-                    (Field::Label(*label), Value::Label(*present))
+                    Some((Field::Label(*label), Value::Label(*present)))
                 }
-                GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete),
+                GraphMutationAction::DetachDelete { .. } => {
+                    Some((Field::Delete, Value::Delete(true)))
+                }
+                GraphMutationAction::Delete { .. } => Some((Field::Delete, Value::Delete(false))),
+                // DETACH deletes a relationship as a plain DELETE does.
+                GraphMutationAction::DeleteValue { detach, .. } => Some((
+                    Field::Delete,
+                    Value::Delete(*detach && matches!(target, ElementId::Vertex(_))),
+                )),
             };
-            if let Some(previous) = proposals.get(&(target, field)) {
-                if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
-                    return Err(GqlQueryError::Source(
-                        GraphMutationError::ConflictingAssignment {
-                            first_row: previous.row,
-                            first_action: previous.action,
-                            row: row_at,
-                            action: action_at,
-                        },
-                    ));
-                }
-            } else {
-                let observed = proposals.len() as u128 + 1;
-                if observed > u128::from(policy.max_effects) {
-                    return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
-                        limit: policy.max_effects,
-                        observed,
-                    }));
-                }
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                proposals.insert(
-                    (target, field),
-                    Proposal {
-                        value,
-                        row: row_at,
-                        action: action_at,
-                    },
-                );
+            for (field, value) in proposed.into_iter().chain(single) {
+                propose(
+                    &mut proposals,
+                    &mut meter,
+                    target,
+                    field,
+                    value,
+                    row_at,
+                    action_at,
+                )?;
             }
+        }
+    }
+    let mut returned = Vec::new();
+    if let Some(bindings) = bindings {
+        for (row_at, row) in selected.value.iter().enumerate() {
+            returned.push(returned_row(
+                bindings,
+                row,
+                row_at,
+                &proposals,
+                mutation.reverse_catalog(),
+                &mut meter,
+            )?);
         }
     }
     let mut intents = Vec::new();
@@ -345,11 +930,18 @@ pub(super) fn execute<E, C>(
                 if let Some(scalar) = value {
                     reserve_copy(scalar, &mut |event| meter.event(event))?;
                 }
-                property_intent(target, key, value.cloned())
+                property_intent(
+                    target,
+                    key,
+                    value.cloned().map(CanonicalPropertyValue::Scalar),
+                )
             }
             (target, Field::Property(key), Value::Computed(value)) => {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
-                property_intent(target, key, Some(value))
+                property_intent(target, key, Some(CanonicalPropertyValue::Scalar(value)))
+            }
+            (target, Field::Property(key), Value::Stored(value)) => {
+                GraphMutationIntent::StoredProperty { target, key, value }
             }
             (ElementId::Vertex(vertex), Field::Label(label), Value::Label(present)) => {
                 GraphMutationIntent::Label {
@@ -358,8 +950,14 @@ pub(super) fn execute<E, C>(
                     present,
                 }
             }
-            (ElementId::Vertex(vertex), Field::Delete, Value::Delete) => {
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete(true)) => {
                 GraphMutationIntent::DetachDelete { vertex }
+            }
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete(false)) => {
+                GraphMutationIntent::Delete { vertex }
+            }
+            (ElementId::Edge(edge), Field::Delete, Value::Delete(false)) => {
+                GraphMutationIntent::DeleteEdge { edge }
             }
             _ => unreachable!("field and proposal are constructed together"),
         };
@@ -373,13 +971,14 @@ pub(super) fn execute<E, C>(
         target_edges,
         effects: intents.len() as u64,
     };
-    Ok(GraphMutationBatch { intents, stats })
+    Ok((GraphMutationBatch { intents, stats }, returned))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_types::CanonicalPropertyValue;
     fn query() -> PreparedGraphPattern<GraphValueRow> {
         PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a,b.p AS p", |kind, _| {
             Some(match kind {
@@ -415,6 +1014,11 @@ mod tests {
         values: &[CanonicalScalar],
         policy: GraphMutationPolicy,
     ) -> ResultOf<GraphMutationBatch, (), ()> {
+        let values: Vec<CanonicalPropertyValue> = values
+            .iter()
+            .cloned()
+            .map(CanonicalPropertyValue::from)
+            .collect();
         mutation.execute_governed(
             policy,
             |plan, policy| {
@@ -434,12 +1038,10 @@ mod tests {
     fn policy() -> GraphMutationPolicy {
         GraphMutationPolicy::new(GqlQueryPolicy::new(100, 100, 100_000, 100_000), 100)
     }
-    /// fgdb-2jw3z: a composite value runs on the shared row evaluator per
-    /// row. A scalar result is assigned; a list result is a typed refusal; a
-    /// value that is never scalar, or reads a column the selection lacks,
-    /// refuses at build.
+    /// Composite results use the shared evaluator: scalars and bounded lists
+    /// are written, while bad references and graph-valued arguments refuse.
     #[test]
-    fn composite_values_assign_scalars_and_refuse_everything_else() {
+    fn composite_values_assign_scalars_and_lists_and_check_references() {
         use crate::GraphSetValue;
         use crate::algebra::GraphValue;
         let composite = |value| {
@@ -467,25 +1069,37 @@ mod tests {
                 &[GraphMutationIntent::Property {
                     vertex: VId(1),
                     key: PropertyKeyId(2),
-                    value: Some(CanonicalScalar::Bool(expected)),
+                    value: Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(
+                        expected
+                    ))),
                 }]
             );
         }
-        // [[1]][0] is a list, known only when it runs.
-        let nested = composite(GraphSetValue::Index {
-            list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
-            index: Box::new(int(0)),
-        })
-        .unwrap();
+        let expected =
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice())
+                .to_written_property()
+                .unwrap();
+        for expression in [
+            GraphSetValue::Index {
+                list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
+                index: Box::new(int(0)),
+            },
+            GraphSetValue::List(vec![int(1)]),
+        ] {
+            let query = composite(expression).unwrap();
+            assert_eq!(
+                run_with(&query, &[CanonicalScalar::Int(7)], policy())
+                    .unwrap()
+                    .intents(),
+                &[GraphMutationIntent::StoredProperty {
+                    target: ElementId::Vertex(VId(1)),
+                    key: PropertyKeyId(2),
+                    value: expected.clone(),
+                }]
+            );
+        }
         assert!(matches!(
-            run_with(&nested, &[CanonicalScalar::Int(7)], policy()),
-            Err(GqlQueryError::Source(GraphMutationError::NonScalarValue {
-                row: 0,
-                action: 0
-            }))
-        ));
-        assert!(matches!(
-            composite(GraphSetValue::List(vec![int(1)])),
+            composite(GraphSetValue::Column(0)),
             Err(GraphMutationBuildError::ValueExpression {
                 action: 0,
                 kind: None
@@ -500,6 +1114,89 @@ mod tests {
         ));
     }
     #[test]
+    fn computed_element_rhs_uses_the_frozen_reader_and_preserves_its_failure() {
+        use crate::algebra::GraphValue;
+        use crate::{GraphElementKey, GraphSetValue};
+        let mutation = PreparedGraphMutation::prepare(
+            query(),
+            RelationId(1),
+            vec![GraphMutationAction::SetProperty {
+                target: 0,
+                key: PropertyKeyId(2),
+                value: GraphMutationValue::Composite(GraphSetValue::MapGet {
+                    map: Box::new(GraphSetValue::Column(0)),
+                    key: "p".into(),
+                    property: GraphElementKey::Property(PropertyKeyId(1)),
+                }),
+            }],
+        )
+        .unwrap();
+        let source = |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| {
+            Ok::<_, GqlQueryError<&'static str, ()>>(GqlQueryExecution {
+                value: vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ])],
+                rows: GqlExecutionStats {
+                    snapshot_records: 1,
+                    result_rows: 1,
+                },
+                evaluator: GlaExecutionStats::default(),
+            })
+        };
+        // Old hosts retain the explicit unsupported-read refusal.
+        assert!(matches!(
+            mutation.execute_governed(policy(), source, || Ok(())),
+            Err(GqlQueryError::Source(GraphMutationError::Arithmetic { .. }))
+        ));
+        let mut reads = Vec::new();
+        let batch = mutation
+            .execute_governed_reading(
+                policy(),
+                source,
+                |element, key| {
+                    reads.push((element, key));
+                    Ok(Some(CanonicalScalar::Int(17).into()))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(reads, [(ElementId::Vertex(VId(1)), PropertyKeyId(1))]);
+        assert_eq!(
+            batch.intents(),
+            &[GraphMutationIntent::Property {
+                vertex: VId(1),
+                key: PropertyKeyId(2),
+                value: Some(CanonicalScalar::Int(17).into()),
+            }]
+        );
+        let failure = mutation.execute_governed_reading(
+            policy(),
+            source,
+            |_, _| Err("point read failed"),
+            || Ok(()),
+        );
+        assert!(matches!(
+            failure,
+            Err(GqlQueryError::Source(GraphMutationError::Source(
+                "point read failed"
+            )))
+        ));
+        let zero = GraphMutationPolicy::new(policy().query, 0);
+        assert!(matches!(
+            mutation.execute_governed_reading(
+                zero,
+                source,
+                |_, _| Ok(Some(CanonicalScalar::Int(17).into())),
+                || Ok(())
+            ),
+            Err(GqlQueryError::Source(
+                GraphMutationError::EffectLimit { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn repeated_assignments_collapse_but_disagreement_never_selects_a_last_writer() {
         let values = [CanonicalScalar::Int(7), CanonicalScalar::Int(7)];
         let result = run(&values, policy()).unwrap();
@@ -508,7 +1205,7 @@ mod tests {
             &[GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: PropertyKeyId(2),
-                value: Some(CanonicalScalar::Int(7)),
+                value: Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7))),
             }]
         );
         assert_eq!(result.stats().selection.result_rows, 2);
@@ -603,7 +1300,7 @@ mod tests {
 
     #[test]
     fn late_rhs_source_failure_never_returns_an_earlier_partial_assignment() {
-        let value = CanonicalScalar::Int(7);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let reads = std::cell::Cell::new(0);
         let result: ResultOf<GraphMutationBatch, &str, ()> = mutation().execute_governed(
             policy(),

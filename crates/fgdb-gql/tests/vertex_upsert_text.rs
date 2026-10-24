@@ -29,7 +29,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn one_parameter_table_spans_merge_key_and_both_action_branches() {
     let text = "MERGE (n:Person {p:$p}) ON MATCH SET n.q=$matched,n:Seen ON CREATE SET n.q=$created,n:Created";
     let calls = Cell::new(0);
-    let template = PreparedGraphVertexUpsertText::prepare(text, R, |kind, name| {
+    let template = PreparedGraphVertexUpsertText::prepare(text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -208,4 +208,107 @@ fn a_trailing_set_is_its_own_clause_not_folded_into_both_branches() {
         .with_int64("c", 2)
         .unwrap();
     assert!(repeated.bind_parameters(&args).is_err());
+}
+
+/// Plan identity for constant-valued MERGE (fgdb-cal4z acceptance). Computed
+/// SET values (ec3a710d) compile through the scalar expression compiler, but
+/// a literal or parameter value in any clause stays the constant action it
+/// was before (SetProperty, transcript tag 0), never an expression (tag 2).
+/// So a constant-valued MERGE keeps its pre-ec3a710d encoding. The one
+/// deliberate change, a trailing SET kept as its own clause, is pinned by
+/// a_trailing_set_is_its_own_clause_not_folded_into_both_branches. Control:
+/// a computed value in the same position becomes the expression action.
+#[test]
+fn constant_values_stay_constant_actions_and_only_computed_values_compile_to_expressions() {
+    use fgdb_gql::GraphVertexUpsertAction as Action;
+    let args = GqlParameters::new()
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("v", 1)
+        .unwrap();
+    let bound = |text: &str| {
+        PreparedGraphVertexUpsertText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&args)
+            .unwrap()
+    };
+    let constant =
+        bound("MERGE (n:Person {p:$p}) ON MATCH SET n.q=2,n:Seen ON CREATE SET n.q=$v SET n.q='x'");
+    let clauses = [constant.on_match(), constant.on_create(), constant.after()];
+    assert_eq!(clauses.map(<[Action]>::len), [2, 1, 1]);
+    for action in clauses.iter().flat_map(|clause| clause.iter()) {
+        assert!(
+            matches!(action, Action::SetProperty { .. } | Action::SetLabel { .. }),
+            "{action:?}"
+        );
+    }
+    let computed = bound("MERGE (n:Person {p:$p}) ON MATCH SET n.q=n.q+$v SET n.q=n.q*2");
+    for clause in [computed.on_match(), computed.after()] {
+        assert!(
+            matches!(clause, [Action::SetExpression { .. }]),
+            "{clause:?}"
+        );
+    }
+    assert_ne!(constant.canonical_bytes(), computed.canonical_bytes());
+}
+
+#[test]
+fn map_assignments_are_their_per_key_assignments() {
+    // fgdb-0s2pq: `n += {key: value, ...}` in any vertex MERGE SET clause is
+    // exactly the assignments `n.key = value`, in entry order.
+    let args = GqlParameters::new()
+        .with_int64("p", 7)
+        .unwrap()
+        .with_int64("m", 100)
+        .unwrap();
+    for (map, keys) in [
+        (
+            "MERGE (n:Person {p:$p}) ON MATCH SET n += {q: $m} ON CREATE SET n += {q: 2}, n:Created",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n.q = $m ON CREATE SET n.q = 2, n:Created",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) SET n += {q: $m, p: 1}",
+            "MERGE (n:Person {p:$p}) SET n.q = $m, n.p = 1",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n += {q: n.q + $m}",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n.q = n.q + $m",
+        ),
+    ] {
+        let bind = |text: &str| {
+            PreparedGraphVertexUpsertText::prepare(text, R, symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameters(&args)
+                .unwrap()
+                .canonical_bytes()
+        };
+        assert_eq!(bind(map), bind(keys), "{map}");
+    }
+    for text in [
+        "MERGE (n:Person {p:1}) SET n += {}",
+        "MERGE (n:Person {p:1}) SET n += {q: 1, q: 2}",
+        // A map parameter has no keys at preparation.
+        "MERGE (n:Person {p:1}) SET n += $m",
+    ] {
+        assert!(
+            PreparedGraphVertexUpsertText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
+    }
+    // A map entry and a plain assignment of one field are a duplicate field,
+    // refused by the typed definition as `n.q=1, n.q=2` is.
+    let failed = PreparedGraphVertexUpsertText::prepare(
+        "MERGE (n:Person {p:1}) SET n += {q: 1}, n.q = 2",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap_err();
+    assert!(matches!(
+        failed.kind,
+        GraphVertexUpsertTextErrorKind::UpsertBuild(
+            fgdb_gql::GraphVertexUpsertBuildError::DuplicateProperty { .. }
+        )
+    ));
 }

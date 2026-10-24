@@ -324,7 +324,7 @@ fn aggregate_late_data_and_quota_failures_release_no_partial_summary_or_success(
 }
 
 #[test]
-fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
+fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse() {
     let ((), report) = run_async_under_lab(0x636c_a605, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -332,15 +332,38 @@ fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
             .await
             .unwrap();
         db.write(&contexts.commit(), batch(1, 7)).await.unwrap();
+
         for text in [
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
             "MATCH (n) WITH n.p AS p RETURN SUM(p) AS total",
+        ] {
+            let opts = options(text);
+            let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
+            assert!(
+                matches!(prepared, PreparedNativeRead::PipelineAggregate(_)),
+                "{text}"
+            );
+            let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 1, "rows", true, &mut expected));
+            let mut bytes = Vec::new();
+            okay(run(&db, &cx, &opts, true, &mut bytes));
+            let streamed = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                row_lines(&streamed),
+                row_lines(&String::from_utf8(expected).unwrap()),
+                "{text}"
+            );
+            assert!(streamed.ends_with("\"seq\":1,\"count\":1}\n"), "{text}");
+        }
+
+        for text in [
             "MATCH (n) WITH DISTINCT n.p AS p RETURN COUNT(*) AS total",
             "MATCH (a), (b) RETURN COUNT(*) AS total",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN AVG(n.p) AS average",
         ] {
-            let options = options(text);
-            let prepared = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
+            let opts = options(text);
+            let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
             assert!(
                 matches!(
                     prepared,
@@ -352,7 +375,7 @@ fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
             );
             let mut bytes = Vec::new();
             let error =
-                run(&db, &cx, &options, true, &mut bytes).expect_err("physical/source refusal");
+                run(&db, &cx, &opts, true, &mut bytes).expect_err("physical/source refusal");
             assert_eq!(error.code, 3, "{}", error.message);
             assert!(bytes.is_empty(), "no header before full admission: {text}");
         }

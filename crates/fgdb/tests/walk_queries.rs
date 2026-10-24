@@ -13,7 +13,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -112,7 +113,7 @@ fn changes() -> WriteBatch {
 }
 fn integer(row: &VertexRow) -> Option<i64> {
     row.props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(value) if *key == N => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == N => Some(*value),
         _ => None,
     })
 }
@@ -521,10 +522,13 @@ fn walk_queries_enforce_exact_limits_and_keep_authority_and_snapshot_error_prece
         let measured = db
             .execute_graph_pattern_governed(&cx, &query, policy())
             .unwrap();
-        assert_eq!(measured.rows.snapshot_records, 13);
+        // The Root-labelled roots {1, 5, 9} walk R forward to depth 3: the
+        // closure admits the five R edges and the six rows its slots bind,
+        // not the two S edges (fgdb-reach closure).
+        assert_eq!(measured.rows.snapshot_records, 11);
         assert_eq!(measured.rows.result_rows, 2);
         let exact = GqlQueryPolicy::new(
-            13,
+            11,
             2,
             measured.evaluator.work_units,
             measured.evaluator.scratch_entries,
@@ -535,10 +539,10 @@ fn walk_queries_enforce_exact_limits_and_keep_authority_and_snapshot_error_prece
             measured
         );
         for refused in [
-            GqlQueryPolicy::new(12, 2, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(13, 1, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(13, 2, measured.evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(13, 2, u64::MAX, measured.evaluator.scratch_entries - 1),
+            GqlQueryPolicy::new(10, 2, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(11, 1, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(11, 2, measured.evaluator.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(11, 2, u64::MAX, measured.evaluator.scratch_entries - 1),
         ] {
             assert!(
                 db.execute_graph_pattern_governed(&cx, &query, refused)

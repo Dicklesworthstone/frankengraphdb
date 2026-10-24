@@ -7,7 +7,7 @@ use fgdb_gql::{
     GraphAggregateTest, GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -235,7 +235,8 @@ fn distinct_averages_use_exact_values_and_optional_nulls_share_one_output() {
         CanonicalScalar::Int(3),
         CanonicalScalar::Int(2),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(0), R, VId(10)),
         (VId(0), R, VId(11)),
@@ -294,7 +295,8 @@ fn hidden_scalar_keys_use_declared_parameters_and_generated_names_cannot_capture
         CanonicalScalar::ucs_basic_text("x").unwrap(),
         CanonicalScalar::ucs_basic_text("y").unwrap(),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     for (wanted, count) in [("x", 2), ("y", 1)] {
         let bound = template
             .bind_parameters(&GqlParameters::new().with_text("wanted", wanted).unwrap())
@@ -402,7 +404,7 @@ fn malformed_hidden_references_and_full_evaluation_width_refuse_before_catalog_r
 fn distinct_uses_exact_shared_budgets_and_every_interruption_checkpoint() {
     let query =
         prepare("MATCH (a) RETURN DISTINCT COUNT(*) AS n GROUP BY a.p ORDER BY a.p LIMIT 2");
-    let values = [9, 9, 1, 2, 2].map(CanonicalScalar::Int);
+    let values = [9, 9, 1, 2, 2].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let run = |policy| {
         query.execute_governed(
             5,
@@ -471,7 +473,7 @@ fn distinct_uses_exact_shared_budgets_and_every_interruption_checkpoint() {
     }
     let query =
         prepare("MATCH (a) RETURN DISTINCT COUNT(*) AS n GROUP BY a.p HAVING a.p>0 LIMIT 0");
-    let invalid = CanonicalScalar::Bool(true);
+    let invalid = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     let result = query.execute_governed(
         1,
         [VId(0)],
@@ -492,7 +494,7 @@ fn distinct_uses_exact_shared_budgets_and_every_interruption_checkpoint() {
         [VId(0)],
         [],
         |_, _| Ok::<_, &str>(true),
-        |_, _| Err::<Option<&CanonicalScalar>, _>("hidden grouping read"),
+        |_, _| Err::<Option<&CanonicalPropertyValue>, _>("hidden grouping read"),
         wide(),
         || Ok::<_, ()>(()),
     );

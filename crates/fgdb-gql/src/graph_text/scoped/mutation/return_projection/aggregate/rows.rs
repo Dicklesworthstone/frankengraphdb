@@ -15,10 +15,88 @@ pub(super) enum Head<'a> {
     },
 }
 
+/// Whether the RETURN at the current token has both a pattern comprehension
+/// or pattern count and an aggregate call among its items (`MATCH (n)
+/// RETURN count([p = (n)-->() | p])`, TCK Pattern2 [6]; `sum(size((n)-->()))`).
+/// The graph aggregate facade reads neither, so such a RETURN reads its MATCH
+/// through an implicit `WITH *`, whose head gathers it (hoist_boundary_reads).
+fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> {
+    const AGGREGATES: [&str; 10] = [
+        "COUNT",
+        "SUM",
+        "SUM_INT",
+        "AVG",
+        "AVG_INT",
+        "MIN",
+        "MAX",
+        "COLLECT",
+        "PERCENTILEDISC",
+        "PERCENTILECONT",
+    ];
+    let saved = (parser.lexer.clone(), parser.current);
+    let mut lexer = parser.lexer.clone();
+    let (mut comprehension, mut aggregate) = (false, false);
+    let mut depth = 0_usize;
+    let found = loop {
+        let token = match lexer.next() {
+            Ok(token) => token,
+            Err(error) => break Err(error.into()),
+        };
+        match token.kind {
+            TokenKind::End => break Ok(comprehension && aggregate),
+            TokenKind::Word(word)
+                if depth == 0
+                    && ["ORDER", "SKIP", "OFFSET", "LIMIT", "UNION"]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end)) =>
+            {
+                break Ok(comprehension && aggregate);
+            }
+            // `size((n)-->())` and `COUNT { ... }` are pattern counts, which
+            // the head gathers as it gathers a comprehension.
+            TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("SIZE") || word.eq_ignore_ascii_case("COUNT") =>
+            {
+                parser.lexer = lexer.clone();
+                parser.current = token;
+                match parser.starts_pattern_count() {
+                    Ok(starts) => comprehension |= starts,
+                    Err(error) => break Err(error.into()),
+                }
+                aggregate |= word.eq_ignore_ascii_case("COUNT")
+                    && matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'(')));
+            }
+            TokenKind::Word(word)
+                if AGGREGATES
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name))
+                    && matches!(lexer.clone().next().map(|next| next.kind), Ok(TokenKind::Punct(b'('))) =>
+            {
+                aggregate = true;
+            }
+            TokenKind::Punct(b'[') => {
+                parser.lexer = lexer.clone();
+                parser.current = token;
+                match parser.starts_pattern_comprehension() {
+                    Ok(starts) => comprehension |= starts,
+                    Err(error) => break Err(error.into()),
+                }
+                depth += 1;
+            }
+            TokenKind::Punct(b'(' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    };
+    (parser.lexer, parser.current) = saved;
+    found
+}
+
 pub(super) fn prefix<'a>(
     parser: &mut Parser<'a>,
     statement: &'a str,
     multipart: bool,
+    leading_match: bool,
 ) -> Result<
     (
         Head<'a>,
@@ -40,15 +118,53 @@ pub(super) fn prefix<'a>(
             depth,
         ));
     }
+    // `UNWIND ... MATCH ... WITH ...`: the leading pipeline's graph part, the
+    // CrossJoin a read builds for it, as the one source of the aggregate.
+    if leading_match {
+        let (first, schema, depth) = parser.leading_aggregate_prefix(statement)?;
+        return Ok((
+            Head::Multipart {
+                first: Box::new(first),
+                continuations: Vec::new(),
+            },
+            Vec::new(),
+            schema,
+            depth,
+        ));
+    }
     if parser.is_word("MATCH") {
-        parser.parse_match_prefix()?;
-        if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
-            return Err(expected(
-                parser.current.at,
-                "WITH or UNWIND before a pipeline aggregate RETURN",
-            ));
-        }
-        let mut head = parser.graph_projection_head()?;
+        // MATCH ... WHERE <over values> RETURN count(*) is MATCH ... WITH *
+        // WHERE ... RETURN count(*) (fgdb-1c29d), as for a plain RETURN: the
+        // row pipeline reads the predicate after an implicit boundary that
+        // projects every visible binding.
+        parser.defer_where = true;
+        let prefix = parser.parse_match_prefix();
+        parser.defer_where = false;
+        prefix?;
+        let mut head = if let Some((lexer, at_where)) = parser.deferred_where.take() {
+            if !parser.syntax.scopes.is_empty()
+                || !(parser.is_word("RETURN") || parser.is_word("WITH"))
+            {
+                return Err(expected(
+                    parser.current.at,
+                    "RETURN or WITH right after a MATCH WHERE over values",
+                ));
+            }
+            let head = parser.implicit_with_head()?;
+            parser.lexer = lexer;
+            parser.current = at_where;
+            head
+        } else if parser.is_word("RETURN") && return_gathers_comprehension(parser)? {
+            parser.implicit_with_head()?
+        } else {
+            if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
+                return Err(expected(
+                    parser.current.at,
+                    "WITH or UNWIND before a pipeline aggregate RETURN",
+                ));
+            }
+            parser.graph_projection_head()?
+        };
         // `WITH n WHERE n.p > 1 RETURN n.q, count(*)`: the WITH's WHERE and
         // pages and the aggregate RETURN read carried properties.
         parser.hoist_boundary_reads(&mut head, 0)?;
@@ -96,7 +212,7 @@ pub(super) fn finish<'a>(
     statement: &'a str,
     head: Head<'a>,
     stages: Vec<ReadStageTemplate>,
-    mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    mut resolve: impl GraphSymbolResolver,
 ) -> Result<BoundReadInput, GraphSetTextError> {
     let (first, continuations) = match head {
         Head::Single(head) => {
@@ -111,6 +227,7 @@ pub(super) fn finish<'a>(
                     leading: Vec::new(),
                     leading_types: Vec::new(),
                     correlations: Vec::new(),
+                    row_fields: Vec::new(),
                 },
             };
             // Keep the old resolver and source definition for a single part.
@@ -151,20 +268,17 @@ pub(super) fn finish<'a>(
     // All syntax, aliases, argument types and total depth were admitted before
     // touching the catalog. Every graph source shares this domain-aware cache.
     let mut cache = std::collections::BTreeMap::new();
-    let mut symbols = |kind, name: &str| {
-        let key = (kind, name.to_owned());
-        if let Some(symbol) = cache.get(&key) {
-            return Some(*symbol);
-        }
-        let symbol = resolve(kind, name)?;
-        cache.insert(key, symbol);
-        Some(symbol)
-    };
-    let first = first.resolve(&mut symbols)?;
+    let first = first.resolve(Cached {
+        inner: &mut resolve,
+        cache: &mut cache,
+    })?;
     let mut bound = Vec::new();
     for (input, join) in continuations {
         bound.push(BoundContinuation {
-            input: input.resolve(&mut symbols)?,
+            input: input.resolve(Cached {
+                inner: &mut resolve,
+                cache: &mut cache,
+            })?,
             join,
         });
     }
@@ -227,11 +341,23 @@ impl PreparedGraphPipelineAggregateText {
                 .map(|value| pipeline::page_value(value, &values)),
         )
         .map_err(|kind| build(self.aggregate_at, kind))?
+        .with_key_aliases(&self.key_aliases)
+        .map_err(|kind| build(self.aggregate_at, kind))?
         .with_key_output_columns(&self.output_keys)
         .map_err(|kind| build(self.aggregate_at, kind))?
         .with_distinct_output(self.output_distinct)
         .with_result_clauses(&[], &self.ordering)
         .map_err(|kind| build(self.aggregate_at, kind))?;
+        if let Some(output) = &self.output {
+            query = query
+                .with_output_projection(super::bind_output(&output.items, &values)?)
+                .map_err(|kind| build(self.aggregate_at, kind))?;
+            if !output.ordering.is_empty() {
+                query = query
+                    .with_projected_order_by(&output.ordering)
+                    .map_err(|kind| build(self.aggregate_at, kind))?;
+            }
+        }
         if !self.having.is_empty() {
             let expression = bind_having(
                 &self.having,
@@ -247,5 +373,32 @@ impl PreparedGraphPipelineAggregateText {
                 })?;
         }
         Ok(query)
+    }
+}
+
+/// One resolver cache shared by every graph source of a statement; the host's
+/// reverse catalog passes through for `labels(n)` and `type(r)` names.
+struct Cached<'c, R> {
+    inner: &'c mut R,
+    cache: &'c mut std::collections::BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+
+impl<R: GraphSymbolResolver> GraphSymbolResolver for Cached<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(symbol) = self.cache.get(&key) {
+            return Some(*symbol);
+        }
+        let symbol = self.inner.resolve_symbol(kind, name)?;
+        self.cache.insert(key, symbol);
+        Some(symbol)
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.inner.time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.inner.reverse_catalog()
     }
 }

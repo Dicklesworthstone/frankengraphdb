@@ -143,8 +143,14 @@ fn expected(operator: &str, literal: &CanonicalScalar) -> Vec<i64> {
     fixture()
         .into_iter()
         .filter(|(_, born)| {
-            let Some(order) = born.as_ref().and_then(|born| exact_order(born, literal)) else {
+            let Some(born) = born.as_ref() else {
                 return false;
+            };
+            let Some(order) = exact_order(born, literal) else {
+                // A value that is not a number is of another domain: `<>`
+                // holds (fgdb-v6ku6). A Decimal is a number this law does
+                // not compare exactly with an Int or a Float: UNKNOWN.
+                return operator == "<>" && !matches!(born, CanonicalScalar::Decimal(_));
             };
             match operator {
                 "=" => order == Ordering::Equal,

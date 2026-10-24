@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::{GraphColumn, GraphPatternBuilder, IntegerComparison};
 use crate::{GqlParameters, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn row(values: &[Option<i64>]) -> GraphValueRow {
     GraphValueRow::from_owned_values(
@@ -263,7 +263,17 @@ fn ranker_preserves_dynamic_value_domains_and_full_width_identities() {
         .cloned()
         .map(|value| GraphValueRow::from_owned_values(vec![value]))
         .collect();
-    expected.sort();
+    // ORDER BY ascending, NULLs first: NULL, then openCypher orderability
+    // (42fb01c3: vertices, lists, bytes, text, numbers), then the canonical
+    // row as the tie-break between equal keys.
+    let null = |value: &GraphValue| matches!(value, GraphValue::Scalar(CanonicalScalar::Null));
+    expected.sort_by(|left, right| {
+        let (a, b) = (&left.values()[0], &right.values()[0]);
+        null(b)
+            .cmp(&null(a))
+            .then_with(|| a.compare_orderability(b))
+            .then_with(|| left.cmp(right))
+    });
     let mut ranked = Ranked::new(&order, 1, 6);
     for value in values {
         ranked
@@ -357,7 +367,10 @@ fn native_ordered_unwind_match_with_queries_use_the_same_topk_path() {
     assert!(supports(&query));
     let frozen = query.canonical_bytes();
     let mut calls = 0;
-    let (s1, s2) = (CanonicalScalar::Int(1), CanonicalScalar::Int(2));
+    let (s1, s2) = (
+        CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+        CanonicalPropertyValue::from(CanonicalScalar::Int(2)),
+    );
     let observed = query
         .execute_governed(
             policy(),

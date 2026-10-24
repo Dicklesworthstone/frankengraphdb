@@ -21,7 +21,10 @@ impl PreparedGraphAggregate {
     /// must never apply this window before completing aggregates and HAVING.
     #[must_use]
     pub fn has_incremental_ranking(&self) -> bool {
-        !self.ordering.is_empty() || self.offset != 0 || self.count.is_some()
+        !self.ordering.is_empty()
+            || !self.projected_ordering.is_empty()
+            || self.offset != 0
+            || self.count.is_some()
     }
 
     /// Original result window in occurrence units, after output DISTINCT.
@@ -68,6 +71,7 @@ impl GraphAggregateRow {
                 cell(other, order.column).expect("ordering columns checked above"),
                 order.descending,
                 order.nulls,
+                true,
                 control,
             )?;
             if result != Ordering::Equal {

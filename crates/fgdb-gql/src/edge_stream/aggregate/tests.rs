@@ -1,8 +1,10 @@
 use super::*;
 mod computed;
+mod cooperative;
 mod grouped;
 mod groups;
 mod output;
+mod spill;
 use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
@@ -17,10 +19,15 @@ use std::sync::{
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Edge = (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Edge = (
+    VId,
+    RelationId,
+    VId,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+);
 #[derive(Clone)]
 struct Source {
-    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     edges: BTreeMap<EId, Edge>,
     incident: BTreeMap<(VId, u8), BTreeSet<EId>>,
     after: Option<EId>,
@@ -112,9 +119,9 @@ impl EdgeScanSource for Source {
 fn source(mask: u32) -> Source {
     let ids = [VId(0), VId(1), VId(u128::MAX)];
     let vertices = BTreeMap::from([
-        (ids[0], vec![(P, CanonicalScalar::Int(-3))]),
-        (ids[1], vec![(P, CanonicalScalar::Null)]),
-        (ids[2], vec![(P, CanonicalScalar::Int(7))]),
+        (ids[0], vec![(P, CanonicalScalar::Int(-3).into())]),
+        (ids[1], vec![(P, CanonicalScalar::Null.into())]),
+        (ids[2], vec![(P, CanonicalScalar::Int(7).into())]),
     ]);
     let mut edges = BTreeMap::new();
     let mut incident: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
@@ -134,7 +141,7 @@ fn source(mask: u32) -> Source {
         let from = ids[a];
         let to = ids[b];
         let properties = weight
-            .map(|w| vec![(P, CanonicalScalar::Int(w))])
+            .map(|w| vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(w)))])
             .unwrap_or_default();
         edges.insert(eid, (from, rel, to, properties));
         for key in [(from, 0), (to, 1), (from, 2), (to, 2)] {
@@ -172,9 +179,11 @@ fn run(
 ) -> EdgeAggregateCursor<Source, impl FnMut() -> Result<(), ()>> {
     EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(q).unwrap(), p, || Ok(()))
 }
-fn integer(props: &[(PropertyKeyId, CanonicalScalar)]) -> Option<i128> {
+fn integer(props: &[(PropertyKeyId, CanonicalPropertyValue)]) -> Option<i128> {
     props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(value) if *key == P => Some(i128::from(*value)),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+            Some(i128::from(*value))
+        }
         _ => None,
     })
 }
@@ -204,8 +213,8 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
         for &(from, rel, to) in &atoms[..=shape] {
             choices.push(
                 s.edges
-                    .values()
-                    .filter(|(a, r, b, _)| {
+                    .iter()
+                    .filter(|(_, (a, r, b, _))| {
                         *r == rel
                             && match dir {
                                 GlaDirection::Forward => *a == values[from] && *b == values[to],
@@ -216,27 +225,32 @@ fn oracle(s: &Source, shape: usize, dir: GlaDirection) -> Vec<GraphAggregateValu
                                 }
                             }
                     })
+                    .map(|(&eid, edge)| (eid, edge))
                     .collect::<Vec<_>>(),
             );
         }
-        let count = choices.iter().map(|c| c.len() as u64).product::<u64>();
-        if count == 0 {
-            continue;
-        }
-        n += count;
-        let suffix = choices
-            .iter()
-            .skip(1)
-            .map(|c| c.len() as u64)
-            .product::<u64>();
-        for edge in &choices[0] {
-            if let Some(value) = integer(&edge.3) {
-                present += suffix;
-                edge_sum = Some(edge_sum.unwrap_or(0) + value * i128::from(suffix));
+        let combinations = choices.iter().map(Vec::len).product::<usize>();
+        for mut code in 0..combinations {
+            let first = choices[0][code % choices[0].len()].1;
+            let mut selected = Vec::new();
+            let mut distinct = true;
+            for atom in &choices {
+                let (eid, _) = atom[code % atom.len()];
+                code /= atom.len();
+                distinct &= !selected.contains(&eid);
+                selected.push(eid);
             }
-        }
-        if let Some(value) = integer(&s.vertices[&values[width as usize - 1]]) {
-            vertex_sum = Some(vertex_sum.unwrap_or(0) + value * i128::from(count));
+            if !distinct {
+                continue;
+            }
+            n += 1;
+            if let Some(value) = integer(&first.3) {
+                present += 1;
+                edge_sum = Some(edge_sum.unwrap_or(0) + value);
+            }
+            if let Some(value) = integer(&s.vertices[&values[width as usize - 1]]) {
+                vertex_sum = Some(vertex_sum.unwrap_or(0) + value);
+            }
         }
     }
     vec![
@@ -413,7 +427,7 @@ fn invalid_data_and_late_source_failures_never_become_partial_counts() {
         match kind {
             0 => s.fail = Some(EId(6)),
             1 => {
-                s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+                s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
             }
             _ => {
                 s.vertices.remove(&VId(1));
@@ -442,8 +456,9 @@ fn ordinary_row_profile_is_not_relaxed_and_unsupported_aggregate_shapes_refuse()
     let q = prepare("MATCH (a)-[r:R]->(b) RETURN SUM(r.p) AS total");
     assert!(EdgeScanPlan::compile(q.input_pattern().plan()).is_err());
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
+    // Plain edge collections now stream (output.rs pins them to the eager
+    // answer); a computed collection and an optional join still refuse.
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS n",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n",
     ] {
@@ -470,7 +485,12 @@ fn many_input_rows_need_only_one_result_allowance_and_wide_sums_are_exact() {
     for id in 0..4096 {
         s.edges.insert(
             EId(id),
-            (VId(0), R, VId(1), vec![(P, CanonicalScalar::Int(i64::MAX))]),
+            (
+                VId(0),
+                R,
+                VId(1),
+                vec![(P, CanonicalScalar::Int(i64::MAX).into())],
+            ),
         );
     }
     let mut stream = run(&q, s, policy());

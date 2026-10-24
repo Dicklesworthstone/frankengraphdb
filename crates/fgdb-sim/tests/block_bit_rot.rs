@@ -1,5 +1,8 @@
 //! Published FGSB/FGSP one-bit damage: cached answers are not storage verification.
 //! Every record is printed only after its path's exact assertions have passed.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::fs::Vfs;
 use asupersync::io::{AsyncRead, ReadBuf};
@@ -403,7 +406,10 @@ fn retained_answers(case: Case, db: &Database<FaultVfs>, query: &QueryCx, outcom
         assert_eq!(db.in_neighbours_at(VId(3), R, at).unwrap(), incoming);
         case.record("native-expansion-at", outcome, (at, &neighbours, incoming));
         let edge = db.edge_at(EId(10), at).unwrap().unwrap();
-        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(edge_value))]);
+        assert_eq!(
+            edge.props,
+            vec![(P, CanonicalScalar::Int(edge_value).into())]
+        );
         case.record("native-edge-property-at", outcome, (at, edge.props));
     }
     assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(2), VId(3)]);
@@ -414,7 +420,7 @@ fn retained_answers(case: Case, db: &Database<FaultVfs>, query: &QueryCx, outcom
         (vec![VId(2), VId(3)], vec![VId(1)]),
     );
     let edge = db.edge(EId(10)).unwrap().unwrap();
-    assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(6))]);
+    assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(6).into())]);
     case.record("native-edge-property-live", outcome, edge.props);
     assert!(db.verify_snapshot_indexes().unwrap());
     // Equality selects a maintained property posting; its bound expansion uses
@@ -588,6 +594,14 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                             .await
                             .unwrap();
                     let objects = inventory(&db, &store, &query).await;
+                    let vertex_patches: BTreeSet<_> = store
+                        .resolve_manifest(&query, db.manifest().unwrap())
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .flat_map(|(_, root)| root.vertex_patches)
+                        .map(|reference| reference.patch_id)
+                        .collect();
                     let candidates: Vec<_> = objects
                         .iter()
                         .filter(|object| object.family == family)
@@ -602,7 +616,7 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                     assert_eq!(summary.clean.len(), 2);
                     assert!(summary.repaired.is_empty());
                     assert!(summary.lost.is_empty());
-                    assert_eq!(summary.block_objects, objects.len());
+                    assert_eq!(summary.block_objects, objects.len() + vertex_patches.len());
                     assert_eq!(summary.block_lost.len(), 1);
                     assert_eq!(summary.block_lost[0].object_id, target.id);
                     assert_eq!(summary.block_lost[0].reason, LostReason::IdentityMismatch);
@@ -614,8 +628,12 @@ fn published_block_bit_rot_three_seed_read_scrub_and_sync_matrix() {
                             .iter()
                             .filter(|object| object.id != target.id)
                             .map(|object| object.id)
+                            .chain(vertex_patches)
                             .collect()
                     );
+                    assert_eq!(summary.metadata_objects, 2);
+                    assert_eq!(summary.metadata_clean.len(), 2);
+                    assert!(summary.metadata_lost.is_empty());
                     assert_eq!(visible_bytes(&vfs, &target.path).await, damaged);
                     assert_eq!(
                         vfs.read(&target.path).await.unwrap(),
@@ -667,26 +685,26 @@ fn bulk_rows() -> Vec<BulkRow> {
         BulkRow::Vertex(BulkVertex {
             key: "a".into(),
             labels: vec![],
-            props: vec![(P, CanonicalScalar::Int(10))],
+            props: vec![(P, CanonicalScalar::Int(10).into())],
         }),
         BulkRow::Vertex(BulkVertex {
             key: "b".into(),
             labels: vec![],
-            props: vec![(P, CanonicalScalar::Int(20))],
+            props: vec![(P, CanonicalScalar::Int(20).into())],
         }),
         BulkRow::Edge(BulkEdge {
             key: "ab".into(),
             source: "a".into(),
             destination: "b".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(5))],
+            props: vec![(P, CanonicalScalar::Int(5).into())],
         }),
         BulkRow::Edge(BulkEdge {
             key: "ba".into(),
             source: "b".into(),
             destination: "a".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(7))],
+            props: vec![(P, CanonicalScalar::Int(7).into())],
         }),
         // A distinct property row avoids incidental FGSP deduplication against
         // the damaged prefix; this measures resume, not immutable-put reuse.
@@ -695,7 +713,7 @@ fn bulk_rows() -> Vec<BulkRow> {
             source: "a".into(),
             destination: "a".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(99))],
+            props: vec![(P, CanonicalScalar::Int(99).into())],
         }),
     ]
 }
@@ -752,7 +770,7 @@ fn bulk_answers(db: &Database<FaultVfs>, checkpoint: &BulkLoadCheckpoint, finish
     for (key, value) in [("a", 10), ("b", 20)] {
         let vertex = db.vertex(checkpoint.vertices[key]).unwrap().unwrap();
         assert!(vertex.labels.is_empty());
-        assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value))]);
+        assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value).into())]);
     }
     for (key, source, destination, value) in [
         ("ab", "a", "b", 5),
@@ -766,7 +784,7 @@ fn bulk_answers(db: &Database<FaultVfs>, checkpoint: &BulkLoadCheckpoint, finish
         assert_eq!(edge.entry.src, checkpoint.vertices[source]);
         assert_eq!(edge.entry.dst, checkpoint.vertices[destination]);
         assert_eq!(edge.entry.relation, R);
-        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value))]);
+        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value).into())]);
     }
 }
 
@@ -837,10 +855,15 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                 );
                 drop(store);
 
-                // A reopened handle retains decoded rows but no publication
-                // receipts. Its resumed put must detect the dirty prefix even
-                // when the mutation's first dirty sync lied. Later commit syncs
-                // are honest, so the failed publication has a durable suffix.
+                // A reopened handle holds receipts seeded from the root it
+                // opened (fgdb-ibbuq, owner ruling "trust publication"), as
+                // the handle that published the prefix does, so its resumed
+                // put does not re-verify an object that root names. Damage
+                // made after the open stays cache-only and undetected by the
+                // commit, as in the retained case above; the open that reads
+                // the object cold is where it is caught. Here the mutation's
+                // first dirty sync lied, so the crash rolls the block back to
+                // its pristine bytes and the reopen serves the completed load.
                 let case = Case {
                     seed,
                     family,
@@ -872,54 +895,32 @@ fn published_block_bit_rot_three_seed_bulk_resume_matrix() {
                 bulk_answers(&db, &checkpoint, false);
                 let mut resume = BulkLoadPolicy::new(4, R);
                 resume.resume = Some(checkpoint);
-                let error = db
+                let finished = db
                     .bulk_load(&query, &commit, bulk_rows(), resume)
                     .await
-                    .unwrap_err();
-                match &error.kind {
-                    BulkLoadErrorKind::Write(fgdb::WriteTxnError::Write(
-                        fgdb::WriteError::CommittedNeedsRecovery { source, .. },
-                    )) => match source.as_ref() {
-                        RebuildError::Store(StoreError::DamagedExisting { expected, actual }) => {
-                            assert_eq!(*expected, target.id);
-                            assert_ne!(*actual, target.id);
-                        }
-                        other => panic!(
-                            "expected immutable-put damage naming {:?}, got {other:?}",
-                            target.id
-                        ),
-                    },
-                    other => {
-                        panic!("expected committed derived-publication refusal, got {other:?}")
-                    }
-                }
-                assert_eq!(error.committed.next_row, 4);
-                let pending = error
-                    .pending
-                    .as_ref()
-                    .expect("durable attempted successor checkpoint");
-                assert_eq!(pending.next_row, 5);
-                assert_eq!(pending.frontier, CommitSeq(2));
+                    .unwrap();
+                assert_eq!(finished.next_row, 5);
+                assert_eq!(finished.committed_chunks, 2);
+                assert_eq!(finished.frontier, CommitSeq(2));
+                bulk_answers(&db, &finished, true);
                 assert_eq!(visible_bytes(&vfs, &target.path).await, damaged);
-                assert_eq!(vfs.read(&target.path).await.unwrap(), target.bytes);
                 case.record(
-                    "bulk-resume-retained-reopened-handle",
-                    "typed-put-refusal-committed-needs-recovery",
-                    &error,
+                    "bulk-resume-reopened-handle",
+                    "cache-only/not-detected",
+                    &finished,
                 );
-                assert!(matches!(db.edges(), Err(ReadError::RecoveryRequired(_))));
                 drop(db);
                 vfs.crash().await.unwrap();
                 assert_eq!(visible_bytes(&vfs, &target.path).await, target.bytes);
                 let db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
                     .await
                     .unwrap();
-                bulk_answers(&db, pending, true);
+                bulk_answers(&db, &finished, true);
                 assert_eq!(db.frontier().unwrap(), CommitSeq(2));
                 case.record(
-                    "bulk-resume-retained-reopened-after-crash",
-                    "pristine-rollback-plus-durable-suffix-not-healing",
-                    pending,
+                    "bulk-resume-reopened-after-crash",
+                    "pristine-rollback",
+                    &finished,
                 );
                 drop(db);
                 drop(store);

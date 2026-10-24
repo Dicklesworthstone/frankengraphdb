@@ -474,9 +474,15 @@ coverage_of() {
     # then exits 1 with unregistered_marker for each appended FG-ZZZ-99 in
     # an isolated source copy. This covers marker resolution, not prose truth.
     docs/atomic_relation_writes.md|\
+    docs/bolt-autocommit-writes.md|\
     docs/bounded_gla_execution.md|\
     docs/graph_patterns.md|\
-    docs/FABRIC_PROTOCOL.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
+    docs/FABRIC_PROTOCOL.md|\
+    docs/REMOTE_BATCH_WRITES.md|\
+    docs/STUDIO.md|\
+    docs/VECTOR_COORDINATE_PROJECTION.md|\
+    docs/cli_graph_only_search.md|\
+    crates/fgdb-cli/QUERY_FED_WRITES.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
     # Mutation-proven 2026-09-13: registered prose passes; appending an
     # unregistered claim marker in an isolated copy fails at this exact path.
     scratchpad/agent-bootstrap-downloads.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT download availability)" ;;
@@ -527,6 +533,34 @@ coverage_exempt_reason() {
            scripts/local_proof.sh on the exact tree (fgdb-ci-workflow-check-sh-4csa)" ;;
     crates/fgdb-cli/src/robot_schema.json)
       echo "illustrative pseudo-JSON template documenting the CLI robot event grammar; not parsed by the binary (ROBOT_SCHEMA in crates/fgdb-cli/src/main.rs is frozen by tests/support/robot_schema.rs, checked by cli_robot.rs and cli_fuzz_contract.rs)" ;;
+    # EXACT paths, not studio/*: a glob would silently exempt the next Studio
+    # file too, and `*` crosses `/` in a case pattern.
+    crates/fgdb-server/src/studio/app.mjs|\
+    crates/fgdb-server/src/studio/demo.mjs|\
+    crates/fgdb-server/src/studio/experience.mjs|\
+    crates/fgdb-server/src/studio/graph.mjs|\
+    crates/fgdb-server/src/studio/layout.mjs|\
+    crates/fgdb-server/src/studio/model.mjs|\
+    crates/fgdb-server/src/studio/studio.css|\
+    crates/fgdb-server/src/studio/index.html|\
+    crates/fgdb-server/src/studio/favicon.svg|\
+    crates/fgdb-server/src/studio/wasm/force.wasm)
+      echo "Studio browser asset embedded in fgdbd by include_bytes! (studio/mod.rs): \
+           cargo proves it exists, NOTHING checks its content; force.wasm is a \
+           committed binary no gate rebuilds from wasm/force.c \
+           (fgdb-rc1017-bridge-wvze5.12)" ;;
+    crates/fgdb-server/src/studio/tests/experience.test.mjs|\
+    crates/fgdb-server/src/studio/tests/flow.test.mjs|\
+    crates/fgdb-server/src/studio/tests/force.test.mjs|\
+    crates/fgdb-server/src/studio/tests/model.test.mjs|\
+    crates/fgdb-server/src/studio/tests/browser_client.py|\
+    crates/fgdb-server/src/studio/wasm/force.c)
+      echo "Studio test or kernel source that NO gate executes or compiles \
+           (node --test, Playwright, clang): unchecked until \
+           fgdb-rc1017-bridge-wvze5.12 gates it" ;;
+    .cargo/macos-lld.toml)
+      echo "macOS-only linker override for the documented fgdb lib test \
+           workaround (AGENTS.md, fgdb-jon4t); no Linux gate exercises it" ;;
     *)
       echo "" ;;
   esac

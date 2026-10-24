@@ -27,7 +27,7 @@ fn input(text: &str) -> PreparedGraphMutationText {
 fn one_exact_map_binds_shared_and_statement_local_parameters_without_catalog_reentry() {
     let calls = Cell::new(0);
     let prepare = |text| {
-        PreparedGraphMutationText::prepare(text, RelationId(1), |kind, name| {
+        PreparedGraphMutationText::prepare(text, RelationId(1), |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })

@@ -317,8 +317,8 @@ fn captured_join_creation_and_late_update_failure_restore_outer_work_without_reu
         assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
         for id in [VId(200), VId(201)] {
             let row = db.vertex(id).unwrap().unwrap();
-            assert!(row.props.contains(&(P, CanonicalScalar::Int(42))));
-            assert!(row.props.contains(&(Q, CanonicalScalar::Int(99))));
+            assert!(row.props.contains(&(P, CanonicalScalar::Int(42).into())));
+            assert!(row.props.contains(&(Q, CanonicalScalar::Int(99).into())));
         }
         assert!(db.vertex(VId(90)).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);

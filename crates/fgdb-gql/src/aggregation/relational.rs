@@ -7,9 +7,13 @@
 //! sorting barriers and unsupported functions retain the materialized path.
 
 mod folded;
+mod incremental;
 
 use super::*;
-use crate::PreparedGraphSet;
+use crate::{
+    GraphSetProjection, GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+    PreparedGraphSetAggregate,
+};
 use std::cell::RefCell;
 
 impl PreparedGraphAggregate {
@@ -89,6 +93,151 @@ impl PreparedGraphAggregate {
         self.relational_input.as_ref()
     }
 
+    /// Normalize native COLLECT with a proved occurrence order into the
+    /// existing relational group owner. The retained source is the complete
+    /// original graph plan, not a fabricated schema leaf. Every input expression
+    /// and result clause remains in the definition.
+    ///
+    /// Ordinary native vertex scans visit ascending identities. Their private
+    /// leading identity makes that occurrence order explicit in the row bag.
+    /// Uncaptured fixed-edge scans visit ascending source/destination pairs;
+    /// both identities carry this order, with exact parallel-edge multiplicity.
+    /// Reverse and undirected scans use their bound endpoint orientations.
+    /// Computed inputs instead retain the original complete-row ordering used
+    /// by their materialized source, before evaluating argument expressions.
+    /// Equal source rows have equal computed values and preserve their full
+    /// multiplicity. Neither argument order nor change-arrival order can stand
+    /// in for the original occurrence sequence.
+    ///
+    /// Computed inputs can retain multi-hop and scoped graph sources when
+    /// their complete rows use canonical ordering. Unprojected inputs still
+    /// require the native vertex/one-edge occurrence proof; visitation order
+    /// must never be replaced with argument order. Hidden source columns,
+    /// noncanonical input ordering and unsupported schema widths refuse.
+    /// The consumer must independently admit and meter the COMPLETE returned
+    /// relation through its ordinary maintained circuit. This normalization
+    /// does not add an eager fallback for unsupported source operators.
+    /// Iterator callers that supply vertices in arbitrary order have no native
+    /// ordering guarantee.
+    #[must_use]
+    pub fn incremental_collection_relation(&self) -> Option<PreparedGraphSetAggregate> {
+        if self.relational_input.is_some()
+            || !self.aggregates.iter().any(|aggregate| {
+                matches!(
+                    aggregate.function,
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                )
+            })
+        {
+            return None;
+        }
+        let mut names: BTreeSet<_> = self.input.columns().iter().cloned().collect();
+        if let Some(computed) = &self.computed_input {
+            names.extend(computed.iter().map(|column| column.name().to_owned()));
+        }
+        let mut ordinal = 0;
+        let mut private_name = || loop {
+            let name = format!("_fgdb_collect_order_{ordinal}");
+            ordinal += 1;
+            if names.insert(name.clone()) {
+                break name;
+            }
+        };
+        let (source, projection, prefix) =
+            match &self.computed_input {
+                Some(computed) => {
+                    // Batch computed aggregation first materializes and orders
+                    // COMPLETE graph rows, then evaluates every input expression.
+                    // This order does not depend on graph topology: the source
+                    // may contain joins, OPTIONAL or EXISTS. Keep those rows as
+                    // a private leading key, not the computed argument values.
+                    let [
+                        ..,
+                        GlaOperator::ProjectValues { columns },
+                        GlaOperator::OrderByValues,
+                        GlaOperator::Limit {
+                            offset: 0,
+                            count: None,
+                        },
+                    ] = self.input.plan().operators()
+                    else {
+                        return None;
+                    };
+                    if columns.is_empty()
+                        || columns.len() != self.input.columns().len()
+                        || columns.len() >= MAX_PATTERN_VERTICES
+                        || !self.input.preserves_duplicates()
+                    {
+                        // Hidden order columns cannot be reconstructed from a
+                        // visible row. Reserve the counted source's private
+                        // COUNT column inside its complete-schema bound.
+                        return None;
+                    }
+                    let source = self.input_pattern().clone();
+                    let prefix = source.columns().len();
+                    let mut projection: Vec<_> = (0..prefix)
+                        .map(|column| {
+                            GraphSetProjection::new(private_name(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    projection.extend_from_slice(computed);
+                    (source, projection, prefix)
+                }
+                None => {
+                    let names = [private_name(), private_name()];
+                    let (source, identities) =
+                        self.input.incremental_collection_source(Some(&[
+                            names[0].as_str(),
+                            names[1].as_str(),
+                        ]))?;
+                    // Identity columns the input already leads with, in scan
+                    // order, are the occurrence proof in place: no private copy
+                    // widens the row past the bound (fgdb-fjemc).
+                    let leading = identities
+                        .iter()
+                        .enumerate()
+                        .all(|(at, &column)| at == column);
+                    let prefix = if leading { 0 } else { identities.len() };
+                    let mut projection: Vec<_> = if leading {
+                        Vec::new()
+                    } else {
+                        names
+                            .into_iter()
+                            .zip(identities)
+                            .map(|(name, column)| {
+                                GraphSetProjection::new(name, GraphSetValue::Column(column))
+                            })
+                            .collect()
+                    };
+                    projection.extend(self.input.columns().iter().enumerate().map(
+                        |(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        },
+                    ));
+                    (source, projection, prefix)
+                }
+            };
+        let relation = PreparedGraphSet::from(source.clone())
+            .project(projection, GraphSetQuantifier::All)
+            .ok()?;
+        relation.check_parent_depth().ok()?;
+        let mut summary = self.clone();
+        summary.input = AggregateInput(Some(source));
+        summary.computed_input = None;
+        summary.relational_input = Some(relation);
+        // Only input addresses shift. Output keys, hidden aggregate slots,
+        // HAVING and scoped collection-output expressions keep their schema.
+        for column in &mut summary.keys {
+            *column += prefix;
+        }
+        for aggregate in &mut summary.aggregates {
+            if let Some(column) = &mut aggregate.column {
+                *column += prefix;
+            }
+        }
+        PreparedGraphSetAggregate::from_relation(summary)
+    }
+
     /// Reuse native grouping inside a relational operator whose COMPLETE
     /// input has already executed under the caller's meter. The caller must
     /// retain that input and its checked schema through result materialization.
@@ -111,7 +260,8 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -121,21 +271,26 @@ impl PreparedGraphAggregate {
         // once; compound execution cannot enter this iterator-only interface.
         let checkpoint = RefCell::new(&mut checkpoint);
         let mut admitted = Some((vertices, edges));
+        let mut source = |pattern: &PreparedGraphPattern<GraphValueRow>,
+                          remaining: GqlQueryPolicy| {
+            let (vertices, edges) = admitted
+                .take()
+                .expect("preparation admitted exactly one immutable graph leaf");
+            pattern.plan().execute_governed_with_properties(
+                snapshot_records,
+                vertices,
+                edges,
+                &mut test_vertex,
+                &mut property,
+                remaining,
+                || (*checkpoint.borrow_mut())(),
+            )
+        };
         self.execute_relational_with_source(
             policy,
-            |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
-                let (vertices, edges) = admitted
-                    .take()
-                    .expect("preparation admitted exactly one immutable graph leaf");
-                pattern.plan().execute_governed_with_properties(
-                    snapshot_records,
-                    vertices,
-                    edges,
-                    &mut test_vertex,
-                    &mut property,
-                    remaining,
-                    || (*checkpoint.borrow_mut())(),
-                )
+            crate::set_ops::BorrowedSource {
+                source: &mut source,
+                elements: Some(elements),
             },
             || (*checkpoint.borrow_mut())(),
         )
@@ -179,12 +334,12 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = relation
+        let input = relation
             .execute_with_source(source_policy, &mut source, &mut checkpoint)
             .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
-        let mut evaluator = source.evaluator;
+        let mut evaluator = input.evaluator;
         let mut rows = GqlExecutionStats {
-            snapshot_records: source.rows.snapshot_records,
+            snapshot_records: input.rows.snapshot_records,
             result_rows: 0,
         };
         let mut control = |event| {
@@ -210,7 +365,11 @@ impl PreparedGraphAggregate {
         // Borrow the completed input through final result copying. Empty input
         // still makes one keyless zero/null group; LIMIT 0 never skips input
         // failures or aggregation. No row payload clone is needed at this seam.
-        let value = self.summarize_projected_rows(&source.value, &mut control)?;
+        let value = self.summarize_projected_rows_with_elements(
+            &input.value,
+            &mut |element, key| source.element_property(element, key),
+            &mut control,
+        )?;
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution {
             value,

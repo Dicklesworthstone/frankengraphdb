@@ -83,8 +83,11 @@ fn text_or_allows_nonmembers_but_detects_membership_through_either_property() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// NOT keeps a missing or NULL value UNKNOWN, so neither enters the read
+/// result. A Bool is of another domain than 7 (fgdb-v6ku6): `n.p = 7` is
+/// FALSE, so NOT admits it and its concurrent write is a read conflict.
 #[test]
-fn text_not_keeps_missing_null_and_incompatible_values_unknown() {
+fn text_not_keeps_missing_and_null_unknown_but_admits_another_domain() {
     let ((), report) = run_async_under_lab(0x7653_0202, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
@@ -98,7 +101,10 @@ fn text_not_keeps_missing_null_and_incompatible_values_unknown() {
             Some(CanonicalScalar::Int(7)),
             Some(CanonicalScalar::Int(8)),
         ] {
-            let enters = value == Some(CanonicalScalar::Int(8));
+            let enters = matches!(
+                value,
+                Some(CanonicalScalar::Int(8) | CanonicalScalar::Bool(true))
+            );
             let mut database = fixture(&cx).await;
             let mut transaction = database.begin(&txcx).unwrap();
             let result = transaction
@@ -505,10 +511,11 @@ fn a_later_label_never_hides_an_earlier_boolean_data_error() {
         let database = fixture(&cx).await;
         let query = boolean_plan("MATCH (n:L) WHERE 1 / n.p > 0 RETURN n");
         let mut row = database.vertex(VId(3)).unwrap().unwrap();
-        row.props = vec![(P, CanonicalScalar::Int(0))];
+        row.props = vec![(P, CanonicalScalar::Int(0).into())];
         let mut scan = VertexScanRead {
             selections: VertexScanRead::predicates(query.plan()).unwrap().to_vec(),
             complete: false,
+            endpoint: None,
         };
         assert_eq!(scan.selections.len(), 2);
         assert!(!scan.matches_labels(Some(&row)));

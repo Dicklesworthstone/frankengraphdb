@@ -4,7 +4,7 @@
 //! the relation, cost property, mode, selector and finite hop interval. It does
 //! not interpret a graph, interpolate arguments, or execute a captured WALK bag.
 
-use crate::algebra::GlaDirection;
+use crate::algebra::{GlaDirection, GraphMatchMode};
 use crate::set_text::{TextKind, TextToken};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphCheapestPathMode,
@@ -28,13 +28,35 @@ pub enum GraphCheapestPathTextErrorKind {
     /// The same endpoint variable was bound to two different vertex identities.
     AnchorMismatch,
 }
+impl core::fmt::Display for GraphCheapestPathTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Pattern(kind) => kind.fmt(f),
+            Self::InvalidHopBounds => f.write_str("invalid weighted path hop bounds"),
+            Self::AnchorMismatch => {
+                f.write_str("an endpoint variable is bound to two different vertices")
+            }
+        }
+    }
+}
+impl GraphCheapestPathTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Pattern(kind) => kind.class(),
+            Self::InvalidHopBounds | Self::AnchorMismatch => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphCheapestPathTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphCheapestPathTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "weighted path text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphCheapestPathTextError {}
@@ -87,15 +109,18 @@ impl Number {
 /// MATCH p = ANY CHEAPEST WALK (s)-[e:ROAD*1..8]->(t)
 /// COST e.distance RETURN p
 ///
-/// MATCH p = CHEAPEST $k TRAIL (s)-[e:ROAD*$min..$max]->(t)
+/// MATCH REPEATABLE ELEMENTS p = CHEAPEST $k WALK (s)-[e:ROAD*$min..$max]->(t)
 /// COST e.distance RETURN p AS route
 /// ```
 ///
 /// WALK (the default), TRAIL, ACYCLIC and SIMPLE use the existing exact signed
 /// Int64-cost pathfinder. `CHEAPEST n` requests a ranked prefix; `ANY CHEAPEST`
-/// selects one minimum using the existing single-answer specialization. Both
+/// selects one minimum using the native pathfinder. Both
 /// break cost ties by canonical edge/vertex path order. Zero K is legal and is
 /// NOT a source-validation bypass. A single `*n` is an exact-length interval.
+/// MATCH defaults to DIFFERENT EDGES, independently of the path mode: no EId
+/// may repeat, including an undirected SIMPLE closing return. Explicit MATCH
+/// REPEATABLE ELEMENTS permits reuse where the selected path mode permits it.
 ///
 /// This is an explicit bounded extension, not full ISO GQL. COST accepts only
 /// the declared edge's property. No filters, extra patterns, cost expressions,
@@ -113,6 +138,7 @@ pub struct PreparedGraphCheapestPathText {
     weight: PropertyKeyId,
     direction: GlaDirection,
     mode: GraphCheapestPathMode,
+    match_mode: GraphMatchMode,
     count: Option<Number>,
     minimum: Number,
     maximum: Number,
@@ -139,6 +165,7 @@ impl PreparedGraphCheapestPathText {
             parameter_offsets: Vec::new(),
         };
         parser.word("MATCH")?;
+        let match_mode = parser.match_mode()?;
         let path = parser.name()?;
         parser.punct(b'=', "=")?;
         let count = if parser.take_word("ANY") {
@@ -256,6 +283,7 @@ impl PreparedGraphCheapestPathText {
             weight: weight_id,
             direction,
             mode,
+            match_mode,
             count,
             minimum,
             maximum,
@@ -295,6 +323,9 @@ impl PreparedGraphCheapestPathText {
         target: VId,
         arguments: &GqlParameters,
     ) -> Result<BoundGraphCheapestPathQuery, GraphCheapestPathTextError> {
+        // A client's signed K is the same unsigned count (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         let mut values = Vec::new();
         for (spec, &at) in self.parameters.iter().zip(&self.parameter_offsets) {
             match arguments.get(&spec.name) {
@@ -337,7 +368,8 @@ impl PreparedGraphCheapestPathText {
             bounds,
         )
         .map_err(|kind| pattern(self.return_at, GraphPatternTextErrorKind::Build(kind)))?
-        .with_mode(self.mode);
+        .with_mode(self.mode)
+        .with_match_mode(self.match_mode);
         Ok(BoundGraphCheapestPathQuery {
             query,
             count: self.count.as_ref().map(|n| n.bind(&values)),
@@ -506,13 +538,31 @@ impl<'a> Parser<'a> {
         self.at += 1;
         Ok((text, at))
     }
+    fn match_mode(&mut self) -> Result<GraphMatchMode, GraphCheapestPathTextError> {
+        if self.take_word("REPEATABLE") {
+            if self.take_word("ELEMENT") {
+                self.take_word("BINDINGS");
+            } else {
+                self.word("ELEMENTS")?;
+            }
+            Ok(GraphMatchMode::RepeatableElements)
+        } else if self.take_word("DIFFERENT") {
+            if self.take_word("EDGE") || self.take_word("RELATIONSHIP") {
+                self.take_word("BINDINGS");
+            } else if !self.take_word("EDGES") {
+                self.word("RELATIONSHIPS")?;
+            }
+            Ok(GraphMatchMode::DifferentEdges)
+        } else {
+            Ok(GraphMatchMode::DifferentEdges)
+        }
+    }
     fn number(&mut self) -> Result<Number, GraphCheapestPathTextError> {
         let at = self.offset();
         let operand = match &self.current().kind {
             TextKind::Digits(digits) => Operand::Literal(
-                digits
-                    .parse::<u64>()
-                    .map_err(|_| pattern(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
+                crate::graph_text::integer_magnitude(digits)
+                    .ok_or_else(|| pattern(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
             ),
             TextKind::Parameter(name) => {
                 let name = *name;

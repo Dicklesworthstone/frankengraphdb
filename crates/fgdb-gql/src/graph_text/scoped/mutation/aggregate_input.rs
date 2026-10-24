@@ -17,7 +17,10 @@ fn scalar_error(source: GraphMutationTextError) -> GraphPatternTextError {
         GraphMutationTextErrorKind::IntegerExpression(_) => {
             GraphPatternTextErrorKind::Expected("valid bounded aggregate scalar expression")
         }
-        GraphMutationTextErrorKind::Build(_) => {
+        GraphMutationTextErrorKind::Relation(crate::GraphSetTextErrorKind::Pattern(kind)) => kind,
+        GraphMutationTextErrorKind::Build(_)
+        | GraphMutationTextErrorKind::Relation(_)
+        | GraphMutationTextErrorKind::ReturnBuild(_) => {
             GraphPatternTextErrorKind::Expected("aggregate scalar operand")
         }
     };
@@ -45,6 +48,22 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
                         MutationIntegerTemplateOp::Parameter { index: a, .. },
                         MutationIntegerTemplateOp::Parameter { index: b, .. },
                     ) => a == b,
+                    (
+                        MutationIntegerTemplateOp::ParameterField {
+                            index: a,
+                            keys: a_keys,
+                            ..
+                        },
+                        MutationIntegerTemplateOp::ParameterField {
+                            index: b,
+                            keys: b_keys,
+                            ..
+                        },
+                    ) => a == b && a_keys == b_keys,
+                    (
+                        MutationIntegerTemplateOp::ListMembers { index: a, .. },
+                        MutationIntegerTemplateOp::ListMembers { index: b, .. },
+                    ) => a == b,
                     _ => false,
                 })
         }
@@ -53,28 +72,23 @@ fn same_value(left: &ReadValueTemplate, right: &ReadValueTemplate) -> bool {
 }
 
 impl<'a> Parser<'a> {
+    /// One grouping key or aggregate argument. `predicates` admits a whole
+    /// expression, comparisons and connectors included, as a RETURN item's
+    /// key is (`RETURN n.p > 1 AS big, COUNT(*)`).
     pub(in crate::graph_text) fn aggregate_scalar_expression(
         &mut self,
         computed: &mut ComputedInputs<'a>,
+        predicates: bool,
     ) -> Result<Expression<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let mut sources: Vec<_> = computed
             .sources
             .iter()
-            .map(|&(variable, property)| Projection {
+            .map(|&(variable, property, path)| Projection {
                 variable,
                 property,
-                path: if self
-                    .syntax
-                    .path
-                    .is_some_and(|path| path.text == variable.text)
-                {
-                    Some(GraphPathFunction::Value)
-                } else if self.syntax.visible_edge(variable.text).is_some() {
-                    Some(GraphPathFunction::Edge)
-                } else {
-                    None
-                },
+                path,
+                collect: None,
             })
             .collect();
         // A bound vertex, edge, or path with a literal-looking name retains its identity.
@@ -83,9 +97,16 @@ impl<'a> Parser<'a> {
             false
         } else if let TokenKind::Word(word) = self.current.kind {
             let next = self.lexer.clone().next()?;
+            // `r IS NULL` is a scalar predicate over the element, which the
+            // scalar compiler reads (element_null_operand). In a HAVING
+            // operand the IS belongs to the HAVING test: `HAVING a IS NOT
+            // NULL` tests group key `a`.
             !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
+                && (self.having_operand
+                    || !matches!(next.kind,
+                        TokenKind::Word(next) if next.eq_ignore_ascii_case("IS")))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
-                    || self.syntax.path.is_some_and(|path| path.text == word)
+                    || self.syntax.names_path(word)
                     || self.syntax.visible_edge(word).is_some()
                     || !(word.eq_ignore_ascii_case("TRUE")
                         || word.eq_ignore_ascii_case("FALSE")
@@ -93,33 +114,73 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
-        let operand = if bare_variable {
+        // A list or map argument, as in COUNT(DISTINCT [a, b]), reads with the
+        // RETURN value grammar over the same input sources. The input binder
+        // already lowers every composite template, so no new evaluator exists.
+        let composite = self.is_punct(b'[')
+            || self.is_punct(b'{')
+            || ((self.is_word("KEYS") || self.is_word("PROPERTIES"))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+            || (matches!(self.current.kind, TokenKind::Word(_))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')));
+        let operand = if composite {
+            None
+        } else if bare_variable {
             let variable = self.any_variable()?;
-            Operand::Column(self.mutation_projection(&mut sources, variable, None)?)
+            Some(Operand::Column(self.mutation_projection(
+                &mut sources,
+                variable,
+                None,
+            )?))
         } else {
-            self.aggregate_value_expression(&mut sources)
-                .map_err(scalar_error)?
+            Some(
+                self.aggregate_value_expression(&mut sources, predicates)
+                    .map_err(scalar_error)?,
+            )
+        };
+        // Err carries a plain scalar/vertex input's column.
+        let value = match operand {
+            None => match self.read_graph_value(&mut sources, 0).map_err(|source| {
+                let kind = match source.kind {
+                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                    _ => GraphPatternTextErrorKind::Expected(
+                        "valid bounded aggregate list or map argument",
+                    ),
+                };
+                error(source.offset, kind)
+            })? {
+                ReadValueTemplate::Column(column) => Err(column),
+                value => Ok(value),
+            },
+            Some(Operand::Column(column)) => Err(column),
+            Some(Operand::Literal(value)) => Ok(ReadValueTemplate::Literal(value)),
+            Some(Operand::Number(Number::Literal(value))) => {
+                Ok(ReadValueTemplate::Literal(scalar(value, at)?))
+            }
+            Some(Operand::Number(Number::Parameter(index))) => Ok(ReadValueTemplate::parameter(
+                index,
+                at,
+                self.syntax.parameters[index].parameter_type,
+            )),
+            Some(Operand::Integer { program, at }) => {
+                Ok(ReadValueTemplate::Integer { program, at })
+            }
         };
         computed.sources = sources
             .iter()
-            .map(|source| (source.variable, source.property))
+            .map(|source| (source.variable, source.property, source.path))
             .collect();
-        if let Operand::Column(column) = operand {
-            let source = sources[column];
-            return Ok(Expression {
-                variable: source.variable,
-                property: source.property,
-                computed: None,
-            });
-        }
-        let value = match operand {
-            Operand::Literal(value) => ReadValueTemplate::Literal(value),
-            Operand::Number(Number::Literal(value)) => {
-                ReadValueTemplate::Literal(scalar(value, at)?)
+        let value = match value {
+            Ok(value) => value,
+            Err(column) => {
+                let source = sources[column];
+                return Ok(Expression {
+                    variable: source.variable,
+                    property: source.property,
+                    path: source.path,
+                    computed: None,
+                });
             }
-            Operand::Number(Number::Parameter(index)) => ReadValueTemplate::Parameter { index, at },
-            Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
-            Operand::Column(_) => unreachable!("plain scalar/vertex inputs returned above"),
         };
         let index = if let Some(index) = computed
             .operands
@@ -140,6 +201,7 @@ impl<'a> Parser<'a> {
         Ok(Expression {
             variable: Name { text: "", at },
             property: None,
+            path: None,
             computed: Some(index),
         })
     }
@@ -168,9 +230,11 @@ impl PreparedGraphAggregateText {
         match template {
             ReadValueTemplate::Column(input) => Ok(GraphSetValue::Column(*input)),
             ReadValueTemplate::Literal(value) => Ok(GraphSetValue::Literal(value.clone())),
-            ReadValueTemplate::Parameter { index, at } => {
-                Ok(GraphSetValue::Literal(scalar(values[*index].clone(), *at)?))
-            }
+            ReadValueTemplate::Parameter {
+                index,
+                at,
+                null_type,
+            } => return_projection::bind_read_parameter(&values[*index], *at, *null_type),
             ReadValueTemplate::Integer { program, at } => Ok(GraphSetValue::Integer(
                 integer::bind_integer(program, values, *at).map_err(scalar_error)?,
             )),
@@ -191,7 +255,37 @@ impl PreparedGraphAggregateText {
                 value: Box::new(Self::bind_input_value(value, values)?),
                 list: Box::new(Self::bind_input_value(list, values)?),
             }),
+            ReadValueTemplate::Equal { left, right } => Ok(GraphSetValue::Equal {
+                left: Box::new(Self::bind_input_value(left, values)?),
+                right: Box::new(Self::bind_input_value(right, values)?),
+            }),
+            ReadValueTemplate::Ordered {
+                comparison,
+                left,
+                right,
+            } => Ok(GraphSetValue::Ordered {
+                comparison: *comparison,
+                left: Box::new(Self::bind_input_value(left, values)?),
+                right: Box::new(Self::bind_input_value(right, values)?),
+            }),
+            ReadValueTemplate::Temporal {
+                function,
+                argument,
+                zones,
+            } => Ok(GraphSetValue::Temporal {
+                function: *function,
+                argument: Box::new(Self::bind_input_value(argument, values)?),
+                zones: zones.clone(),
+            }),
+            ReadValueTemplate::Function { function, argument } => Ok(GraphSetValue::Function {
+                function: *function,
+                argument: Box::new(Self::bind_input_value(argument, values)?),
+            }),
             ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
+            ReadValueTemplate::Random { site, scope } => Ok(GraphSetValue::Random {
+                site: *site,
+                scope: *scope,
+            }),
             ReadValueTemplate::Comprehension { list, filter, map } => {
                 let part = |part: &Option<Box<ReadValueTemplate>>| {
                     part.as_deref()
@@ -253,13 +347,51 @@ impl PreparedGraphAggregateText {
                     .map(|guard| Self::bind_input_value(guard, values).map(Box::new))
                     .transpose()?,
             }),
-            ReadValueTemplate::MapGet { map, key } => Ok(GraphSetValue::MapGet {
+            ReadValueTemplate::MapGet { map, key, property } => Ok(GraphSetValue::MapGet {
                 map: Box::new(Self::bind_input_value(map, values)?),
                 key: key.clone(),
+                property: property.bind(),
+            }),
+            ReadValueTemplate::MapOverlay {
+                base,
+                keys,
+                values: entries,
+            } => Ok(GraphSetValue::MapOverlay {
+                base: Box::new(Self::bind_input_value(base, values)?),
+                keys: keys.clone(),
+                values: entries
+                    .iter()
+                    .map(|value| Self::bind_input_value(value, values))
+                    .collect::<Result<_, _>>()?,
             }),
             ReadValueTemplate::Keys(map) => Ok(GraphSetValue::Keys(Box::new(
                 Self::bind_input_value(map, values)?,
             ))),
+            ReadValueTemplate::Let {
+                values: slots,
+                body,
+            } => Ok(GraphSetValue::Let {
+                values: slots
+                    .iter()
+                    .map(|value| Self::bind_input_value(value, values))
+                    .collect::<Result<_, _>>()?,
+                body: Box::new(Self::bind_input_value(body, values)?),
+            }),
+            ReadValueTemplate::Case { arms, otherwise } => Ok(GraphSetValue::Case {
+                arms: arms
+                    .iter()
+                    .map(|(condition, value)| -> Result<_, GraphPatternTextError> {
+                        Ok((
+                            Self::bind_input_value(condition, values)?,
+                            Self::bind_input_value(value, values)?,
+                        ))
+                    })
+                    .collect::<Result<_, _>>()?,
+                otherwise: otherwise
+                    .as_deref()
+                    .map(|value| Self::bind_input_value(value, values).map(Box::new))
+                    .transpose()?,
+            }),
         }
     }
 }

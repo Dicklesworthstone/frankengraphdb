@@ -203,24 +203,52 @@ fn classify(
     declarations: &[(&str, GqlParameterType)],
 ) -> Result<Kind, GraphPatternTextError> {
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;
-    if parser.is_word("UNWIND") {
+    let unwind_led = parser.is_word("UNWIND");
+    if unwind_led || parser.is_word("WITH") {
         let (_, imports) = parser.insertion_unwind_prefix().map_err(|source| {
             let kind = match source.kind {
                 crate::GraphSetTextErrorKind::Pattern(kind) => kind,
-                _ => GraphPatternTextErrorKind::Expected("a bounded native UNWIND source"),
+                _ => GraphPatternTextErrorKind::Expected("a bounded native WITH/UNWIND source"),
             };
             error(source.offset, kind)
         })?;
         // Use the insertion compiler's exact imported scope and correlation
         // rules during whole-script preflight, before any catalog callbacks.
-        // Do not route UNWIND MATCH SET/MERGE through an unrelated compiler.
-        parser.insertion_match_prefix(&imports)?;
+        // A row-fed MERGE stays with its own owners.
+        let matched = parser.insertion_match_prefix(&imports)?;
         return if parser.is_word("CREATE") || parser.is_word("INSERT") {
             Ok(Kind::Insert)
+        } else if unwind_led
+            && matched
+            && ["SET", "REMOVE", "DETACH", "DELETE"]
+                .iter()
+                .any(|word| parser.is_word(word))
+        {
+            // UNWIND ... MATCH ... SET/REMOVE/DELETE: the mutation compiler
+            // reads the rows of the UNWIND stages and the MATCH (fgdb-0s2pq).
+            Ok(Kind::Mutation)
         } else {
             Err(error(
                 parser.current.at,
-                GraphPatternTextErrorKind::Expected("CREATE or INSERT after UNWIND/MATCH"),
+                GraphPatternTextErrorKind::Expected("CREATE or INSERT after WITH/UNWIND/MATCH"),
+            ))
+        };
+    }
+    // A leading OPTIONAL MATCH is a write source only for SET, REMOVE and
+    // either DELETE: the mutation compiler left-joins it with the unit row.
+    if parser.is_word("OPTIONAL") {
+        parser.parse_mutation_match_prefix()?;
+        return if ["SET", "REMOVE", "DETACH", "DELETE"]
+            .iter()
+            .any(|word| parser.is_word(word))
+        {
+            Ok(Kind::Mutation)
+        } else {
+            Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "SET, REMOVE, DELETE or DETACH DELETE after a leading OPTIONAL MATCH",
+                ),
             ))
         };
     }
@@ -228,11 +256,56 @@ fn classify(
     if matched {
         parser.parse_match_prefix()?;
     }
+    // MATCH ... WITH ... CREATE/SET/REMOVE/DELETE: the write reads the WITH
+    // row (fgdb-sl4ym).
+    if matched && parser.is_word("WITH") {
+        parser.write_row_prefix().map_err(|source| {
+            let kind = match source.kind {
+                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                _ => GraphPatternTextErrorKind::Expected("a bounded WITH before a write clause"),
+            };
+            error(source.offset, kind)
+        })?;
+        // A relationship MERGE over the row (fgdb-cpny9) has no branch clause
+        // here: ON MATCH/ON CREATE or SET after it keep their refusal.
+        let merge_at = statement.span.start + parser.current.at;
+        let plain_merge = !statement.last_on.is_some_and(|at| at > merge_at)
+            && !statement.last_set.is_some_and(|at| at > merge_at)
+            && parser.at_relationship_merge()?;
+        return if parser.is_word("CREATE") || parser.is_word("INSERT") {
+            Ok(Kind::Insert)
+        } else if ["SET", "REMOVE", "DETACH", "DELETE"]
+            .iter()
+            .any(|word| parser.is_word(word))
+        {
+            Ok(Kind::Mutation)
+        } else if plain_merge {
+            Ok(Kind::EdgeMerge)
+        } else {
+            Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "CREATE, SET, REMOVE, DELETE or a relationship MERGE after MATCH ... WITH",
+                ),
+            ))
+        };
+    }
     if parser.is_word("CREATE") || parser.is_word("INSERT") {
         return Ok(Kind::Insert);
     }
     if matched && parser.is_word("DELETE") {
-        return Ok(Kind::Delete);
+        // DELETE p of a matched path is the mutation compiler's, which
+        // expands each path into its elements (TCK Delete3).
+        let mut lexer = parser.lexer.clone();
+        loop {
+            match lexer.next()?.kind {
+                TokenKind::Word(word) if parser.syntax.names_path(word) => {
+                    return Ok(Kind::Mutation);
+                }
+                TokenKind::End => return Ok(Kind::Delete),
+                _ => {}
+            }
+        }
     }
     if matched && (parser.is_word("SET") || parser.is_word("REMOVE") || parser.is_word("DETACH")) {
         return Ok(Kind::Mutation);
@@ -255,6 +328,37 @@ fn classify(
     ))
 }
 
+/// The one cached catalog every statement of a script resolves through. It
+/// forwards each defaulted resolver capability, so a statement compiler sees
+/// the host's tzdb and reverse catalog, not a closure that drops them.
+struct ScriptCatalog<'r, R: ?Sized> {
+    resolve: &'r mut R,
+    cache: BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for ScriptCatalog<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(value) = self.cache.get(&key) {
+            return Some(*value);
+        }
+        let value = self.resolve.resolve_symbol(kind, name)?;
+        self.cache.insert(key, value);
+        Some(value)
+    }
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.resolve.time_zones()
+    }
+    fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        self.resolve.reverse_catalog()
+    }
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolve.reverse_label(id)
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.resolve.reverse_relation(id)
+    }
+}
+
 impl PreparedGraphWriteScript {
     pub fn prepare(
         script: &str,
@@ -275,6 +379,27 @@ impl PreparedGraphWriteScript {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphWriteScriptError> {
+        Self::prepare_with_parameter_types_and_resolver(
+            script,
+            relation,
+            declarations,
+            &mut resolve,
+        )
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a host resolver whose
+    /// pinned tzdb every statement compiler receives (fgdb-txbg9): a write's
+    /// temporal constructors resolve named zones exactly as a read's do, and
+    /// without a tzdb a named zone still refuses.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        script: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphWriteScriptError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
         let scanned = scan(script)?;
         // Reuse the native declaration validator, without inventing a parser or
         // accepting duplicate/invalid names merely because different steps use them.
@@ -313,15 +438,9 @@ impl PreparedGraphWriteScript {
             kinds.push(kind);
             locals.push(local);
         }
-        let mut cache = BTreeMap::new();
-        let mut catalog = |kind, name: &str| {
-            let key = (kind, name.to_owned());
-            if let Some(value) = cache.get(&key) {
-                return Some(*value);
-            }
-            let value = resolve(kind, name)?;
-            cache.insert(key, value);
-            Some(value)
+        let mut catalog = ScriptCatalog {
+            resolve,
+            cache: BTreeMap::new(),
         };
         let mut statements = Vec::with_capacity(scanned.len());
         for (statement, definition) in scanned.iter().enumerate() {
@@ -333,7 +452,7 @@ impl PreparedGraphWriteScript {
                         text,
                         relation,
                         local,
-                        &mut catalog,
+                        crate::graph_text::LentResolver(&mut catalog),
                     )
                     .map(Into::into)
                     .map_err(|source| {
@@ -343,14 +462,14 @@ impl PreparedGraphWriteScript {
                         text,
                         relation,
                         local,
-                        &mut catalog,
+                        crate::graph_text::LentResolver(&mut catalog),
                     )
                     .map(Into::into)
                     .map_err(|source| {
                         GraphWriteProgramTemplateError::InsertBind { statement, source }
                     }),
                     Kind::VertexMerge => {
-                        PreparedGraphVertexMergeText::prepare_with_parameter_types(
+                        PreparedGraphVertexMergeText::prepare_with_parameter_types_and_resolver(
                             text,
                             relation,
                             local,
@@ -366,43 +485,49 @@ impl PreparedGraphWriteScript {
                             text,
                             relation,
                             local,
-                            &mut catalog,
+                            crate::graph_text::LentResolver(&mut catalog),
                         )
                         .map(Into::into)
                         .map_err(|source| {
                             GraphWriteProgramTemplateError::VertexUpsertBind { statement, source }
                         })
                     }
-                    Kind::EdgeMerge => PreparedGraphEdgeMergeText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::EdgeMergeBind { statement, source }
-                    }),
-                    Kind::EdgeUpsert => PreparedGraphEdgeUpsertText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source }
-                    }),
-                    Kind::Delete => PreparedGraphDeleteText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::DeleteBind { statement, source }
-                    }),
+                    Kind::EdgeMerge => {
+                        PreparedGraphEdgeMergeText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::EdgeMergeBind { statement, source }
+                        })
+                    }
+                    Kind::EdgeUpsert => {
+                        PreparedGraphEdgeUpsertText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source }
+                        })
+                    }
+                    Kind::Delete => {
+                        PreparedGraphDeleteText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::DeleteBind { statement, source }
+                        })
+                    }
                 };
             statements
                 .push(prepared.map_err(|source| GraphWriteScriptError::program(&spans, source))?);

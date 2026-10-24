@@ -1,4 +1,7 @@
 //! Real subprocess ingestion, checkpoint recovery, and caller-keyed engine differential.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys,
@@ -7,7 +10,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -437,7 +441,17 @@ impl Fixture {
         Outcome::new(self.load_command(chunk).output().unwrap())
     }
     fn checkpoint(&self) -> BulkLoadCheckpoint {
-        let value = json(&std::fs::read_to_string(&self.checkpoint).unwrap());
+        let text = std::fs::read_to_string(&self.checkpoint).unwrap();
+        let value = json(&text);
+        if value.get("v").unsigned() == 2 {
+            assert!(
+                text.len() <= 1024,
+                "compact receipt must not grow with key maps"
+            );
+            assert!(!value.object().contains_key("vertices"));
+            assert!(!value.object().contains_key("edges"));
+            return self.compact_checkpoint(&value);
+        }
         assert_eq!(value.get("v").unsigned(), 1);
         BulkLoadCheckpoint {
             vertices: value
@@ -465,6 +479,109 @@ impl Fixture {
             committed_chunks: value.get("committed_chunks").unsigned() as usize,
         }
     }
+
+    // Generated fixtures carry an independent unique ordinal property K in
+    // each element kind. Recover caller keys through public HISTORICAL reads,
+    // not the loader's issue-order pairing or its checkpoint decoder. Existing
+    // logical() comparisons still check every label, property, endpoint and
+    // relation, as well as missing/extra elements and aliased identities.
+    fn compact_checkpoint(&self, value: &Json) -> BulkLoadCheckpoint {
+        let mut cp = BulkLoadCheckpoint {
+            next_row: usize::try_from(value.get("next_row").unsigned()).unwrap(),
+            frontier: CommitSeq(value.get("frontier").unsigned()),
+            committed_chunks: usize::try_from(value.get("committed_chunks").unsigned()).unwrap(),
+            ..BulkLoadCheckpoint::default()
+        };
+        let source: Vec<_> = std::fs::read_to_string(&self.input)
+            .unwrap()
+            .lines()
+            .take(cp.next_row)
+            .map(json)
+            .collect();
+        assert_eq!(source.len(), cp.next_row);
+        let mut vertex_keys = BTreeMap::new();
+        let mut edge_keys = BTreeMap::new();
+        for row in &source {
+            let ordinal: i64 = row
+                .get("props")
+                .get("k")
+                .string()
+                .strip_prefix("int:")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let keys = match row.get("kind").string() {
+                "vertex" => &mut vertex_keys,
+                "edge" => &mut edge_keys,
+                _ => panic!("generated element kind"),
+            };
+            assert!(
+                keys.insert(ordinal, row.get("key").string().to_owned())
+                    .is_none()
+            );
+        }
+        let ordinal = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+            let (_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) = props
+                .iter()
+                .find(|(key, _)| *key == K)
+                .expect("fixture ordinal must survive")
+            else {
+                panic!("fixture ordinal must retain integer type");
+            };
+            *value
+        };
+        runtime_check(async |contexts| {
+            let db = open(&self.db, &contexts).await;
+            // A commit may be durable beyond this receipt. Using the live
+            // frontier here would erase the checkpoint-before-ACK negative.
+            let vertices = db.vertices_at(cp.frontier).unwrap();
+            let edges = db.edges_at(cp.frontier).unwrap();
+            assert_eq!(vertices.len(), vertex_keys.len());
+            assert_eq!(edges.len(), edge_keys.len());
+            for row in vertices {
+                let key = vertex_keys
+                    .get(&ordinal(&row.props))
+                    .expect("unexpected vertex");
+                assert!(cp.vertices.insert(key.clone(), row.vid).is_none());
+            }
+            for row in edges {
+                let key = edge_keys
+                    .get(&ordinal(&row.props))
+                    .expect("unexpected edge");
+                assert!(cp.edges.insert(key.clone(), row.entry.eid).is_none());
+            }
+        });
+        assert_eq!(cp.vertices.len(), vertex_keys.len());
+        assert_eq!(cp.edges.len(), edge_keys.len());
+        assert_eq!(
+            identity_hash(&source, &cp),
+            value.get("identity_hash").string()
+        );
+        cp
+    }
+}
+
+// Independent byte-vector transcript oracle. The production path incrementally
+// advances a cloned source cursor and streams fields into a Hasher instead.
+fn identity_hash(source: &[Json], cp: &BulkLoadCheckpoint) -> String {
+    let domain = b"fgdb.cli.load.identity-prefix.v2\0";
+    let mut digest = fgdb_crypto::hash(domain).0;
+    for row in source {
+        let key = row.get("key").string();
+        let (kind, id) = match row.get("kind").string() {
+            "vertex" => (0_u8, cp.vertices[key].0),
+            "edge" => (1_u8, cp.edges[key].0),
+            _ => panic!("source kind"),
+        };
+        let mut bytes = domain.to_vec();
+        bytes.extend_from_slice(&digest);
+        bytes.push(kind);
+        bytes.extend_from_slice(&u64::try_from(key.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(&id.to_be_bytes());
+        digest = fgdb_crypto::hash(&bytes).0;
+    }
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 const P: PropertyKeyId = PropertyKeyId(1);
 const K: PropertyKeyId = PropertyKeyId(2);
@@ -536,14 +653,14 @@ fn cli_answers(fixture: &Fixture, relation: RelationId) -> Vec<Vec<i64>> {
     rows.sort();
     rows
 }
-type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type Edges = BTreeMap<
     String,
     (
         String,
         String,
         RelationId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ),
 >;
 fn logical(db: &Database, checkpoint: &BulkLoadCheckpoint) -> (Vertices, Edges) {
@@ -614,8 +731,8 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
                         .insert(
                             row.key.clone(),
                             (
-                                row.source.clone(),
-                                row.destination.clone(),
+                                row.source.key().unwrap().to_owned(),
+                                row.destination.key().unwrap().to_owned(),
                                 row.relation,
                                 row.props.clone()
                             )
@@ -627,17 +744,21 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
     }
     (vertices, edges)
 }
-fn props(n: usize, payload: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+fn props(n: usize, payload: i64) -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
     vec![
-        (P, CanonicalScalar::Int(payload)),
-        (K, CanonicalScalar::Int(n as i64)),
+        (P, CanonicalScalar::Int(payload).into()),
+        (K, CanonicalScalar::Int(n as i64).into()),
         (
             PropertyKeyId(3),
             CanonicalScalar::ucs_basic_text(&format!("row {n}: \"quoted\" \\ newline\nUnicode λ"))
-                .unwrap(),
+                .unwrap()
+                .into(),
         ),
-        (PropertyKeyId(4), CanonicalScalar::Bool(n.is_multiple_of(2))),
-        (PropertyKeyId(5), CanonicalScalar::Null),
+        (
+            PropertyKeyId(4),
+            CanonicalScalar::Bool(n.is_multiple_of(2)).into(),
+        ),
+        (PropertyKeyId(5), CanonicalScalar::Null.into()),
     ]
 }
 fn generated(seed: u64) -> Vec<BulkRow> {
@@ -659,8 +780,8 @@ fn generated(seed: u64) -> Vec<BulkRow> {
     for n in 0..208 {
         rows.push(BulkRow::Edge(BulkEdge {
             key: format!("e{n}"),
-            source: format!("v{}", next() % 48),
-            destination: format!("v{}", next() % 48),
+            source: format!("v{}", next() % 48).into(),
+            destination: format!("v{}", next() % 48).into(),
             relation: if n % 2 == 0 { R } else { S },
             props: props(n, (next() % 1999) as i64 - 999),
         }));
@@ -668,7 +789,7 @@ fn generated(seed: u64) -> Vec<BulkRow> {
     rows
 }
 fn ndjson(rows: &[BulkRow]) -> String {
-    let properties = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+    let properties = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
         props
             .iter()
             .map(|(key, value)| {
@@ -681,13 +802,17 @@ fn ndjson(rows: &[BulkRow]) -> String {
                     _ => panic!("unknown test property"),
                 };
                 let value = match value {
-                    CanonicalScalar::Int(value) => format!("int:{value}"),
-                    CanonicalScalar::Bool(value) => format!("bool:{value}"),
-                    CanonicalScalar::Null => "null".into(),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => {
+                        format!("int:{value}")
+                    }
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(value)) => {
+                        format!("bool:{value}")
+                    }
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Null) => "null".into(),
                     _ if *key == PropertyKeyId(3) => {
                         // Derive text from the independent ordinal property; the logical
                         // comparison below checks its actual persisted canonical value.
-                        let (_, CanonicalScalar::Int(n)) =
+                        let (_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) =
                             props.iter().find(|(key, _)| *key == K).unwrap()
                         else {
                             panic!("ordinal")
@@ -703,7 +828,7 @@ fn ndjson(rows: &[BulkRow]) -> String {
     };
     rows.iter().map(|row| match row {
         BulkRow::Vertex(row) => format!("{{\"kind\":\"vertex\",\"key\":{},\"labels\":[{}],\"props\":{{{}}}}}\n", quote(&row.key), row.labels.iter().map(|label| quote(if label.0 == 1 { "Person" } else { "Other" })).collect::<Vec<_>>().join(","), properties(&row.props)),
-        BulkRow::Edge(row) => format!("{{\"kind\":\"edge\",\"key\":{},\"source\":{},\"destination\":{},\"relation\":{},\"props\":{{{}}}}}\n", quote(&row.key), quote(&row.source), quote(&row.destination), quote(if row.relation == R { "R" } else { "S" }), properties(&row.props)),
+        BulkRow::Edge(row) => format!("{{\"kind\":\"edge\",\"key\":{},\"source\":{},\"destination\":{},\"relation\":{},\"props\":{{{}}}}}\n", quote(&row.key), quote(row.source.key().unwrap()), quote(row.destination.key().unwrap()), quote(if row.relation == R { "R" } else { "S" }), properties(&row.props)),
     }).collect()
 }
 fn runtime_check(test: impl AsyncFnOnce(PurposeContexts)) {
@@ -743,7 +868,10 @@ fn load_progress_and_exact_typed_values() {
         (53, 5, CommitSeq(fixture.basis + 5))
     );
     runtime_check(async |contexts| {
-        let db = open(&fixture.db, &contexts).await;
+        let mut db = open(&fixture.db, &contexts).await;
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         assert_eq!(logical(&db, &checkpoint), expected(&rows[..53]));
         assert_eq!(db.delta_since(CommitSeq(fixture.basis)).unwrap().count(), 5);
     });
@@ -767,10 +895,12 @@ fn default_chunk_size_and_completed_resume_do_not_invent_commits() {
 
 /// Without --rows-per-chunk the loader fits chunks to the input
 /// (fgdb-hkp7k): 3,000 small rows commit as ONE chunk, past the old fixed
-/// 1,000-row default, and 3,000 rows carrying 1,500 characters of text each
-/// (~1.75 KB of transcript: text is group-encoded, 8 bytes to 9) take the
-/// largest power of two whose every chunk stays within 4 MiB of source
-/// transcript, 2,048, so they commit as 2,048 + 952.
+/// 1,000-row default, and 3,000 rows carrying 3,000 characters of text each
+/// (~3.4 KB of transcript and of capsule template: text is group-encoded,
+/// 8 bytes to 9) take the largest power of two whose every chunk stays
+/// within the 8 MiB transcript cap and the 8 MiB template budget, 2,048, so
+/// they commit as 2,048 + 952. (Before the template budget the fit held
+/// chunks to half the transcript cap, and 1,500-character rows did this.)
 #[test]
 fn the_default_chunk_is_fitted_to_the_input() {
     let small: String = (0..3000)
@@ -785,7 +915,7 @@ fn the_default_chunk_is_fitted_to_the_input() {
     outcome.loaded(3000, 1, fixture.basis + 1);
     assert_eq!(outcome.progress(), [(3000, fixture.basis + 1)]);
 
-    let text = "x".repeat(1500);
+    let text = "x".repeat(3000);
     let large: String = (0..3000)
         .map(|n| {
             format!(
@@ -800,6 +930,153 @@ fn the_default_chunk_is_fitted_to_the_input() {
         outcome.progress(),
         [(2048, fixture.basis + 1), (3000, fixture.basis + 2)]
     );
+}
+
+/// The whole-input row and key-byte bounds are the caller's: a graph past the
+/// engine defaults (1,000,000 rows) needs no rebuild to load. Each bound admits
+/// an input exactly at it and refuses one row or byte past it, before anything
+/// commits; omitting a flag keeps its default.
+#[test]
+fn source_row_and_key_byte_bounds_are_caller_selected() {
+    let rows: String = (0..300)
+        .map(|n| {
+            format!(
+                "{{\"kind\":\"vertex\",\"key\":\"v{n:03}\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{n}\"}}}}\n"
+            )
+        })
+        .collect();
+    // 300 keys of four bytes each: 1,200 key bytes.
+    for (flags, admitted, refusal) in [
+        (vec!["--max-source-rows", "300"], true, ""),
+        (vec!["--max-source-rows", "299"], false, "source_rows"),
+        (vec!["--max-total-key-bytes", "1200"], true, ""),
+        (
+            vec!["--max-total-key-bytes", "1199"],
+            false,
+            "total_key_bytes",
+        ),
+        (vec![], true, ""),
+    ] {
+        let fixture = Fixture::new("source-bounds", &rows);
+        let outcome = Outcome::new(fixture.load_command(None).args(&flags).output().unwrap());
+        if admitted {
+            outcome.loaded(300, 1, fixture.basis + 1);
+        } else {
+            outcome.refusal(refusal, None);
+            assert!(outcome.progress().is_empty(), "{flags:?}");
+            runtime_check(async |contexts| {
+                let db = open(&fixture.db, &contexts).await;
+                assert_eq!(
+                    db.frontier().unwrap(),
+                    CommitSeq(fixture.basis),
+                    "{flags:?}"
+                );
+            });
+        }
+    }
+    // Repeating a bound, or a non-decimal bound, is a usage error.
+    let fixture = Fixture::new("source-bounds-usage", &rows);
+    for flags in [
+        ["--max-source-rows", "1", "--max-source-rows", "2"].as_slice(),
+        ["--max-source-rows", "-1"].as_slice(),
+        ["--max-source-rows", "+5"].as_slice(),
+        ["--max-total-key-bytes", "many"].as_slice(),
+    ] {
+        let output = fixture.load_command(None).args(flags).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{flags:?}: {output:?}");
+    }
+}
+
+/// Incremental ingest across invocations (fgdb-srnr7): vertices load first,
+/// then a separate input's edges name them by `{label, property, value}`. A
+/// match that names no committed vertex refuses at its line before anything
+/// commits; an endpoint object with an unknown field is a malformed row.
+#[test]
+fn edges_in_a_later_load_name_committed_vertices_by_property() {
+    let zones: String = (0..5)
+        .map(|n| {
+            format!("{{\"kind\":\"vertex\",\"key\":\"z{n}\",\"labels\":[\"Person\"],\"props\":{{\"k\":\"int:{n}\"}}}}\n")
+        })
+        .collect();
+    let fixture = Fixture::new("match-endpoints", &zones);
+    fixture.load(None).loaded(5, 1, fixture.basis + 1);
+    let endpoint =
+        |n: i64| format!("{{\"label\":\"Person\",\"property\":\"k\",\"value\":\"int:{n}\"}}");
+    let trip = |n: usize, from: i64, to: String| {
+        format!(
+            "{{\"kind\":\"edge\",\"key\":\"t{n}\",\"source\":{},\"destination\":{to},\"relation\":\"R\",\"props\":{{}}}}\n",
+            endpoint(from)
+        )
+    };
+    let load = |name: &str, text: String| {
+        let input = fixture.root.join(name);
+        std::fs::write(&input, text).unwrap();
+        Outcome::new(
+            fixture
+                .command("load")
+                .arg("--input")
+                .arg(&input)
+                .output()
+                .unwrap(),
+        )
+    };
+    let frontier = fixture.basis + 1;
+    // Line 3 names k=99, which no committed vertex carries.
+    let refused = load(
+        "bad.ndjson",
+        [
+            trip(0, 0, endpoint(1)),
+            trip(1, 1, endpoint(2)),
+            trip(2, 2, endpoint(99)),
+        ]
+        .concat(),
+    );
+    refused.refusal("UnresolvedEndpoint", Some(3));
+    // The refusal names the endpoint as the input did, not by internal IDs.
+    let diagnostics = format!("{:?}", refused.terminal().get("diagnostics"));
+    assert!(
+        diagnostics.contains("label Person, property k, value Int(99)"),
+        "{diagnostics}"
+    );
+    assert!(refused.progress().is_empty());
+    let malformed = load(
+        "malformed.ndjson",
+        trip(
+            0,
+            0,
+            "{\"property\":\"k\",\"value\":\"int:1\",\"extra\":1}".to_owned(),
+        ),
+    );
+    malformed.refusal("MalformedRow", Some(1));
+    // A key endpoint for a vertex of the same input still works beside matches.
+    let trips = [
+        trip(0, 0, endpoint(1)),
+        trip(1, 1, endpoint(2)),
+        "{\"kind\":\"vertex\",\"key\":\"fresh\",\"labels\":[\"Other\"],\"props\":{\"k\":\"int:7\"}}\n"
+            .to_owned(),
+        trip(2, 4, "\"fresh\"".to_owned()),
+    ]
+    .concat();
+    load("trips.ndjson", trips).loaded(4, 1, frontier + 1);
+    let answer = fixture.run(
+        "query",
+        &["MATCH (a:Person)-[:R]->(b) RETURN a.k AS a, b.k AS b ORDER BY a"],
+    );
+    answer.success();
+    let rows: Vec<Vec<String>> = answer
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            event
+                .get("cells")
+                .array()
+                .iter()
+                .map(|cell| cell.get("value").string().to_owned())
+                .collect()
+        })
+        .collect();
+    assert_eq!(rows, [["0", "1"], ["1", "2"], ["4", "7"]]);
 }
 
 fn refusal_preserves_frontier(bad: &str, kind: &str) {
@@ -829,6 +1106,45 @@ fn refusal_preserves_frontier(bad: &str, kind: &str) {
         assert!(db.edges().unwrap().is_empty());
     });
 }
+/// The loader reads and parses rows a batch of 16,384 lines ahead, across
+/// threads (fgdb-load-beats-memgraph-xf2n8). A source spanning three
+/// batches loads every row. A malformed row is reported at its own line
+/// with nothing committed, whether it is a batch's last line, the next
+/// batch's first, or mid-batch.
+#[test]
+fn rows_parsed_in_batches_keep_their_lines_and_all_load() {
+    let row = |n: usize| {
+        format!(
+            "{{\"kind\":\"vertex\",\"key\":\"v{n}\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{n}\"}}}}\n"
+        )
+    };
+    let rows: Vec<String> = (0..40_000).map(row).collect();
+    let fixture = Fixture::new("batches", &rows.concat());
+    fixture.load(None).loaded(40_000, 1, fixture.basis + 1);
+    runtime_check(async |contexts| {
+        let db = open(&fixture.db, &contexts).await;
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 40_000);
+        let mut values: Vec<i64> = vertices
+            .iter()
+            .map(|vertex| match vertex.props[..] {
+                [(_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))] => value,
+                _ => panic!("{vertex:?}"),
+            })
+            .collect();
+        values.sort_unstable();
+        assert!(values.iter().copied().eq(0..40_000));
+    });
+    for line in [16_384, 16_385, 33_000] {
+        let mut bad = rows.clone();
+        bad[line - 1] = "{not-json}\n".into();
+        let fixture = Fixture::new("batches-bad", &bad.concat());
+        let failure = fixture.load(None);
+        failure.refusal("MalformedRow", Some(line));
+        assert!(failure.progress().is_empty(), "line {line}");
+    }
+}
+
 #[test]
 fn malformed_line_is_typed_line_two_and_atomic() {
     refusal_preserves_frontier("{not-json}", "MalformedRow");
@@ -909,7 +1225,11 @@ fn resume_scenario(before_capsule: bool) {
         (48, 14)
     );
     runtime_check(async |contexts| {
-        let recovered = open(&fixture.db, &contexts).await;
+        let mut recovered = open(&fixture.db, &contexts).await;
+        recovered
+            .ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         let committed = if before_capsule { 2 } else { 3 };
         assert_eq!(
             recovered.frontier().unwrap(),
@@ -944,7 +1264,11 @@ fn resume_scenario(before_capsule: bool) {
     let cli_actual = [R, S].map(|relation| cli_answers(&fixture, relation));
     let cli_reference = [R, S].map(|relation| cli_answers(&uninterrupted, relation));
     runtime_check(async |contexts| {
-        let actual = open(&fixture.db, &contexts).await;
+        let mut actual = open(&fixture.db, &contexts).await;
+        actual
+            .ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
         let reference = open(&uninterrupted.db, &contexts).await;
         assert_eq!(logical(&actual, &completed), expected(&rows));
         assert_eq!(logical(&actual, &completed), logical(&reference, &baseline));
@@ -1057,8 +1381,20 @@ fn three_seed_256_row_subprocess_matches_bulk_load_by_caller_key_and_gql() {
                     .iter()
                     .filter_map(|row| match row {
                         BulkRow::Edge(row) if row.relation == relation => Some(vec![
-                            row.source.strip_prefix('v').unwrap().parse().unwrap(),
-                            row.destination.strip_prefix('v').unwrap().parse().unwrap(),
+                            row.source
+                                .key()
+                                .unwrap()
+                                .strip_prefix('v')
+                                .unwrap()
+                                .parse()
+                                .unwrap(),
+                            row.destination
+                                .key()
+                                .unwrap()
+                                .strip_prefix('v')
+                                .unwrap()
+                                .parse()
+                                .unwrap(),
                         ]),
                         _ => None,
                     })
@@ -1077,5 +1413,249 @@ fn three_seed_256_row_subprocess_matches_bulk_load_by_caller_key_and_gql() {
                 assert_eq!(cli_actual[index], expected_answers, "CLI seed={seed}");
             }
         });
+    }
+}
+
+fn legacy_checkpoint(value: &Json, cp: &BulkLoadCheckpoint) -> Json {
+    let mut fields = value.object().clone();
+    fields.insert("v".into(), Json::Number("1".into()));
+    assert!(fields.remove("identity_hash").is_some());
+    fields.insert(
+        "vertices".into(),
+        Json::Object(
+            cp.vertices
+                .iter()
+                .map(|(key, id)| (key.clone(), Json::String(id.0.to_string())))
+                .collect(),
+        ),
+    );
+    fields.insert(
+        "edges".into(),
+        Json::Object(
+            cp.edges
+                .iter()
+                .map(|(key, id)| (key.clone(), Json::String(id.0.to_string())))
+                .collect(),
+        ),
+    );
+    Json::Object(fields)
+}
+
+#[test]
+fn compact_identity_commitment_refuses_a_wrong_mapping_before_overwrite_or_resume() {
+    let rows = generated(0xc028);
+    let fixture = Fixture::new("compact-forgery", &ndjson(&rows));
+    let interrupted = Outcome::new(
+        fixture
+            .load_command(Some(31))
+            .env("FGDB_LOAD_CRASH_CHUNK", "2")
+            .env("FGDB_LOAD_CRASH_POINT", "before-capsule")
+            .output()
+            .unwrap(),
+    );
+    assert!(!interrupted.output.status.success());
+    let cp = fixture.checkpoint();
+    assert_eq!(cp.next_row, 62);
+    let good = std::fs::read_to_string(&fixture.checkpoint).unwrap();
+    let source: Vec<_> = ndjson(&rows[..cp.next_row]).lines().map(json).collect();
+    // Keep valid counters, source and base identities. Only the mapping is
+    // wrong, so a missing digest check cannot hide behind another refusal.
+    let mut wrong = cp.clone();
+    let first = wrong.vertices["v0"];
+    let second = wrong.vertices["v1"];
+    wrong.vertices.insert("v0".into(), second);
+    wrong.vertices.insert("v1".into(), first);
+    let forged_hash = identity_hash(&source, &wrong);
+    let mut forged = json(&good);
+    let Json::Object(fields) = &mut forged else {
+        unreachable!()
+    };
+    assert_ne!(fields["identity_hash"].string(), forged_hash);
+    fields.insert("identity_hash".into(), Json::String(forged_hash));
+    let forged = encode(&forged);
+    std::fs::write(&fixture.checkpoint, &forged).unwrap();
+    let refusal = fixture.load(Some(31));
+    refusal.refusal("identity commitment", None);
+    assert!(refusal.progress().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&fixture.checkpoint).unwrap(),
+        forged
+    );
+    runtime_check(async |contexts| {
+        let db = open(&fixture.db, &contexts).await;
+        assert_eq!(db.frontier().unwrap(), cp.frontier);
+        assert_eq!(logical(&db, &cp), expected(&rows[..62]));
+    });
+    std::fs::write(&fixture.checkpoint, good).unwrap();
+    fixture.load(Some(31)).loaded(256, 9, fixture.basis + 9);
+    let completed = fixture.checkpoint();
+    runtime_check(async |contexts| {
+        let db = open(&fixture.db, &contexts).await;
+        assert_eq!(logical(&db, &completed), expected(&rows));
+    });
+}
+
+#[test]
+fn legacy_maps_are_verified_before_upgrade_and_unacknowledged_history_is_reconciled() {
+    let rows = generated(0xc029);
+    let fixture = Fixture::new("compact-upgrade", &ndjson(&rows));
+    let interrupted = Outcome::new(
+        fixture
+            .load_command(Some(31))
+            .env("FGDB_LOAD_CRASH_CHUNK", "2")
+            .env("FGDB_LOAD_CRASH_POINT", "after-marker-sync")
+            .output()
+            .unwrap(),
+    );
+    assert!(!interrupted.output.status.success());
+    let cp = fixture.checkpoint();
+    assert_eq!(cp.next_row, 62);
+    let compact = json(&std::fs::read_to_string(&fixture.checkpoint).unwrap());
+    let legacy = legacy_checkpoint(&compact, &cp);
+    // Same cardinalities/frontiers but wrong identity: V1 must still use exact
+    // map equality, not silently ignore its maps during the V2 migration.
+    let mut wrong = cp.clone();
+    let first = wrong.vertices["v0"];
+    let second = wrong.vertices["v1"];
+    wrong.vertices.insert("v0".into(), second);
+    wrong.vertices.insert("v1".into(), first);
+    let forged = encode(&legacy_checkpoint(&compact, &wrong));
+    std::fs::write(&fixture.checkpoint, &forged).unwrap();
+    let refusal = fixture.load(Some(31));
+    refusal.refusal("InvalidResume", None);
+    assert!(refusal.progress().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&fixture.checkpoint).unwrap(),
+        forged
+    );
+    let mut prefix_markers = Vec::new();
+    runtime_check(async |contexts| {
+        let mut db = open(&fixture.db, &contexts).await;
+        assert_eq!(db.frontier().unwrap(), CommitSeq(fixture.basis + 3));
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
+        prefix_markers = db
+            .delta_since(CommitSeq(fixture.basis))
+            .unwrap()
+            .map(|batch| batch.commit_marker_identity())
+            .collect();
+    });
+    std::fs::write(&fixture.checkpoint, encode(&legacy)).unwrap();
+    let resumed = fixture.load(Some(31));
+    resumed.loaded(256, 9, fixture.basis + 9);
+    assert_eq!(
+        resumed.progress(),
+        (3..=9)
+            .map(|chunk| ((chunk * 31).min(256), fixture.basis + chunk))
+            .collect::<Vec<_>>()
+    );
+    let upgraded = std::fs::read_to_string(&fixture.checkpoint).unwrap();
+    assert_eq!(json(&upgraded).get("v").unsigned(), 2);
+    assert!(upgraded.len() <= 1024);
+    let completed = fixture.checkpoint();
+    runtime_check(async |contexts| {
+        let mut db = open(&fixture.db, &contexts).await;
+        assert_eq!(logical(&db, &completed), expected(&rows));
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.delta_since(CommitSeq(fixture.basis))
+                .unwrap()
+                .take(3)
+                .map(|batch| batch.commit_marker_identity())
+                .collect::<Vec<_>>(),
+            prefix_markers
+        );
+    });
+}
+
+#[test]
+fn compact_receipts_resume_every_durability_boundary_with_original_sequence_progress() {
+    let rows = generated(0xc02a);
+    let rows = &rows[..53];
+    let size = 11;
+    let chunks = rows.len().div_ceil(size);
+    for point in ["before-capsule", "after-d1", "after-marker-sync"] {
+        for stop in 0..chunks {
+            let fixture = Fixture::new("compact-boundaries", &ndjson(rows));
+            let interrupted = Outcome::new(
+                fixture
+                    .load_command(Some(size))
+                    .env("FGDB_LOAD_CRASH_CHUNK", stop.to_string())
+                    .env("FGDB_LOAD_CRASH_POINT", point)
+                    .output()
+                    .unwrap(),
+            );
+            assert!(!interrupted.output.status.success(), "{point} chunk={stop}");
+            let cp = fixture.checkpoint();
+            // The persisted receipt may lag already delivered progress. Keep
+            // the existing geometric cadence and its sequence-stable replay.
+            let saved = [0, 1, 2, 2, 4][stop];
+            assert_eq!(cp.next_row, saved * size, "{point} chunk={stop}");
+            assert_eq!(cp.committed_chunks, saved);
+            assert_eq!(cp.frontier, CommitSeq(fixture.basis + saved as u64));
+            let mut markers = Vec::new();
+            runtime_check(async |contexts| {
+                let mut db = open(&fixture.db, &contexts).await;
+                let durable = stop + usize::from(point == "after-marker-sync");
+                assert_eq!(
+                    db.frontier().unwrap(),
+                    CommitSeq(fixture.basis + durable as u64)
+                );
+                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+                    .await
+                    .unwrap();
+                markers = db
+                    .delta_since(CommitSeq(fixture.basis))
+                    .unwrap()
+                    .map(|batch| batch.commit_marker_identity())
+                    .collect();
+            });
+            let resumed = fixture.load(Some(size));
+            resumed.loaded(rows.len(), chunks, fixture.basis + chunks as u64);
+            assert_eq!(
+                interrupted.progress(),
+                (1..=stop)
+                    .map(|chunk| (
+                        (chunk * size).min(rows.len()) as u64,
+                        fixture.basis + chunk as u64,
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                resumed.progress(),
+                (saved + 1..=chunks)
+                    .map(|chunk| (
+                        (chunk * size).min(rows.len()) as u64,
+                        fixture.basis + chunk as u64,
+                    ))
+                    .collect::<Vec<_>>(),
+                "{point} chunk={stop}"
+            );
+            let completed = fixture.checkpoint();
+            runtime_check(async |contexts| {
+                let mut db = open(&fixture.db, &contexts).await;
+                assert_eq!(logical(&db, &completed), expected(rows));
+                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    db.delta_since(CommitSeq(fixture.basis))
+                        .unwrap()
+                        .take(markers.len())
+                        .map(|batch| batch.commit_marker_identity())
+                        .collect::<Vec<_>>(),
+                    markers
+                );
+            });
+            let bytes = std::fs::read(&fixture.checkpoint).unwrap();
+            assert!(bytes.len() <= 1024);
+            let finished = fixture.load(Some(size));
+            finished.loaded(rows.len(), chunks, fixture.basis + chunks as u64);
+            assert!(finished.progress().is_empty());
+            assert_eq!(std::fs::read(&fixture.checkpoint).unwrap(), bytes);
+        }
     }
 }

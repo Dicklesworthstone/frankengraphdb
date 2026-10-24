@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSymbolKind, GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -28,13 +28,16 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000)
 }
-fn values() -> BTreeMap<VId, CanonicalScalar> {
-    BTreeMap::from([
-        (VId(1), CanonicalScalar::Int(7)),
-        (VId(2), CanonicalScalar::Int(7)),
-        (VId(3), CanonicalScalar::Int(9)),
-        (VId(4), CanonicalScalar::Null),
-    ])
+fn values() -> BTreeMap<VId, CanonicalPropertyValue> {
+    BTreeMap::from(
+        [
+            (VId(1), CanonicalScalar::Int(7)),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(9)),
+            (VId(4), CanonicalScalar::Null),
+        ]
+        .map(|(vid, value)| (vid, CanonicalPropertyValue::from(value))),
+    )
 }
 fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, symbols)
@@ -346,7 +349,14 @@ fn aggregate_input_and_write_script_batches_reuse_the_same_outer_binding_path() 
     else {
         panic!("wrong shared write dispatch")
     };
-    assert_eq!(captures(update.selection()), 1);
+    assert_eq!(
+        captures(
+            update
+                .selection()
+                .expect("a MATCH mutation reads a graph selection")
+        ),
+        1
+    );
     assert_eq!(captures(delete.selection()), 1);
     let batch = script.bind_parameter_sets(&[args.clone(), args]).unwrap();
     assert_eq!(batch.program().statements().len(), 4);

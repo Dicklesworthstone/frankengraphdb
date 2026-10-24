@@ -134,6 +134,26 @@ fn seq(out: &str, kind: &str) -> u64 {
         .unwrap()
 }
 
+/// The fixture's key file as keys: engine identities are the keyed
+/// permutation of each kind's counter under them (fgdb-hxgm1 channel 2).
+fn keys() -> fgdb::DatabaseKeys {
+    fgdb::DatabaseKeys::new(
+        [0x31; 32],
+        fgdb_types::DatabaseSecurityNamespaceId([0x32; 32]),
+        [0x33; 32],
+    )
+}
+fn vertex(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::vertices(&keys())
+        .permute(counter)
+        .unwrap()
+}
+fn edge(counter: u64) -> u64 {
+    fgdb::IdentityPermutation::edges(&keys())
+        .permute(counter)
+        .unwrap()
+}
+
 #[test]
 fn typed_writes_and_csv_imports_survive_separate_process_reopens() {
     let fixture = Fixture::new();
@@ -211,7 +231,11 @@ fn unwind_write_preserves_duplicate_occurrences_and_staged_updates_across_reopen
     };
     let expected = rows(&before);
     assert_eq!(expected.len(), 3, "{before}");
-    for (row, (vertex, value)) in expected.iter().zip([(1, 3), (2, 1), (3, 3)]) {
+    // ORDER BY vertex is identity order: the occurrences took counters 1..=3
+    // in source order, wherever their identities fall.
+    let mut issued = [(vertex(1), 3), (vertex(2), 1), (vertex(3), 3)];
+    issued.sort_unstable();
+    for (row, (vertex, value)) in expected.iter().zip(issued) {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
              {{\"type\":\"int\",\"value\":\"{value}\"}},\
@@ -247,7 +271,9 @@ fn empty_and_failed_unwind_writes_publish_nothing_and_late_script_failure_is_ato
     let written = success(fixture.run("write", &["UNWIND [11,12] AS x CREATE (:Person {id:x})"]));
     assert_eq!(seq(&written, "written"), fixture.created + 1);
     let before = success(fixture.run("query", &[query]));
-    for (vertex, value) in [(1, 11), (2, 12)] {
+    // The refused write committed nothing, so its reservations were never
+    // recorded: this write takes the first two counters.
+    for (vertex, value) in [(vertex(1), 11), (vertex(2), 12)] {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{vertex}\"}},\
              {{\"type\":\"int\",\"value\":\"{value}\"}}]"
@@ -296,9 +322,15 @@ fn create_return_reports_exact_occurrence_identities_at_one_durable_frontier() {
     );
     let rows = row_frames(&written);
     assert_eq!(rows.len(), 3, "{written}");
-    for (row, (source, edge, destination, value)) in
-        rows.iter().zip([(1, 1, 2, 3), (3, 2, 4, 1), (5, 3, 6, 3)])
-    {
+    // Occurrence k takes vertex counters 2k-1 (source) and 2k (destination)
+    // and edge counter k; ORDER BY source is identity order.
+    let mut issued = [
+        (vertex(1), edge(1), vertex(2), 3),
+        (vertex(3), edge(2), vertex(4), 1),
+        (vertex(5), edge(3), vertex(6), 3),
+    ];
+    issued.sort_unstable();
+    for (row, (source, edge, destination, value)) in rows.iter().zip(issued) {
         let cells = format!(
             "\"cells\":[{{\"type\":\"vertex\",\"value\":\"{source}\"}},\
              {{\"type\":\"edge\",\"value\":\"{edge}\"}},\
@@ -579,7 +611,11 @@ fn engine_identities_remain_spent_after_delete_and_reopen() {
     fixture.count(0);
     success(fixture.run("write", &["CREATE (n:Person)"]));
     let out = success(fixture.run("query", &["MATCH (n:Person) RETURN n"]));
-    assert!(out.contains("\"type\":\"vertex\",\"value\":\"3\""), "{out}");
+    // The deleted vertices spent counters 1 and 2.
+    assert!(
+        out.contains(&format!("\"type\":\"vertex\",\"value\":\"{}\"", vertex(3))),
+        "{out}"
+    );
     fixture.count(1);
 }
 
@@ -716,4 +752,205 @@ fn an_undeclared_text_column_names_the_types_file_fix_and_imports_once_declared(
     ));
     assert!(imported.contains("\"records\":2"), "{imported}");
     fixture.count(2);
+}
+
+/// A chained MERGE is not a write script, so import-csv runs it as ONE chain
+/// over every record (each clause over all records, creations staged once,
+/// fgdb-0s2pq) instead of refusing it. Repeated pairs merge once, 2000
+/// records commit (a per-record script refused at about 190), and a
+/// --types-file name the statement does not read refuses before any write.
+#[test]
+fn a_chained_merge_imports_as_one_chain_over_every_record() {
+    let fixture = Fixture::new();
+    let statement =
+        "MERGE (a:Person {id: $src}) MERGE (b:Person {id: $dst}) MERGE (a)-[:KNOWS]->(b)";
+    let import = |extra: &[&str]| {
+        fixture
+            .command(true, "import-csv")
+            .args(["--relation", "KNOWS=1"])
+            .args(extra)
+            .arg(statement)
+            .output()
+            .unwrap()
+    };
+    fixture.file("pairs.csv", "src,dst\n1,2\n2,3\n1,2\n3,1\n");
+    let imported = success(import(&["--input", "pairs.csv"]));
+    assert!(
+        imported.contains("\"kind\":\"imported_csv\"")
+            && imported.contains("\"records\":4,\"statements\":1"),
+        "{imported}"
+    );
+    fixture.count(3);
+    let edges = success(
+        fixture
+            .command(true, "query")
+            .args(["--relation", "KNOWS=1"])
+            .arg("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id AS s, b.id AS d")
+            .output()
+            .unwrap(),
+    );
+    let mut rows: Vec<&str> = edges
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect();
+    rows.sort_unstable();
+    let pair = |s: u8, d: u8| {
+        format!(
+            "\"cells\":[{{\"type\":\"int\",\"value\":\"{s}\"}},{{\"type\":\"int\",\"value\":\"{d}\"}}]"
+        )
+    };
+    assert_eq!(rows.len(), 3, "{edges}");
+    for (s, d) in [(1, 2), (2, 3), (3, 1)] {
+        assert!(rows.iter().any(|row| row.contains(&pair(s, d))), "{edges}");
+    }
+    let mut many = String::from("src,dst\n");
+    for i in 0..2000 {
+        many.push_str(&format!(
+            "{},{}\n",
+            1000 + i % 1000,
+            1000 + (i * 7 + 1) % 1000
+        ));
+    }
+    fixture.file("many.csv", &many);
+    let imported = success(import(&["--input", "many.csv"]));
+    assert!(imported.contains("\"records\":2000"), "{imported}");
+    fixture.count(1003);
+    fixture.file("unused.types", "int64\tsrc\nint64\tother\n");
+    fixture.file("one.csv", "src,dst\n7,8\n");
+    refusal(
+        &import(&["--input", "one.csv", "--types-file", "unused.types"]),
+        3,
+        "query",
+    );
+    fixture.count(1003);
+}
+
+/// A relation is not a scalar list: two-column CSV no longer stops at
+/// 21,845 records. Duplicate records retain bag semantics while MERGE still
+/// commits only distinct vertices/edges, once for the complete source.
+#[test]
+fn chained_csv_accepts_22000_records_and_commits_one_atomic_relation() {
+    let fixture = Fixture::new();
+    let mut input = String::from("src,dst\n");
+    for row in 0..22_000 {
+        input.push_str(&format!("{},{}\n", row % 16, (row + 1) % 16));
+    }
+    fixture.file("large.csv", &input);
+    let output = success(fixture.run(
+        "import-csv",
+        &[
+            "--input",
+            "large.csv",
+            "--relation",
+            "KNOWS=1",
+            "--max-snapshot-records",
+            "10000000",
+            "--max-work-units",
+            "100000000",
+            "--max-scratch-entries",
+            "100000000",
+            "MERGE (a:Person {id:$src}) MERGE (b:Person {id:$dst}) MERGE (a)-[:KNOWS]->(b)",
+        ],
+    ));
+    assert!(
+        output.contains("\"records\":22000,\"statements\":1"),
+        "{output}"
+    );
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    fixture.count(16);
+    let edges = success(fixture.run(
+        "query",
+        &[
+            "--relation",
+            "KNOWS=1",
+            "MATCH ()-[r:KNOWS]->() RETURN count(r) AS total",
+        ],
+    ));
+    assert!(
+        edges.contains("\"type\":\"count\",\"value\":\"16\""),
+        "{edges}"
+    );
+}
+
+#[test]
+fn chained_csv_preserves_clause_order_and_original_with_prefix() {
+    let fixture = Fixture::new();
+    fixture.file("ordered.csv", "src,dst\n1,2\n2,1\n");
+    let output = success(fixture.run(
+        "import-csv",
+        &[
+            "--input",
+            "ordered.csv",
+            "--relation",
+            "KNOWS=1",
+            "WITH $src AS source, $dst AS destination \
+         MERGE (a:Person {id:source}) ON CREATE SET a.score=destination \
+         MERGE (b:Person {id:destination}) ON CREATE SET b.score=-1 \
+         MERGE (a)-[:KNOWS]->(b)",
+        ],
+    ));
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    let values = success(fixture.run(
+        "query",
+        &["MATCH (n:Person) RETURN n.id AS id, n.score AS score ORDER BY id"],
+    ));
+    let rows: Vec<_> = values
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect();
+    assert_eq!(rows.len(), 2, "{values}");
+    assert!(
+        rows[0].contains(
+            "\"cells\":[{\"type\":\"int\",\"value\":\"1\"},{\"type\":\"int\",\"value\":\"2\"}]"
+        ),
+        "{values}"
+    );
+    assert!(
+        rows[1].contains(
+            "\"cells\":[{\"type\":\"int\",\"value\":\"2\"},{\"type\":\"int\",\"value\":\"1\"}]"
+        ),
+        "{values}"
+    );
+}
+
+#[test]
+fn chained_csv_late_decode_and_execution_refusals_publish_nothing() {
+    let fixture = Fixture::new();
+    fixture.file("late.csv", "src,dst\n1,2\n3,4\n5,invalid\n");
+    fixture.file("valid.csv", "src,dst\n1,2\n3,4\n5,6\n");
+    let statement = "MERGE (a:Person {id:$src}) MERGE (b:Person {id:$dst}) MERGE (a)-[:KNOWS]->(b)";
+    refusal(
+        &fixture.run(
+            "import-csv",
+            &["--input", "late.csv", "--relation", "KNOWS=1", statement],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(0);
+    // The first MERGE can create three vertices; the second exceeds the same
+    // cumulative limit. No earlier clause or accepted source prefix commits.
+    refusal(
+        &fixture.run(
+            "import-csv",
+            &[
+                "--input",
+                "valid.csv",
+                "--relation",
+                "KNOWS=1",
+                "--max-changes",
+                "4",
+                statement,
+            ],
+        ),
+        3,
+        "query",
+    );
+    fixture.count(0);
+    let output = success(fixture.run(
+        "import-csv",
+        &["--input", "valid.csv", "--relation", "KNOWS=1", statement],
+    ));
+    assert_eq!(seq(&output, "imported_csv"), fixture.created + 1);
+    fixture.count(6);
 }

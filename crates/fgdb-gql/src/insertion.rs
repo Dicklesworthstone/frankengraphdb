@@ -14,13 +14,19 @@ use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphIntegerError, GraphMutationValue, GraphSetColumnType, GraphSetExecutionError,
-    GraphSetProjection, GraphSetValue, PreparedGraphSet,
+    GraphSetProjection, GraphSetSource, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
-pub const MAX_GRAPH_INSERT_DECLARATIONS: usize = 256;
-pub const MAX_GRAPH_INSERT_FIELDS: usize = 256;
+// One statement's text is at most MAX_GRAPH_TEXT_TOKENS (24576) tokens, about
+// 6144 of the smallest declarations `(a),`. These caps stay below that, so a
+// text can reach them and their refusal is the one it reports. They admit a
+// whole hand-written dataset in one CREATE: TCK Create4 [1], the movie graph
+// (424 declarations, about 730 fields), and Create4 [2] (1477 declarations).
+// Preparation stays linear apart from a short name scan per node reference.
+pub const MAX_GRAPH_INSERT_DECLARATIONS: usize = 4096;
+pub const MAX_GRAPH_INSERT_FIELDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphInsertEndpoint {
@@ -94,7 +100,54 @@ pub enum GraphInsertBuildError {
 }
 impl core::fmt::Display for GraphInsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph insertion definition: {self:?}")
+        match self {
+            Self::RelationalInput(error) => error.fmt(f),
+            Self::Empty => f.write_str("CREATE requires at least one vertex or relationship"),
+            Self::TooManyDeclarations { limit, observed } => {
+                write!(f, "CREATE declares {observed} elements, limit {limit}")
+            }
+            Self::TooManyFields { limit, observed } => {
+                write!(
+                    f,
+                    "CREATE sets {observed} labels and properties, limit {limit}"
+                )
+            }
+            Self::DuplicateLabel { vertex } => {
+                write!(f, "created vertex {vertex} repeats a label")
+            }
+            Self::DuplicateProperty { declaration } => {
+                write!(f, "created element {declaration} repeats a property")
+            }
+            Self::ValueColumn {
+                declaration,
+                column,
+            } => write!(
+                f,
+                "created element {declaration} reads column {column}, which is not a property value"
+            ),
+            Self::ValueExpression {
+                declaration,
+                property,
+                kind,
+            } => {
+                write!(
+                    f,
+                    "property {property} of created element {declaration} cannot be stored"
+                )?;
+                match kind {
+                    Some(kind) => write!(f, ": {kind}"),
+                    None => Ok(()),
+                }
+            }
+            Self::EndpointColumn { edge, column } => write!(
+                f,
+                "created relationship {edge} uses column {column} as an endpoint, which is not a vertex"
+            ),
+            Self::CreatedEndpoint { edge, vertex } => write!(
+                f,
+                "created relationship {edge} names endpoint vertex {vertex}, which is not created"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphInsertBuildError {}
@@ -209,6 +262,10 @@ pub struct GraphInsertPolicy {
     pub query: GqlQueryPolicy,
     pub max_vertices: u64,
     pub max_edges: u64,
+    /// The effects a chain's SET, REMOVE or DELETE step may propose
+    /// (fgdb-cpny9). An insertion proposes none; [`Self::new`] leaves it
+    /// unbounded, so only the query allowance bounds such a step.
+    pub max_mutation_effects: u64,
 }
 impl GraphInsertPolicy {
     #[must_use]
@@ -217,7 +274,13 @@ impl GraphInsertPolicy {
             query,
             max_vertices,
             max_edges,
+            max_mutation_effects: u64::MAX,
         }
+    }
+    #[must_use]
+    pub const fn with_mutation_limit(mut self, max_mutation_effects: u64) -> Self {
+        self.max_mutation_effects = max_mutation_effects;
+        self
     }
 }
 
@@ -235,14 +298,16 @@ pub enum GraphInsertIntent {
     Vertex {
         vertex: VId,
         labels: Vec<LabelId>,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Sorted by key. A value is a scalar or a stored List (fgdb-k3nub).
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     Edge {
         edge: EId,
         relation: RelationId,
         source: VId,
         destination: VId,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Sorted by key. A value is a scalar or a stored List (fgdb-k3nub).
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
 }
 impl core::fmt::Debug for GraphInsertIntent {
@@ -510,6 +575,75 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    /// A native vertex-only selection followed solely by edge creations in
+    /// one relation. Appending such edges cannot change this selection or its
+    /// frozen property inputs. A host may reuse that fact only while no other
+    /// mutations intervene and must still admit every edge and issued identity.
+    ///
+    /// Relational inputs, procedures and returning-query stages are not part
+    /// of this proof. Native projected values name pattern-bound vertices;
+    /// they cannot hide a read through a supplied edge identity.
+    ///
+    /// The answer is the edges' own relation, not the statement coordinate:
+    /// the coordinate places created vertices, and this profile creates none.
+    /// The host stages every edge group under its edge relation either way.
+    #[must_use]
+    pub fn independent_edge_append_relation(&self) -> Option<RelationId> {
+        use crate::algebra::ValueProjection;
+
+        let Input::Pattern(selection) = &self.input else {
+            return None;
+        };
+        let relation = self.edges.first()?.relation;
+        if !self.vertices.is_empty()
+            || self.edges.iter().any(|edge| edge.relation != relation)
+            || selection.plan().reads_edges()
+            || !selection.value_columns().iter().all(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Property { .. }
+                        | ValueProjection::Labels { .. }
+                        | ValueProjection::Properties { .. }
+                )
+            })
+        {
+            return None;
+        }
+        Some(relation)
+    }
+
+    pub(crate) fn return_property_keys(
+        &self,
+        binding: crate::GraphInsertBinding,
+    ) -> Option<&[PropertyKeyId]> {
+        match binding {
+            crate::GraphInsertBinding::VertexProperties(vertex) => self
+                .vertices
+                .get(vertex)
+                .map(|vertex| vertex.properties.keys.as_slice()),
+            crate::GraphInsertBinding::EdgeProperties(edge) => self
+                .edges
+                .get(edge)
+                .map(|edge| edge.properties.keys.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// A created vertex's labels, in identity order (sorted at preparation).
+    pub(crate) fn return_label_ids(
+        &self,
+        binding: crate::GraphInsertBinding,
+    ) -> Option<&[LabelId]> {
+        match binding {
+            crate::GraphInsertBinding::VertexLabels(vertex) => self
+                .vertices
+                .get(vertex)
+                .map(|vertex| vertex.labels.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
     /// The source callback is not called for standalone or source-free relational
@@ -535,21 +669,61 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
-        collect::execute(self, policy, None, source, allocate, checkpoint).map(|(batch, _)| batch)
+        self.execute_governed_with_source(policy, source, allocate, checkpoint)
     }
 
+    /// The same atomic collector with an explicit graph source owner. The host
+    /// may supply checked factors of one admitted pattern; ordinary closures
+    /// continue to use [`Self::execute_governed`] with identical semantics.
+    pub fn execute_governed_with_source<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
+        self.execute_governed_over(None, policy, source, allocate, checkpoint)
+    }
+
+    /// The last write of a chain when it has no RETURN (`CREATE (a) WITH a
+    /// CREATE (b)`): `rows` are the rows the previous write of the statement
+    /// returned, read by this relational input's one owned leaf. `None` is
+    /// [`Self::execute_governed_with_source`].
+    pub fn execute_governed_over<E, A, C>(
+        &self,
+        rows: Option<Vec<GraphValueRow>>,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
+        collect::execute(self, policy, None, None, rows, source, allocate, checkpoint)
+            .map(|(batch, _)| batch)
+    }
+
+    /// `owned` is the previous write's rows for a chained CREATE, read by the
+    /// relational input's one owned leaf; `None` for every other statement.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_returning<E, A, C>(
         &self,
         policy: GraphInsertPolicy,
         bindings: &[crate::insertion_query::GraphInsertBinding],
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        property_catalog: Option<&crate::ReverseSymbolCatalog>,
+        owned: Option<Vec<GraphValueRow>>,
+        source: impl GraphSetSource<E, C>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> ReturningInsert<E, A, C> {
-        collect::execute(self, policy, Some(bindings), source, allocate, checkpoint)
+        collect::execute(
+            self,
+            policy,
+            Some(bindings),
+            property_catalog,
+            owned,
+            source,
+            allocate,
+            checkpoint,
+        )
     }
 
     /// Application definition, not a durable effect encoding or allocation log.
@@ -614,11 +788,13 @@ impl Properties {
         let mut keys = Vec::new();
         let mut projection = Vec::new();
         for (at, (key, value)) in fields.into_iter().enumerate() {
-            let check = |column| {
-                if matches!(
-                    columns.get(column),
-                    Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
-                ) {
+            // A list column is a stored list field (fgdb-k3nub); execution
+            // still refuses a list holding a map or a graph element.
+            let check = |column: usize| {
+                if columns.get(column).is_some_and(|kind| {
+                    kind.is_scalar_like()
+                        || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                }) {
                     Ok(())
                 } else {
                     Err(GraphInsertBuildError::ValueColumn {
@@ -647,7 +823,9 @@ impl Properties {
                     };
                     let kind = crate::GraphSetProjection::admit_output(&value, columns, at)
                         .map_err(|kind| refused(Some(kind)))?;
-                    if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                    if !kind.is_scalar_like()
+                        && !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                    {
                         return Err(refused(None));
                     }
                     value
@@ -680,10 +858,17 @@ impl Properties {
                 }
                 // Composite projections use the enum's own canonical
                 // transcript; the discriminant byte keeps wire framing.
-                GraphSetValue::List(_)
+                GraphSetValue::TypedNull(_)
+                | GraphSetValue::List(_)
                 | GraphSetValue::Index { .. }
                 | GraphSetValue::Size(_)
                 | GraphSetValue::In { .. }
+                | GraphSetValue::Equal { .. }
+                | GraphSetValue::Ordered { .. }
+                | GraphSetValue::Temporal { .. }
+                | GraphSetValue::Function { .. }
+                | GraphSetValue::Case { .. }
+                | GraphSetValue::Random { .. }
                 | GraphSetValue::Local(_)
                 | GraphSetValue::Comprehension { .. }
                 | GraphSetValue::Quantifier { .. }
@@ -691,8 +876,10 @@ impl Properties {
                 | GraphSetValue::Range { .. }
                 | GraphSetValue::Reduce { .. }
                 | GraphSetValue::MapLiteral { .. }
+                | GraphSetValue::MapOverlay { .. }
                 | GraphSetValue::MapGet { .. }
                 | GraphSetValue::Keys(_)
+                | GraphSetValue::Let { .. }
                 | GraphSetValue::Value(_) => {
                     bytes.push(3);
                     let mut encoded = Vec::new();

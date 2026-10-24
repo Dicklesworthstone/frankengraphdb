@@ -1,9 +1,11 @@
 //! RETURN binds the identities and fields frozen by the native CREATE
 //! collector. These names are compiler scope, never a later graph lookup.
 
+use super::super::mutation_query::{self, ReturnLeaves, ReturnMapInput};
 use super::*;
 use crate::algebra::GraphValueOrder;
 use crate::insertion_query_text::{InsertReturnTemplate, PreparedGraphInsertQueryText};
+use crate::mutation_text::WriteReturnGroupTemplate;
 use crate::set_text::{ReadPageNumber, ReadProjectionTemplate};
 use crate::{GraphInsertBinding, GraphSetProjection, GraphSetQuantifier, PreparedGraphInsertQuery};
 
@@ -14,13 +16,19 @@ enum Binding<'a> {
     VertexProperty(usize, Name<'a>),
     Edge(usize),
     EdgeProperty(usize, Name<'a>),
+    VertexProperties(usize),
+    EdgeProperties(usize),
+    VertexLabels(usize),
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
         match (self, other) {
             (Self::Input(a), Self::Input(b))
             | (Self::Vertex(a), Self::Vertex(b))
-            | (Self::Edge(a), Self::Edge(b)) => a == b,
+            | (Self::Edge(a), Self::Edge(b))
+            | (Self::VertexProperties(a), Self::VertexProperties(b))
+            | (Self::EdgeProperties(a), Self::EdgeProperties(b))
+            | (Self::VertexLabels(a), Self::VertexLabels(b)) => a == b,
             (Self::VertexProperty(a, ak), Self::VertexProperty(b, bk))
             | (Self::EdgeProperty(a, ak), Self::EdgeProperty(b, bk)) => {
                 a == b && ak.text == bk.text
@@ -33,11 +41,44 @@ impl Binding<'_> {
 pub(super) struct ParsedReturn<'a> {
     bindings: Vec<(Binding<'a>, Name<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
+    grouping: Option<WriteReturnGroupTemplate>,
     quantifier: GraphSetQuantifier,
     order: Vec<GraphValueOrder>,
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    /// The row stages after a WITH head, when the head is a WITH.
+    tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
+}
+
+struct InsertLeaves<'r, 'a> {
+    returning: &'r mut ParsedReturn<'a>,
+    syntax: &'r mut InsertionSyntax<'a>,
+    source: &'r [(Name<'a>, GraphSetColumnType)],
+}
+
+impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        self.returning.leaf(parser, self.syntax, self.source)
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        self.returning
+            .map_input(parser, self.syntax, self.source, source, input)
+    }
+
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.returning
+            .bindings
+            .iter()
+            .map(|(_, _, kind)| *kind)
+            .collect()
+    }
 }
 
 impl<'a> ParsedReturn<'a> {
@@ -53,9 +94,7 @@ impl<'a> ParsedReturn<'a> {
             .position(|(old, _, _)| old.same(binding))
         {
             // A graph function and a bare variable can denote the same
-            // vertex. Reuse its value slot, but keep the current spelling for
-            // an implicit output alias (e.g. startNode(e), endNode(e) on a loop).
-            self.bindings[column].1 = name;
+            // vertex (startNode(e), endNode(e) on a loop): one value slot.
             return Ok(column);
         }
         if self.bindings.len() == MAX_PATTERN_VERTICES {
@@ -79,6 +118,8 @@ impl<'a> ParsedReturn<'a> {
         syntax: &mut InsertionSyntax<'a>,
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<Option<usize>, GraphPatternTextError> {
+        // Only an imported map leaf reads `.key` entries, and only its own.
+        parser.resolved_entries = false;
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);
         };
@@ -95,9 +136,67 @@ impl<'a> ParsedReturn<'a> {
             text: word,
             at: parser.current.at,
         };
+        if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let mut lookahead = parser.lexer.clone();
+            lookahead.next()?;
+            if let TokenKind::Word(variable) = lookahead.next()?.kind
+                && !parser.elements.contains(&variable)
+                && (syntax
+                    .vertices
+                    .iter()
+                    .any(|v| v.name.is_some_and(|name| name.text == variable))
+                    || syntax
+                        .edges
+                        .iter()
+                        .any(|e| e.name.is_some_and(|name| name.text == variable))
+                    || matches!(
+                        parser.insertion_match_kind(variable),
+                        Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                    ))
+                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+            {
+                parser.advance()?;
+                parser.punct(b'(', "(")?;
+                let variable = parser.name()?;
+                parser.punct(b')', ")")?;
+                return self
+                    .map_input(parser, syntax, source, variable, ReturnMapInput::Properties)
+                    .map(Some);
+            }
+            // MAP/NULL arguments remain ordinary row values; only actual
+            // graph bindings require a creation/source property-map leaf.
+            return Ok(None);
+        }
         if let Ok(function) = Parser::path_function(name)
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
+            // labels() of a vertex this CREATE makes is its CREATE labels:
+            // known without a graph read (openCypher Graph3).
+            if function == GraphPathFunction::Labels {
+                let mut lookahead = parser.lexer.clone();
+                lookahead.next()?;
+                if let TokenKind::Word(variable) = lookahead.next()?.kind
+                    && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                    && let Some(vertex) = syntax
+                        .vertices
+                        .iter()
+                        .position(|vertex| vertex.name.is_some_and(|old| old.text == variable))
+                {
+                    parser.advance()?;
+                    parser.punct(b'(', "(")?;
+                    parser.name()?;
+                    parser.punct(b')', ")")?;
+                    return self
+                        .column(
+                            Binding::VertexLabels(vertex),
+                            name,
+                            GraphSetColumnType::List,
+                        )
+                        .map(Some);
+                }
+            }
             let kind = match function {
                 GraphPathFunction::Value => GraphSetColumnType::Path,
                 GraphPathFunction::Length | GraphPathFunction::Type => GraphSetColumnType::Scalar,
@@ -105,6 +204,7 @@ impl<'a> ParsedReturn<'a> {
                 GraphPathFunction::Edges => GraphSetColumnType::Edges,
                 GraphPathFunction::Edge => GraphSetColumnType::Edge,
                 GraphPathFunction::Labels => GraphSetColumnType::List,
+                GraphPathFunction::Properties => GraphSetColumnType::Any,
             };
             // mutation_operand owns function spelling, argument/domain
             // checks, projection deduplication and source-column limits.
@@ -128,41 +228,122 @@ impl<'a> ParsedReturn<'a> {
         if vertex.is_none() && edge.is_none() && input.is_none() && matched.is_none() {
             return Ok(None);
         }
+        // After WITH, `a.key` of an element the row carries is the row's
+        // hidden read (fgdb-sl4ym); CREATE never changes an element it did
+        // not create, so that read is also the value after it.
+        if vertex.is_none()
+            && edge.is_none()
+            && let Some(imported) = input
+        {
+            let mut lookahead = parser.lexer.clone();
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+                let key = lookahead.next()?;
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = key.kind
+                    && let Some(column) = parser.boundary_read(source.len())?
+                {
+                    let name = Name { text, at: key.at };
+                    return self
+                        .column(Binding::Input(column), name, GraphSetColumnType::Stored)
+                        .map(Some);
+                }
+                // An imported map's `row.key` reads that entry through a let
+                // slot after this leaf, as CREATE's insertion_source_value
+                // does (fgdb-0s2pq). A scalar, list or element import keeps
+                // its refusal below.
+                let kind = source[imported].1;
+                if matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Stored) {
+                    let name = parser.name()?;
+                    parser.resolved_entries = true;
+                    return self.column(Binding::Input(imported), name, kind).map(Some);
+                }
+            }
+        }
+        let element = vertex.is_some()
+            || edge.is_some()
+            || matches!(
+                matched,
+                Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            );
         let name = parser.name()?;
-        let property = if parser.take(b'.')? {
-            Some(parser.name()?)
+        let input = if parser.take(b'.')? {
+            ReturnMapInput::Property(parser.schema_name()?)
+        } else if element && parser.is_punct(b'[') {
+            // `n[key]` subscripts n's property map (openCypher Graph7), so an
+            // absent key reads NULL and a non-text key fails as for any map.
+            ReturnMapInput::Properties
         } else {
-            None
+            ReturnMapInput::Identity
+        };
+        self.map_input(parser, syntax, source, name, input)
+            .map(Some)
+    }
+
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        syntax: &mut InsertionSyntax<'a>,
+        source: &[(Name<'a>, GraphSetColumnType)],
+        name: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let vertex = syntax
+            .vertices
+            .iter()
+            .position(|vertex| vertex.name.is_some_and(|old| old.text == name.text));
+        let edge = syntax
+            .edges
+            .iter()
+            .position(|edge| edge.name.is_some_and(|old| old.text == name.text));
+        let imported = source.iter().position(|(old, _)| old.text == name.text);
+        let matched = parser.insertion_match_kind(name.text);
+        let property = match input {
+            ReturnMapInput::Property(key) => Some(key),
+            _ => None,
         };
         let (binding, alias, kind) = if let Some(vertex) = vertex {
-            match property {
-                Some(key) => (
+            match input {
+                ReturnMapInput::Property(key) => (
                     Binding::VertexProperty(vertex, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
-                None => (Binding::Vertex(vertex), name, GraphSetColumnType::Vertex),
+                ReturnMapInput::Properties => (
+                    Binding::VertexProperties(vertex),
+                    name,
+                    GraphSetColumnType::Any,
+                ),
+                ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                    (Binding::Vertex(vertex), name, GraphSetColumnType::Vertex)
+                }
             }
         } else if let Some(edge) = edge {
-            match property {
-                Some(key) => (
+            match input {
+                ReturnMapInput::Property(key) => (
                     Binding::EdgeProperty(edge, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
-                None => (Binding::Edge(edge), name, GraphSetColumnType::Edge),
+                ReturnMapInput::Properties => {
+                    (Binding::EdgeProperties(edge), name, GraphSetColumnType::Any)
+                }
+                ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                    (Binding::Edge(edge), name, GraphSetColumnType::Edge)
+                }
             }
-        } else if let Some(input) = input {
-            if property.is_some() {
+        } else if let Some(imported) = imported {
+            if !matches!(input, ReturnMapInput::Identity) {
                 return Err(error(
                     name.at,
-                    GraphPatternTextErrorKind::Expected("a scalar or list UNWIND binding"),
+                    GraphPatternTextErrorKind::Expected(
+                        "a created or matched graph property binding",
+                    ),
                 ));
             }
-            (Binding::Input(input), name, source[input].1)
+            (Binding::Input(imported), name, source[imported].1)
         } else {
-            let kind = matched.expect("one admitted CREATE result binding");
-            if property.is_some()
+            let kind = matched
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownVariable))?;
+            if !matches!(input, ReturnMapInput::Identity)
                 && !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
             {
                 return Err(error(
@@ -173,18 +354,32 @@ impl<'a> ParsedReturn<'a> {
             // RETURN-only source fields must join the same selection used by
             // CREATE. An index into the visible alias list is NOT a projection
             // column: creation may already have projected other properties.
-            let input = parser.mutation_projection(&mut syntax.projections, name, property)?;
+            let column = if matches!(input, ReturnMapInput::Properties) {
+                parser.projection_slot(
+                    &mut syntax.projections,
+                    Projection {
+                        variable: name,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                        collect: None,
+                    },
+                )?
+            } else {
+                parser.mutation_projection(&mut syntax.projections, name, property)?
+            };
             (
-                Binding::Input(source.len() + input),
+                Binding::Input(source.len() + column),
                 property.unwrap_or(name),
-                if property.is_some() {
-                    GraphSetColumnType::Scalar
+                if matches!(input, ReturnMapInput::Properties) {
+                    GraphSetColumnType::Any
+                } else if property.is_some() {
+                    GraphSetColumnType::Stored
                 } else {
                     kind
                 },
             )
         };
-        self.column(binding, alias, kind).map(Some)
+        self.column(binding, alias, kind)
     }
 
     /// Endpoint identities are already in the native occurrence: created
@@ -232,20 +427,14 @@ impl<'a> ParsedReturn<'a> {
         &self,
         parameters: &[GqlParameterSpec],
     ) -> Result<(), GraphInsertTextError> {
-        let values = shape_arguments(parameters);
         let types: Vec<_> = self.bindings.iter().map(|(_, _, kind)| *kind).collect();
-        for (column, output) in self.projection.iter().enumerate() {
-            let value = return_projection::bind_read_value(&output.value, &values)?;
-            for result in [
-                GraphSetProjection::validate_output_name(&output.name, column),
-                GraphSetProjection::admit_output(&value, &types, column).map(|_| ()),
-            ] {
-                result.map_err(|kind| crate::GraphSetTextError {
-                    offset: self.at,
-                    kind: crate::GraphSetTextErrorKind::ProjectionBuild(kind),
-                })?;
-            }
-        }
+        mutation_query::admit_return(
+            &self.projection,
+            &types,
+            parameters,
+            self.grouping.as_ref(),
+            self.at,
+        )?;
         Ok(())
     }
 
@@ -259,6 +448,9 @@ impl<'a> ParsedReturn<'a> {
                 Binding::Input(column) => GraphInsertBinding::Input(column),
                 Binding::Vertex(vertex) => GraphInsertBinding::CreatedVertex(vertex),
                 Binding::Edge(edge) => GraphInsertBinding::CreatedEdge(edge),
+                Binding::VertexProperties(vertex) => GraphInsertBinding::VertexProperties(vertex),
+                Binding::EdgeProperties(edge) => GraphInsertBinding::EdgeProperties(edge),
+                Binding::VertexLabels(vertex) => GraphInsertBinding::VertexLabels(vertex),
                 Binding::VertexProperty(vertex, name) => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
                     else {
@@ -278,11 +470,14 @@ impl<'a> ParsedReturn<'a> {
         Ok(InsertReturnTemplate {
             bindings,
             projection: self.projection,
+            grouping: self.grouping,
             quantifier: self.quantifier,
             order: self.order,
             offset: self.offset,
             count: self.count,
             at: self.at,
+            property_catalog: None,
+            tail: self.tail,
         })
     }
 }
@@ -294,25 +489,41 @@ impl<'a> Parser<'a> {
         source: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ParsedReturn<'a>, GraphInsertTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
-        let quantifier = if self.take_word("DISTINCT")? {
+        // A WITH after the CREATE heads a row pipeline over the created
+        // occurrences (openCypher Create6 "... WITH n WHERE ... RETURN").
+        // In a chain, a next write directly after it (`CREATE (a), (b) MERGE
+        // (a)-[:R]->(b)`) reads every binding, as `WITH *` would.
+        let implicit = self.chain_write && self.at_chained_write()?;
+        let head = implicit || self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
+        let quantifier = if !implicit && self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_all_quantifier()?;
+            if !implicit {
+                self.take_all_quantifier()?;
+            }
             GraphSetQuantifier::All
         };
         let mut returning = ParsedReturn {
             bindings: Vec::new(),
             projection: Vec::new(),
+            grouping: None,
             quantifier,
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
-        if self.take(b'*')? {
-            for (index, &(name, kind)) in source.iter().enumerate() {
+        // The source spelling of every non-star output, for ORDER BY.
+        let mut spellings = Vec::new();
+        if implicit || self.take(b'*')? {
+            // A WITH row's hidden reads are never columns of `*`.
+            let visible = self.visible_width(source);
+            for (index, &(name, kind)) in source[..visible].iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
@@ -320,18 +531,24 @@ impl<'a> Parser<'a> {
                 });
                 output.push((name, kind));
             }
-            let matched: Vec<_> = self
-                .syntax
-                .variables
-                .iter()
-                .copied()
-                .chain(
-                    self.syntax
-                        .visible_edges()
-                        .filter_map(|(edge, _)| edge.variable),
-                )
-                .chain(self.syntax.path)
-                .collect();
+            // After WITH the row is the whole scope (fgdb-sl4ym): the MATCH
+            // bindings it dropped are not RETURN * columns.
+            let matched: Vec<_> = if self.write_row_scope {
+                Vec::new()
+            } else {
+                self.syntax
+                    .variables
+                    .iter()
+                    .copied()
+                    .chain(
+                        self.syntax
+                            .visible_edges()
+                            .filter_map(|(edge, _)| edge.variable),
+                    )
+                    .chain(self.syntax.path)
+                    .chain(self.syntax.scope_paths.iter().copied())
+                    .collect()
+            };
             for name in matched {
                 if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
                     continue;
@@ -372,6 +589,23 @@ impl<'a> Parser<'a> {
                     output.push((name, GraphSetColumnType::Edge));
                 }
             }
+            if output.is_empty() && head && !syntax.vertices.is_empty() {
+                // A WITH head (or a chain's implicit `WITH *`) over anonymous
+                // patterns only (`MATCH () CREATE () WITH * CREATE ()`) still
+                // carries one row per occurrence: an anonymous column of the
+                // first created vertex, which no name addresses (fgdb-cpny9).
+                let name = Name {
+                    text: Self::anonymous_name(0),
+                    at,
+                };
+                let column =
+                    returning.column(Binding::Vertex(0), name, GraphSetColumnType::Vertex)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((name, GraphSetColumnType::Vertex));
+            }
             if output.is_empty() {
                 return Err(expected(
                     at,
@@ -379,57 +613,98 @@ impl<'a> Parser<'a> {
                 ));
             }
         } else {
-            loop {
-                self.capacity(
-                    output.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let at = self.current.at;
-                let value = self
-                    .read_resolved_value(&mut |parser| returning.leaf(parser, syntax, source), 0)?;
-                let name = if self.take_word("AS")? {
-                    self.name()?
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    returning.bindings[*column].1
-                } else {
-                    return Err(expected(at, "AS alias for a computed row value"));
-                };
-                if output.iter().any(|(old, _)| old.text == name.text) {
-                    return Err(error(
-                        name.at,
-                        GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
-                    )
-                    .into());
-                }
-                let types: Vec<_> = returning
-                    .bindings
-                    .iter()
-                    .map(|(_, _, kind)| *kind)
-                    .collect();
-                let kind = value.column_type(&types, &self.syntax.parameters);
-                returning.projection.push(ReadProjectionTemplate {
-                    name: name.text.to_owned(),
-                    value,
-                });
-                output.push((name, kind));
-                if !self.take(b',')? {
-                    break;
-                }
-            }
+            let entries = self.resolved_entries;
+            let items = self.write_return_items(&mut InsertLeaves {
+                returning: &mut returning,
+                syntax: &mut *syntax,
+                source,
+            });
+            self.resolved_entries = entries;
+            let items = items?;
+            returning.projection = items.projection;
+            returning.grouping = items.grouping;
+            output = items.output;
+            spellings = items.spellings;
         }
         if let Some(ReadStageTemplate::Page {
             order,
             offset,
             count,
             ..
-        }) = self.row_page(&output)?
+        }) = self.row_page_sourced(&output, &spellings)?
         {
             returning.order = order;
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            let tail = self.insertion_tail(&mut returning, syntax, source, output)?;
+            returning.tail = Some(tail);
+        }
         Ok(returning)
+    }
+
+    /// The stages after a CREATE's WITH head. A carried element's property
+    /// read in the WITH's own WHERE, its pages or the terminal RETURN is a
+    /// hidden head column holding the frozen created or matched value.
+    fn insertion_tail(
+        &mut self,
+        returning: &mut ParsedReturn<'a>,
+        syntax: &mut InsertionSyntax<'a>,
+        source: &[(Name<'a>, GraphSetColumnType)],
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<crate::set_text::ReadStageTemplate>, GraphInsertTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        // An aggregating WITH carries no element to read later.
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                    returning.bindings[binding]
+                else {
+                    continue;
+                };
+                // The element's own variable, never an output spelling such
+                // as `startNode`: a created slot or a bare MATCH projection.
+                let variable = match binding {
+                    Binding::Vertex(vertex) => syntax.vertices[vertex].name,
+                    Binding::Edge(edge) => syntax.edges[edge].name,
+                    Binding::Input(input) => input
+                        .checked_sub(source.len())
+                        .map(|column| &syntax.projections[column])
+                        .filter(|column| column.property.is_none() && column.path.is_none())
+                        .map(|column| column.variable),
+                    _ => None,
+                };
+                let Some(variable) = variable else {
+                    continue;
+                };
+                let column = returning.map_input(
+                    self,
+                    syntax,
+                    source,
+                    variable,
+                    ReturnMapInput::Property(key),
+                )?;
+                mutation_query::push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
+            }
+        }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
     }
 }
 
@@ -446,11 +721,16 @@ impl InsertReturnTemplate {
                 return_projection::bind_read_value(&output.value, values)?,
             ));
         }
-        let mut query = PreparedGraphInsertQuery::prepare(
+        let mut query = PreparedGraphInsertQuery::prepare_with_grouping(
             insertion,
             self.bindings.clone(),
             projection,
             self.quantifier,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
+            self.property_catalog.clone(),
         )
         .map_err(|kind| GraphInsertTextError {
             offset: self.at,
@@ -464,19 +744,27 @@ impl InsertReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        // The tail reads the head's own output columns, hidden reads included.
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 
 /// Single-statement framing uses the script lexer, so separators inside quoted
 /// strings are values. One terminal semicolon is accepted, further statements
 /// refuse before catalog resolution or parameter binding.
-fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
+pub(super) fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
         return Err(error(
             MAX_GRAPH_TEXT_BYTES,
@@ -523,7 +811,7 @@ impl PreparedGraphInsertQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "WITH", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -572,7 +860,7 @@ impl PreparedGraphInsertQueryText {
     pub fn prepare(
         statement: &str,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
@@ -581,7 +869,7 @@ impl PreparedGraphInsertQueryText {
         statement: &str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphInsertTextError> {
         let body = statement_body(statement)?;
         let (insertion, returning) = PreparedGraphInsertText::prepare_definition(
@@ -637,6 +925,9 @@ mod write_clause_framing_tests {
             "MATCH (n) WHERE n.CREATE = 1 RETURN n",
             "MATCH (n) WHERE n.INSERT = 1 RETURN n",
             "UNWIND [1] AS CREATE RETURN CREATE",
+            "WITH 1 AS CREATE RETURN CREATE",
+            "WITH {INSERT: 1} AS row RETURN row.INSERT",
+            "WITH 'CREATE (n) RETURN n' AS text RETURN text",
             "CREATE (n); MATCH (CREATE) WHERE CREATE.p = 1 RETURN CREATE",
         ] {
             assert!(
@@ -652,6 +943,8 @@ mod write_clause_framing_tests {
             "MATCH (CREATE) WHERE CREATE.p = 1 CREATE (copy) RETURN CREATE,copy",
             "MATCH (INSERT) INSERT (copy) RETURN INSERT,copy",
             "UNWIND [1] AS CREATE CREATE (n {p:CREATE}) RETURN n",
+            "WITH 1 AS CREATE CREATE (n {p:CREATE}) RETURN n",
+            "WITH [1, 2] AS rows UNWIND rows AS row INSERT (n {p:row}) RETURN n",
             "CREATE (n) RETURN n",
             "INSERT (n) RETURN n",
             "CREATE (n); MATCH (CREATE) CREATE (copy) RETURN copy",

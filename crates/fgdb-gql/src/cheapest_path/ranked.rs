@@ -19,15 +19,16 @@ type Step = (EId, VId);
 /// Construct through [`PreparedGraphCheapestPath::cursor_with_control`]. The
 /// source is admitted once, including every selected-relation cost. This cursor
 /// owns the checked topology and weights; later source changes cannot change its
-/// answers. Parallel edges remain distinct. WALK permits repeated vertices and
-/// edges; the other modes retain path-local history before growing alternatives.
+/// answers. Parallel edges remain distinct. WALK under REPEATABLE ELEMENTS
+/// permits repeated vertices and edges. DIFFERENT EDGES and the restricted path
+/// modes retain their combined path-local history before growing alternatives.
 ///
 /// Returned answers are expanded only when the next answer is requested. A
 /// finite prefix does not enumerate the remaining result bag. Preparation
-/// retains polynomially many suffix states. For WALK, the pending heap grows
-/// with requested answers and branching. For other modes, WALK suffixes are lower
-/// bounds only; invalid optimistic minima are refined at their first forbidden
-/// step, pruning all its descendants. Exact work/frontier growth can still be
+/// retains polynomially many suffix states. For repeatable WALK, the pending heap
+/// grows with requested answers and branching. With either match or path history,
+/// WALK suffixes are lower bounds only; invalid optimistic minima are refined
+/// at their first forbidden step, pruning all its descendants. Exact work/frontier growth can still be
 /// exponential: resource refusal is not evidence of no path. This is not a
 /// spill operator, allocator-byte memory bound,
 /// durable cursor, authorization grant, or session/lease protocol.
@@ -59,6 +60,7 @@ struct Search {
     target: VId,
     bounds: GraphWalkBounds,
     mode: GraphCheapestPathMode,
+    match_mode: GraphMatchMode,
     forward: WeightedIndex,
     // Indexed by maximum - depth, so the immediately following depth is
     // available while building the table backwards, with no cloned maps.
@@ -74,7 +76,10 @@ impl PreparedGraphCheapestPath {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphCheapestPathCursor, GraphCheapestPathError<E>> {
         GraphCheapestPathCursor::create(
@@ -95,7 +100,10 @@ impl PreparedGraphCheapestPath {
         count: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphCostPath>, GraphCheapestPathError<E>> {
         collect(
@@ -119,7 +127,10 @@ impl PreparedGraphCheapestPath {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphCostPath>, GqlQueryError<GraphCheapestPathError<E>, C>> {
@@ -177,7 +188,10 @@ pub(super) fn collect<'a, E>(
     count: u64,
     vertices: impl IntoIterator<Item = VId>,
     edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-    property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(
+        EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     failure: &impl Fn(GraphPathCostError) -> E,
 ) -> Result<Vec<GraphCostPath>, E> {
@@ -199,7 +213,10 @@ impl GraphCheapestPathCursor {
         query: &PreparedGraphCheapestPath,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<Self, E> {
@@ -273,6 +290,7 @@ impl GraphCheapestPathCursor {
             target: query.target,
             bounds: query.bounds,
             mode: query.mode,
+            match_mode: query.match_mode,
             forward,
             suffixes,
             heap: Vec::new(),
@@ -410,7 +428,7 @@ impl Search {
         if entry.terminal {
             return Ok(());
         }
-        let mut history = History::new(self.mode, self.source, control)?;
+        let mut history = History::new(self.mode, self.match_mode, self.source, control)?;
         let mut vertex = self.source;
         let mut prefix_cost = 0_i128;
         for depth in 0..=entry.steps.len() {

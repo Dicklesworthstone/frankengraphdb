@@ -62,6 +62,31 @@ impl core::fmt::Debug for BoundNativeGraphWrite {
 }
 
 impl BoundNativeGraphWrite {
+    /// Probe a native no-RETURN definition without expanding argument rows.
+    ///
+    /// This is a dispatch probe, not a bound program or authority. Ordinary
+    /// scripts are prepared but not bound; UNWIND mutation admission is lexical
+    /// only. Values, row shapes, downstream types and execution budgets still
+    /// require the ordinary binder. Collection contents are never inspected.
+    /// Native reads should be admitted by their own compiler before this probe.
+    #[allow(clippy::result_large_err)]
+    pub fn probe_definition(
+        text: &str,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<(), NativeGraphWriteBindError> {
+        if GraphUnwindWriteText::parse_if_supported(text)
+            .map_err(NativeGraphWriteBindError::Unwind)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        Self::prepare_script(text, arguments, relation, resolve)
+            .map(|_| ())
+            .map_err(NativeGraphWriteBindError::ScriptPreparation)
+    }
+
     /// Bind ordinary scripts or one `UNWIND $rows AS row` MERGE/MATCH mutation.
     ///
     /// Recognition uses the existing native lexer and inspects no values or
@@ -76,38 +101,65 @@ impl BoundNativeGraphWrite {
         text: &str,
         arguments: &GqlParameters,
         relation: RelationId,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, NativeGraphWriteBindError> {
+        Self::bind_with_resolver(text, arguments, relation, resolve)
+    }
+
+    /// As [`Self::bind`], with the host's own resolver rather than a closure
+    /// over it, so the statements see its pinned tzdb (fgdb-txbg9).
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_resolver(
+        text: &str,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        mut resolve: impl crate::GraphSymbolResolver,
     ) -> Result<Self, NativeGraphWriteBindError> {
         if let Some(unwind) = GraphUnwindWriteText::parse_if_supported(text)
             .map_err(NativeGraphWriteBindError::Unwind)?
         {
             let batch = unwind
-                .bind_with_limit(
+                .bind_with_limit_resolver(
                     arguments,
                     relation,
                     PreparedGraphWriteScript::MAX_BATCH_STATEMENTS,
-                    &mut resolve,
+                    crate::graph_text::LentResolver(&mut resolve),
                 )
                 .map_err(NativeGraphWriteBindError::Unwind)?;
             return Ok(Self(BoundInput::Unwind(batch)));
         }
-        // Preserve native script inference: integer/pagination/list roles are
-        // resolved by the existing parser; canonical scalar kinds are explicit.
-        let declarations: Vec<_> = arguments
-            .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
-            .collect();
-        let script = PreparedGraphWriteScript::prepare_with_parameter_types(
-            text,
-            relation,
-            &declarations,
-            resolve,
-        )
-        .map_err(NativeGraphWriteBindError::ScriptPreparation)?;
+        let script = Self::prepare_script(text, arguments, relation, resolve)
+            .map_err(NativeGraphWriteBindError::ScriptPreparation)?;
         let program = script
             .bind_parameters(arguments)
             .map_err(NativeGraphWriteBindError::ScriptBinding)?;
         Ok(Self(BoundInput::Script(program)))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn prepare_script(
+        text: &str,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        mut resolve: impl crate::GraphSymbolResolver,
+    ) -> Result<PreparedGraphWriteScript, GraphWriteScriptError> {
+        // Preserve numeric inference while declaring collection/scalar roles.
+        // Collections may occur outside UNWIND, which otherwise infers List.
+        let declarations: Vec<_> = arguments
+            .parameter_types()
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
+            })
+            .collect();
+        PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
+            text,
+            relation,
+            &declarations,
+            &mut resolve,
+        )
     }
 
     #[must_use]
@@ -138,6 +190,57 @@ impl BoundNativeGraphWrite {
         match &self.0 {
             BoundInput::Script(_) => GraphWriteScriptExecutionError::Program(source),
             BoundInput::Unwind(batch) => batch.execution_error(source),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_probe_and_binder_share_ordinary_script_preparation() {
+        let arguments = GqlParameters::new();
+        let text = "CREATE (n); CREATE (m)";
+        BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| None)
+            .unwrap();
+        let bound =
+            BoundNativeGraphWrite::bind(text, &arguments, RelationId(1), |_, _| None).unwrap();
+        assert_eq!(bound.program().statements().len(), 2);
+        assert_eq!(bound.input_records(), None);
+    }
+
+    #[test]
+    fn definition_probe_does_not_bind_or_expand_unwind_rows() {
+        let text = "UNWIND $rows AS row MERGE (n:Item {key: row.key})";
+        for arguments in [
+            GqlParameters::new(),
+            GqlParameters::new().with_list("rows", Vec::new()).unwrap(),
+        ] {
+            BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| {
+                panic!("lexical UNWIND probing must not resolve row-dependent symbols")
+            })
+            .unwrap();
+            // A successful probe is not a bound program: missing and empty
+            // sources must still fail the ordinary all-rows binding boundary.
+            assert!(matches!(
+                BoundNativeGraphWrite::bind(text, &arguments, RelationId(1), |_, _| None),
+                Err(NativeGraphWriteBindError::Unwind(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn definition_probe_refuses_reads_returning_writes_and_broken_scripts() {
+        let arguments = GqlParameters::new();
+        for text in ["RETURN 1", "CREATE (n) RETURN n", "CREATE ("] {
+            assert!(
+                BoundNativeGraphWrite::probe_definition(text, &arguments, RelationId(1), |_, _| {
+                    None
+                },)
+                .is_err(),
+                "{text}",
+            );
         }
     }
 }

@@ -232,7 +232,7 @@ fn concurrent_mutation_of_edge_observed_by_edges_aborts_and_replays_only_writer(
                 .expect("edge remains durable")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(33)),
+            Some(&CanonicalScalar::Int(33).into()),
             "B's edge mutation is durable"
         );
         assert!(

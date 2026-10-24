@@ -302,7 +302,10 @@ fn joined_creation_and_later_updates_share_one_rollback_guard_and_one_commit() {
             let row = db.vertex(VId(vid)).unwrap().unwrap();
             assert_eq!(
                 row.props,
-                vec![(P, CanonicalScalar::Int(77)), (Q, CanonicalScalar::Int(77))]
+                vec![
+                    (P, CanonicalScalar::Int(77).into()),
+                    (Q, CanonicalScalar::Int(77).into())
+                ]
             );
         }
         assert!(db.vertex(VId(99)).unwrap().is_some());
@@ -403,7 +406,7 @@ fn parameter_batches_continue_after_an_empty_join_and_keep_global_creation_limit
             let tag = if vid < 204 { 7 } else { 9 };
             assert_eq!(
                 db.vertex(VId(vid)).unwrap().unwrap().props,
-                vec![(Q, CanonicalScalar::Int(tag))]
+                vec![(Q, CanonicalScalar::Int(tag).into())]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);

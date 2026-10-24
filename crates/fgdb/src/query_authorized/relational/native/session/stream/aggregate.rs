@@ -11,7 +11,11 @@ use fgdb_gql::{
 };
 
 #[path = "aggregate/edge.rs"]
-mod edge;
+pub(super) mod edge;
+
+#[path = "aggregate/asynchronous.rs"]
+mod asynchronous;
+pub use asynchronous::AuthorizedAsyncAggregateCursor;
 
 struct Layout {
     slots: Vec<GraphAggregateTextSlot>,
@@ -56,11 +60,17 @@ struct Bound {
 /// Group state, argument DISTINCT and COLLECT remain governed in-memory state,
 /// not bounded by result rows; a global numeric summary has fixed cell count.
 /// No raw source counters, reusable permit, spill or durable lease is exported.
-pub struct AuthorizedAggregateCursor<'q> {
-    inner: AuthorizedRowCursor<'q, GraphAggregateRow>,
+pub struct AuthorizedAggregateCursor<'q, Driver = Pull<'q, GraphAggregateRow>> {
+    inner: AuthorizedRowCursor<'q, GraphAggregateRow, Driver>,
     layout: Layout,
 }
-impl AuthorizedAggregateCursor<'_> {
+
+/// The same aggregate cursor with a Send driver for asynchronous hosts. Moving
+/// it between workers preserves the source, reducer, permit and output layout.
+pub type AuthorizedSendAggregateCursor<'q> =
+    AuthorizedAggregateCursor<'q, SendPull<'q, GraphAggregateRow>>;
+
+impl<Driver> AuthorizedAggregateCursor<'_, Driver> {
     pub fn columns(&self) -> &[String] {
         self.inner.columns()
     }
@@ -83,7 +93,10 @@ impl AuthorizedAggregateCursor<'_> {
         self.inner.close();
     }
 }
-impl Iterator for AuthorizedAggregateCursor<'_> {
+impl<Driver> Iterator for AuthorizedAggregateCursor<'_, Driver>
+where
+    Driver: FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError>,
+{
     type Item = Result<GraphAggregateRow, QueryError>;
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -92,8 +105,11 @@ impl Iterator for AuthorizedAggregateCursor<'_> {
         self.inner.size_hint()
     }
 }
-impl FusedIterator for AuthorizedAggregateCursor<'_> {}
-impl core::fmt::Debug for AuthorizedAggregateCursor<'_> {
+impl<Driver> FusedIterator for AuthorizedAggregateCursor<'_, Driver> where
+    Driver: FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError>
+{
+}
+impl<Driver> core::fmt::Debug for AuthorizedAggregateCursor<'_, Driver> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedAggregateCursor")
             .field("state", &self.state())
@@ -226,11 +242,11 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
-fn build<'q>(
+fn build<'q, C: FnMut() -> u64>(
     bound: Bound,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
-    execution: Shared<'q>,
+    execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphAggregateRow, Layout> {
     let Bound {
@@ -239,42 +255,79 @@ fn build<'q>(
         columns,
         layout,
     } = bound;
-    let plan = match plan {
-        Plan::Edge(plan) => {
-            return edge::build(plan, at, columns, layout, view, cx, execution, policy);
-        }
-        Plan::Vertex(plan) => plan,
+    let driver: Pull<'q, GraphAggregateRow> = match plan {
+        Plan::Edge(plan) => Box::new(edge::aggregate_driver(
+            plan, at, view, cx, execution, policy,
+        )?),
+        Plan::Vertex(plan) => Box::new(vertex_driver(plan, at, view, cx, execution, policy)?),
     };
+    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
+}
+
+fn build_send<'q, C: FnMut() -> u64 + Send>(
+    bound: Bound,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Opened<'q, GraphAggregateRow, Layout, SendPull<'q, GraphAggregateRow>> {
+    let Bound {
+        plan,
+        at,
+        columns,
+        layout,
+    } = bound;
+    // Erasure is the only difference from the local cursor: both constructors
+    // use the same source, accumulation and signed delivery drivers.
+    let driver: SendPull<'q, GraphAggregateRow> = match plan {
+        Plan::Edge(plan) => Box::new(edge::aggregate_driver(
+            plan, at, view, cx, execution, policy,
+        )?),
+        Plan::Vertex(plan) => Box::new(vertex_driver(plan, at, view, cx, execution, policy)?),
+    };
+    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
+}
+
+/// One step of a native aggregate driver: the group it delivered, if any, and
+/// whether its cursor has finished.
+type AggregateStep = Result<(Option<GraphAggregateRow>, bool), QueryError>;
+
+fn vertex_driver<'q, C: FnMut() -> u64>(
+    plan: VertexAggregatePlan,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Result<impl FnMut() -> AggregateStep + use<'q, C>, QueryError> {
     // Includes exact historical-cut admission even when LIMIT/HAVING returns
     // no rows. The source owns the existing immutable generation, not a copy.
-    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view
+        .vertex_scan_source(cx, at)
+        .map_err(QueryError::Read)?
+        .with_root_equality_predicates(plan.leading_root_predicates(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        })
+        .with_root_prefix(plan.leading_root_prefix(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        });
     let source = ScopedSource {
         inner,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
-    let control = Rc::clone(&execution);
+    let control = execution.clone();
     let mut cursor = VertexAggregateCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver = Box::new(move || {
+    Ok(move || {
         let row = cursor.next().transpose().map_err(error)?;
         // This also guards group delivery after the reducer releases its source,
         // plus natural EOF and empty selected pages. Input rows are not delivery.
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
-    });
-    Ok((
-        AuthorizedRowCursor {
-            driver: Some(driver),
-            guard: None,
-            columns,
-            snapshot_seq: at,
-            state: VertexScanState::Open,
-        },
-        layout,
-    ))
+    })
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -304,8 +357,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// Unsupported relational/source-free roots, variable-length outer joins,
     /// optional/nested scopes and unsafe probe payload shapes refuse with no
     /// eager fallback, including LIMIT 0. This borrows the
-    /// session and QueryCx, not the writer or prepared template. It remains
-    /// thread-local; no Send, external-memory or physical noninterference claim.
+    /// session and QueryCx, not the writer or prepared template. The local
+    /// factory accepts thread-local clocks; stream_aggregate_send adds Send.
+    /// No external-memory or physical noninterference claim is made.
     pub fn stream_aggregate<'q>(
         &'q mut self,
         cx: &'q QueryCx,
@@ -313,6 +367,24 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         params: &GqlParameters,
     ) -> Result<AuthorizedAggregateCursor<'q>, QueryError> {
         let (inner, layout) = self.open_cursor(cx, prepared, params, bind_aggregate, build)?;
+        Ok(AuthorizedAggregateCursor { inner, layout })
+    }
+
+    /// Open the same native aggregate with a Send driver for a task that moves
+    /// between runtime workers. Source and group consumption remain demand
+    /// driven, with the same first-pull accumulation and cumulative allowances
+    /// as stream_aggregate(). No background task or intermediate row bag is
+    /// introduced, and the original local API still accepts non-Send clocks.
+    pub fn stream_aggregate_send<'q>(
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> Result<AuthorizedSendAggregateCursor<'q>, QueryError>
+    where
+        C: Send,
+    {
+        let (inner, layout) = self.open_cursor(cx, prepared, params, bind_aggregate, build_send)?;
         Ok(AuthorizedAggregateCursor { inner, layout })
     }
 }

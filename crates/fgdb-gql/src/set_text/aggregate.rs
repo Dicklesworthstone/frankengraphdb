@@ -10,6 +10,26 @@ pub(crate) struct ReadAggregateSpec {
     pub(crate) column: Option<usize>,
 }
 
+impl ReadAggregateSpec {
+    pub(crate) fn declaration(&self) -> crate::GraphAggregate<'_> {
+        use crate::{GraphAggregate as A, GraphAggregateFunction as F};
+        match (self.function, self.column) {
+            (F::CountRows, None) => A::count_rows(&self.name),
+            (F::Count, Some(at)) => A::count(&self.name, at),
+            (F::CountDistinct, Some(at)) => A::count_distinct(&self.name, at),
+            (F::SumInt, Some(at)) => A::sum_int(&self.name, at),
+            (F::SumIntDistinct, Some(at)) => A::sum_int_distinct(&self.name, at),
+            (F::AverageInt, Some(at)) => A::average_int(&self.name, at),
+            (F::AverageIntDistinct, Some(at)) => A::average_int_distinct(&self.name, at),
+            (F::Min, Some(at)) => A::min(&self.name, at),
+            (F::Max, Some(at)) => A::max(&self.name, at),
+            (F::Collect, Some(at)) => A::collect(&self.name, at),
+            (F::CollectDistinct, Some(at)) => A::collect_distinct(&self.name, at),
+            _ => unreachable!("native aggregate grammar pairs functions and arguments"),
+        }
+    }
+}
+
 /// Input expressions run before grouping; output slots restore declaration
 /// order after the native key-first group schema. Private input names never
 /// participate in user alias resolution. All three operators are depth-counted.
@@ -19,6 +39,10 @@ pub(crate) struct ReadAggregateStage {
     pub(crate) keys: Vec<usize>,
     pub(crate) aggregates: Vec<ReadAggregateSpec>,
     pub(crate) outputs: Vec<(String, usize, GraphSetColumnType)>,
+    /// Outputs that combine aggregate results (fgdb-4avot): the position in
+    /// `outputs` and a template over the grouped row, keys then aggregates.
+    /// Their `outputs` column is unused.
+    pub(crate) computed: Vec<(usize, ReadValueTemplate)>,
     pub(crate) quantifier: GraphSetQuantifier,
 }
 
@@ -67,5 +91,15 @@ impl ReadAggregateStage {
             bytes.push(set_column_type_tag(*kind));
         }
         bytes.push(u8::from(self.quantifier == GraphSetQuantifier::Distinct));
+        // Only a combined output extends the transcript; every other WITH
+        // grouping keeps its exact bytes.
+        if !self.computed.is_empty() {
+            bytes.extend_from_slice(b"fgdb:with-group-computed:v1\0");
+            bytes.extend_from_slice(&(self.computed.len() as u64).to_be_bytes());
+            for (position, template) in &self.computed {
+                bytes.extend_from_slice(&(*position as u64).to_be_bytes());
+                template.append_template_transcript(bytes);
+            }
+        }
     }
 }

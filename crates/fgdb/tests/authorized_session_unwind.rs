@@ -1,7 +1,7 @@
 //! Native ingestion through a capability-only session, not a raw Database writer.
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteTxnError};
+use fgdb::{Database, DatabaseKeys, IdentityPermutation, MemVfs, WriteBatch, WriteTxnError};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
@@ -32,6 +32,14 @@ const COUNTER: &str = "UNWIND $rows AS row MERGE (n:Visible {p:row.p}) \
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new([0xc1; 32], NS, [0xc3; 32])
+}
+/// The vertex identity the engine issues for `counter` under [`keys`].
+fn engine_vertex(counter: u64) -> VId {
+    VId(u128::from(
+        IdentityPermutation::vertices(&keys())
+            .permute(counter)
+            .unwrap(),
+    ))
 }
 fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(10121), NS, "graph", SchemaEpoch(1), 1).unwrap()
@@ -176,11 +184,17 @@ fn native_session_ingestion_and_existing_prepared_writes_survive_reopen() {
         assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 2));
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(15))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(15).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(4))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ]
         );
         let expected = db.vertices().unwrap();
         db.compact(&commit).await.unwrap();
@@ -250,7 +264,10 @@ fn stats_only_ingestion_exceeds_the_default_64_only_when_the_host_admits_it() {
         assert_eq!(vertices.len(), 1);
         assert_eq!(
             vertices[0].props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(65))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(65).into())
+            ]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -308,10 +325,12 @@ fn expanded_host_limits_precede_catalog_and_allocation_and_cannot_be_retried() {
             drop(session);
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(db.vertices().unwrap().is_empty());
+            // Nothing refused above took a counter: this fresh handle's first
+            // engine allocation is still vertex counter 1.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(engine_vertex(1))
             );
         }
         // Ordinary text must not lose the host cap while adopting native binding.
@@ -613,11 +632,17 @@ fn frozen_unwind_inputs_and_receipts_reuse_without_catalog_or_rebinding() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(10).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(8))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(8).into())
+            ]
         );
         let expected = db.vertices().unwrap();
         db.compact(&commit).await.unwrap();
@@ -707,10 +732,12 @@ fn frozen_batch_preparation_neither_allocates_graph_ids_nor_accepts_nonbatch_fal
             drop(session);
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(db.vertices().unwrap().is_empty());
+            // Preparation took no counter: this fresh handle's first engine
+            // allocation is still vertex counter 1.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(engine_vertex(1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -780,10 +807,11 @@ fn frozen_unwind_handle_cannot_cross_identical_sessions() {
         drop(second);
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertices().unwrap().is_empty());
+        // Neither the binding nor the refused execution took a counter.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(engine_vertex(1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });

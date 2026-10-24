@@ -74,7 +74,7 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalarResolver, CommitSeq, StorageReadCx};
+use fgdb_types::{BranchId, CanonicalScalarResolver, CommitSeq, GraphId, StorageReadCx};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
@@ -84,6 +84,20 @@ use std::sync::Arc;
 mod bounded_read;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
+mod pack;
+pub use pack::{PACK_DIR, PACK_MIN_OBJECTS};
+
+/// The fewest new root segments (with index segments) a root publication
+/// packs together; fewer stay loose, as a small transaction's objects do.
+pub const ROOT_SEGMENT_PACK_MIN: usize = 8;
+mod buffered_read;
+#[cfg(test)]
+mod pack_tests;
+pub use buffered_read::{
+    BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
+    BufferedScanError, BufferedScanEvent, BufferedValue, BufferedVertexCandidate,
+    BufferedVertexScan, BufferedVertexTopology,
+};
 
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
@@ -239,8 +253,10 @@ struct ObjectPublicationPermit {
 enum StoredObjectKind {
     Block,
     Root,
-    /// A V4 root's full reference segment (fgdb-d5vo4).
+    /// A V4 or V5 root's full reference segment (fgdb-d5vo4).
     Segment,
+    /// A V5 root's full index segment (fgdb-5gzaa).
+    IndexSegment,
     VertexPatch,
     EdgePropertyPatch,
     Manifest,
@@ -257,6 +273,7 @@ impl StoredObjectKind {
             Self::Block => block_id(k_oid, namespace, bytes),
             Self::Root => crate::root::root_id(k_oid, namespace, bytes),
             Self::Segment => crate::root_segment::segment_id(k_oid, namespace, bytes),
+            Self::IndexSegment => crate::root_segment::index_id(k_oid, namespace, bytes),
             Self::VertexPatch => crate::vertex::vertex_patch_id(k_oid, namespace, bytes),
             Self::EdgePropertyPatch => {
                 crate::edge_props::property_patch_id(k_oid, namespace, bytes)
@@ -278,6 +295,7 @@ impl StoredObjectKind {
         match self {
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
             Self::Segment => crate::root_segment::SEGMENT_BYTES as u64,
+            Self::IndexSegment => crate::root_segment::INDEX_BYTES as u64,
             _ => MAX_STORED_OBJECT_BYTES,
         }
     }
@@ -318,6 +336,152 @@ type DecodedBlockRead = (
     Vec<u8>,
     Result<(Vec<crate::AdjacencyEntry>, Option<(ObjectId, Vec<u8>)>), BlockError>,
 );
+
+/// A [`DecodedBlockRead`] beside its hosted property patch when the walk read
+/// that patch ahead of the block's admission; `None` when it did not (the
+/// block hosts no patch, or admission reads it).
+type BlockRead = (DecodedBlockRead, Option<PrefetchedPatch>);
+
+/// A block's hosted property patch, read ahead of the block's admission, with
+/// [`prove_block_patch`] already run on its bytes. Admission replays both
+/// outcomes in the serial order, so a prefetched patch is accepted or refused,
+/// and its first error reported, exactly as one read at admission.
+enum PrefetchedPatch {
+    /// The read failed; there were no bytes to prove.
+    Unread(StoreError),
+    /// The bytes, and the proof's outcome on them (their identity included).
+    Read(
+        Vec<u8>,
+        Result<Vec<crate::edge_props::EdgePropertyRow>, StoreError>,
+    ),
+}
+
+/// Objects at most this many bytes are proven on the calling task. Hashing and
+/// decoding a few hundred bytes takes about a microsecond, while a blocking-
+/// pool round trip wakes and parks a thread for several times that: on a
+/// packed road-ny (about 495k objects of ~450 bytes) the open spent more
+/// kernel time handing proofs to the pool than proving them.
+const INLINE_PROOF_BYTES: usize = 4096;
+
+/// Run a CPU-only proof over `bytes` bytes on the blocking pool, or inline
+/// when it is small enough that the hand-off would cost more than the work.
+/// Without a pool (the lab runtime) both complete inline, in order.
+async fn prove_off_task<T: Send + 'static>(
+    bytes: usize,
+    proof: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    if bytes <= INLINE_PROOF_BYTES {
+        proof()
+    } else {
+        asupersync::runtime::spawn_blocking(proof).await
+    }
+}
+
+/// Blocks an unmetered root walk reads ahead and proves together. A road
+/// graph's blocks are ~450 bytes, far below [`INLINE_PROOF_BYTES`], so every
+/// proof of an open ran on the walk's one task: about a quarter of a
+/// compacted road-ny CLI open. A window's proofs go to the blocking pool
+/// [`PROOF_CHUNK`] objects at a time, one hand-off per chunk.
+const PROOF_WINDOW: usize = 4096;
+
+/// Objects one blocking-pool task proves: eight tasks per window. At 32 per
+/// task a web-google open (743k blocks) made 23k hand-offs, and the walk's
+/// task spent about a sixth of its time contending for the pool's queue.
+/// Measured 2026-10-15, CLI point reads interleaved on a loaded host, against
+/// 256 / 32: web-google 3.54-3.93 -> 3.20-3.28 s, road-ny 1.11-1.79 ->
+/// 0.98-1.29 s; 2048 / 256 and 2048 / 128 fell between.
+const PROOF_CHUNK: usize = 512;
+
+/// `proof` applied to every item on the blocking pool, [`PROOF_CHUNK`] items
+/// per task with every task in flight at once; the results in item order.
+/// Without a pool (the lab runtime) each task completes inline, in order.
+async fn prove_chunks<I: Send + 'static, T: Send + 'static>(
+    items: Vec<I>,
+    proof: impl Fn(I) -> T + Clone + Send + 'static,
+) -> Vec<T> {
+    let mut tasks = OrderedReads::new();
+    let mut items = items.into_iter().peekable();
+    while items.peek().is_some() {
+        let chunk: Vec<I> = items.by_ref().take(PROOF_CHUNK).collect();
+        let proof = proof.clone();
+        tasks.push(asupersync::runtime::spawn_blocking(move || {
+            chunk.into_iter().map(proof).collect::<Vec<T>>()
+        }));
+    }
+    let mut proven = Vec::new();
+    while let Some(chunk) = tasks.next().await {
+        proven.extend(chunk);
+    }
+    proven
+}
+
+/// A root walk's next window, polled while the current one is admitted so
+/// its reads and pool proofs run meanwhile; its result is kept once ready.
+enum Ahead<F: Future> {
+    Running(std::pin::Pin<Box<F>>),
+    Done(F::Output),
+}
+
+impl<F: Future> Ahead<F> {
+    /// Poll once without waiting.
+    async fn advance(&mut self) {
+        std::future::poll_fn(|task| {
+            if let Self::Running(read) = self
+                && let std::task::Poll::Ready(output) = read.as_mut().poll(task)
+            {
+                *self = Self::Done(output);
+            }
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn finish(self) -> F::Output {
+        match self {
+            Self::Running(read) => read.await,
+            Self::Done(output) => output,
+        }
+    }
+}
+
+/// The patch half of a propertied block's admission, once its bytes are in
+/// hand: the patch's identity and format, the joint locator bijection, and
+/// the joint logical digest (V5) the block's header declares. A propertied
+/// block's transcript needs its rows, so this is the seam that owns that law;
+/// decode proved the propertyless half already. Pure CPU, so a root walk runs
+/// it on the blocking pool.
+#[allow(clippy::too_many_arguments)]
+fn prove_block_patch(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    patch_id: ObjectId,
+    patch_bytes: &[u8],
+    locators: &[u8],
+    entries: &[crate::AdjacencyEntry],
+    declared_digest: [u8; 32],
+) -> Result<Vec<crate::edge_props::EdgePropertyRow>, StoreError> {
+    let rows = read_property_patch_inner(
+        k_oid,
+        namespace,
+        patch_bytes,
+        EdgePropertyPatchVersion(patch_id),
+        resolver,
+    )
+    .map_err(StoreError::MalformedEdgePropertyPatch)?;
+    validate_block_patch_consistency(locators, rows.len())
+        .map_err(StoreError::MalformedEdgePropertyPatch)?;
+    let per_entry = crate::rows_by_entry(locators, &rows);
+    let recomputed =
+        crate::block_logical_digest(entries, &per_entry).map_err(StoreError::Malformed)?;
+    if recomputed != declared_digest {
+        return Err(StoreError::Malformed(BlockError::LogicalDigestMismatch {
+            declared: declared_digest,
+            recomputed,
+        }));
+    }
+    Ok(rows)
+}
 
 impl<F: Future> OrderedReads<F> {
     fn new() -> Self {
@@ -418,6 +582,12 @@ pub enum StoreError {
         limit: u64,
         observed: u64,
     },
+    /// A caller's root-reference cap refused metadata before V4 flattening.
+    RootReferenceLimit {
+        resource: &'static str,
+        requested: usize,
+        limit: usize,
+    },
     /// The bytes at the block's path are not the block that path names.
     ///
     /// Damage, or a store that was written by something that did not derive the
@@ -504,6 +674,14 @@ impl core::fmt::Display for StoreError {
                 f,
                 "stored object has at least {observed} bytes, above the {limit}-byte limit"
             ),
+            Self::RootReferenceLimit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "ResourceExhausted: {resource} needs {requested}, limit {limit}"
+            ),
             Self::IdentityMismatch { expected, actual } => write!(
                 f,
                 "the bytes stored for {expected:?} are actually {actual:?}"
@@ -556,6 +734,7 @@ impl core::error::Error for StoreError {
             | Self::ManifestRootLoad { error, .. }
             | Self::BlockPatchLoad { error, .. } => Some(error.as_ref()),
             Self::ObjectTooLarge { .. }
+            | Self::RootReferenceLimit { .. }
             | Self::IdentityMismatch { .. }
             | Self::DamagedExisting { .. }
             | Self::Collision { .. } => None,
@@ -576,22 +755,61 @@ fn ensure_size_within_limit(observed: u64, limit: u64) -> Result<(), StoreError>
     Ok(())
 }
 
+/// The most bytes one read asks for: asupersync's file reads cap one blocking
+/// op at 128 KiB, so asking for more buys nothing.
+const READ_OP_BYTES: usize = 128 * 1024;
+
 async fn read_bounded<F: VfsFile>(
     cx: &impl StorageReadCx,
     file: F,
     limit: u64,
 ) -> Result<Vec<u8>, StoreError> {
     cx.with_restriction_async(async move {
-        ensure_size_within_limit(file.metadata().await?.len(), limit)?;
-
-        let mut bytes = Vec::new();
-        {
-            // Metadata is only an early refusal, not authority: the inode could grow
-            // after it was read. One extra byte distinguishes the exact ceiling from
-            // an over-limit stream without ever materializing the unbounded tail.
-            let mut bounded = file.take(limit.saturating_add(1));
-            bounded.read_to_end(&mut bytes).await?;
+        let mut file = file;
+        // Metadata is only an early refusal, not authority: the inode could grow
+        // after it was read. It spares an oversized inode's bytes from being
+        // materialized, so it is asked only when the ceiling is larger than one
+        // read: below that, the refusal costs the same op it would save.
+        if limit >= READ_OP_BYTES as u64 {
+            ensure_size_within_limit(file.metadata().await?.len(), limit)?;
         }
+        // The read itself is the bound: it never asks past limit + 1 bytes, and
+        // the one extra byte distinguishes the exact ceiling from an over-limit
+        // stream without ever materializing the unbounded tail. Each read asks
+        // for everything still allowed, so an object costs one data op plus
+        // the end-of-file op.
+        //
+        // The read window is zeroed once as it grows, never again per read:
+        // the end-of-file probe reuses what the data read left unfilled. The
+        // result keeps only the bytes read. An open reads every stored object
+        // of a partition and holds them until each is proven; at a 16 KiB
+        // ceiling a ceiling-sized buffer per object cost road-ny (about 495k
+        // objects of ~450 bytes) ~8 GB of zero-filled, retained capacity
+        // (fgdb-2n2a2). The window grows amortized, not exactly: a manifest
+        // of tens of MB is read in READ_OP_BYTES ops, and exact growth would
+        // copy everything read so far once per op.
+        let allowed = usize::try_from(limit.saturating_add(1)).unwrap_or(usize::MAX);
+        let mut bytes = Vec::new();
+        let mut filled = 0;
+        while filled < allowed {
+            let ask = (allowed - filled).min(READ_OP_BYTES);
+            if bytes.len() < filled + ask {
+                bytes.try_reserve(filled + ask - bytes.len()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "stored object read allocation failed",
+                    )
+                })?;
+                bytes.resize(filled + ask, 0);
+            }
+            let read = file.read(&mut bytes[filled..filled + ask]).await?;
+            filled += read;
+            if read == 0 {
+                break;
+            }
+        }
+        bytes.truncate(filled);
+        bytes.shrink_to_fit();
         let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         ensure_size_within_limit(observed, limit)?;
         Ok(bytes)
@@ -613,6 +831,8 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
     scalar_resolver: Option<Arc<dyn CanonicalScalarResolver + Send + Sync>>,
+    /// Where packed objects are, shared by every clone of this store.
+    packs: Arc<pack::PackIndex>,
 }
 
 impl<V: Vfs> core::fmt::Debug for BlockStore<V> {
@@ -827,6 +1047,7 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await?;
 
+        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
         Ok(Self {
             vfs,
             dir,
@@ -834,6 +1055,45 @@ impl<V: Vfs> BlockStore<V> {
             k_oid,
             namespace,
             scalar_resolver: None,
+            packs,
+        })
+    }
+
+    /// Open an EXISTING block store to read already-published objects. Unlike
+    /// [`Self::open_with_vfs`], it creates no directory or publication-lock
+    /// file and issues no sync: a read-only view costs no durability barrier
+    /// (on Apple platforms each one is an `F_FULLFSYNC`) and leaves the
+    /// database directory untouched. Only the database's own read paths
+    /// construct it, and they never publish through it.
+    pub async fn open_existing_for_read_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+    ) -> Result<Self, StoreError> {
+        let dir = database_dir.as_ref().join(BLOCK_DIR);
+        if !cx
+            .with_restriction_async(vfs.symlink_metadata(&dir))
+            .await?
+            .file_type()
+            .is_dir()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "strata block path exists but is not a directory",
+            )
+            .into());
+        }
+        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
+        Ok(Self {
+            vfs,
+            publication_lock_path: dir.join(PUBLICATION_LOCK_FILE),
+            dir,
+            k_oid: k_oid.into(),
+            namespace,
+            scalar_resolver: None,
+            packs,
         })
     }
 
@@ -1185,7 +1445,9 @@ impl<V: Vfs> BlockStore<V> {
             receipts,
             permit: self.acquire_publication_permit(cx)?,
             objects: std::collections::BTreeSet::new(),
-            staged: Vec::new(),
+            unflushed: Vec::new(),
+            unflushed_bytes: 0,
+            packed: false,
             pending: Vec::new(),
             crash_at,
             failed: false,
@@ -1207,16 +1469,118 @@ impl<V: Vfs> BlockStore<V> {
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
+    /// The stored bytes of `id`, wherever they are: a pack this store knows,
+    /// else the object's loose file, else a pack published since this store
+    /// last looked (another process may have committed). The caller verifies
+    /// identity, as it always has; the location is only where to look.
     async fn read_object_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        let file = cx
-            .with_restriction_async(self.vfs.open_read(&self.path(id)))
-            .await?;
-        read_bounded(cx, file, limit).await
+        if let Some(bytes) = self.read_packed(cx, id, limit).await? {
+            return Ok(bytes);
+        }
+        let loose = async {
+            let file = cx
+                .with_restriction_async(self.vfs.open_read(&self.path(id)))
+                .await?;
+            read_bounded(cx, file, limit).await
+        };
+        match loose.await {
+            Err(StoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.packs.refresh(cx, &self.vfs).await? =>
+            {
+                match self.read_packed(cx, id, limit).await? {
+                    Some(bytes) => Ok(bytes),
+                    None => Err(StoreError::Io(error)),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// The bytes of a packed copy of `id`, or `None` when no known pack has
+    /// one. With several copies (a recovery republished an object whose
+    /// older copy is damaged), the newest copy whose bytes derive `id` wins;
+    /// when none does, the newest copy is returned for the caller to refuse.
+    async fn read_packed(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let copies = match self.packs.locate(id) {
+            pack::Located::None => return Ok(None),
+            pack::Located::One(location) => {
+                return self
+                    .packs
+                    .read(cx, &self.vfs, location, limit)
+                    .await
+                    .map(Some);
+            }
+            pack::Located::Several(copies) => copies,
+        };
+        let mut newest = None;
+        for location in copies {
+            let read = self.packs.read(cx, &self.vfs, location, limit).await;
+            if let Ok(bytes) = &read
+                && self.derives(id, bytes)
+            {
+                return read.map(Some);
+            }
+            newest.get_or_insert(read);
+        }
+        newest.expect("several copies").map(Some)
+    }
+
+    /// Whether `bytes` derive `id` under some stored family's transcript.
+    /// The transcripts are domain-separated, so at most one family can.
+    fn derives(&self, id: ObjectId, bytes: &[u8]) -> bool {
+        use StoredObjectKind::{
+            Block, EdgePropertyPatch, IndexSegment, Manifest, Root, Segment, VertexPatch,
+        };
+        [
+            Block,
+            Root,
+            Segment,
+            IndexSegment,
+            VertexPatch,
+            EdgePropertyPatch,
+            Manifest,
+        ]
+        .into_iter()
+        .any(|kind| kind.identity(self.k_oid.expose(), self.namespace, bytes) == id)
+    }
+
+    /// Fill `out` with the object `id`, whose admitted length is `out.len()`.
+    /// A stored object of any other length is refused.
+    pub(crate) async fn read_object_exact(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        out: &mut [u8],
+    ) -> Result<(), StoreError> {
+        let changed = || {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "admitted object length changed",
+            ))
+        };
+        let bytes = self
+            .read_object_bytes(cx, id, out.len() as u64)
+            .await
+            .map_err(|error| match error {
+                StoreError::ObjectTooLarge { .. } => changed(),
+                error => error,
+            })?;
+        if bytes.len() != out.len() {
+            return Err(changed());
+        }
+        out.copy_from_slice(&bytes);
+        Ok(())
     }
 
     /// Load the raw bytes of a block, verifying identity but not decoding.
@@ -1241,6 +1605,94 @@ impl<V: Vfs> BlockStore<V> {
         Ok(bytes)
     }
 
+    /// Read one immutable publication-metadata object independently of its
+    /// children. The family supplies both the allocation ceiling and the
+    /// identity transcript; no filename or decoded child can choose either.
+    async fn read_metadata_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        kind: StoredObjectKind,
+        limit: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.read_object_bytes(cx, id, limit).await?;
+        let actual = kind.identity(self.k_oid.expose(), self.namespace, &bytes);
+        if actual != id {
+            return Err(StoreError::IdentityMismatch {
+                expected: id,
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Re-read an admitted manifest without following its root references.
+    /// This is an identity check, not a new root admission. Scrub uses its
+    /// retained inventory so a damaged parent cannot conceal damaged children.
+    pub async fn get_manifest_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::manifest::ManifestVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id.0,
+            StoredObjectKind::Manifest,
+            MANIFEST_HEADER_AND_RECORDS_CEILING,
+        )
+        .await
+    }
+
+    /// Re-read an admitted V3, V4 or V5 partition-root frame without loading
+    /// its segments. The exact root identity is checked under the root byte
+    /// cap.
+    pub async fn get_root_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: PartitionRootVersion,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id.0,
+            StoredObjectKind::Root,
+            crate::root::MAX_ENCODED_ROOT_BYTES as u64,
+        )
+        .await
+    }
+
+    /// Re-read one admitted root segment under its own identity transcript
+    /// and fixed format ceiling, without following its block/patch references.
+    pub async fn get_root_segment_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id,
+            StoredObjectKind::Segment,
+            crate::root_segment::SEGMENT_BYTES as u64,
+        )
+        .await
+    }
+
+    /// Re-read one admitted V5 root index segment under its own identity
+    /// transcript and fixed format ceiling, without following the segments it
+    /// names.
+    pub async fn get_root_index_segment_bytes(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.read_metadata_bytes(
+            cx,
+            id,
+            StoredObjectKind::IndexSegment,
+            crate::root_segment::INDEX_BYTES as u64,
+        )
+        .await
+    }
+
     /// [`BlockStore::get_bytes`] for a root walk, with its CPU-heavy proof
     /// moved off the async task: once the bytes are read, the identity check
     /// and the block's one decode run on the runtime's blocking pool, so a
@@ -1248,17 +1700,24 @@ impl<V: Vfs> BlockStore<V> {
     /// (the lab runtime) the closure runs inline, in order. The identity
     /// refusal is `get_bytes`'s own; a decode failure comes back beside the
     /// bytes for the root walk to attribute to its position.
+    ///
+    /// With `prefetch_patch`, a decoded block's hosted property patch is read
+    /// in the same future and [`prove_block_patch`] runs on the pool too, so
+    /// the patch read overlaps the window instead of stalling admission and
+    /// its hash, decode and joint digest leave the async task. A walk whose
+    /// observer meters each object before its read starts must pass `false`.
     async fn read_block_decoded(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
-    ) -> Result<DecodedBlockRead, StoreError> {
+        prefetch_patch: bool,
+    ) -> Result<BlockRead, StoreError> {
         let bytes = self
             .read_object_bytes(cx, id, MAX_STORED_OBJECT_BYTES)
             .await?;
         let k_oid = self.k_oid.clone();
         let namespace = self.namespace;
-        asupersync::runtime::spawn_blocking(move || {
+        let (bytes, decoded) = prove_off_task(bytes.len(), move || {
             let actual = block_id(k_oid.expose(), namespace, &bytes);
             if actual != id {
                 return Err(StoreError::IdentityMismatch {
@@ -1269,7 +1728,161 @@ impl<V: Vfs> BlockStore<V> {
             let decoded = crate::decode_block_with_properties(&bytes);
             Ok((bytes, decoded))
         })
-        .await
+        .await?;
+        let (entries, patch_id, locators) = match decoded {
+            Ok((entries, Some((patch_id, locators)))) if prefetch_patch => {
+                (entries, patch_id, locators)
+            }
+            decoded => return Ok(((bytes, decoded), None)),
+        };
+        let patch_bytes = match self
+            .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+            .await
+        {
+            Ok(patch_bytes) => patch_bytes,
+            Err(error) => {
+                let decoded = Ok((entries, Some((patch_id, locators))));
+                return Ok(((bytes, decoded), Some(PrefetchedPatch::Unread(error))));
+            }
+        };
+        let k_oid = self.k_oid.clone();
+        let resolver = self.scalar_resolver.clone();
+        Ok(prove_off_task(bytes.len() + patch_bytes.len(), move || {
+            let (_, declared_digest) = crate::header_partition_and_digest(&bytes);
+            let proof = prove_block_patch(
+                k_oid.expose(),
+                namespace,
+                resolver
+                    .as_deref()
+                    .map(|resolver| resolver as &dyn CanonicalScalarResolver),
+                patch_id,
+                &patch_bytes,
+                &locators,
+                &entries,
+                declared_digest,
+            );
+            let decoded = Ok((entries, Some((patch_id, locators))));
+            (
+                (bytes, decoded),
+                Some(PrefetchedPatch::Read(patch_bytes, proof)),
+            )
+        })
+        .await)
+    }
+
+    /// [`Self::read_block_decoded`] with the hosted patch prefetched, for
+    /// every block in `ids`, in order and with the same results. Reads
+    /// overlap as a root walk's do; block proofs, then hosted-patch proofs,
+    /// run on the blocking pool through [`prove_chunks`].
+    async fn read_block_window(
+        &self,
+        cx: &impl StorageReadCx,
+        ids: Vec<ObjectId>,
+    ) -> Vec<Result<BlockRead, StoreError>> {
+        let mut fetched = Vec::with_capacity(ids.len());
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
+        while fetched.len() < ids.len() {
+            while issued < ids.len() && reads.len() < OPEN_READS_IN_FLIGHT {
+                reads.push(self.read_object_bytes(cx, ids[issued], MAX_STORED_OBJECT_BYTES));
+                issued += 1;
+            }
+            fetched.push(reads.next().await.expect("a read is in flight"));
+        }
+        let k_oid = self.k_oid.clone();
+        let namespace = self.namespace;
+        let blocks = prove_chunks(
+            ids.iter().copied().zip(fetched).collect(),
+            move |(id, bytes): (ObjectId, Result<Vec<u8>, StoreError>)| {
+                let bytes = bytes?;
+                let actual = block_id(k_oid.expose(), namespace, &bytes);
+                if actual != id {
+                    return Err(StoreError::IdentityMismatch {
+                        expected: id,
+                        actual,
+                    });
+                }
+                let decoded = crate::decode_block_with_properties(&bytes);
+                Ok((bytes, decoded))
+            },
+        )
+        .await;
+        let mut done: Vec<Option<Result<BlockRead, StoreError>>> = Vec::with_capacity(ids.len());
+        let mut hosting = Vec::new();
+        for (at, block) in blocks.into_iter().enumerate() {
+            match block {
+                Ok((bytes, Ok((entries, Some((patch_id, locators)))))) => {
+                    hosting.push((at, bytes, entries, patch_id, locators));
+                    done.push(None);
+                }
+                Ok(read) => done.push(Some(Ok((read, None)))),
+                Err(error) => done.push(Some(Err(error))),
+            }
+        }
+        let mut patches = Vec::with_capacity(hosting.len());
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
+        while patches.len() < hosting.len() {
+            while issued < hosting.len() && reads.len() < OPEN_READS_IN_FLIGHT {
+                reads.push(self.read_object_bytes(cx, hosting[issued].3, MAX_STORED_OBJECT_BYTES));
+                issued += 1;
+            }
+            patches.push(reads.next().await.expect("a read is in flight"));
+        }
+        let mut proving = Vec::with_capacity(hosting.len());
+        for ((at, bytes, entries, patch_id, locators), patch) in hosting.into_iter().zip(patches) {
+            match patch {
+                Ok(patch_bytes) => {
+                    proving.push((at, bytes, entries, patch_id, locators, patch_bytes))
+                }
+                Err(error) => {
+                    let decoded = Ok((entries, Some((patch_id, locators))));
+                    done[at] = Some(Ok(((bytes, decoded), Some(PrefetchedPatch::Unread(error)))));
+                }
+            }
+        }
+        let k_oid = self.k_oid.clone();
+        let resolver = self.scalar_resolver.clone();
+        let proven = prove_chunks(
+            proving,
+            move |(at, bytes, entries, patch_id, locators, patch_bytes): (
+                usize,
+                Vec<u8>,
+                Vec<crate::AdjacencyEntry>,
+                ObjectId,
+                Vec<u8>,
+                Vec<u8>,
+            )| {
+                let (_, declared_digest) = crate::header_partition_and_digest(&bytes);
+                let proof = prove_block_patch(
+                    k_oid.expose(),
+                    namespace,
+                    resolver
+                        .as_deref()
+                        .map(|resolver| resolver as &dyn CanonicalScalarResolver),
+                    patch_id,
+                    &patch_bytes,
+                    &locators,
+                    &entries,
+                    declared_digest,
+                );
+                let decoded = Ok((entries, Some((patch_id, locators))));
+                (
+                    at,
+                    (
+                        (bytes, decoded),
+                        Some(PrefetchedPatch::Read(patch_bytes, proof)),
+                    ),
+                )
+            },
+        )
+        .await;
+        for (at, read) in proven {
+            done[at] = Some(Ok(read));
+        }
+        done.into_iter()
+            .map(|read| read.expect("every block in the window was read"))
+            .collect()
     }
 
     /// Store a vertex patch's bytes — the same derived-identity discipline and
@@ -1426,7 +2039,7 @@ impl<V: Vfs> BlockStore<V> {
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
     ) -> Result<ReadRootBlock, E> {
         observe(RootReadEvent::ObjectStart)?;
-        let read = self.read_block_decoded(cx, reference.block_id).await;
+        let read = self.read_block_decoded(cx, reference.block_id, false).await;
         self.admit_root_block(cx, at, partition, reference, read, observe)
             .await
     }
@@ -1435,17 +2048,17 @@ impl<V: Vfs> BlockStore<V> {
     /// ([`BlockStore::read_block_decoded`]): every check after the read, in
     /// the order a serial resolver makes them. The serial resolver and the
     /// prefetching root walk both admit here, so a block is accepted or refused
-    /// identically however its bytes were read.
+    /// identically however its bytes, and its hosted patch's, were read.
     async fn admit_root_block<E: From<StoreError>>(
         &self,
         cx: &impl StorageReadCx,
         at: usize,
         partition: u64,
         reference: &crate::root::BlockRef,
-        read: Result<DecodedBlockRead, StoreError>,
+        read: Result<BlockRead, StoreError>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
     ) -> Result<ReadRootBlock, E> {
-        let (bytes, decoded) = read.map_err(|error| StoreError::RootBlockLoad {
+        let ((bytes, decoded), prefetched) = read.map_err(|error| StoreError::RootBlockLoad {
             at,
             error: Box::new(error),
         })?;
@@ -1481,39 +2094,33 @@ impl<V: Vfs> BlockStore<V> {
         }
         let (props, property_patch) = if let Some((patch_id, locators)) = patch {
             observe(RootReadEvent::ObjectStart)?;
-            let patch_bytes = self
-                .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
-                .await
-                .map_err(|error| StoreError::BlockPatchLoad {
-                    at,
-                    error: Box::new(error),
-                })?;
+            let (patch_bytes, proof) = match prefetched {
+                Some(PrefetchedPatch::Read(patch_bytes, proof)) => (Ok(patch_bytes), Some(proof)),
+                Some(PrefetchedPatch::Unread(error)) => (Err(error), None),
+                None => (
+                    self.read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                        .await,
+                    None,
+                ),
+            };
+            let patch_bytes = patch_bytes.map_err(|error| StoreError::BlockPatchLoad {
+                at,
+                error: Box::new(error),
+            })?;
             observe(RootReadEvent::SourceBytes(patch_bytes.len()))?;
-            let rows = read_property_patch_inner(
-                self.k_oid.expose(),
-                self.namespace,
-                &patch_bytes,
-                EdgePropertyPatchVersion(patch_id),
-                self.decode_resolver(),
-            )
-            .map_err(StoreError::MalformedEdgePropertyPatch)?;
-            validate_block_patch_consistency(&locators, rows.len())
-                .map_err(StoreError::MalformedEdgePropertyPatch)?;
-            // The joint digest law (V5): a propertied block's transcript needs
-            // its rows, so this is the seam that owns it — decode proved the
-            // propertyless half already.
-            let per_entry = crate::rows_by_entry(&locators, &rows);
-            let recomputed =
-                crate::block_logical_digest(&entries, &per_entry).map_err(StoreError::Malformed)?;
-            if recomputed != declared_digest {
-                return Err(
-                    StoreError::Malformed(crate::BlockError::LogicalDigestMismatch {
-                        declared: declared_digest,
-                        recomputed,
-                    })
-                    .into(),
-                );
-            }
+            let rows = match proof {
+                Some(proof) => proof,
+                None => prove_block_patch(
+                    self.k_oid.expose(),
+                    self.namespace,
+                    self.decode_resolver(),
+                    patch_id,
+                    &patch_bytes,
+                    &locators,
+                    &entries,
+                    declared_digest,
+                ),
+            }?;
             (
                 Some(BlockProps { locators, rows }),
                 Some((patch_id, patch_bytes)),
@@ -1532,7 +2139,8 @@ impl<V: Vfs> BlockStore<V> {
     /// the caller-selected decoded blocks.
     ///
     /// Each encoded block is dropped once admitted, so at most
-    /// [`OPEN_READS_IN_FLIGHT`] are held at once. One canonical statement per
+    /// [`OPEN_READS_IN_FLIGHT`] are held at once, each with its hosted property
+    /// patch when it has one. One canonical statement per
     /// EId remains in the incremental history validator so a future block
     /// cannot reuse an identity and still mint a selective-read token. This is
     /// the fresh admission path: even a block outside the requested snapshot is
@@ -1552,6 +2160,7 @@ impl<V: Vfs> BlockStore<V> {
             |at, reference, read| retain(at, reference).then(|| decoded_block(read)),
             &mut |_| Ok::<(), StoreError>(()),
             OPEN_READS_IN_FLIGHT,
+            &mut RootWalk::default(),
         )
         .await
     }
@@ -1563,6 +2172,9 @@ impl<V: Vfs> BlockStore<V> {
     /// Up to `in_flight` block reads run ahead of admission. A caller whose
     /// `observe` meters or refuses work passes 1: each block's read then starts
     /// only after its [`RootReadEvent::ObjectStart`], exactly as a serial walk.
+    ///
+    /// `walk` must be fresh; it is left holding the edge-history and chain
+    /// state after the last block, for a caller that keeps it.
     async fn inspect_root_blocks_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
@@ -1570,28 +2182,66 @@ impl<V: Vfs> BlockStore<V> {
         mut keep: impl FnMut(usize, &crate::root::BlockRef, ReadRootBlock) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
         in_flight: usize,
+        walk: &mut RootWalk,
     ) -> Result<Vec<T>, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
+        self.packs.rearm(
+            root.blocks
+                .iter()
+                .map(|block| block.block_id)
+                .chain(root.vertex_patches.iter().map(|patch| patch.patch_id)),
+        );
 
         let mut blocks = Vec::new();
-        let mut history = crate::root::EdgeHistoryValidator::default();
-        let mut chain_heads: std::collections::BTreeMap<
-            (fgdb_types::VId, fgdb_delta_types::RelationId),
-            ObjectId,
-        > = std::collections::BTreeMap::new();
+        let RootWalk {
+            history,
+            chain_heads,
+            ..
+        } = walk;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
+        // An unmetered walk reads and proves PROOF_WINDOW blocks at a time,
+        // the next window running ahead while this one is admitted; a
+        // metering walk (in_flight 1) reads each block after its event.
+        let window_ids = |start: usize| -> Vec<ObjectId> {
+            root.blocks[start..root.blocks.len().min(start + PROOF_WINDOW)]
+                .iter()
+                .map(|block| block.block_id)
+                .collect()
+        };
+        let mut window = std::collections::VecDeque::new();
+        let mut ahead = None;
         for (at, reference) in root.blocks.iter().enumerate() {
             observe(RootReadEvent::ObjectStart)?;
-            // Block `at` is always issued by now; later ones only up to the
-            // window.
-            while let Some(next) = root.blocks.get(issued)
-                && (issued <= at || reads.len() < in_flight)
-            {
-                reads.push(self.read_block_decoded(cx, next.block_id));
-                issued += 1;
+            let fetched = if in_flight > 1 {
+                if window.is_empty() {
+                    window = match ahead.take() {
+                        Some(next) => Ahead::finish(next).await,
+                        None => self.read_block_window(cx, window_ids(at)).await,
+                    }
+                    .into();
+                    let next = at + window.len();
+                    if next < root.blocks.len() {
+                        let mut running =
+                            Ahead::Running(Box::pin(self.read_block_window(cx, window_ids(next))));
+                        running.advance().await;
+                        ahead = Some(running);
+                    }
+                } else if let Some(running) = ahead.as_mut() {
+                    running.advance().await;
+                }
+                window.pop_front()
+            } else {
+                // Block `at` is always issued by now.
+                while let Some(next) = root.blocks.get(issued)
+                    && issued <= at
+                {
+                    reads.push(self.read_block_decoded(cx, next.block_id, false));
+                    issued += 1;
+                }
+                reads.next().await
             }
-            let fetched = reads.next().await.ok_or_else(|| {
+            .ok_or_else(|| {
                 StoreError::Io(std::io::Error::other(
                     "root block walk consumed a read it never issued",
                 ))
@@ -1718,6 +2368,7 @@ impl<V: Vfs> BlockStore<V> {
             |at, reference, (rows, _)| retain(at, reference).then_some(rows),
             &mut |_| Ok::<(), StoreError>(()),
             OPEN_READS_IN_FLIGHT,
+            &mut RootWalk::default(),
         )
         .await
     }
@@ -1725,7 +2376,7 @@ impl<V: Vfs> BlockStore<V> {
     /// Admit every vertex patch named by `root` and keep what `keep` returns
     /// for each; every patch is proven whether or not it is kept. `in_flight`
     /// bounds the reads running ahead of admission, as for blocks; a metering
-    /// `observe` passes 1.
+    /// `observe` passes 1. `walk` is left holding the vertex-history state.
     async fn inspect_root_patches_observed<E: From<StoreError>, T>(
         &self,
         cx: &impl StorageReadCx,
@@ -1733,9 +2384,10 @@ impl<V: Vfs> BlockStore<V> {
         mut keep: impl FnMut(usize, &crate::root::PatchRef, (VertexPatchRows, Vec<u8>)) -> Option<T>,
         observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
         in_flight: usize,
+        walk: &mut RootWalk,
     ) -> Result<Vec<T>, E> {
         let mut patches = Vec::new();
-        let mut history = crate::root::VertexHistoryValidator::default();
+        let history = &mut walk.vertex_history;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
         for (at, reference) in root.vertex_patches.iter().enumerate() {
@@ -1765,6 +2417,8 @@ impl<V: Vfs> BlockStore<V> {
                 patches.push(kept);
             }
         }
+        // The patches close every root walk.
+        self.packs.release();
         Ok(patches)
     }
 
@@ -1841,9 +2495,10 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<PartitionRootVersion, StoreError> {
-        // Encoded from scratch: every full segment this root names is sealed.
-        // Re-putting a segment an earlier root already named is idempotent.
-        let encoded = crate::root::encode_root_v4(
+        // Encoded from scratch: every full segment and index segment this
+        // root names is sealed. Re-putting one an earlier root already named
+        // is idempotent.
+        let encoded = crate::root::encode_root_v5(
             root,
             self.k_oid.expose(),
             self.namespace,
@@ -1852,10 +2507,8 @@ impl<V: Vfs> BlockStore<V> {
         .map_err(StoreError::MalformedRoot)?;
         self.inspect_root_blocks(cx, root, |_, _| false).await?;
         self.inspect_root_patches(cx, root, |_, _| false).await?;
-        for (_, segment) in &encoded.new_segments {
-            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
-                .await?;
-        }
+        self.put_segments(cx, &encoded.new_segments, &encoded.new_index_segments)
+            .await?;
         self.put_object_with_steps(
             StoredObjectKind::Root,
             cx,
@@ -1866,6 +2519,26 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await
         .map(PartitionRootVersion)
+    }
+
+    /// Write a root's new segments, then its new index segments, each under
+    /// its own kind, before the root that names them.
+    async fn put_segments(
+        &self,
+        cx: &CommitCx,
+        segments: &[(ObjectId, Vec<u8>)],
+        index_segments: &[(ObjectId, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        for (kind, objects) in [
+            (StoredObjectKind::Segment, segments),
+            (StoredObjectKind::IndexSegment, index_segments),
+        ] {
+            for (_, bytes) in objects {
+                self.put_object_with_steps(kind, cx, bytes, None, || {}, || {})
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// [`BlockStore::put_patch`], memoised under `receipts` — the patch
@@ -1983,32 +2656,21 @@ impl<V: Vfs> BlockStore<V> {
                     &owned
                 }
             };
-            let rows = read_property_patch_inner(
-                self.k_oid.expose(),
-                self.namespace,
-                proof_bytes,
-                EdgePropertyPatchVersion(patch_id),
-                self.decode_resolver(),
-            )
-            .map_err(StoreError::MalformedEdgePropertyPatch)?;
-            validate_block_patch_consistency(&locators, rows.len())
-                .map_err(StoreError::MalformedEdgePropertyPatch)?;
             // The joint digest law (V5) at the standalone-admission seam too:
             // the receipt must not be earned by a block whose declared digest
             // disowns the rows it hosts. Partition agreement is a root-side
             // law — no root is in hand here.
             let (_, declared_digest) = crate::header_partition_and_digest(bytes);
-            let per_entry = crate::rows_by_entry(&locators, &rows);
-            let recomputed =
-                crate::block_logical_digest(&entries, &per_entry).map_err(StoreError::Malformed)?;
-            if recomputed != declared_digest {
-                return Err(StoreError::Malformed(
-                    crate::BlockError::LogicalDigestMismatch {
-                        declared: declared_digest,
-                        recomputed,
-                    },
-                ));
-            }
+            prove_block_patch(
+                self.k_oid.expose(),
+                self.namespace,
+                self.decode_resolver(),
+                patch_id,
+                proof_bytes,
+                &locators,
+                &entries,
+                declared_digest,
+            )?;
         }
         Ok(entries)
     }
@@ -2042,10 +2704,8 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<PartitionRootVersion, StoreError> {
         let verified = self.verify_root(cx, root, receipts).await?;
-        for (_, segment) in &verified.segments {
-            self.put_object_with_steps(StoredObjectKind::Segment, cx, segment, None, || {}, || {})
-                .await?;
-        }
+        self.put_segments(cx, &verified.segments, &verified.index_segments)
+            .await?;
         let published = self
             .put_object_with_steps(
                 StoredObjectKind::Root,
@@ -2073,26 +2733,126 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<VerifiedRoot, StoreError> {
         // Resume after the prefix this handle already verified, if this root
         // extends it exactly; otherwise verify from the first reference.
+        let identity = self.root_identity_domain();
         let memo = receipts.root_memo.take().filter(|memo| {
             memo.partition == root.partition
+                && memo
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.identity == identity)
                 && root.blocks.starts_with(&memo.blocks)
                 && root.vertex_patches.starts_with(&memo.patches)
         });
-        let RootMemo {
-            blocks: mut verified_blocks,
-            mut chain_heads,
-            patches: mut verified_patches,
-            mut segments,
-            ..
-        } = memo.unwrap_or_default();
-        // The memo's segments chunk the prefix it just proved this root
-        // extends, so only segments this root newly fills are sealed and
-        // hashed (fgdb-d5vo4).
-        let encoded =
-            crate::root::encode_root_v4(root, self.k_oid.expose(), self.namespace, &mut segments)
-                .map_err(StoreError::MalformedRoot)?;
-        let (block_start, patch_start) = (verified_blocks.len(), verified_patches.len());
-        for (at, reference) in root.blocks.iter().enumerate().skip(block_start) {
+        let mut memo = memo.unwrap_or_default();
+        memo.partition = root.partition;
+        // The memo's segments and index segments chunk the prefix it just
+        // proved this root extends, so only those this root newly fills are
+        // sealed and hashed (fgdb-d5vo4, fgdb-5gzaa).
+        let encoded = crate::root::encode_root_v5(
+            root,
+            self.k_oid.expose(),
+            self.namespace,
+            &mut memo.segments,
+        )
+        .map_err(StoreError::MalformedRoot)?;
+        let carried = (memo.blocks.len(), memo.patches.len());
+        memo.blocks.extend_from_slice(&root.blocks[carried.0..]);
+        memo.patches
+            .extend_from_slice(&root.vertex_patches[carried.1..]);
+        self.verify_root_suffix(cx, &mut memo, carried, receipts)
+            .await?;
+        Ok(self.finish_verified_root(root.graph, root.branch, root.published_at, encoded, memo))
+    }
+
+    /// Verify an append to the exact root these receipts last published or
+    /// admitted from a published slot. The memo owns the unchanged reference
+    /// vectors; only the supplied suffix is copied and checked, including its
+    /// boundary with each carried list. Encoding uses the same canonical V5
+    /// encoder as [`Self::verify_root`].
+    ///
+    /// `Ok(None)` leaves the receipts unchanged: the basis, coordinate, counts
+    /// or publication did not match a current memo, and the caller must supply
+    /// a complete root to [`Self::verify_root`]. An eligible append takes the
+    /// memo, which is restored only after durable publication. Dropping the
+    /// result or refusing any check cannot make an unpublished suffix eligible.
+    pub async fn verify_root_append(
+        &self,
+        cx: &CommitCx,
+        append: RootAppend<'_>,
+        receipts: &mut PublishReceipts,
+    ) -> Result<Option<VerifiedRoot>, StoreError> {
+        let identity = self.root_identity_domain();
+        let eligible = receipts.root_memo.as_ref().is_some_and(|memo| {
+            memo.partition == append.partition
+                && memo.blocks.len() == append.carried_blocks
+                && memo.patches.len() == append.carried_patches
+                && memo.binding.as_ref().is_some_and(|binding| {
+                    binding.identity == identity
+                        && binding.root == append.basis
+                        && binding.graph == append.graph
+                        && binding.branch == append.branch
+                        && binding.published_at <= append.published_at
+                })
+        });
+        if !eligible {
+            return Ok(None);
+        }
+        let mut memo = receipts.root_memo.take().expect("eligible memo");
+        let carried = (memo.blocks.len(), memo.patches.len());
+        // Refuse an excessive append before copying it into the memo. Counts
+        // are checked again by the shared encoder with the structural laws.
+        let declared =
+            u32::try_from(carried.0.saturating_add(append.blocks.len())).unwrap_or(u32::MAX);
+        if declared > crate::root::MAX_ROOT_BLOCKS {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::ImplausibleBlockCount { declared },
+            ));
+        }
+        let declared = u32::try_from(carried.1.saturating_add(append.vertex_patches.len()))
+            .unwrap_or(u32::MAX);
+        if declared > crate::root::MAX_ROOT_PATCHES {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::ImplausiblePatchCount { declared },
+            ));
+        }
+        memo.blocks.extend_from_slice(append.blocks);
+        memo.patches.extend_from_slice(append.vertex_patches);
+        let encoded = crate::root::encode_root_v5_append(
+            crate::root::PartitionRootRef {
+                graph: append.graph,
+                branch: append.branch,
+                partition: append.partition,
+                published_at: append.published_at,
+                blocks: &memo.blocks,
+                vertex_patches: &memo.patches,
+            },
+            carried,
+            self.k_oid.expose(),
+            self.namespace,
+            &mut memo.segments,
+        )
+        .map_err(StoreError::MalformedRoot)?;
+        self.verify_root_suffix(cx, &mut memo, carried, receipts)
+            .await?;
+        Ok(Some(self.finish_verified_root(
+            append.graph,
+            append.branch,
+            append.published_at,
+            encoded,
+            memo,
+        )))
+    }
+
+    /// Both entry points use identical span, history and chain admission. A
+    /// durable object receipt can skip a read, never its root-order chain law.
+    async fn verify_root_suffix(
+        &self,
+        cx: &CommitCx,
+        memo: &mut RootMemo,
+        carried: (usize, usize),
+        receipts: &mut PublishReceipts,
+    ) -> Result<(), StoreError> {
+        for (at, reference) in memo.blocks.iter().enumerate().skip(carried.0) {
             let receipted = receipts.spans.get(&reference.block_id)
                 == Some(&(reference.first_seq, reference.last_seq));
             let (family, predecessor) = if receipted {
@@ -2102,7 +2862,7 @@ impl<V: Vfs> BlockStore<V> {
                     .expect("every span receipt records its chain fields in the same insertion")
             } else {
                 let (entries, _props, predecessor) = self
-                    .resolve_root_block(cx, at, root.partition, reference)
+                    .resolve_root_block(cx, at, memo.partition, reference)
                     .await?;
                 receipts
                     .validator
@@ -2122,7 +2882,7 @@ impl<V: Vfs> BlockStore<V> {
             // THE CHAIN LAW (V6) holds on the memoised path too: receipts
             // prove a block admissible, never that a root ORDERS it lawfully.
             if let Some(family) = family {
-                let expected = chain_heads.get(&family).copied();
+                let expected = memo.chain_heads.get(&family).copied();
                 if predecessor.map(|link| link.0) != expected {
                     return Err(StoreError::MalformedRoot(
                         crate::root::RootError::BlockChainMismatch {
@@ -2132,11 +2892,10 @@ impl<V: Vfs> BlockStore<V> {
                         },
                     ));
                 }
-                chain_heads.insert(family, reference.block_id);
+                memo.chain_heads.insert(family, reference.block_id);
             }
-            verified_blocks.push(*reference);
         }
-        for (at, reference) in root.vertex_patches.iter().enumerate().skip(patch_start) {
+        for (at, reference) in memo.patches.iter().enumerate().skip(carried.1) {
             if receipts.patch_spans.get(&reference.patch_id)
                 != Some(&(reference.first_seq, reference.last_seq))
             {
@@ -2151,22 +2910,51 @@ impl<V: Vfs> BlockStore<V> {
                     (reference.first_seq, reference.last_seq),
                 );
             }
-            verified_patches.push(*reference);
         }
+        Ok(())
+    }
+
+    fn finish_verified_root(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        published_at: CommitSeq,
+        encoded: crate::root::EncodedRoot,
+        mut memo: RootMemo,
+    ) -> VerifiedRoot {
         let id =
             StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &encoded.bytes);
-        Ok(VerifiedRoot {
-            id: PartitionRootVersion(id),
+        let id = PartitionRootVersion(id);
+        memo.binding = Some(self.root_binding(id, graph, branch, published_at));
+        VerifiedRoot {
+            id,
             bytes: encoded.bytes,
             segments: encoded.new_segments,
-            memo: RootMemo {
-                partition: root.partition,
-                blocks: verified_blocks,
-                chain_heads,
-                patches: verified_patches,
-                segments,
-            },
-        })
+            index_segments: encoded.new_index_segments,
+            memo,
+        }
+    }
+
+    fn root_identity_domain(&self) -> ObjectId {
+        // An opaque tag for this key and security namespace, not another
+        // copy of key material and not a claim that a root exists on disk.
+        StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &[])
+    }
+
+    fn root_binding(
+        &self,
+        root: PartitionRootVersion,
+        graph: GraphId,
+        branch: BranchId,
+        published_at: CommitSeq,
+    ) -> RootBinding {
+        RootBinding {
+            identity: self.root_identity_domain(),
+            root,
+            graph,
+            branch,
+            published_at,
+        }
     }
 
     /// Publish a verified root together with the manifest that names it: both
@@ -2195,15 +2983,28 @@ impl<V: Vfs> BlockStore<V> {
             id,
             bytes,
             segments,
+            index_segments,
             memo,
         } = root;
         let mut batch = self.publication_batch(cx, receipts, None)?;
-        // A root's new segments ride its batch, staged before it: nothing
-        // names them until the root slot names this manifest.
-        for (segment_id, segment) in &segments {
-            batch
-                .put_object(cx, StoredObjectKind::Segment, *segment_id, segment)
-                .await?;
+        // A root's new segments and index segments ride its batch, staged
+        // before it: nothing names them until the root slot names this
+        // manifest.
+        for (kind, objects) in [
+            (StoredObjectKind::Segment, &segments),
+            (StoredObjectKind::IndexSegment, &index_segments),
+        ] {
+            for (segment_id, segment) in objects {
+                batch.put_object(cx, kind, *segment_id, segment).await?;
+            }
+        }
+        // A bulk commit fills about 16 segments. One pack makes them one
+        // inode sync instead of one each, and one file an open reads instead
+        // of one per 256 references (2,905 files on a web-google root). The
+        // root and manifest stay loose, where slot recovery and the damage
+        // tooling address them by path.
+        if segments.len() + index_segments.len() >= ROOT_SEGMENT_PACK_MIN {
+            batch.flush_as_pack(cx).await?;
         }
         batch
             .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
@@ -2221,8 +3022,9 @@ impl<V: Vfs> BlockStore<V> {
 
     /// Load the partition root named by `id`, using the root format's exact byte
     /// ceiling and root-specific identity verifier before structural decoding.
-    /// A V4 root's segments are read, authenticated and flattened back into
-    /// the one [`crate::root::PartitionRoot`] every reader sees.
+    /// A V4 or V5 root's segments (a V5 root's index segments first) are read,
+    /// authenticated and flattened back into the one
+    /// [`crate::root::PartitionRoot`] every reader sees.
     pub async fn get_root(
         &self,
         cx: &impl StorageReadCx,
@@ -2268,13 +3070,18 @@ impl<V: Vfs> BlockStore<V> {
     /// [`BlockStore::reopen`], also returning the sealed bytes a retained
     /// writer needs, taken from the same identity-verified reads. A caller that
     /// rebuilds a writer from a reopened partition must not read and verify
-    /// every block and patch a second time to get bytes it already had.
+    /// every block and patch a second time to get bytes it already had. The
+    /// same holds for the walk's admission state, returned as a
+    /// [`RootAdmission`].
     pub async fn reopen_sealed(
         &self,
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<ReopenedPartition, StoreError> {
-        let root = self.get_root(cx, id).await?;
+        let (root, segments) = self
+            .get_root_and_segments(cx, id, crate::root::MAX_ROOT_READ_BYTES)
+            .await?;
+        let mut walk = RootWalk::default();
         let read = self
             .inspect_root_blocks_observed(
                 cx,
@@ -2282,23 +3089,34 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
+                &mut walk,
             )
             .await?;
         let mut blocks = Vec::with_capacity(read.len());
         let mut block_props = Vec::with_capacity(read.len());
         let mut sealed_blocks = Vec::with_capacity(read.len());
+        let mut chains = Vec::with_capacity(read.len());
+        let mut property_patches = std::collections::BTreeSet::new();
         for (reference, read) in read {
-            let property_patch = read
-                .property_patch
-                .map(|(patch_id, bytes)| crate::writer::SealedPropertyPatch { patch_id, bytes });
+            let property_patch = read.property_patch.map(|(patch_id, bytes)| {
+                property_patches.insert(patch_id);
+                crate::writer::SealedPropertyPatch {
+                    patch_id,
+                    bytes: bytes.into(),
+                }
+            });
             sealed_blocks.push(crate::writer::SealedBlock {
                 block_id: reference.block_id,
-                bytes: read.bytes,
+                bytes: read.bytes.into(),
                 first_seq: reference.first_seq,
                 last_seq: reference.last_seq,
                 property_patch,
             });
-            let (entries, props, _) = read.resolved;
+            let (entries, props, predecessor) = read.resolved;
+            chains.push((
+                entries.first().map(|entry| (entry.src, entry.relation)),
+                predecessor,
+            ));
             blocks.push(entries);
             block_props.push(props);
         }
@@ -2309,6 +3127,7 @@ impl<V: Vfs> BlockStore<V> {
                 |_, reference, read| Some((*reference, read)),
                 &mut |_| Ok::<(), StoreError>(()),
                 OPEN_READS_IN_FLIGHT,
+                &mut walk,
             )
             .await?;
         let mut patches = Vec::with_capacity(read.len());
@@ -2316,12 +3135,22 @@ impl<V: Vfs> BlockStore<V> {
         for (reference, (rows, bytes)) in read {
             sealed_patches.push(crate::writer::SealedPatch {
                 patch_id: reference.patch_id,
-                bytes,
+                bytes: bytes.into(),
                 first_seq: reference.first_seq,
                 last_seq: reference.last_seq,
             });
             patches.push(rows);
         }
+        let admission = RootAdmission {
+            partition: root.partition,
+            binding: self.root_binding(id, root.graph, root.branch, root.published_at),
+            blocks: root.blocks.clone(),
+            chains,
+            patches: root.vertex_patches.clone(),
+            property_patches,
+            walk,
+            segments,
+        };
         Ok(ReopenedPartition {
             root,
             blocks,
@@ -2329,6 +3158,7 @@ impl<V: Vfs> BlockStore<V> {
             patches,
             sealed_blocks,
             sealed_patches,
+            admission,
         })
     }
 
@@ -2423,26 +3253,6 @@ impl<V: Vfs> BlockStore<V> {
     }
 }
 
-/// Durability-and-verification receipts for one live publish lineage
-/// (fgdb-gieu): which block identities a [`BlockStore`] has already made
-/// durable and admitted, plus the cross-block edge-history state those
-/// admissions accumulated.
-///
-/// The receipt transfers no authority a caller could not earn on the slow
-/// path: an identity enters the map only after the store itself wrote the
-/// bytes durably ([`BlockStore::put_verified`]) or read them back from disk
-/// ([`BlockStore::put_root_verified`]'s fallback), and in both cases the
-/// entries passed the same identity, span, and edge-history checks full
-/// admission runs. What a receipt buys is memoisation, not trust: the proof
-/// already happened in this process over these immutable content-addressed
-/// bytes, so re-deriving it from disk on every subsequent publication is
-/// O(blocks) work per commit with no new information in it.
-///
-/// Scope it like the fold it accompanies: one receipts value per open
-/// database session, dropped with the session. It is never persisted —
-/// a receipt is a statement about what THIS process has proven and fsynced,
-/// and a fresh process must re-earn those proofs from disk, which the
-/// fallback path does automatically on the first publication after open.
 /// One root-named block, fully admitted: its decoded entries, its hosted
 /// property column, and its declared predecessor link (V6, fgdb-4391).
 type ResolvedBlock = (
@@ -2474,8 +3284,83 @@ pub struct ReopenedPartition {
     pub patches: Vec<VertexPatchRows>,
     pub sealed_blocks: Vec<crate::writer::SealedBlock>,
     pub sealed_patches: Vec<crate::writer::SealedPatch>,
+    pub admission: RootAdmission,
 }
 
+/// The cross-object state one root walk accumulates beside the objects it
+/// keeps: the edge-history and chain-law state after the last block, and the
+/// vertex-history state after the last patch.
+#[derive(Debug, Default)]
+struct RootWalk {
+    history: crate::root::EdgeHistoryValidator,
+    chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
+    vertex_history: crate::root::VertexHistoryValidator,
+}
+
+/// What [`BlockStore::reopen_sealed`] proved about one root, besides the
+/// objects it returned. For each named block: its identity, claimed span and
+/// chain fields. For each named vertex patch: its identity and claimed span.
+/// Also the hosted edge-property patches, the history validators after the
+/// whole root, and the root's proven V4 segments.
+///
+/// This is admission only. It says nothing about durability, so it grants
+/// nothing until [`PublishReceipts::for_published_root`] is called on it.
+#[derive(Debug)]
+pub struct RootAdmission {
+    partition: u64,
+    /// The stored identity is retained verbatim: a reopened V3 or V4 root
+    /// must not be silently rebound to its re-encoding as V5.
+    binding: RootBinding,
+    blocks: Vec<crate::root::BlockRef>,
+    /// Parallel to `blocks`: each block's descriptor family and declared
+    /// predecessor.
+    #[allow(clippy::type_complexity)]
+    chains: Vec<(
+        Option<(fgdb_types::VId, fgdb_delta_types::RelationId)>,
+        Option<DeltaBlockVersion>,
+    )>,
+    patches: Vec<crate::root::PatchRef>,
+    property_patches: std::collections::BTreeSet<ObjectId>,
+    walk: RootWalk,
+    segments: crate::root::SegmentCache,
+}
+
+impl RootAdmission {
+    /// The canonical edge history this walk admitted: one row per content
+    /// statement, keyed `(eid, created_at)`, exactly the collapse of the
+    /// root's blocks in order. A writable open builds its writer from it
+    /// instead of validating every block a second time (fgdb-e8gr4). Built
+    /// on each call from the walk's per-EId chains (fgdb-2n2a2).
+    pub fn edge_statements(
+        &self,
+    ) -> std::collections::BTreeMap<(fgdb_types::EId, CommitSeq), crate::AdjacencyEntry> {
+        self.walk.history.statements()
+    }
+}
+
+/// Durability-and-verification receipts for one live publish lineage
+/// (fgdb-gieu): which block identities a [`BlockStore`] has already made
+/// durable and admitted, plus the cross-block edge-history state those
+/// admissions accumulated.
+///
+/// The receipt transfers no authority a caller could not earn on the slow
+/// path. An identity enters the map in one of three ways:
+/// - the store itself wrote the bytes durably ([`BlockStore::put_verified`]);
+/// - the store read them back from disk ([`BlockStore::put_root_verified`]'s
+///   fallback);
+/// - a published root named them ([`Self::for_published_root`]).
+///
+/// In every case the entries passed the same identity, span, and edge-history
+/// checks full admission runs. What a receipt buys is memoisation: the proof
+/// already happened in this process over these immutable content-addressed
+/// bytes, so re-deriving it from disk on every subsequent publication is
+/// O(blocks) work per commit with no new information in it.
+///
+/// Scope it like the fold it accompanies: one receipts value per open
+/// database session, dropped with the session. It is never persisted. A
+/// fresh process seeds it from the root it opens ([`Self::for_published_root`]),
+/// or starts empty and re-earns each proof from disk through the fallback
+/// path on its first publication.
 #[derive(Debug, Default)]
 pub struct PublishReceipts {
     validator: crate::root::EdgeHistoryValidator,
@@ -2517,7 +3402,25 @@ pub struct VerifiedRoot {
     /// Full segments this root names that were never published before; they
     /// are written, before the root, in the same publication.
     segments: Vec<(ObjectId, Vec<u8>)>,
+    /// The same for full index segments (fgdb-5gzaa).
+    index_segments: Vec<(ObjectId, Vec<u8>)>,
     memo: RootMemo,
+}
+
+/// A proposed extension of one exact, already admitted partition root.
+/// Membership slices contain only new references; the previous publication
+/// supplies the prefix. A stale or mismatched basis takes the full-root path.
+#[derive(Clone, Copy, Debug)]
+pub struct RootAppend<'a> {
+    pub basis: PartitionRootVersion,
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub carried_blocks: usize,
+    pub carried_patches: usize,
+    pub blocks: &'a [crate::root::BlockRef],
+    pub vertex_patches: &'a [crate::root::PatchRef],
 }
 
 impl VerifiedRoot {
@@ -2531,17 +3434,121 @@ impl VerifiedRoot {
 #[derive(Debug, Default)]
 struct RootMemo {
     partition: u64,
+    binding: Option<RootBinding>,
     blocks: Vec<crate::root::BlockRef>,
     chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
     patches: Vec<crate::root::PatchRef>,
-    /// The full V4 segments chunking the verified prefix. Valid exactly as
-    /// long as the memo is: a root that does not extend the prefix drops both.
+    /// The full segments and index segments chunking the verified prefix.
+    /// Valid exactly as long as the memo is: a root that does not extend the
+    /// prefix drops both.
     segments: crate::root::SegmentCache,
+}
+
+/// Exact publication provenance for the append fast path. The identity tag
+/// binds both the key and security namespace; block/patch counts and partition
+/// are carried by the enclosing memo.
+#[derive(Debug)]
+struct RootBinding {
+    identity: ObjectId,
+    root: PartitionRootVersion,
+    graph: GraphId,
+    branch: BranchId,
+    published_at: CommitSeq,
 }
 
 impl PublishReceipts {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enumerate root segments and index segments, each with its level, only
+    /// when this memo covers the caller's exact admitted partition
+    /// membership. An absent or prefix-only memo refuses; neither can silently
+    /// certify an incomplete scrub inventory. This lends identities for
+    /// re-verification and mints no new durability receipts.
+    pub fn root_segment_ids(
+        &self,
+        partition: u64,
+        blocks: &[crate::root::BlockRef],
+        patches: &[crate::root::PatchRef],
+    ) -> Option<impl Iterator<Item = (ObjectId, crate::root_segment::SegmentLevel)> + '_> {
+        self.root_memo
+            .as_ref()
+            .filter(|memo| {
+                memo.partition == partition
+                    && memo.blocks.as_slice() == blocks
+                    && memo.patches.as_slice() == patches
+            })
+            .map(|memo| memo.segments.object_ids())
+    }
+
+    /// Receipts for every object a published root names, built from that
+    /// root's full admission (fgdb-ibbuq; owner ruling 2026-10-06, "trust
+    /// publication").
+    ///
+    /// The admission half is already proven: the reopen walk checked every
+    /// identity, claimed span, chain link and history law that publication
+    /// checks, over the bytes on disk. The durability half is what this step
+    /// trusts, and only the caller can vouch for it: pass the admission of a
+    /// root that the root slot selected. The publish protocol syncs every
+    /// object a root names, then the root and its manifest, before the slot
+    /// names them, so they were durable before the root became reachable.
+    ///
+    /// A directory copied without a sync breaks that premise. Its objects can
+    /// still sit in the page cache only, and a commit that trusted them could
+    /// publish a root over bytes a crash then loses. Such a copy must be
+    /// adopted (every file and directory synced) before it is opened for
+    /// writing.
+    pub fn for_published_root(admission: RootAdmission) -> Self {
+        let RootAdmission {
+            partition,
+            binding,
+            blocks,
+            chains,
+            patches,
+            property_patches,
+            walk,
+            segments,
+        } = admission;
+        let RootWalk {
+            history,
+            chain_heads,
+            vertex_history,
+        } = walk;
+        let mut spans = BTreeMap::new();
+        let mut chain_fields = BTreeMap::new();
+        for (reference, chain) in blocks.iter().zip(chains) {
+            spans.insert(
+                reference.block_id,
+                (reference.first_seq, reference.last_seq),
+            );
+            chain_fields.insert(reference.block_id, chain);
+        }
+        let patch_spans = patches
+            .iter()
+            .map(|reference| {
+                (
+                    reference.patch_id,
+                    (reference.first_seq, reference.last_seq),
+                )
+            })
+            .collect();
+        Self {
+            validator: history,
+            spans,
+            chains: chain_fields,
+            vertex_validator: vertex_history,
+            patch_spans,
+            property_patches,
+            root_memo: Some(RootMemo {
+                partition,
+                binding: Some(binding),
+                blocks,
+                chain_heads,
+                patches,
+                segments,
+            }),
+        }
     }
 
     fn admit_block(
@@ -2610,7 +3617,13 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
     receipts: &'a mut PublishReceipts,
     permit: ObjectPublicationPermit,
     objects: std::collections::BTreeSet<ObjectId>,
-    staged: Vec<StagedObject<V::File>>,
+    /// Objects staged since the last flush, in staging order. Nothing is
+    /// written until a flush decides between one pack and loose files.
+    unflushed: Vec<(StoredObjectKind, ObjectId, Vec<u8>)>,
+    unflushed_bytes: usize,
+    /// Whether a flush of this batch published a pack, whose name `finish`
+    /// must make durable in the pack directory.
+    packed: bool,
     pending: Vec<PendingAdmission>,
     crash_at: Option<BlockStoreCrashPoint>,
     failed: bool,
@@ -2626,32 +3639,31 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         if !self.objects.contains(&id) {
-            if self.staged.len() == BATCH_SYNCS_IN_FLIGHT {
+            let limit = kind.stored_limit();
+            ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
+            if self.unflushed_bytes + bytes.len() > pack::PACK_TARGET_BYTES {
                 self.flush_staged(cx).await?;
             }
-            let staged = self
-                .store
-                .stage_object_under_permit(kind, cx, id, bytes, self.staged.len(), &self.permit)
-                .await?;
-            self.staged.push(staged);
+            self.unflushed_bytes += bytes.len();
+            self.unflushed.push((kind, id, bytes.to_vec()));
             self.objects.insert(id);
         }
         Ok(())
     }
 
-    /// The bytes of an object this batch staged but has not yet flushed: its
-    /// canonical name does not exist until the flush renames it.
+    /// The bytes of an object this batch staged but has not yet flushed: it
+    /// has no canonical location until the flush publishes it.
     fn staged_bytes(&self, id: ObjectId) -> Option<Vec<u8>> {
-        let path = self.store.path(id);
-        self.staged
+        self.unflushed
             .iter()
-            .find(|object| object.path == path)
-            .map(|object| object.bytes.clone())
+            .find(|(_, staged, _)| *staged == id)
+            .map(|(_, _, bytes)| bytes.clone())
     }
 
-    /// Make every object staged so far canonical: sync all of their inodes
-    /// with every sync in flight at once, prove each inode's durable bytes,
-    /// then give each new inode its content-addressed name. The names become
+    /// Make every object staged so far canonical: as one pack when there are
+    /// at least [`PACK_MIN_OBJECTS`], else as loose files whose inodes sync
+    /// with every sync in flight at once. Either way the durable bytes are
+    /// proven by a read-back before anything is named. The names become
     /// durable only at `finish`'s directory barrier, and receipts escape only
     /// after it. A failed or cancelled flush poisons this batch.
     pub async fn flush(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
@@ -2662,8 +3674,149 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         Ok(())
     }
 
+    /// Publish everything staged so far as one pack, however few objects
+    /// it is; the root publication packs a bulk commit's segments this way.
+    async fn flush_as_pack(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
+        self.check_live()?;
+        self.failed = true;
+        let objects = std::mem::take(&mut self.unflushed);
+        self.unflushed_bytes = 0;
+        if !objects.is_empty() {
+            self.flush_pack(cx, &objects).await?;
+        }
+        self.failed = false;
+        Ok(())
+    }
+
     async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
-        let mut staged = std::mem::take(&mut self.staged);
+        let objects = std::mem::take(&mut self.unflushed);
+        self.unflushed_bytes = 0;
+        if objects.len() >= PACK_MIN_OBJECTS {
+            return self.flush_pack(cx, &objects).await;
+        }
+        for chunk in objects.chunks(BATCH_SYNCS_IN_FLIGHT) {
+            let mut staged = Vec::with_capacity(chunk.len());
+            for (slot, (kind, id, bytes)) in chunk.iter().enumerate() {
+                staged.push(
+                    self.store
+                        .stage_object_under_permit(*kind, cx, *id, bytes, slot, &self.permit)
+                        .await?,
+                );
+            }
+            self.flush_loose(cx, staged).await?;
+        }
+        Ok(())
+    }
+
+    /// Publish `objects` as one pack: write it under the staging name, sync
+    /// it, prove its durable bytes, then give it its content-addressed name
+    /// in the pack directory. A pack already published under that name (the
+    /// same bytes, by a batch that failed before its receipts) is re-synced,
+    /// never rewritten, as an existing loose object is.
+    async fn flush_pack(
+        &mut self,
+        cx: &CommitCx,
+        objects: &[(StoredObjectKind, ObjectId, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        let store = self.store;
+        let dir = store.packs.dir().to_path_buf();
+        match cx.with_restriction_async(store.vfs.create_dir(&dir)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !cx
+                    .with_restriction_async(store.vfs.symlink_metadata(&dir))
+                    .await?
+                    .file_type()
+                    .is_dir()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "strata pack path exists but is not a directory",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let entries: Vec<(ObjectId, &[u8])> = objects
+            .iter()
+            .map(|(_, id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+        let bytes = pack::encode(&entries);
+        let path = dir.join(pack::name(&bytes));
+        match cx
+            .with_restriction_async(store.vfs.symlink_metadata(&path))
+            .await
+        {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "canonical pack path exists but is not a regular file",
+                    )
+                    .into());
+                }
+                let existing_opts = OpenOptions::new().read(true).write(true);
+                let existing = cx
+                    .with_restriction_async(store.vfs.open(&path, &existing_opts))
+                    .await?;
+                let reread = cx
+                    .with_restriction_async(store.vfs.open(&path, &existing_opts))
+                    .await?;
+                if read_bounded(cx, reread, pack::MAX_PACK_BYTES).await? != bytes {
+                    return Err(StoreError::Collision {
+                        object_id: ObjectId(fgdb_crypto::blake3::hash(&bytes).0),
+                    });
+                }
+                cx.with_restriction_async(existing.sync_all()).await?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let staging_path = dir.join(pack::PACK_STAGING_FILE);
+                let mut staging = store.open_staging_inode(cx, &staging_path).await?;
+                staging.write_all(&bytes).await?;
+                if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
+                    return Err(std::io::Error::other(
+                        "crash: batch staging bytes before inode sync",
+                    )
+                    .into());
+                }
+                cx.with_restriction_async(staging.sync_all()).await?;
+                store
+                    .verify_durable_bytes(cx, &staging_path, &bytes, pack::MAX_PACK_BYTES)
+                    .await?;
+                if self.crash_at
+                    == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication)
+                {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "crash: complete staging inode before canonical publication",
+                    )));
+                }
+                // Close before rename for platforms that refuse to move an
+                // open file. The batch's permit spans the absence check, the
+                // staging write and the move.
+                drop(staging);
+                store.vfs.rename(&staging_path, &path).await?;
+                if self.crash_at
+                    == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
+                {
+                    return Err(std::io::Error::other(
+                        "crash: strata block inode durable before directory entry",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        store.packs.published(path, &bytes);
+        self.packed = true;
+        Ok(())
+    }
+
+    async fn flush_loose(
+        &mut self,
+        cx: &CommitCx,
+        mut staged: Vec<StagedObject<V::File>>,
+    ) -> Result<(), StoreError> {
         let creates = staged.iter().any(|object| object.staging.is_some());
         if creates && self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
             return Err(
@@ -2818,6 +3971,11 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 )
                 .into());
             }
+            if self.packed {
+                // The packs' names, then (below) the pack directory's own
+                // entry, which this batch may have created.
+                sync_directory(cx, &self.store.vfs, self.store.packs.dir()).await?;
+            }
             sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
             if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {
                 return Err(std::io::Error::other(
@@ -2918,6 +4076,77 @@ mod durability_tests {
         ));
     }
 
+    /// The read loop returns a file of exactly the ceiling whole and refuses
+    /// one byte more, on both sides of the metadata early refusal: an object
+    /// ceiling one read covers, and a ceiling that takes several reads.
+    #[test]
+    fn bounded_reads_return_the_exact_ceiling_whole_across_read_ops() {
+        let dir = scratch_dir("bounded-read-ops");
+        let large = 3 * super::READ_OP_BYTES as u64 + 7;
+        for (name, limit) in [("object", MAX_STORED_OBJECT_BYTES), ("large", large)] {
+            let fill = |len: u64| (0..len).map(|at| (at % 251) as u8).collect::<Vec<u8>>();
+            let (exact, over) = (
+                dir.join(format!("{name}-exact")),
+                dir.join(format!("{name}-over")),
+            );
+            std::fs::write(&exact, fill(limit)).expect("fixture");
+            std::fs::write(&over, fill(limit + 1)).expect("fixture");
+            let (read_exact, read_over) = under_lab(50, move |cx| async move {
+                let vfs = UnixVfs::new();
+                let file = vfs.open_read(&exact).await.expect("open fixture");
+                let read_exact = read_bounded(&cx, file, limit).await;
+                let file = vfs.open_read(&over).await.expect("open fixture");
+                (read_exact, read_bounded(&cx, file, limit).await)
+            });
+            let read_exact = read_exact.expect("the exact ceiling reads");
+            assert!(
+                read_exact == fill(limit),
+                "{name}: read {} of {limit} bytes",
+                read_exact.len()
+            );
+            assert!(
+                matches!(read_over, Err(StoreError::ObjectTooLarge { limit: found, observed })
+                    if found == limit && observed == limit + 1),
+                "{name}"
+            );
+        }
+    }
+
+    /// A read returns exactly the object's bytes and holds no more capacity
+    /// than it read, whatever the ceiling: an open keeps every object's bytes
+    /// until it is proven, so ceiling-sized buffers were most of its peak
+    /// resident memory (fgdb-2n2a2). Small, exact-ceiling, multi-read and
+    /// empty objects alike.
+    #[test]
+    fn bounded_reads_keep_only_the_bytes_they_read() {
+        let dir = scratch_dir("bounded-read-exact-capacity");
+        let large = 3 * super::READ_OP_BYTES as u64 + 7;
+        let cases = [
+            ("empty", 0, MAX_STORED_OBJECT_BYTES),
+            ("one", 1, MAX_STORED_OBJECT_BYTES),
+            ("typical", 450, MAX_STORED_OBJECT_BYTES),
+            ("ceiling", MAX_STORED_OBJECT_BYTES, MAX_STORED_OBJECT_BYTES),
+            ("one-op-of-large", super::READ_OP_BYTES as u64, large),
+            ("large", large, large),
+        ];
+        for (name, len, limit) in cases {
+            let fill = |len: u64| (0..len).map(|at| (at % 251) as u8).collect::<Vec<u8>>();
+            let path = dir.join(name);
+            std::fs::write(&path, fill(len)).expect("fixture");
+            let read = under_lab(51, move |cx| async move {
+                let file = UnixVfs::new().open_read(&path).await.expect("open fixture");
+                read_bounded(&cx, file, limit).await
+            })
+            .expect("within the ceiling");
+            assert!(
+                read == fill(len),
+                "{name}: read {} of {len} bytes",
+                read.len()
+            );
+            assert_eq!(read.capacity(), read.len(), "{name}: retained capacity");
+        }
+    }
+
     #[test]
     fn oversized_canonical_inode_is_refused_before_identity_materialization() {
         let dir = scratch_dir("oversized-canonical-inode");
@@ -2940,18 +4169,152 @@ mod durability_tests {
         });
     }
 
-    /// fgdb-a7sz, pinned where the seam lives: a lawful root larger than the
-    /// block-derived bound is admitted under the root family's own ceiling.
-    /// A stored V4 root (fgdb-d5vo4) outgrows 16 KiB only at 51 full
-    /// segments plus a full tail -- 13,311 references, which end to end costs
-    /// as many synced blocks -- so the root object here names no stored ones.
+    /// Each metadata family refuses one byte past its ceiling before identity
+    /// or decode. The read never materializes more than ceiling + 1 bytes; a
+    /// family whose ceiling is at least one read op (manifest, root) refuses
+    /// from the inode's length before reading any, while a smaller ceiling
+    /// (segment, index) is read to ceiling + 1 and refused from that count
+    /// (fgdb-2n2a2: the length probe would cost the op it saves).
     #[test]
-    fn a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling() {
-        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v4};
+    fn metadata_reads_refuse_each_family_ceiling_before_materializing_sparse_bytes() {
+        let dir = scratch_dir("oversized-metadata-inodes");
+        under_lab(0x5c12, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            for (kind, limit) in [
+                (0, super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+                (1, crate::root::MAX_ENCODED_ROOT_BYTES as u64),
+                (2, crate::root_segment::SEGMENT_BYTES as u64),
+                (3, crate::root_segment::INDEX_BYTES as u64),
+            ] {
+                let id = ObjectId([0x60 + kind; 32]);
+                let file = File::create(store.path(id)).expect("private sparse fixture");
+                file.set_len(limit + 1).expect("one byte past format cap");
+                let result = match kind {
+                    0 => {
+                        store
+                            .get_manifest_bytes(&cx, crate::manifest::ManifestVersion(id))
+                            .await
+                    }
+                    1 => {
+                        store
+                            .get_root_bytes(&cx, crate::PartitionRootVersion(id))
+                            .await
+                    }
+                    2 => store.get_root_segment_bytes(&cx, id).await,
+                    _ => store.get_root_index_segment_bytes(&cx, id).await,
+                };
+                assert!(
+                    matches!(result, Err(StoreError::ObjectTooLarge {
+                        limit: found_limit, observed
+                    }) if found_limit == limit && observed == limit + 1),
+                    "metadata family {kind}: bound must precede identity/decode"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn scrub_segment_inventory_requires_the_exact_admitted_membership() {
+        use crate::root::{BlockRef, PartitionRoot, PatchRef, SegmentCache, encode_root_v5};
         use crate::root_segment::SEGMENT_REFS;
         use fgdb_types::{BranchId, CommitSeq, GraphId};
 
-        let refs = 51 * SEGMENT_REFS + (SEGMENT_REFS - 1);
+        let id = |kind, at: usize| {
+            let mut bytes = [kind; 32];
+            bytes[..8].copy_from_slice(&(at as u64).to_be_bytes());
+            ObjectId(bytes)
+        };
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 7,
+            published_at: CommitSeq(1),
+            blocks: (0..SEGMENT_REFS)
+                .map(|at| BlockRef {
+                    block_id: id(1, at),
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                })
+                .collect(),
+            vertex_patches: (0..SEGMENT_REFS)
+                .map(|at| PatchRef {
+                    patch_id: id(2, at),
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                })
+                .collect(),
+        };
+        let mut segments = SegmentCache::default();
+        let encoded = encode_root_v5(&root, &K_OID, NAMESPACE, &mut segments).unwrap();
+        assert_eq!(
+            encoded.new_segments.len(),
+            2,
+            "both reference families are segmented"
+        );
+        let receipts = super::PublishReceipts {
+            root_memo: Some(super::RootMemo {
+                partition: root.partition,
+                blocks: root.blocks.clone(),
+                patches: root.vertex_patches.clone(),
+                segments,
+                ..super::RootMemo::default()
+            }),
+            ..super::PublishReceipts::default()
+        };
+        assert_eq!(
+            receipts
+                .root_segment_ids(7, &root.blocks, &root.vertex_patches)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            encoded
+                .new_segments
+                .iter()
+                .map(|(id, _)| (*id, crate::root_segment::SegmentLevel::Leaf))
+                .collect::<Vec<_>>()
+        );
+        for (partition, blocks, patches) in [
+            (8, root.blocks.as_slice(), root.vertex_patches.as_slice()),
+            (
+                7,
+                &root.blocks[..SEGMENT_REFS - 1],
+                root.vertex_patches.as_slice(),
+            ),
+            (
+                7,
+                root.blocks.as_slice(),
+                &root.vertex_patches[..SEGMENT_REFS - 1],
+            ),
+        ] {
+            assert!(
+                receipts
+                    .root_segment_ids(partition, blocks, patches)
+                    .is_none()
+            );
+        }
+        assert!(
+            super::PublishReceipts::default()
+                .root_segment_ids(7, &root.blocks, &root.vertex_patches)
+                .is_none()
+        );
+    }
+
+    /// fgdb-a7sz, pinned where the seam lives: a lawful root larger than the
+    /// block-derived bound is admitted under the root family's own ceiling.
+    /// A stored V5 root (fgdb-5gzaa) outgrows 16 KiB only once it names 51
+    /// segment references beside a full tail. At most 15 of those can be
+    /// segments, so it needs 36 index references: 151,551 references, which
+    /// end to end costs as many synced blocks. The root object here therefore
+    /// names no stored ones.
+    #[test]
+    fn a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling() {
+        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v5};
+        use crate::root_segment::{INDEX_REFS, SEGMENT_REFS};
+        use fgdb_types::{BranchId, CommitSeq, GraphId};
+
+        let refs =
+            36 * INDEX_REFS * SEGMENT_REFS + (INDEX_REFS - 1) * SEGMENT_REFS + (SEGMENT_REFS - 1);
         let root = PartitionRoot {
             graph: GraphId(1),
             branch: BranchId(1),
@@ -2970,7 +4333,7 @@ mod durability_tests {
                 .collect(),
             vertex_patches: vec![],
         };
-        let bytes = encode_root_v4(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+        let bytes = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
             .expect("a lawful root")
             .bytes;
         assert!(
@@ -2996,6 +4359,123 @@ mod durability_tests {
                 .await
                 .expect("admitted under the root family's ceiling");
             assert_eq!(std::fs::read(store.path(id)).expect("stored"), bytes);
+        });
+    }
+
+    /// fgdb-5gzaa at the object layer: a V5 root naming an index segment is
+    /// read back through it. The index segment is authenticated like any
+    /// object (a flipped byte is refused, restoring it restores the read), its
+    /// bytes are charged to the read budget (the exact sum admits, one byte
+    /// less is refused), and the scrub inventory names it as an index. A full
+    /// index covers 4,096 references, as many synced blocks end to end, so
+    /// the root names no stored ones: the read path proves the root, the index
+    /// and the segments, never the blocks.
+    #[test]
+    fn a_v5_root_reads_through_its_index_segment_under_its_budget() {
+        use crate::root::{BlockRef, PartitionRoot, SegmentCache, encode_root_v5};
+        use crate::root_segment::{INDEX_BYTES, INDEX_REFS, SEGMENT_BYTES, SEGMENT_REFS};
+        use fgdb_types::{BranchId, CommitSeq, GraphId};
+
+        let refs = SEGMENT_REFS * INDEX_REFS + 300;
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(2),
+            blocks: (0..refs)
+                .map(|k| {
+                    let mut id = [0x0b; 32];
+                    id[..8].copy_from_slice(&(k as u64).to_be_bytes());
+                    BlockRef {
+                        block_id: ObjectId(id),
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }
+                })
+                .collect(),
+            vertex_patches: vec![],
+        };
+        let encoded = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
+            .expect("a lawful root");
+        assert_eq!(encoded.new_segments.len(), INDEX_REFS + 1);
+        assert_eq!(encoded.new_index_segments.len(), 1);
+        // The index, one more segment, and the 44-reference tail.
+        assert_eq!(encoded.bytes.len(), 94 + 2 * 80 + 44 * 48);
+
+        let dir = scratch_dir("v5-root-index-segment");
+        under_lab(53, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+                .await
+                .expect("opens");
+            for (kind, objects) in [
+                (super::StoredObjectKind::Segment, &encoded.new_segments),
+                (
+                    super::StoredObjectKind::IndexSegment,
+                    &encoded.new_index_segments,
+                ),
+            ] {
+                for (_, bytes) in objects {
+                    store
+                        .put_object_with_steps(kind, &cx, bytes, None, || {}, || {})
+                        .await
+                        .expect("segment stored");
+                }
+            }
+            let id = crate::PartitionRootVersion(
+                store
+                    .put_object_with_steps(
+                        super::StoredObjectKind::Root,
+                        &cx,
+                        &encoded.bytes,
+                        None,
+                        || {},
+                        || {},
+                    )
+                    .await
+                    .expect("root stored"),
+            );
+            assert_eq!(store.get_root(&cx, id).await.expect("reads"), root);
+
+            let exact = encoded.bytes.len() + INDEX_BYTES + (INDEX_REFS + 1) * SEGMENT_BYTES;
+            let (read, segments) = store
+                .get_root_and_segments(&cx, id, exact)
+                .await
+                .expect("the exact budget admits");
+            assert_eq!(read, root);
+            let (index_id, _) = encoded.new_index_segments[0];
+            assert_eq!(
+                segments
+                    .object_ids()
+                    .filter(|(_, level)| *level == crate::root_segment::SegmentLevel::Index)
+                    .collect::<Vec<_>>(),
+                [(index_id, crate::root_segment::SegmentLevel::Index)]
+            );
+            assert_eq!(segments.object_ids().count(), INDEX_REFS + 2);
+            assert!(matches!(
+                store.get_root_and_segments(&cx, id, exact - 1).await,
+                Err(StoreError::ObjectTooLarge { .. })
+            ));
+            assert_eq!(
+                store
+                    .get_root_index_segment_bytes(&cx, index_id)
+                    .await
+                    .expect("re-reads"),
+                encoded.new_index_segments[0].1
+            );
+
+            let path = store.path(index_id);
+            let genuine = std::fs::read(&path).expect("index object");
+            let mut flipped = genuine.clone();
+            flipped[300] ^= 1;
+            std::fs::write(&path, &flipped).expect("plant damage");
+            assert!(matches!(
+                store.get_root(&cx, id).await,
+                Err(StoreError::MalformedRoot(crate::root::RootError::Segment(
+                    crate::root_segment::SegmentError::IdentityMismatch { .. }
+                )))
+            ));
+            std::fs::write(&path, &genuine).expect("restore");
+            assert_eq!(store.get_root(&cx, id).await.expect("restored"), root);
         });
     }
 

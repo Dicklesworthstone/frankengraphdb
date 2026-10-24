@@ -405,13 +405,19 @@ fn hidden_expression_failure_preserves_durable_write_and_rebuild_restores_mainte
         let durable = db.write(&commit, bad).await.unwrap();
         assert_ne!(durable, basis);
         assert_eq!(db.frontier().unwrap(), durable);
+        // The projected definition is a circuit: the quotient is computed by
+        // a projection node feeding the group. The failing node keeps the
+        // cause; the registered root reports its dependency unavailable, at
+        // the last healthy frontier.
         assert!(matches!(db.standing_query(&query, &handle),
             Err(StandingQueryError::Unavailable { frontier,
-                reason: StandingQueryFailure::InputExpression { column: 1, error } })
-                if frontier == basis && error.kind == GraphIntegerErrorKind::DivisionByZero));
+                reason: StandingQueryFailure::DependencyUnavailable })
+                if frontier == basis));
+        // A rebuild re-runs the circuit and surfaces the projection's
+        // division by zero in its quotient column.
         assert!(
             matches!(db.rebuild_standing_query(&query, &handle, policy()),
-            Err(StandingQueryError::Maintenance(StandingQueryFailure::InputExpression {
+            Err(StandingQueryError::Maintenance(StandingQueryFailure::OutputExpression {
                 column: 1, error,
             })) if error.kind == GraphIntegerErrorKind::DivisionByZero)
         );

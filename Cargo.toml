@@ -16,6 +16,7 @@ members = [
     "crates/fgdb",
     "crates/fgdb-beacon",
     "crates/fgdb-bigint",
+    "crates/fgdb-bolt",
     "crates/fgdb-calibrate",
     "crates/fgdb-chronicle",
     "crates/fgdb-claim",
@@ -42,6 +43,7 @@ members = [
     "crates/fgdb-unsafe-vfs",
     "crates/fgdb-warden",
     "crates/fgdb-bench",
+    "crates/fgdb-server",
     "tools/registry-check",
 ]
 
@@ -65,4 +67,10 @@ needless_range_loop = "allow"
 # evidence were each removed by fixing their sites or allowing a named site
 # locally with a reason. A new entry in either table needs a lint_allowance row
 # in registries/workspace_topology.toml.
+
+# Test builds keep line tables only, so backtraces still carry file:line. With
+# 889 integration-test files, full DWARF made one remote test pool 300G+
+# and filled build workers' disks (fgdb-2n5c7).
+[profile.test]
+debug = "line-tables-only"
 

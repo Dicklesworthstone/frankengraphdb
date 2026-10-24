@@ -402,7 +402,7 @@ fn database_returns_joint_endpoints_of_a_billion_walks_with_original_source_limi
         db.write_atomic(&commit, vec![vertices, first, transitions])
             .await
             .unwrap();
-        let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+        let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
         for at in 1..=10 {
             statement.push_str(&format!("-[:S]->(x{at})"));
         }

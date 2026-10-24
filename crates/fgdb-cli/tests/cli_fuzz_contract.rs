@@ -428,7 +428,8 @@ fn check_cell(cell: &Json, schema: &Json) {
         "wideint" => {
             value.string().parse::<i128>().unwrap();
         }
-        "average" | "decimal" | "float" | "bytes" | "vertex" | "edge" => {
+        "average" | "decimal" | "float" | "bytes" | "vertex" | "edge" | "date" | "localtime"
+        | "time" | "localdatetime" | "duration" => {
             value.string();
         }
         "timestamp" => {
@@ -567,7 +568,15 @@ fn check_robot_events(stdout: &str, code: i32, schema: &Json) -> Vec<Json> {
             "error" => {
                 terminals += 1;
                 assert_eq!(index, events.len() - 1, "terminal must be last");
-                exact_fields(event, &["v", "event", "class", "diagnostics"]);
+                if event.object().contains_key("offset") {
+                    exact_fields(
+                        event,
+                        &["v", "event", "class", "code", "offset", "diagnostics"],
+                    );
+                    event.get("offset").unsigned();
+                } else {
+                    exact_fields(event, &["v", "event", "class", "code", "diagnostics"]);
+                }
                 let class = event.get("class").string();
                 assert_ne!(class, "success");
                 assert_eq!(
@@ -575,6 +584,20 @@ fn check_robot_events(stdout: &str, code: i32, schema: &Json) -> Vec<Json> {
                     schema.get("exit_codes").get(class).unsigned(),
                     "error.class must match the exit code"
                 );
+                let refusal = event.get("code").string();
+                assert!(
+                    schema
+                        .get("errors")
+                        .get("codes")
+                        .object()
+                        .contains_key(refusal),
+                    "undocumented code {refusal}"
+                );
+                let owner = match refusal {
+                    "usage" | "open" | "io" => refusal,
+                    _ => "query",
+                };
+                assert_eq!(class, owner, "code {refusal} belongs to class {owner}");
                 assert!(!event.get("diagnostics").array().is_empty());
                 for diagnostic in event.get("diagnostics").array() {
                     assert!(!diagnostic.string().trim().is_empty());

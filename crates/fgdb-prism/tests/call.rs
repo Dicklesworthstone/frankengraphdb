@@ -61,28 +61,142 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 4);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 14);
+    assert_eq!(FnxSignatureRegistry::version(), 13);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 16);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
-    assert_eq!(signature.parameters.len(), 4);
+    assert_eq!(signature.parameters.len(), 6);
+    assert_eq!(
+        signature.parameters.iter().filter(|p| p.positional).count(),
+        4
+    );
+    assert_eq!(
+        signature.parameters[4],
+        FnxParameterSpec {
+            name: "iterations",
+            value_type: FnxParameterType::PositiveInteger,
+            positional: false,
+            default: None,
+        }
+    );
+    assert_eq!(
+        signature.parameters[5],
+        FnxParameterSpec {
+            name: "l1_tol",
+            value_type: FnxParameterType::FiniteFloat,
+            positional: false,
+            default: None,
+        }
+    );
     assert_eq!(signature.outputs, &[FnxOutput::Vertex, FnxOutput::Score]);
     assert_eq!(
         signature.implementation,
         FnxImplementationClass::InCoreDecodedCache
     );
-    // A foundation row runs fnx-algorithms itself over an undirected projection.
+    // A native foundation row keeps its undirected law and identifies its
+    // own CSR kernel, with pinned fnx serving as the semantics oracle.
     let foundation = FnxSignatureRegistry::lookup("fnx.betweenness_centrality").unwrap();
     assert_eq!(foundation.graph_kind, FnxGraphKind::Undirected);
     assert!(foundation.parameters.is_empty());
     assert_eq!(
         foundation.execution_kernel,
-        "fnx-algorithms/betweenness_centrality"
+        "fgdb-prism/brandes-csr-source-order-v2"
     );
     // Katz stays unregistered: its checked foundation entry drops the result
     // and witness on non-convergence, so a refusal would have to invent one.
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn cdlp_binds_required_nonnegative_iterations_without_losing_call_identity() {
+    let registration = FnxSignatureRegistry::lookup("fnx.cdlp").unwrap();
+    assert_eq!(registration.graph_kind, FnxGraphKind::Any);
+    assert_eq!(registration.numeric_profile, FNX_DISCRETE_PROFILE);
+    assert_eq!(registration.rng_policy, "none");
+    assert_eq!(
+        registration.parameters,
+        &[FnxParameterSpec {
+            name: "max_iter",
+            value_type: FnxParameterType::NonNegativeInteger,
+            positional: true,
+            default: None,
+        }]
+    );
+    assert_eq!(
+        registration.outputs,
+        &[FnxOutput::Vertex, FnxOutput::Component]
+    );
+    assert_eq!(
+        registration.execution_kernel,
+        "fgdb-prism/cdlp-synchronous-csr-v1"
+    );
+    for max_iter in [0, 1, 5] {
+        let call = FnxCallSpec::cdlp(max_iter);
+        assert_eq!(bind(&format!("CALL fnx.cdlp({max_iter})")), call);
+        assert_eq!(
+            bind(&format!("CALL fnx.cdlp(max_iter => {max_iter})")),
+            call
+        );
+        assert_eq!(call.algorithm(), FnxAlgorithm::Cdlp { max_iter });
+        let parameters =
+            FnxParameters::from([("steps".to_owned(), FnxArgument::Integer(max_iter as i64))]);
+        assert_eq!(
+            FnxCallSpec::bind("CALL fnx.cdlp(max_iter => $steps)", &parameters).unwrap(),
+            call
+        );
+        assert!(!call.supports_sealed_execution());
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            assert!(matches!(
+                call.validate_sealed_projection(direction),
+                Err(FnxSealedExecutionError::UnsupportedAlgorithm(
+                    FnxAlgorithm::Cdlp { .. }
+                ))
+            ));
+        }
+    }
+    assert_ne!(FnxCallSpec::cdlp(0).digest(), FnxCallSpec::cdlp(1).digest());
+    assert_ne!(FnxCallSpec::cdlp(1).digest(), FnxCallSpec::cdlp(5).digest());
+    let aliased = bind("CALL fnx.cdlp(2) YIELD component AS community,node AS member");
+    assert_eq!(aliased.outputs()[0].field, FnxOutput::Component);
+    assert_eq!(aliased.outputs()[0].name, "community");
+    assert_eq!(aliased.outputs()[1].field, FnxOutput::Vertex);
+    assert_ne!(aliased.digest(), FnxCallSpec::cdlp(2).digest());
+    assert_eq!(
+        FnxCallSpec::bind("CALL fnx.cdlp()", &FnxParameters::new())
+            .unwrap_err()
+            .kind,
+        FnxBindErrorKind::MissingArgument("max_iter")
+    );
+    for argument in [
+        FnxArgument::Integer(-1),
+        FnxArgument::Float(2.0),
+        FnxArgument::Boolean(false),
+        FnxArgument::Null,
+        FnxArgument::Vertex(VId(u128::MAX)),
+    ] {
+        let error =
+            FnxCallSpec::from_named_arguments("fnx", "cdlp", &[("max_iter", argument)], &[])
+                .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(0));
+        assert!(matches!(error.kind, FnxBindErrorKind::InvalidArgument(_)));
+    }
+    for text in [
+        "CALL fnx.cdlp(1,2)",
+        "CALL fnx.cdlp(iterations => 2)",
+        "CALL fnx.cdlp(max_iter => 1,max_iter => 2)",
+        "CALL fnx.cdlp(340282366920938463463374607431768211455)",
+        "CALL fnx.cdlp(2) YIELD score",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
 }
 
 /// fgdb-luq0b: `node` is the openCypher spelling of the vertex output. The
@@ -131,6 +245,310 @@ fn literals_parameters_defaults_and_whitespace_bind_identically() {
         bind("CALL fnx.pagerank(-0.0)").digest(),
         bind("CALL fnx.pagerank(0)").digest()
     );
+}
+
+#[test]
+fn fixed_iteration_calls_freeze_named_controls_without_changing_positional_defaults() {
+    let default = bind("CALL fnx.pagerank()");
+    assert_eq!(
+        default.options().unwrap().stopping_rule(),
+        PageRankStoppingRule::Convergence
+    );
+    assert_eq!(default.options().unwrap().iterations(), None);
+    assert_eq!(
+        default,
+        bind("CALL fnx.pagerank(weighted => true, tol => 1e-6, alpha => 0.85, max_iter => 100)")
+    );
+    let fixed = bind(
+        "CALL fnx.pagerank(iterations => 2, weighted => false, alpha => 0.85) YIELD score AS rank, vertex AS id",
+    );
+    let reordered = FnxCallSpec::from_named_arguments(
+        "fnx",
+        "pagerank",
+        &[
+            ("alpha", FnxArgument::Float(0.85)),
+            ("weighted", FnxArgument::Boolean(false)),
+            ("iterations", FnxArgument::Integer(2)),
+        ],
+        &[("score", "rank"), ("vertex", "id")],
+    )
+    .unwrap();
+    assert_eq!(fixed, reordered);
+    let options = fixed.options().unwrap();
+    assert_eq!(
+        options.stopping_rule(),
+        PageRankStoppingRule::ExactIterations
+    );
+    assert_eq!(options.iterations(), Some(2));
+    assert_eq!(options.max_iter(), 2);
+    assert!(!options.weighted());
+    let mut parameters = [("k".to_owned(), FnxArgument::Integer(2))]
+        .into_iter()
+        .collect::<FnxParameters>();
+    let prepared = FnxCallSpec::bind(
+        "CALL fnx.pagerank(iterations /* count */ => $k, weighted => false) YIELD score AS rank, vertex AS id",
+        &parameters,
+    )
+    .unwrap();
+    parameters.insert("k".to_owned(), FnxArgument::Integer(7));
+    assert_eq!(prepared, fixed);
+    assert_ne!(
+        fixed.digest(),
+        bind("CALL fnx.pagerank(iterations => 3, weighted => false) YIELD score AS rank, vertex AS id").digest()
+    );
+    assert_ne!(
+        fixed.digest(),
+        bind("CALL fnx.pagerank(0.85,2,1e-6,false) YIELD score AS rank, vertex AS id").digest()
+    );
+    assert!(FnxCallSpec::continues_past_call(
+        "CALL fnx.pagerank(iterations => $missing) YIELD vertex, score RETURN vertex, score"
+    ));
+    assert_eq!(
+        FnxCallSpec::from_named_arguments(
+            "fnx",
+            "single_source_shortest_path_length",
+            &[
+                ("cutoff", FnxArgument::Integer(3)),
+                ("source", FnxArgument::Vertex(VId(u128::MAX))),
+            ],
+            &[],
+        )
+        .unwrap(),
+        FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), Some(3))
+    );
+}
+
+#[test]
+fn named_iteration_refusals_identify_the_supplied_argument_and_reject_ambiguous_controls() {
+    for value in [
+        FnxArgument::Integer(0),
+        FnxArgument::Integer(-1),
+        FnxArgument::Float(2.0),
+        FnxArgument::Boolean(true),
+        FnxArgument::Null,
+        FnxArgument::Vertex(VId(u128::MAX)),
+    ] {
+        let error = FnxCallSpec::from_named_arguments(
+            "fnx",
+            "pagerank",
+            &[
+                ("weighted", FnxArgument::Boolean(false)),
+                ("iterations", value),
+            ],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(1), "{value:?}");
+        assert!(matches!(error.kind, FnxBindErrorKind::InvalidArgument(_)));
+    }
+    for supplied in [
+        vec![
+            ("iterations", FnxArgument::Integer(2)),
+            ("max_iter", FnxArgument::Integer(100)),
+        ],
+        vec![
+            ("iterations", FnxArgument::Integer(2)),
+            ("tol", FnxArgument::Float(1e-6)),
+        ],
+        vec![
+            ("weighted", FnxArgument::Boolean(false)),
+            ("iterations", FnxArgument::Integer(2)),
+            ("iterations", FnxArgument::Integer(3)),
+        ],
+        vec![
+            ("iterations", FnxArgument::Integer(2)),
+            ("unknown", FnxArgument::Integer(3)),
+        ],
+        vec![
+            ("iterations", FnxArgument::Integer(2)),
+            ("alpha", FnxArgument::Float(1.0)),
+        ],
+    ] {
+        let error =
+            FnxCallSpec::from_named_arguments("fnx", "pagerank", &supplied, &[]).unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(supplied.len() - 1));
+    }
+    for supplied in [
+        [
+            ("tol", FnxArgument::Float(1e-6)),
+            ("iterations", FnxArgument::Integer(2)),
+        ],
+        [
+            ("max_iter", FnxArgument::Integer(100)),
+            ("iterations", FnxArgument::Integer(2)),
+        ],
+    ] {
+        assert_eq!(
+            FnxCallSpec::from_named_arguments("fnx", "pagerank", &supplied, &[])
+                .unwrap_err()
+                .site,
+            FnxCallSite::Argument(0)
+        );
+    }
+    for text in [
+        "CALL fnx.pagerank(0.85, iterations => 2)",
+        "CALL fnx.pagerank(iterations => 2, 0.85)",
+        "CALL fnx.pagerank(iterations => 2, max_iter => 100)",
+        "CALL fnx.pagerank(tol => 1e-6, iterations => 2)",
+        "CALL fnx.pagerank(iterations => 9223372036854775808)",
+        "CALL fnx.pagerank(iterations => 340282366920938463463374607431768211456)",
+        "CALL fnx.pagerank(0.85,100,1e-6,true,2)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+    let invalid_text = "CALL fnx.pagerank(weighted => false, iterations => 0)";
+    assert_eq!(
+        FnxCallSpec::bind(invalid_text, &FnxParameters::new())
+            .unwrap_err()
+            .at,
+        invalid_text.find("iterations").unwrap()
+    );
+    assert!(PageRankOptions::fixed_iterations(0.85, 0, true).is_err());
+    assert!(PageRankOptions::fixed_iterations(f64::NAN, 2, true).is_err());
+    assert!(PageRankOptions::fixed_iterations(1.0, 2, true).is_err());
+    assert_eq!(
+        FnxCallSpec::from_named_arguments("fnx", "single_source_shortest_path_length", &[], &[])
+            .unwrap_err()
+            .site,
+        FnxCallSite::Arguments
+    );
+}
+
+#[test]
+fn global_l1_pagerank_binds_an_explicit_scale_independent_answer() {
+    let call = bind(
+        "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => 1000, weighted => false) YIELD score AS rank, vertex AS id",
+    );
+    let typed = FnxCallSpec::from_named_arguments(
+        "fnx",
+        "pagerank",
+        &[
+            ("weighted", FnxArgument::Boolean(false)),
+            ("max_iter", FnxArgument::Integer(1000)),
+            ("l1_tol", FnxArgument::Float(1e-9)),
+        ],
+        &[("score", "rank"), ("vertex", "id")],
+    )
+    .unwrap();
+    assert_eq!(call, typed);
+    let parameters = FnxParameters::from([("accuracy".to_owned(), FnxArgument::Float(1e-9))]);
+    assert_eq!(
+        call,
+        FnxCallSpec::bind(
+            "CALL fnx.pagerank(weighted => false, l1_tol => $accuracy, max_iter => 1000) YIELD score AS rank, vertex AS id",
+            &parameters,
+        )
+        .unwrap()
+    );
+    let options = call.options().unwrap();
+    assert_eq!(
+        options,
+        PageRankOptions::global_l1(0.85, 1000, 1e-9, false).unwrap()
+    );
+    assert_eq!(options.stopping_rule(), PageRankStoppingRule::GlobalL1);
+    assert_eq!(options.iterations(), None);
+    assert_eq!(options.tolerance(), 1e-9);
+    assert_eq!(options.max_iter(), 1000);
+    assert_eq!(
+        bind("CALL fnx.pagerank(l1_tol => 1e-9)").options().unwrap(),
+        PageRankOptions::global_l1(0.85, 100, 1e-9, true).unwrap()
+    );
+    for other in [
+        "CALL fnx.pagerank(tol => 1e-9, max_iter => 1000, weighted => false) YIELD score AS rank, vertex AS id",
+        "CALL fnx.pagerank(l1_tol => 1e-8, max_iter => 1000, weighted => false) YIELD score AS rank, vertex AS id",
+        "CALL fnx.pagerank(iterations => 1000, weighted => false) YIELD score AS rank, vertex AS id",
+    ] {
+        assert_ne!(call.digest(), bind(other).digest(), "{other}");
+    }
+    assert_eq!(
+        bind("CALL fnx.pagerank(l1_tol => 1)"),
+        bind("CALL fnx.pagerank(l1_tol => 1.0)")
+    );
+}
+
+#[test]
+fn global_l1_pagerank_refuses_invalid_or_ambiguous_accuracy() {
+    for value in [
+        FnxArgument::Float(0.0),
+        FnxArgument::Float(-0.0),
+        FnxArgument::Float(-1.0),
+        FnxArgument::Float(f64::NAN),
+        FnxArgument::Float(f64::INFINITY),
+        FnxArgument::Integer(0),
+        FnxArgument::Integer(i64::MAX),
+        FnxArgument::Null,
+        FnxArgument::Boolean(true),
+        FnxArgument::Vertex(VId(1)),
+    ] {
+        let error = FnxCallSpec::from_named_arguments(
+            "fnx",
+            "pagerank",
+            &[("weighted", FnxArgument::Boolean(false)), ("l1_tol", value)],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(1), "{value:?}");
+        assert!(matches!(error.kind, FnxBindErrorKind::InvalidArgument(_)));
+    }
+    for tolerance in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(PageRankOptions::global_l1(0.85, 100, tolerance, true).is_err());
+    }
+    assert!(PageRankOptions::global_l1(f64::NAN, 100, 1e-6, true).is_err());
+    assert!(PageRankOptions::global_l1(0.85, 0, 1e-6, true).is_err());
+    for text in [
+        "CALL fnx.pagerank(l1_tol => 1e-6, tol => 1e-6)",
+        "CALL fnx.pagerank(tol => 1e-6, l1_tol => 1e-6)",
+        "CALL fnx.pagerank(l1_tol => 1e-6, iterations => 2)",
+        "CALL fnx.pagerank(iterations => 2, l1_tol => 1e-6)",
+        "CALL fnx.pagerank(l1_tol => 1e-6, l1_tol => 1e-9)",
+        "CALL fnx.pagerank(0.85, l1_tol => 1e-6)",
+        "CALL fnx.pagerank(l1_tol => 1e-6, 0.85)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn standalone_text_matches_native_comments_and_numeric_spelling() {
+    let canonical = bind("CALL fnx.pagerank(0.85,100,1e-6,true) YIELD vertex,score");
+    let commented = bind(
+        "/* lead */ CALL /* keyword */ fnx /* namespace */ . pagerank /* name */ (\
+         85e-2, // alpha\n 100, 1E-6, true /* weighted */) \
+         /* before yield */ YIELD vertex, /* split */ score ; // tail\n",
+    );
+    assert_eq!(commented, canonical);
+    assert!(!FnxCallSpec::continues_past_call(
+        "/* lead */ CALL fnx.pagerank() /* done */"
+    ));
+    assert!(FnxCallSpec::continues_past_call(
+        "CALL fnx.pagerank() YIELD vertex /* pipeline */ RETURN vertex"
+    ));
+
+    for text in [
+        "CALL fnx.pagerank(.85)",
+        "CALL fnx.pagerank(0.)",
+        "CALL fnx.pagerank(85e)",
+        "CALL fnx.pagerank(85e+)",
+        "CALL fnx.pagerank(85e-)",
+        "CALL fnx.pagerank(0.8.5)",
+        "CALL fnx.pagerank(-.5)",
+        "CALL fnx.pagerank(+.5)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+
+    let unterminated =
+        FnxCallSpec::bind("CALL fnx.pagerank() /* missing", &FnxParameters::new()).unwrap_err();
+    assert_eq!(unterminated.kind, FnxBindErrorKind::Expected("closing */"));
 }
 
 #[test]
@@ -324,6 +742,387 @@ fn weighted_parallel_edges_and_dangling_vertices_match_dense_oracle() {
             &view
         ))
     );
+}
+
+#[test]
+fn fixed_iteration_pagerank_matches_an_independent_dense_transition_oracle() {
+    let view = graph(
+        &[VId(1), VId(2), VId(3), VId(u128::MAX)],
+        &[
+            edge(4, 1, 2, 1.0),
+            edge(1, 1, 2, 2.0),
+            edge(3, 1, 3, 1.0),
+            edge(9, 2, 1, 2.0),
+            edge(12, 3, 2, 0.0),
+            edge(13, 3, 3, 0.0),
+        ],
+        Directedness::Directed,
+    );
+    // Independently specified Markov matrices after the declared parallel
+    // reduction. Row 3 has zero weighted outflow but two unweighted arcs;
+    // the full-width fourth vertex is isolated in both interpretations.
+    for (weighted, matrix) in [
+        (
+            true,
+            [
+                [0.0, 0.75, 0.25, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.25; 4],
+                [0.25; 4],
+            ],
+        ),
+        (
+            false,
+            [
+                [0.0, 0.5, 0.5, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.5, 0.5, 0.0],
+                [0.25; 4],
+            ],
+        ),
+    ] {
+        for alpha in [0.0, 0.85, 0.99] {
+            for iterations in [1, 2, 7] {
+                let mut expected = [0.25; 4];
+                for _ in 0..iterations {
+                    let mut next = [(1.0 - alpha) / 4.0; 4];
+                    for (target, value) in next.iter_mut().enumerate() {
+                        for (rank, row) in expected.iter().zip(matrix) {
+                            *value += alpha * rank * row[target];
+                        }
+                    }
+                    expected = next;
+                }
+                let call = FnxCallSpec::pagerank(
+                    PageRankOptions::fixed_iterations(alpha, iterations, weighted).unwrap(),
+                );
+                let actual = execute(&call, &view);
+                for (actual, expected) in scores(&actual).into_iter().zip(expected) {
+                    assert!(
+                        (actual - expected).abs() <= 3e-15,
+                        "weighted={weighted} alpha={alpha} iterations={iterations}: {actual} != {expected}"
+                    );
+                }
+                assert_eq!(
+                    actual.certificate.witness.algorithm,
+                    "pagerank_fixed_iterations"
+                );
+                assert_eq!(actual.certificate.witness.nodes_touched, 4 * iterations);
+                assert_eq!(actual.certificate.witness.edges_scanned, 5 * iterations);
+                assert_eq!(actual.certificate.call_digest, call.digest());
+            }
+        }
+    }
+    let fixed = execute(&bind("CALL fnx.pagerank(iterations => 2)"), &view);
+    assert_ne!(
+        scores(&fixed),
+        scores(&execute(&bind("CALL fnx.pagerank(iterations => 1)"), &view))
+    );
+    assert_ne!(
+        scores(&fixed),
+        scores(&execute(&bind("CALL fnx.pagerank()"), &view))
+    );
+}
+
+#[test]
+fn fixed_iterations_do_not_stop_at_stationarity_or_claim_convergence() {
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for edges in [vec![], vec![edge(1, 1, 2, 1.0), edge(2, 2, 1, 1.0)]] {
+            let view = graph(&[VId(1), VId(2)], &edges, direction);
+            let converged = execute(&FnxCallSpec::pagerank(PageRankOptions::default()), &view);
+            let fixed = execute(&bind("CALL fnx.pagerank(iterations => 7)"), &view);
+            assert_eq!(scores(&fixed), vec![0.5, 0.5]);
+            assert_eq!(fixed.columns, converged.columns);
+            assert_eq!(fixed.rows, converged.rows);
+            // Result digests include the frozen call before the scalar rows;
+            // equal stationary scores do not erase their stopping contract.
+            assert_ne!(
+                fixed.certificate.result_digest,
+                converged.certificate.result_digest
+            );
+            assert_eq!(converged.certificate.witness.nodes_touched, 2);
+            assert_eq!(fixed.certificate.witness.nodes_touched, 14);
+            assert_eq!(fixed.certificate.witness.edges_scanned, edges.len() * 7);
+            assert_ne!(
+                fixed.certificate.call_digest,
+                converged.certificate.call_digest
+            );
+            assert_ne!(fixed.certificate.digest, converged.certificate.digest);
+        }
+    }
+    let empty = execute(
+        &bind("CALL fnx.pagerank(iterations => 7)"),
+        &graph(&[], &[], Directedness::Directed),
+    );
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.certificate.witness.nodes_touched, 0);
+    assert_eq!(
+        empty.certificate.witness.algorithm,
+        "pagerank_fixed_iterations"
+    );
+}
+
+#[test]
+fn fixed_iteration_limits_numeric_refusals_and_every_cancellation_cut_remain_enforced() {
+    let call = bind("CALL fnx.pagerank(iterations => 2)");
+    let view = graph(
+        &[VId(1), VId(2)],
+        &[edge(1, 1, 2, 1.0)],
+        Directedness::Directed,
+    );
+    let expected = execute(&call, &view);
+    let exact = FnxExecutionLimits {
+        max_iterations: 2,
+        max_result_rows: 2,
+        max_estimated_work: expected.certificate.estimated_work,
+    };
+    assert_eq!(
+        call.execute(&view, exact, || Ok::<(), Infallible>(()))
+            .unwrap(),
+        expected
+    );
+    for (resource, cap) in [
+        (
+            "iterations",
+            FnxExecutionLimits {
+                max_iterations: 1,
+                ..exact
+            },
+        ),
+        (
+            "result rows",
+            FnxExecutionLimits {
+                max_result_rows: 1,
+                ..exact
+            },
+        ),
+        (
+            "estimated work",
+            FnxExecutionLimits {
+                max_estimated_work: exact.max_estimated_work - 1,
+                ..exact
+            },
+        ),
+    ] {
+        assert!(
+            matches!(call.execute(&view, cap, || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::LimitExceeded { resource: actual, .. }) if actual == resource)
+        );
+    }
+    let huge =
+        FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, usize::MAX, true).unwrap());
+    assert!(matches!(
+        huge.execute(
+            &view,
+            FnxExecutionLimits {
+                max_iterations: usize::MAX,
+                ..limits()
+            },
+            || Ok::<(), Infallible>(())
+        ),
+        Err(FnxExecutionError::SizeOverflow)
+    ));
+    let negative = graph(
+        &[VId(1), VId(2)],
+        &[edge(1, 1, 2, -1.0)],
+        Directedness::Directed,
+    );
+    assert!(matches!(
+        call.execute(&negative, limits(), || Ok::<(), Infallible>(())),
+        Err(FnxExecutionError::NegativeWeight)
+    ));
+    execute(
+        &bind("CALL fnx.pagerank(iterations => 2, weighted => false)"),
+        &negative,
+    );
+    let overflow = graph(
+        &[VId(1), VId(2), VId(3)],
+        &[edge(1, 1, 2, f64::MAX), edge(2, 1, 3, f64::MAX)],
+        Directedness::Directed,
+    );
+    assert!(matches!(
+        call.execute(&overflow, limits(), || Ok::<(), Infallible>(())),
+        Err(FnxExecutionError::NonFiniteWeightSum)
+    ));
+    let mut count = 0;
+    assert_eq!(
+        call.execute(&view, exact, || {
+            count += 1;
+            Ok::<(), &'static str>(())
+        })
+        .unwrap(),
+        expected
+    );
+    for stop in 1..=count {
+        let mut seen = 0;
+        assert!(matches!(
+            call.execute(&view, exact, || {
+                seen += 1;
+                if seen == stop {
+                    Err("fixed-step cancellation")
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(FnxExecutionError::Cancelled("fixed-step cancellation"))
+        ));
+        assert_eq!(seen, stop);
+    }
+    assert!(count > 2 * view.node_count());
+    assert_eq!(execute(&call, &view), expected);
+}
+
+#[test]
+fn global_l1_pagerank_retains_accuracy_when_the_population_grows() {
+    // Repeated sink-free, unit-weight motifs make this operator compatible
+    // with GAPBS PRVerifier. Like its independent serial-push verifier, compute
+    // an f32 update and sum the global L1 residual in f64. This checks residual
+    // quality, not bit identity with GAPBS's Gauss-Seidel PageRank producer.
+    // Oracle: https://github.com/sbeamer/gapbs/blob/941462c7c42e786e4e006a9211b0576ef78d23f7/src/pr.cc
+    // Source blob: 7d999002a02d94aaa35be01e4f17f4c9c13500d7.
+    fn verifier_residual(ranks: &[f64], adjacency: &[Vec<usize>]) -> f64 {
+        let ranks: Vec<f32> = ranks.iter().map(|&rank| rank as f32).collect();
+        let damping = 0.85_f32;
+        let base = (1.0_f32 - damping) / ranks.len() as f32;
+        let mut incoming = vec![0.0_f32; ranks.len()];
+        for (rank, targets) in ranks.iter().zip(adjacency) {
+            assert!(
+                !targets.is_empty(),
+                "GAPBS comparison excludes dangling vertices"
+            );
+            let share = rank / targets.len() as f32;
+            for &target in targets {
+                incoming[target] += share;
+            }
+        }
+        ranks
+            .iter()
+            .zip(incoming)
+            .map(|(&rank, incoming)| f64::from((base + damping * incoming - rank).abs()))
+            .sum()
+    }
+
+    let global = bind("CALL fnx.pagerank(l1_tol => 0.001, max_iter => 1000, weighted => false)");
+    let legacy = bind("CALL fnx.pagerank(tol => 0.001, max_iter => 1000, weighted => false)");
+    let mut first: Option<(_, Vec<f64>)> = None;
+    for copies in [1_usize, 32] {
+        let population = copies * 3;
+        let vertices: Vec<VId> = (0..population as u128).map(VId).collect();
+        let mut edges = Vec::new();
+        let mut adjacency = vec![Vec::new(); population];
+        for copy in 0..copies {
+            let start = copy * 3;
+            for (source, target) in [
+                (start, start + 1),
+                (start + 1, start),
+                (start + 1, start + 2),
+                (start + 2, start + 1),
+            ] {
+                edges.push(edge(
+                    edges.len() as u128,
+                    source as u128,
+                    target as u128,
+                    1.0,
+                ));
+                adjacency[source].push(target);
+            }
+        }
+        let view = graph(&vertices, &edges, Directedness::Directed);
+        let result = execute(&global, &view);
+        let ranks = scores(&result);
+        let residual = verifier_residual(&ranks, &adjacency);
+        assert!(
+            residual < 0.001,
+            "copies={copies}, global residual={residual}"
+        );
+        assert_eq!(result.certificate.witness.algorithm, "pagerank_global_l1");
+        assert_eq!(result.certificate.call_digest, global.digest());
+        let iterations = result.certificate.witness.nodes_touched / population;
+        if let Some((expected_iterations, expected_ranks)) = &first {
+            assert_eq!(iterations, *expected_iterations);
+            for (rank, expected) in ranks.iter().take(3).zip(expected_ranks) {
+                assert!((rank * copies as f64 - expected).abs() < 1e-14);
+            }
+        } else {
+            first = Some((iterations, ranks.clone()));
+        }
+        let old = execute(&legacy, &view);
+        assert!(
+            verifier_residual(&scores(&old), &adjacency) > 0.001,
+            "the legacy population-scaled tolerance remains a distinct answer"
+        );
+        assert!(old.certificate.witness.nodes_touched < result.certificate.witness.nodes_touched);
+        assert_eq!(
+            old.certificate.witness.algorithm,
+            "pagerank_power_iteration"
+        );
+    }
+}
+
+#[test]
+fn global_l1_pagerank_keeps_empty_exhaustion_admission_and_cancellation_contracts() {
+    let call = bind("CALL fnx.pagerank(l1_tol => 1e-9)");
+    let empty = execute(&call, &graph(&[], &[], Directedness::Directed));
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.certificate.witness.nodes_touched, 0);
+    assert_eq!(empty.certificate.witness.algorithm, "pagerank_global_l1");
+    let view = graph(
+        &[VId(1), VId(2)],
+        &[edge(1, 1, 2, 1.0)],
+        Directedness::Directed,
+    );
+    let too_short = bind("CALL fnx.pagerank(l1_tol => 1e-30, max_iter => 1)");
+    assert!(matches!(
+        too_short.execute(&view, limits(), || Ok::<(), Infallible>(())),
+        Err(FnxExecutionError::NotConverged { max_iterations: 1, witness })
+            if witness.algorithm == "pagerank_global_l1" && witness.nodes_touched == 2
+    ));
+    let mut callbacks = 0;
+    let result = call
+        .execute(&view, limits(), || {
+            callbacks += 1;
+            Ok::<(), &'static str>(())
+        })
+        .unwrap();
+    for cap in [
+        FnxExecutionLimits {
+            max_iterations: 99,
+            ..limits()
+        },
+        FnxExecutionLimits {
+            max_result_rows: 1,
+            ..limits()
+        },
+        FnxExecutionLimits {
+            max_estimated_work: result.certificate.estimated_work - 1,
+            ..limits()
+        },
+    ] {
+        assert!(matches!(
+            call.execute(&view, cap, || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::LimitExceeded { .. })
+        ));
+    }
+    for stop in [1, callbacks / 2, callbacks] {
+        let mut seen = 0;
+        assert!(matches!(
+            call.execute(&view, limits(), || {
+                seen += 1;
+                if seen == stop {
+                    Err("global cancellation")
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(FnxExecutionError::Cancelled("global cancellation"))
+        ));
+        assert_eq!(seen, stop);
+    }
+    assert_eq!(execute(&call, &view), result);
 }
 
 #[test]

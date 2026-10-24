@@ -15,7 +15,7 @@
 
 use fgdb_chronicle::marker::{
     CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, ChainedMarker, CommitMarker,
-    EffectSource, HeadCasMismatch, HeadUpdate, MarkerChain, decode_canonical,
+    EffectSource, HeadCasMismatch, HeadUpdate, IdentityCounters, MarkerChain, decode_canonical,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
@@ -52,6 +52,7 @@ fn marker(commit_seq: u64, command_seq: u64) -> CommitMarker {
         resource_effect_digest: digest(6),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 
@@ -155,7 +156,20 @@ fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
         ("availability_cert", |m| {
             m.payload_availability_certificate_oid = Some(oid(0xf6))
         }),
-        ("flags", |m| m.flags ^= 1),
+        // Bit 0 announces identity counters and cannot flip alone (the marker
+        // would not encode), so the plain flags row flips bit 1, and the
+        // counters get rows of their own below.
+        ("flags", |m| m.flags ^= 1 << 1),
+        ("identity_counters.vertex", |m| {
+            *m = m
+                .clone()
+                .with_identity_counters(IdentityCounters { vertex: 1, edge: 0 });
+        }),
+        ("identity_counters.edge", |m| {
+            *m = m
+                .clone()
+                .with_identity_counters(IdentityCounters { vertex: 0, edge: 1 });
+        }),
     ];
 
     for (field, mutate) in mutations {
@@ -187,6 +201,22 @@ fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
             "mutating {field} must invalidate every later marker"
         );
     }
+
+    // The rows above add counters to a marker that had none. A marker that
+    // already carries counters commits to each value too.
+    let counted = |vertex, edge| {
+        marker(3, 30)
+            .with_identity_counters(IdentityCounters { vertex, edge })
+            .chain_hash(CHAIN_ORIGIN)
+            .expect("counted marker encodes")
+    };
+    let base = counted(5, 9);
+    assert_ne!(
+        counted(4, 9),
+        base,
+        "the vertex counter is in the transcript"
+    );
+    assert_ne!(counted(5, 8), base, "the edge counter is in the transcript");
 }
 
 /// A tampered marker is detected AT ITS OWN SEQUENCE, so an operator learns

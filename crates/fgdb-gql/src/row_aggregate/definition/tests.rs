@@ -85,7 +85,7 @@ fn complete_group_schema_uses_final_relation_positions_and_preserves_all_operato
     let original = query.canonical_bytes();
     assert_eq!(
         query.incremental_input_column_type(0),
-        Some(GraphSetColumnType::Scalar)
+        Some(GraphSetColumnType::Stored)
     );
     assert_eq!(
         query.incremental_input_column_type(1),

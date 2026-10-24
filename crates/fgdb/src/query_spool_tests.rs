@@ -1,4 +1,6 @@
 //! Real native cursor -> paged scratch -> canonical row differential tests.
+#[path = "query_spool/aggregate_tests.rs"]
+mod aggregate;
 use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::io::ReadBuf;

@@ -11,7 +11,8 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 
@@ -110,8 +111,8 @@ fn oracle(
                 .find(|(key, _)| *key == P)
                 .map(|(_, value)| value);
             let value = match value {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(CanonicalScalar::Int(value)) => Some(*value),
+                None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+                Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => Some(*value),
                 _ => panic!("noninteger in the independent fixture"),
             };
             groups.entry(left.entry.src).or_default().push(value);

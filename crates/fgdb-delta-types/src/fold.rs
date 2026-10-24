@@ -10,7 +10,7 @@
 //! family of net rows for the same intent sequence.
 
 use crate::{DeltaRow, ElementId, LabelId, PropertyKeyId, ValidTimePeriod};
-use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, ObjectId, VId};
 use std::collections::BTreeMap;
 
 /// Collapse `rows` (evaluation order) so remaining rows are target-disjoint
@@ -375,16 +375,22 @@ struct VertexNet {
     created: Option<CreatedVertex>,
     deleted: Option<DeletedVertex>,
     cancelled: bool,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
     labels: BTreeMap<LabelId, (bool, bool)>,
     valid_time: Option<(Option<ValidTimePeriod>, Option<ValidTimePeriod>)>,
     valid_time_contract: Option<ObjectId>,
 }
 
+/// One property's net (before, after) images; `None` is absent.
+type PropertyImages = (
+    Option<CanonicalPropertyValue>,
+    Option<CanonicalPropertyValue>,
+);
+
 struct CreatedVertex {
     birth_ordinal: u64,
     labels: Vec<LabelId>,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -403,7 +409,7 @@ struct EdgeNet {
     /// tag-ordered (`DeleteVertex` before `DeleteEdge` / `Property`), so a
     /// leftover row would hit a retired edge (fgdb-qgk9).
     cascade_owned: bool,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
     valid_time: Option<(Option<ValidTimePeriod>, Option<ValidTimePeriod>)>,
     valid_time_contract: Option<ObjectId>,
 }
@@ -414,7 +420,7 @@ struct CreatedEdge {
     relation: crate::RelationId,
     dst: VId,
     canonical_key: Option<CanonicalScalar>,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -478,9 +484,9 @@ fn absorb_edge_with_delete(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId, before_
 }
 
 fn apply_prop_map(
-    props: &mut Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     key: PropertyKeyId,
-    after: Option<CanonicalScalar>,
+    after: Option<CanonicalPropertyValue>,
 ) {
     if let Some(at) = props.iter().position(|(k, _)| *k == key) {
         match after {
@@ -509,10 +515,10 @@ fn apply_label_list(labels: &mut Vec<LabelId>, label: LabelId, after: bool) {
 }
 
 fn fold_prop(
-    map: &mut BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    map: &mut BTreeMap<PropertyKeyId, PropertyImages>,
     key: PropertyKeyId,
-    before: Option<CanonicalScalar>,
-    after: Option<CanonicalScalar>,
+    before: Option<CanonicalPropertyValue>,
+    after: Option<CanonicalPropertyValue>,
 ) {
     let entry = map.entry(key).or_insert((before, after.clone()));
     entry.1 = after;
@@ -521,7 +527,7 @@ fn fold_prop(
 fn emit_props(
     out: &mut Vec<DeltaRow>,
     elem: ElementId,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
 ) {
     for (property, (before, after)) in props {
         if before != after {
@@ -565,8 +571,8 @@ mod tests {
         DeltaRow::Property {
             elem: ElementId::Vertex(VId(vid)),
             property: PropertyKeyId(1),
-            before: Some(CanonicalScalar::Int(before)),
-            after: Some(CanonicalScalar::Int(after)),
+            before: Some(CanonicalScalar::Int(before).into()),
+            after: Some(CanonicalScalar::Int(after).into()),
         }
     }
 
@@ -578,8 +584,8 @@ mod tests {
             vec![DeltaRow::Property {
                 elem: ElementId::Vertex(VId(1)),
                 property: PropertyKeyId(1),
-                before: Some(CanonicalScalar::Int(5)),
-                after: Some(CanonicalScalar::Int(7)),
+                before: Some(CanonicalScalar::Int(5).into()),
+                after: Some(CanonicalScalar::Int(7).into()),
             }]
         );
     }
@@ -666,7 +672,7 @@ mod tests {
                 vid: VId(1),
                 birth_ordinal: 1,
                 labels: vec![],
-                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1).into())],
                 valid_time: None,
             },
             prop(1, 1, 4),
@@ -787,8 +793,8 @@ mod tests {
             DeltaRow::Property {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(1),
-                before: Some(CanonicalScalar::Int(1)),
-                after: Some(CanonicalScalar::Int(2)),
+                before: Some(CanonicalScalar::Int(1).into()),
+                after: Some(CanonicalScalar::Int(2).into()),
             },
         ]);
         assert_eq!(
@@ -938,7 +944,7 @@ mod tests {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(1),
                 before: None,
-                after: Some(CanonicalScalar::Int(9)),
+                after: Some(CanonicalScalar::Int(9).into()),
             },
         ]);
         assert_eq!(
@@ -1048,13 +1054,13 @@ mod tests {
             elem: ElementId::Vertex(VId(1)),
             property: PropertyKeyId(1),
             before: None,
-            after: Some(CanonicalScalar::Int(5)),
+            after: Some(CanonicalScalar::Int(5).into()),
         };
         let expected = vec![DeltaRow::CreateVertex {
             vid: VId(1),
             birth_ordinal: 1,
             labels: vec![],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5).into())],
             valid_time: None,
         }];
         assert_eq!(
@@ -1108,7 +1114,7 @@ mod tests {
             elem: ElementId::Edge(EId(10)),
             property: PropertyKeyId(1),
             before: None,
-            after: Some(CanonicalScalar::Int(7)),
+            after: Some(CanonicalScalar::Int(7).into()),
         };
         let expected = vec![DeltaRow::CreateEdge {
             eid: EId(10),
@@ -1117,7 +1123,7 @@ mod tests {
             relation: crate::RelationId(1),
             dst: VId(2),
             canonical_key: None,
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())],
             valid_time: None,
         }];
         assert_eq!(
@@ -1147,20 +1153,20 @@ mod tests {
             elem: ElementId::Vertex(VId(1)),
             property: PropertyKeyId(1),
             before: None,
-            after: Some(CanonicalScalar::Int(5)),
+            after: Some(CanonicalScalar::Int(5).into()),
         };
         let second = DeltaRow::CreateVertex {
             vid: VId(1),
             birth_ordinal: 2,
             labels: vec![LabelId(9)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99).into())],
             valid_time: None,
         };
         let expected = vec![DeltaRow::CreateVertex {
             vid: VId(1),
             birth_ordinal: 1,
             labels: vec![],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5).into())],
             valid_time: None,
         }];
         assert_eq!(
@@ -1182,7 +1188,7 @@ mod tests {
             elem: ElementId::Edge(EId(10)),
             property: PropertyKeyId(1),
             before: None,
-            after: Some(CanonicalScalar::Int(5)),
+            after: Some(CanonicalScalar::Int(5).into()),
         };
         let second = DeltaRow::CreateEdge {
             eid: EId(10),
@@ -1191,7 +1197,7 @@ mod tests {
             relation: crate::RelationId(1),
             dst: VId(4),
             canonical_key: None,
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(99).into())],
             valid_time: None,
         };
         let expected = vec![DeltaRow::CreateEdge {
@@ -1201,7 +1207,7 @@ mod tests {
             relation: crate::RelationId(1),
             dst: VId(2),
             canonical_key: None,
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(5).into())],
             valid_time: None,
         }];
         assert_eq!(

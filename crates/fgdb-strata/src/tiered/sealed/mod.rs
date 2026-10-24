@@ -4,6 +4,9 @@
 //! compaction paths. Small descriptors use Tier I; larger descriptors use EF
 //! neighbors, EF CSR offsets, identity-coded EIDs, visibility spans and aligned
 //! property sidecars. Parallel edges and retained versions remain incidences.
+//! `BlockStore::seal_relation` proves that same complete root while retaining
+//! only one relation for compaction and encoding. Its opaque anchor keeps that
+//! scope even when the selected relation has no retained incidences.
 //!
 //! The source-root receipt is separate from the resident image: an anchor does
 //! not pin its adjacency bytes. Reload authenticates the complete image against
@@ -19,11 +22,14 @@
 //! immutable OriginBirthOrder values. Forking an image handle shares its bytes,
 //! but does not authorize the image under an unrelated branch.
 
+mod buffered;
 mod image;
 mod incoming;
 pub use incoming::{
     IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex,
 };
+#[cfg(test)]
+mod relation_tests;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -38,9 +44,9 @@ use fgdb_codec::elias_fano::EliasFanoError;
 use fgdb_codec::identity::IdentityColumnError;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
 };
-use image::{Image, Row};
+use image::{Image, Row, RowScan, RowScanStep};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +72,8 @@ impl Default for SealedLimits {
 #[derive(Debug)]
 pub enum SealedError {
     Store(Box<StoreError>),
+    /// A selected extent or its pool admission refused after buffered open.
+    BufferedSource(Box<crate::store::BufferedReadError>),
     History(crate::root::RootError),
     Entry(BlockError),
     Inline(InlineError),
@@ -90,6 +98,10 @@ pub enum SealedError {
         requested: CommitSeq,
         floor: CommitSeq,
         publication: CommitSeq,
+    },
+    RelationOutsideAnchor {
+        requested: RelationId,
+        retained: RelationId,
     },
     ImageMismatch,
 }
@@ -131,6 +143,7 @@ pub struct SealedScope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedAnchor {
     scope: SealedScope,
+    relation: Option<RelationId>,
     fingerprint: [u8; 32],
     encoded_bytes: usize,
 }
@@ -138,6 +151,25 @@ pub struct SealedAnchor {
 impl SealedAnchor {
     pub const fn scope(self) -> SealedScope {
         self.scope
+    }
+
+    /// The retained relation, or `None` for a complete partition image. An
+    /// empty scoped image proves absence only within its retained relation.
+    pub const fn relation(self) -> Option<RelationId> {
+        self.relation
+    }
+
+    /// Check coverage before treating a missing descriptor as an empty row.
+    pub fn check_relation(self, requested: RelationId) -> Result<(), SealedError> {
+        if let Some(retained) = self.relation
+            && requested != retained
+        {
+            return Err(SealedError::RelationOutsideAnchor {
+                requested,
+                retained,
+            });
+        }
+        Ok(())
     }
 
     pub const fn encoded_bytes(self) -> usize {
@@ -253,27 +285,128 @@ impl<V: Vfs> BlockStore<V> {
         // Preserve the existing source-incidence contract even when a caller
         // offers a looser explicit source profile than the image allowance.
         source.max_incidences = source.max_incidences.min(limits.max_incidences);
-        let (root, blocks, properties) = self
-            .reopen_adjacency_bounded(cx, root_id, floor, source)
+        self.seal_selected_adjacency(cx, root_id, floor, None, limits, source)
+            .await
+    }
+
+    /// Authenticate a complete partition and retain only `relation` for the
+    /// image. Unrelated adjacency/property payloads are released after their
+    /// admission, before compaction and encoding. Whole-root I/O and history
+    /// validation remain necessary; this is not descriptor-only source access.
+    ///
+    /// Source limits use their defaults, with raw incidences admitting at least
+    /// the requested image capacity. A small selected image therefore does not
+    /// cap unrelated source history. Use `seal_relation_with_source_limits` to
+    /// bound that raw population independently.
+    pub async fn seal_relation(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        let mut source = crate::store::RootReadLimits::default();
+        source.max_incidences = source.max_incidences.max(limits.max_incidences);
+        self.seal_relation_with_source_limits(cx, root_id, floor, relation, limits, source)
+            .await
+    }
+
+    /// Select one relation only AFTER every source object's integrity,
+    /// properties, chain and history checks. Raw source limits apply to all
+    /// referenced data; image limits apply solely to the retained relation.
+    /// Neither limit can authorize a partial result or a partial root proof.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_source_limits(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        self.seal_selected_adjacency(cx, root_id, floor, Some(relation), limits, source)
+            .await
+    }
+
+    /// Seal a relation and retain its source's authenticated vertex history
+    /// from the SAME bounded root walk. A read-only host can build a selected
+    /// vertex directory without first opening a resident database or reading
+    /// any payload twice. Unselected relations still undergo full admission.
+    /// The returned history is ordinary immutable data, not a source receipt;
+    /// the image's opaque anchor is minted here only after complete validation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_vertex_history(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<(SealedPartition, Vec<crate::vertex::VertexPatchRows>), SealedError> {
+        let (adjacency, vertices) = self
+            .reopen_relation_with_vertices_bounded(cx, root_id, floor, source, relation)
             .await
             .map_err(sealed_source_error)?;
-        cx.checkpoint().map_err(SealedError::Interrupted)?;
-        let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
-            .map_err(SealedError::History)?;
-        drop(blocks);
-        drop(properties);
-        let scope = SealedScope {
-            source_root: root_id,
-            graph: root.graph,
-            branch: root.branch,
-            partition: root.partition,
-            floor,
-            publication: root.published_at,
-        };
-        let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
-        let image = image::build(compacted, limits, &mut checkpoint)?;
-        SealedPartition::finish(scope, image, limits, &mut checkpoint)
+        let partition =
+            seal_admitted_adjacency(cx, root_id, floor, Some(relation), limits, adjacency)?;
+        Ok((partition, vertices))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seal_selected_adjacency(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: Option<RelationId>,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        let adjacency = match relation {
+            Some(relation) => {
+                self.reopen_relation_adjacency_bounded(cx, root_id, floor, source, relation)
+                    .await
+            }
+            None => {
+                self.reopen_adjacency_bounded(cx, root_id, floor, source)
+                    .await
+            }
+        }
+        .map_err(sealed_source_error)?;
+        seal_admitted_adjacency(cx, root_id, floor, relation, limits, adjacency)
+    }
+}
+
+/// Only authenticated store walks call this; accepting public row vectors is
+/// deliberately not an API for constructing source authority.
+fn seal_admitted_adjacency(
+    cx: &QueryCx,
+    root_id: PartitionRootVersion,
+    floor: CommitSeq,
+    relation: Option<RelationId>,
+    limits: SealedLimits,
+    adjacency: crate::store::ReopenedAdjacency,
+) -> Result<SealedPartition, SealedError> {
+    let (root, blocks, properties) = adjacency;
+    cx.checkpoint().map_err(SealedError::Interrupted)?;
+    let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
+        .map_err(SealedError::History)?;
+    drop(blocks);
+    drop(properties);
+    let scope = SealedScope {
+        source_root: root_id,
+        graph: root.graph,
+        branch: root.branch,
+        partition: root.partition,
+        floor,
+        publication: root.published_at,
+    };
+    let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
+    let image = image::build(compacted, limits, &mut checkpoint)?;
+    SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)
 }
 
 fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {
@@ -297,8 +430,19 @@ fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {
 }
 
 impl SealedPartition {
+    #[cfg(test)]
     fn finish(
         scope: SealedScope,
+        image: Image,
+        limits: SealedLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<Self, SealedError> {
+        Self::finish_scoped(scope, None, image, limits, checkpoint)
+    }
+
+    fn finish_scoped(
+        scope: SealedScope,
+        relation: Option<RelationId>,
         image: Image,
         limits: SealedLimits,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
@@ -307,14 +451,30 @@ impl SealedPartition {
         let bytes = wire::encode(&image, limits, checkpoint)?;
         let anchor = SealedAnchor {
             scope,
+            relation,
             fingerprint: fingerprint(&bytes),
             encoded_bytes: bytes.len(),
         };
+        Self::check_image_scope(anchor, &image, checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
             image: Arc::new(image),
         })
+    }
+
+    fn check_image_scope(
+        anchor: SealedAnchor,
+        image: &Image,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        if anchor.relation.is_some() {
+            for row in &image.rows {
+                checkpoint()?;
+                anchor.check_relation(row.key.relation)?;
+            }
+        }
+        Ok(())
     }
 
     pub const fn anchor(&self) -> SealedAnchor {
@@ -342,6 +502,8 @@ impl SealedPartition {
         }
     }
 
+    /// Physical image metadata. `None` outside a scoped anchor's relation does
+    /// not prove graph absence; use `anchor().check_relation` before a read.
     pub fn storage_kind(&self, src: VId, relation: RelationId) -> Option<RowStorageKind> {
         self.image.find_row(src, relation).map(Row::kind)
     }
@@ -382,6 +544,7 @@ impl SealedPartition {
         }
         let image = wire::decode(bytes, limits, resolver, checkpoint)?;
         image.validate(anchor.scope, limits, checkpoint)?;
+        Self::check_image_scope(anchor, &image, checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
@@ -401,18 +564,13 @@ impl SealedPartition {
     ) -> Result<SealedCursor<'a>, SealedError> {
         cx.checkpoint().map_err(SealedError::Interrupted)?;
         self.anchor.authorize(as_of)?;
+        self.anchor.check_relation(relation)?;
         let row = self.image.find_row(src, relation);
         let position = match (row, lower_bound) {
             (Some(row), Some(destination)) => row.lower_bound(&self.image, destination),
             _ => 0,
         };
-        Ok(SealedCursor {
-            image: &self.image,
-            row,
-            position,
-            as_of,
-            finished: false,
-        })
+        Ok(SealedCursor::new(&self.image, row, position, as_of))
     }
 
     pub fn row<'a>(
@@ -429,7 +587,7 @@ impl SealedPartition {
 #[derive(Debug)]
 pub struct SealedEdge<'a> {
     pub entry: AdjacencyEntry,
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 
 /// One bounded pull. Yield is resumable exhaustion of the caller's scheduling
@@ -442,11 +600,12 @@ pub enum SealedScanStep<T> {
     End,
 }
 
-/// Shared fuel for a cooperative scan slice. Outgoing incidence decodes and
+/// Shared fuel for a cooperative scan slice. Outgoing raw incidences and
 /// incoming locator probes (including chunk transitions/invisible history)
 /// spend one unit each BEFORE advancing. Several cursors can share the same
-/// allowance; no layer silently resets it. Operators may also spend units for
-/// their vertex/edge work. This is not CPU instructions or a wall-clock bound:
+/// allowance, including when visibility spans avoid a physical decode; no layer
+/// silently resets it. Operators may also spend units for their vertex/edge
+/// work. This is not CPU instructions or a wall-clock bound:
 /// an individual compressed lookup, allocation, and its checkpoint are atomic.
 #[derive(Debug)]
 pub struct SealedScanBudget {
@@ -476,13 +635,21 @@ impl SealedScanBudget {
 /// A failed cursor stays failed/finished and cannot resume after skipping rows.
 pub struct SealedCursor<'a> {
     image: &'a Image,
-    row: Option<&'a Row>,
-    position: usize,
+    scan: Option<RowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
 }
 
 impl<'a> SealedCursor<'a> {
+    fn new(image: &'a Image, row: Option<&'a Row>, position: usize, as_of: CommitSeq) -> Self {
+        Self {
+            image,
+            scan: row.map(|row| RowScan::new(image, row, position)),
+            as_of,
+            finished: false,
+        }
+    }
+
     pub fn next(&mut self, cx: &QueryCx) -> Result<Option<SealedEdge<'a>>, SealedError> {
         self.next_inner(&mut || cx.checkpoint().map_err(SealedError::Interrupted))
     }
@@ -560,24 +727,37 @@ impl<'a> SealedCursor<'a> {
             self.finished = true;
             return Err(error);
         }
-        let Some(row) = self.row else {
+        let Some(scan) = &mut self.scan else {
             self.finished = true;
             return Ok(SealedScanStep::End);
         };
-        while self.position < row.len() {
+        while scan.position < scan.len() {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
-            if self.position.is_multiple_of(64)
+            if scan.position.is_multiple_of(64)
                 && let Err(error) = checkpoint()
             {
                 self.finished = true;
                 return Err(error);
             }
-            let (entry, locator) = row
-                .incidence(self.image, self.position)
-                .expect("sealed admission validated every incidence");
-            self.position += 1;
+            let (entry, locator) = match scan
+                .next_or_hidden_span(self.as_of)
+                .expect("sealed admission validated every incidence")
+            {
+                RowScanStep::Incidence(entry, locator) => (entry, locator),
+                RowScanStep::Hidden(count) => {
+                    // One raw incidence was paid above, before its checkpoint.
+                    // Pay the rest before advancing, stopping at the next
+                    // checkpoint, fuel exhaustion or visibility transition.
+                    let count = count
+                        .min(64 - scan.position % 64)
+                        .min(budget.remaining.saturating_add(1));
+                    budget.remaining -= count - 1;
+                    scan.skip_hidden(count);
+                    continue;
+                }
+            };
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]

@@ -1,15 +1,18 @@
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::{
-    GraphColumn, GraphOrderError, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    GraphColumn, GraphOrderError, GraphPatternBuilder, GraphValue, GraphValueOrder, GraphValueRow,
     PreparedGraphPattern, ValueProjection,
 };
 use fgdb_gql::{
-    GqlBudgetDimension, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetBuildError,
-    GraphSetExecutionError, GraphSetOperation as Op, GraphSetQuantifier as Q,
-    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
+    GqlBudgetDimension, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GqlScalarParameter,
+    GraphAggregate, GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerExpression,
+    GraphIntegerOp, GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError,
+    GraphSetOperation as Op, GraphSetProjection, GraphSetQuantifier as Q, GraphSetValue,
+    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
 fn pattern(key: u64, alias: &str) -> PreparedGraphPattern<GraphValueRow> {
     let mut builder = GraphPatternBuilder::new();
@@ -47,13 +50,24 @@ fn run(
     checkpoint: impl FnMut() -> Result<(), usize>,
 ) -> ResultRows {
     let checkpoint = RefCell::new(checkpoint);
+    let stored = |values: &[CanonicalScalar]| -> Vec<CanonicalPropertyValue> {
+        values
+            .iter()
+            .map(|value| CanonicalPropertyValue::from(value.clone()))
+            .collect()
+    };
+    let (left, right) = (stored(left), stored(right));
     query.execute_governed(
         policy,
         |pattern, allowance| {
             let ValueProjection::Property { key, .. } = pattern.value_columns()[0] else {
                 panic!("scalar fixture")
             };
-            let values = if key == PropertyKeyId(1) { left } else { right };
+            let values = if key == PropertyKeyId(1) {
+                &left
+            } else {
+                &right
+            };
             pattern.plan().execute_governed_with_properties(
                 values.len() as u64,
                 (0..values.len()).map(|at| VId(at as u128)),
@@ -73,6 +87,25 @@ fn scalars(result: &GqlQueryExecution<GraphValueRow>) -> Vec<CanonicalScalar> {
         .iter()
         .map(|row| row.get(0).unwrap().as_scalar().unwrap().clone())
         .collect()
+}
+fn constant(value: GraphValue) -> PreparedGraphSet {
+    PreparedGraphSet::singleton()
+        .project(
+            vec![GraphSetProjection::new(
+                "value",
+                GraphSetValue::Value(value),
+            )],
+            Q::All,
+        )
+        .unwrap()
+}
+fn dynamic(values: &[GraphValue]) -> PreparedGraphSet {
+    PreparedGraphSet::singleton()
+        .unwind(
+            "value".into(),
+            GraphSetValue::List(values.iter().cloned().map(GraphSetValue::Value).collect()),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -122,6 +155,295 @@ fn scalar_domains_are_not_coerced_and_large_payloads_are_metered() {
     assert_eq!(scalars(&result), expected);
     assert!(result.evaluator.work_units > 500);
     assert!(!format!("{result:?}").contains("secret payload"));
+}
+
+#[test]
+fn open_columns_compose_with_graph_scalars_without_changing_typed_bag_equality() {
+    use CanonicalScalar::{Int, Null};
+    let left = [Null, Int(1), Int(1), Int(2)];
+    let right = [
+        Null,
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        Int(1),
+        Int(3),
+    ];
+    let concrete = PreparedGraphSet::from(pattern(1, "value"));
+    let open = dynamic(
+        &right
+            .iter()
+            .cloned()
+            .map(GraphValue::Scalar)
+            .collect::<Vec<_>>(),
+    );
+    let mut domain: Vec<_> = left.iter().chain(&right).cloned().collect();
+    domain.sort();
+    domain.dedup();
+    for operation in [Op::Union, Op::Intersect, Op::Except] {
+        for quantifier in [Q::All, Q::Distinct] {
+            for reverse in [false, true] {
+                let (first, second, first_values, second_values) = if reverse {
+                    (&open, &concrete, &right[..], &left[..])
+                } else {
+                    (&concrete, &open, &left[..], &right[..])
+                };
+                let combined = first
+                    .clone()
+                    .combine(operation, quantifier, second.clone())
+                    .unwrap();
+                assert_eq!(combined.column_types(), &[GraphSetColumnType::Any]);
+                let mut expected = Vec::new();
+                for value in &domain {
+                    let mut l = first_values.iter().filter(|v| *v == value).count();
+                    let mut r = second_values.iter().filter(|v| *v == value).count();
+                    if quantifier == Q::Distinct {
+                        l = usize::from(l > 0);
+                        r = usize::from(r > 0);
+                    }
+                    let count = match operation {
+                        Op::Union if quantifier == Q::Distinct => usize::from(l + r > 0),
+                        Op::Union => l + r,
+                        Op::Intersect => l.min(r),
+                        Op::Except => l.saturating_sub(r),
+                    };
+                    expected.extend(std::iter::repeat_n(value.clone(), count));
+                }
+                let result = run(&combined, &left, &[], wide(), || Ok(())).unwrap();
+                assert_eq!(
+                    scalars(&result),
+                    expected,
+                    "{operation:?}/{quantifier:?}/{reverse}"
+                );
+                assert_eq!(result.rows.snapshot_records, left.len() as u64);
+            }
+        }
+    }
+    assert_eq!(concrete.column_types(), &[GraphSetColumnType::Stored]);
+    assert_eq!(open.column_types(), &[GraphSetColumnType::Any]);
+}
+
+#[test]
+fn widened_subtrees_keep_their_open_domain_through_scopes_and_projections() {
+    let int = GraphValue::Scalar(CanonicalScalar::Int(1));
+    let map = GraphValue::map(vec![("n".into(), int.clone())]).unwrap();
+    let list = GraphValue::List(vec![int.clone()].into_boxed_slice());
+    let inner = constant(int.clone())
+        .combine(Op::Union, Q::All, dynamic(std::slice::from_ref(&map)))
+        .unwrap();
+    assert_eq!(inner.column_types(), &[GraphSetColumnType::Any]);
+    let projected = inner
+        .nested()
+        .unwrap()
+        .project(
+            vec![GraphSetProjection::new("value", GraphSetValue::Column(0))],
+            Q::All,
+        )
+        .unwrap();
+    assert_eq!(projected.column_types(), &[GraphSetColumnType::Any]);
+    let concrete = constant(list.clone());
+    assert_eq!(concrete.column_types(), &[GraphSetColumnType::List]);
+    for reverse in [false, true] {
+        let (left, right) = if reverse {
+            (&concrete, &projected)
+        } else {
+            (&projected, &concrete)
+        };
+        let nested = left
+            .clone()
+            .combine(Op::Union, Q::All, right.clone())
+            .unwrap();
+        assert_eq!(nested.column_types(), &[GraphSetColumnType::Any]);
+        let result = run(&nested, &[], &[], wide(), || Ok(())).unwrap();
+        let mut actual: Vec<_> = result
+            .value
+            .iter()
+            .map(|row| row.get(0).unwrap().clone())
+            .collect();
+        let mut expected = vec![int.clone(), map.clone(), list.clone()];
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert_eq!(result.rows.snapshot_records, 0);
+    }
+}
+
+#[test]
+fn different_concrete_domains_still_refuse_even_with_nulls_and_empty_pages() {
+    let scalar = GraphValue::Scalar(CanonicalScalar::Int(1));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let vertex = GraphValue::Vertex(VId(1));
+    let edge = GraphValue::Edge(EId(1));
+    let list = GraphValue::List(Vec::new().into_boxed_slice());
+    for (left, right) in [
+        (scalar, vertex.clone()),
+        (list, null.clone()),
+        (vertex.clone(), edge),
+        (null, vertex),
+    ] {
+        let left = constant(left).with_page(0, Some(0));
+        let right = constant(right).with_page(0, Some(0));
+        for operation in [Op::Union, Op::Intersect, Op::Except] {
+            for quantifier in [Q::All, Q::Distinct] {
+                for (left, right) in [(&left, &right), (&right, &left)] {
+                    assert_eq!(
+                        left.clone()
+                            .combine(operation, quantifier, right.clone())
+                            .unwrap_err(),
+                        GraphSetBuildError::ColumnType {
+                            column: 0,
+                            left: left.column_types()[0],
+                            right: right.column_types()[0],
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn open_output_keeps_child_source_admission_and_late_expression_errors() {
+    let open = dynamic(&[GraphValue::Scalar(CanonicalScalar::Null)]);
+    let concrete = PreparedGraphSet::from(pattern(1, "value"));
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("n").unwrap();
+    let wrong_source = builder
+        .prepare_values(&[GraphColumn::vertex("value", "n")], 0, None)
+        .unwrap();
+    for (left, right) in [(&concrete, &open), (&open, &concrete)] {
+        let query = left
+            .clone()
+            .combine(Op::Union, Q::All, right.clone())
+            .unwrap()
+            .with_page(0, Some(0));
+        let result: ResultRows = query.execute_governed(
+            wide(),
+            |_, allowance| {
+                wrong_source.plan().execute_governed_with_properties(
+                    1,
+                    [VId(0)],
+                    [],
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    allowance,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                operand: 0
+            }))
+        ));
+    }
+    let mixed = constant(GraphValue::Scalar(CanonicalScalar::Int(1)))
+        .combine(
+            Op::Union,
+            Q::All,
+            dynamic(&[GraphValue::List(Vec::new().into_boxed_slice())]),
+        )
+        .unwrap();
+    let arithmetic = GraphIntegerExpression::prepare_scalar(&[
+        GraphIntegerOp::ScalarColumn(0),
+        GraphIntegerOp::Literal(Some(0)),
+        GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+    ])
+    .unwrap();
+    let projected = mixed
+        .project(
+            vec![GraphSetProjection::new(
+                "value",
+                GraphSetValue::Integer(arithmetic),
+            )],
+            Q::All,
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(matches!(run(&projected, &[], &[], wide(), || Ok(())),
+        Err(GqlQueryError::Source(GraphSetExecutionError::Projection { row: 1, column: 0, error }))
+        if error.kind == GraphIntegerErrorKind::NonScalar));
+}
+
+#[test]
+fn typed_nulls_keep_distinct_domain_evidence_and_exact_resource_accounting() {
+    let project = |value| {
+        PreparedGraphSet::singleton()
+            .project(vec![GraphSetProjection::new("value", value)], Q::All)
+            .unwrap()
+    };
+    let ordinary = project(GraphSetValue::Literal(
+        GqlScalarParameter::new(CanonicalScalar::Null).unwrap(),
+    ));
+    assert_eq!(ordinary.column_types(), &[GraphSetColumnType::Scalar]);
+    let measured = run(&ordinary, &[], &[], wide(), || Ok(())).unwrap();
+    let mut definitions = BTreeSet::new();
+    definitions.insert(ordinary.canonical_bytes());
+    for kind in [
+        GraphSetColumnType::Vertex,
+        GraphSetColumnType::Scalar,
+        GraphSetColumnType::Path,
+        GraphSetColumnType::Vertices,
+        GraphSetColumnType::Edges,
+        GraphSetColumnType::Edge,
+        GraphSetColumnType::List,
+        GraphSetColumnType::Any,
+    ] {
+        let plan = project(GraphSetValue::TypedNull(kind));
+        assert_eq!(plan.column_types(), &[kind]);
+        assert!(definitions.insert(plan.canonical_bytes()));
+        assert_eq!(plan.canonical_bytes(), plan.clone().canonical_bytes());
+        let exact = GqlQueryPolicy::new(
+            0,
+            1,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        );
+        let result = run(&plan, &[], &[], exact, || Ok(())).unwrap();
+        assert_eq!(result, measured, "{kind:?}");
+        assert_eq!(scalars(&result), vec![CanonicalScalar::Null]);
+        for policy in [
+            GqlQueryPolicy::new(0, 1, measured.evaluator.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(0, 1, u64::MAX, measured.evaluator.scratch_entries - 1),
+        ] {
+            assert!(matches!(
+                run(&plan, &[], &[], policy, || Ok(())),
+                Err(GqlQueryError::Evaluator(_))
+            ));
+        }
+    }
+    let input = project(GraphSetValue::TypedNull(GraphSetColumnType::List));
+    let input = input.clone().combine(Op::Union, Q::All, input).unwrap();
+    let count = PreparedGraphSetAggregate::prepare(
+        input,
+        &[],
+        &[GraphAggregate::count_rows("rows")],
+        0,
+        None,
+    )
+    .unwrap()
+    .with_output_projection(vec![
+        GraphSetProjection::new("rows", GraphSetValue::Column(0)),
+        GraphSetProjection::new("nothing", GraphSetValue::TypedNull(GraphSetColumnType::Any)),
+    ])
+    .unwrap();
+    let result =
+        count
+            .execute_governed(
+                wide(),
+                |_,
+                 _|
+                 -> Result<
+                    GqlQueryExecution<GraphValueRow>,
+                    GqlQueryError<&'static str, usize>,
+                > { panic!("typed constants have no graph source") },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+    assert_eq!(result.rows.snapshot_records, 0);
+    assert_eq!(result.value.len(), 1);
+    assert_eq!(result.value[0].values()[0].as_count(), Some(2));
+    assert!(result.value[0].values()[1].is_null());
 }
 
 #[test]
@@ -369,6 +691,8 @@ fn tuple_identity_is_not_independent_column_membership() {
     };
     let left = [[Int(1), Int(2)], [Int(2), Int(1)], [Int(1), Int(2)]];
     let right = [[Int(1), Int(1)], [Int(2), Int(2)], [Int(1), Int(2)]];
+    let left = left.map(|row| row.map(CanonicalPropertyValue::from));
+    let right = right.map(|row| row.map(CanonicalPropertyValue::from));
     for (operation, expected) in [
         (Op::Intersect, vec![vec![Int(1), Int(2)]]),
         (Op::Except, vec![vec![Int(2), Int(1)]]),

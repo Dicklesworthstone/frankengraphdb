@@ -7,31 +7,64 @@ use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_gql::scan_stream::{ScanError, ScanKind, ScanState};
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats};
 use fgdb_strata::tiered::memory::spill::PagedSpillRun;
-use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
+use fgdb_strata::tiered::memory::{MemoryCharge, SpillError, SpillFile, TrackedBytes};
 use std::sync::Arc;
 
+#[path = "query_spool/aggregate.rs"]
+mod aggregate;
+#[path = "query_spool/codec.rs"]
+mod codec;
 #[path = "query_spool/sort.rs"]
 mod sort;
+pub use aggregate::{
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
+};
+pub(crate) use sort::ordered_input;
+pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};
 
 #[derive(Debug)]
 pub enum NativeSpoolError {
     Prepare(Box<QueryError>),
+    /// The scoped native source retains the original capability error.
+    Authorized(Box<QueryError>),
     Execute(Box<GqlQueryError<ScanError<ReadError>, Cancel>>),
+    BufferedExecute(Box<GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>>),
+    /// Snapshot admission for a source that opens no graph scan.
+    BufferedRead(Box<crate::BufferedReadError>),
+    SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
+    /// A completed intermediate group preserves the native reducer's errors.
+    Aggregate(Box<NativeAggregateSpoolError>),
     Spill(SpillError),
     Encode(fgdb_types::ScalarEncodeError),
-    RowTooLarge { bytes: usize, limit: usize },
+    Decode(fgdb_gql::algebra::GraphValueDecodeError),
+    RowTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     SortOrder(fgdb_gql::algebra::GraphOrderError),
-    SortRunLimit { required: u64, limit: usize },
-    SortWorkLimit { attempted: u64, limit: u64 },
+    SortRunLimit {
+        required: u64,
+        limit: usize,
+    },
+    SortWorkLimit {
+        attempted: u64,
+        limit: u64,
+    },
     IncompleteCursor,
 }
 impl core::fmt::Display for NativeSpoolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Prepare(e) => e.fmt(f),
+            Self::Prepare(e) | Self::Authorized(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
+            Self::BufferedExecute(e) => e.fmt(f),
+            Self::BufferedRead(e) => e.fmt(f),
+            Self::SetExecution(e) => e.fmt(f),
+            Self::Aggregate(e) => e.fmt(f),
             Self::Spill(e) => e.fmt(f),
             Self::Encode(e) => e.fmt(f),
+            Self::Decode(e) => e.fmt(f),
             Self::SortOrder(e) => e.fmt(f),
             Self::SortRunLimit { required, limit } => {
                 write!(f, "result sort needs {required} runs, limit {limit}")
@@ -52,10 +85,15 @@ impl core::fmt::Display for NativeSpoolError {
 impl core::error::Error for NativeSpoolError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Prepare(e) => Some(e.as_ref()),
+            Self::Prepare(e) | Self::Authorized(e) => Some(e.as_ref()),
             Self::Execute(e) => Some(e.as_ref()),
+            Self::BufferedExecute(e) => Some(e.as_ref()),
+            Self::BufferedRead(e) => Some(e.as_ref()),
+            Self::SetExecution(e) => Some(e),
+            Self::Aggregate(e) => Some(e.as_ref()),
             Self::Spill(e) => Some(e),
             Self::Encode(e) => Some(e),
+            Self::Decode(e) => Some(e),
             Self::SortOrder(e) => Some(e),
             _ => None,
         }
@@ -64,6 +102,14 @@ impl core::error::Error for NativeSpoolError {
 impl From<SpillError> for NativeSpoolError {
     fn from(error: SpillError) -> Self {
         Self::Spill(error)
+    }
+}
+impl From<NativeAggregateSpoolError> for NativeSpoolError {
+    fn from(error: NativeAggregateSpoolError) -> Self {
+        match error {
+            NativeAggregateSpoolError::Spool(error) => error,
+            error => Self::Aggregate(Box::new(error)),
+        }
     }
 }
 impl NativeSpoolError {
@@ -85,6 +131,14 @@ impl NativeSpoolError {
             _ => None,
         }
     }
+    pub fn buffered_execution_error(
+        &self,
+    ) -> Option<&GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>> {
+        match self {
+            Self::BufferedExecute(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// A completely evaluated native result, not a snapshot or query certificate.
@@ -101,6 +155,9 @@ impl NativeSpoolError {
 #[derive(Clone)]
 pub struct NativeResultSpool {
     columns: Arc<[String]>,
+    // Private blocking inputs may also contain trailing hidden sort cells.
+    // Only the final window's visible-width handle escapes a native adapter.
+    encoded_columns: usize,
     snapshot: CommitSeq,
     kind: ScanKind,
     rows: GqlExecutionStats,
@@ -205,7 +262,18 @@ impl PreparedNativeRead {
         let opened = self.stream(database, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain(cx, columns, cursor, scratch, page_bytes, max_row_bytes).await
+            let encoded_columns = columns.len();
+            drain(
+                cx,
+                columns,
+                encoded_columns,
+                cursor,
+                scratch,
+                page_bytes,
+                max_row_bytes,
+                None,
+            )
+            .await
         }
     }
 
@@ -229,32 +297,75 @@ impl PreparedNativeRead {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
             let (columns, cursor) = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            drain(cx, columns, cursor, scratch, page_bytes, max_row_bytes).await
+            let encoded_columns = columns.len();
+            drain(
+                cx,
+                columns,
+                encoded_columns,
+                cursor,
+                scratch,
+                page_bytes,
+                max_row_bytes,
+                None,
+            )
+            .await
         }
     }
 }
 
-// Type-only adapters for the SAME native cursors. The writer/framing loop is
-// shared by ordered result streams and private blocking-operator input.
-trait SpoolInput {
-    fn pull(
-        &mut self,
-    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>>;
+// A buffered row's reservation must survive encoding and every awaited append,
+// even if its source has already exhausted. Governed resident rows use the same
+// byte/work-admitted encoder without inventing a reservation for the source row.
+// Field order releases the actual row before refunding its reservation.
+pub(crate) struct SpoolRow {
+    row: GraphValueRow,
+    _charge: Option<MemoryCharge>,
+    tracked_encoding: bool,
+}
+impl SpoolRow {
+    fn resident(row: GraphValueRow) -> Self {
+        Self {
+            row,
+            _charge: None,
+            tracked_encoding: false,
+        }
+    }
+    fn buffered((row, charge): (GraphValueRow, MemoryCharge)) -> Self {
+        Self {
+            row,
+            _charge: Some(charge),
+            tracked_encoding: true,
+        }
+    }
+    pub(crate) fn governed(row: GraphValueRow) -> Self {
+        Self {
+            row,
+            _charge: None,
+            tracked_encoding: true,
+        }
+    }
+}
+
+// Type-only adapters for the SAME native cursors. Async sources and resident
+// pulls share the complete framing, validation and scratch-acceptance loop.
+pub(crate) trait SpoolInput: Send {
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow, NativeSpoolError>>> + Send;
     fn spool_state(&self) -> ScanState;
     fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats);
 }
 
 impl<VS, VF, ES, EF> SpoolInput for ScanCursor<VS, VF, ES, EF>
 where
-    VS: VertexScanSource<Error = ReadError>,
-    ES: EdgeScanSource<Error = ReadError>,
-    VF: FnMut() -> Result<(), Cancel>,
-    EF: FnMut() -> Result<(), Cancel>,
+    VS: VertexScanSource<Error = ReadError> + Send,
+    ES: EdgeScanSource<Error = ReadError> + Send,
+    VF: FnMut() -> Result<(), Cancel> + Send,
+    EF: FnMut() -> Result<(), Cancel> + Send,
 {
-    fn pull(
-        &mut self,
-    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
-        self.next()
+    async fn pull(&mut self) -> Option<Result<SpoolRow, NativeSpoolError>> {
+        self.next().map(|row| {
+            row.map(SpoolRow::resident)
+                .map_err(|error| NativeSpoolError::Execute(Box::new(error)))
+        })
     }
     fn spool_state(&self) -> ScanState {
         self.state()
@@ -271,14 +382,15 @@ where
 
 impl<S, C> SpoolInput for fgdb_gql::stream::VertexScanCursor<S, C, GraphValueRow>
 where
-    S: VertexScanSource<Error = ReadError>,
-    C: FnMut() -> Result<(), Cancel>,
+    S: VertexScanSource<Error = ReadError> + Send,
+    C: FnMut() -> Result<(), Cancel> + Send,
 {
-    fn pull(
-        &mut self,
-    ) -> Option<Result<GraphValueRow, GqlQueryError<ScanError<ReadError>, Cancel>>> {
-        self.next()
-            .map(|row| row.map_err(|error| error.map_source(ScanError::Vertex)))
+    async fn pull(&mut self) -> Option<Result<SpoolRow, NativeSpoolError>> {
+        self.next().map(|row| {
+            row.map(SpoolRow::resident).map_err(|error| {
+                NativeSpoolError::Execute(Box::new(error.map_source(ScanError::Vertex)))
+            })
+        })
     }
     fn spool_state(&self) -> ScanState {
         self.state()
@@ -293,13 +405,82 @@ where
     }
 }
 
+impl<V: Vfs + Clone> SpoolInput for crate::BufferedQueryCursor<'_, '_, V> {
+    // Type-erased like the spool and commit chokepoints (fgdb-a5y6m): a
+    // caller's `Send` proof stops at `dyn Future + Send` instead of
+    // descending through the buffered read cursor, which the external sort
+    // of buffered reads otherwise pushed past the recursion limit.
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow, NativeSpoolError>>> + Send {
+        let pulled: crate::SendFuture<'_, _> = Box::pin(async move {
+            self.next().await.map(|row| {
+                row.map(|row| SpoolRow::buffered(row.into_parts()))
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Vertex),
+                        ))
+                    })
+            })
+        });
+        pulled
+    }
+    fn spool_state(&self) -> ScanState {
+        self.state()
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (
+            self.snapshot_seq(),
+            ScanKind::Vertex,
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
+    }
+}
+
+impl<S, C> SpoolInput for fgdb_gql::edge_stream::AsyncEdgeScanCursor<S, C>
+where
+    S: fgdb_gql::edge_stream::AsyncEdgeScanSource<
+            Error = crate::BufferedReadError,
+            OutputGuard = MemoryCharge,
+        >,
+    C: FnMut() -> Result<(), Cancel> + Send,
+{
+    async fn pull(&mut self) -> Option<Result<SpoolRow, NativeSpoolError>> {
+        self.next().await.map(|row| {
+            row.map(|row| SpoolRow::buffered(row.into_parts()))
+                .map_err(|error| {
+                    NativeSpoolError::BufferedExecute(Box::new(error.map_source(ScanError::Edge)))
+                })
+        })
+    }
+    fn spool_state(&self) -> ScanState {
+        use fgdb_gql::edge_stream::EdgeScanState;
+        match self.state() {
+            EdgeScanState::Open => ScanState::Open,
+            EdgeScanState::Exhausted => ScanState::Exhausted,
+            EdgeScanState::Closed => ScanState::Closed,
+            EdgeScanState::Failed => ScanState::Failed,
+        }
+    }
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (
+            self.snapshot_seq(),
+            ScanKind::Edge,
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn drain<I, F>(
     cx: &QueryCx,
     columns: Vec<String>,
+    encoded_columns: usize,
     mut cursor: I,
     scratch: &mut SpillFile<F>,
     page_bytes: usize,
     max_row_bytes: usize,
+    mut encoding_work: Option<&mut sort::Work<'_>>,
 ) -> Result<NativeResultSpool, NativeSpoolError>
 where
     I: SpoolInput,
@@ -307,14 +488,34 @@ where
 {
     let (snapshot, kind, _, _) = cursor.spool_stats();
     let columns: Arc<[String]> = columns.into();
+    let pool = scratch.memory_pool().clone();
     let mut writer = scratch.paged_writer(cx, page_bytes)?;
     let mut count = 0_u64;
     let mut largest = 0;
-    while let Some(row) = cursor.pull() {
-        let row = row.map_err(|e| NativeSpoolError::Execute(Box::new(e)))?;
+    while let Some(row) = cursor.pull().await {
+        let row = row?;
+        if row.row.len() != encoded_columns {
+            return Err(SpillError::InvalidRun.into());
+        }
         cx.with_restriction(|| cx.checkpoint())
             .map_err(SpillError::Interrupted)?;
-        let bytes = row.canonical_bytes().map_err(NativeSpoolError::Encode)?;
+        // Keep this tuple intact: fields drop in declaration order on errors,
+        // cancellation and unwind too, so bytes always die before the charge.
+        let encoded = if row.tracked_encoding {
+            let work = encoding_work
+                .as_deref_mut()
+                .ok_or(NativeSpoolError::IncompleteCursor)?;
+            let (bytes, charge) = codec::encode(&pool, work, &row.row, max_row_bytes)?;
+            (bytes, Some(charge))
+        } else {
+            (
+                row.row
+                    .canonical_bytes()
+                    .map_err(NativeSpoolError::Encode)?,
+                None,
+            )
+        };
+        let bytes = &encoded.0;
         if bytes.len() > max_row_bytes {
             return Err(NativeSpoolError::RowTooLarge {
                 bytes: bytes.len(),
@@ -323,9 +524,11 @@ where
         }
         let len = u64::try_from(bytes.len()).map_err(|_| SpillError::SizeOverflow)?;
         writer.write(cx, &len.to_be_bytes()).await?;
-        writer.write(cx, &bytes).await?;
+        writer.write(cx, bytes).await?;
         largest = largest.max(bytes.len());
         count = count.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+        drop(encoded);
+        drop(row);
     }
     let (_, _, rows, evaluator) = cursor.spool_stats();
     if cursor.spool_state() != ScanState::Exhausted || rows.result_rows != count {
@@ -335,6 +538,7 @@ where
     let run = writer.finish(cx).await?;
     Ok(NativeResultSpool {
         columns,
+        encoded_columns,
         snapshot,
         kind,
         rows,
@@ -450,3 +654,11 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> NativeSpoolCursor<'_, F> {
 #[cfg(test)]
 #[path = "query_spool_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_spool/buffered_tests.rs"]
+mod buffered_tests;
+
+#[cfg(test)]
+#[path = "query_spool/governed_tests.rs"]
+mod governed_tests;

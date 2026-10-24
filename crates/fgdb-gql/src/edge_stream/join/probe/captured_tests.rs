@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Props = Vec<(PropertyKeyId, CanonicalScalar)>;
+type Props = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 
 struct Edge {
     source: VId,
@@ -40,7 +40,12 @@ impl Fixture {
         let mut f = Self {
             edges: BTreeMap::new(),
             vertices: (0..=4)
-                .map(|id| (VId(id), vec![(P, CanonicalScalar::Int(5))]))
+                .map(|id| {
+                    (
+                        VId(id),
+                        vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(5)))],
+                    )
+                })
                 .collect(),
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
@@ -84,7 +89,10 @@ impl Fixture {
                 source,
                 target,
                 relation,
-                props: value.into_iter().map(|value| (P, value)).collect(),
+                props: value
+                    .into_iter()
+                    .map(|value| (P, CanonicalPropertyValue::Scalar(value)))
+                    .collect(),
             },
         );
     }
@@ -133,7 +141,8 @@ impl EdgeScanSource for Fixture {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
         if self.fail_property == Some(eid) {
             return Err(EdgeScanSourceError::Source("edge property denied"));
@@ -337,7 +346,8 @@ fn eager_and_vertex_pull_match_an_independent_parallel_edge_property_oracle() {
                                     }
                                 }
                                 && edge.props.iter().any(|(key, value)| {
-                                    *key == P && matches!(value, CanonicalScalar::Int(n) if *n > 5)
+                                    *key == P
+                                        && matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *n > 5)
                                 })
                         });
                         found != anti

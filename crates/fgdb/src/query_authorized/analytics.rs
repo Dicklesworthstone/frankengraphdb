@@ -4,22 +4,111 @@
 //! and the registered native kernels. This path is explicitly DECODED_CACHE:
 //! it does not confer authority on raw sealed images or publish a reusable view
 //! that could outlive the single live Warden execution allowance.
+//!
+//! Projections are retained in a trusted-host sidecar keyed by the live
+//! snapshot allocation and exact request (fgdb-0tbrz), never handed to a token
+//! holder. Scoped entries also bind every compiled predicate exactly. Every
+//! reuse spends the build's exact sequence of live calls again under its
+//! current permit, so it confers nothing a fresh build would not.
 
+use super::tape::{Step, Tape};
 use super::{Execution, authorized_with_errors};
+use crate::gql_exec::AdmissionUsage;
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::query::prism::{push_staged, source_admit};
+use crate::query::prism::{
+    LiveCache, PROJECTION_CACHE_BYTES, ProjectionRequest, push_staged, source_admit,
+};
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
+use fgdb_gql::GqlQueryPolicy;
 use fgdb_prism::{
-    Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxParameters, FnxReadError,
-    FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
-    ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
+    FnxReadError, FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
+    ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    SortedVertexLookup,
 };
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 type Error = FnxReadError<ReadError, QueryError>;
+
+/// Projections reused across authorized calls on one live snapshot
+/// allocation, each with the live calls its build made (fgdb-0tbrz).
+static REUSE: LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)> =
+    LiveCache::new(PROJECTION_CACHE_BYTES);
+
+/// A contended or full REUSE lawfully builds. So the tests that count builds,
+/// and every test that fills REUSE through authorized calls, take turns on
+/// this one lock.
+#[cfg(test)]
+pub(crate) fn reuse_test_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// None retains the existing whole-snapshot key: when no field or incidence
+/// is masked, changing only live allowances does not change the graph or its
+/// replay tape. A scoped key keeps the complete, exact compiled program; no
+/// principal, token spelling or digest stands in for its actual predicates.
+#[derive(PartialEq, Eq)]
+struct ProjectionKey {
+    request: ProjectionRequest,
+    predicates: Option<Vec<u8>>,
+}
+
+impl ProjectionKey {
+    fn new(request: ProjectionRequest, scope: &PlannerPredicates) -> Option<Self> {
+        let predicates = if scope.sees_all_incidence() && scope.sees_all_fields() {
+            None
+        } else {
+            Some(scope.cache_identity()?)
+        };
+        Some(Self {
+            request,
+            predicates,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.predicates.as_ref().map_or(0, Vec::capacity)
+    }
+}
+
+fn remember_projection<Owner>(
+    cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
+    owner: &Arc<Owner>,
+    key: ProjectionKey,
+    graph: &SnapshotGraphView,
+    tape: Tape,
+) {
+    // Retain the ordinary projection cache's source/spec checks as well as
+    // the scoped key and complete-tape requirement. A failed or truncated
+    // build can never seed a different request's reusable entry.
+    if graph.binding() != key.request.binding
+        || graph.spec() != key.request.projection
+        || !tape.is_complete()
+    {
+        return;
+    }
+    if let Some(bytes) = graph
+        .charged_resident_bytes()
+        .checked_add(tape.bytes())
+        .and_then(|bytes| bytes.checked_add(key.retained_bytes()))
+    {
+        cache.remember(owner, key, (graph.clone(), Arc::new(tape)), bytes);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Projection builds on this thread: the tests' physical reuse witness.
+    static BUILDS: Cell<usize> = const { Cell::new(0) };
+    /// Records a reuse replayed in one live-execution loop.
+    static BULK_RECORDS: Cell<u64> = const { Cell::new(0) };
+}
 
 // Like governed GQL, the interruption carrier preserves a live authorization
 // refusal. Keep source/frontier errors in their ordinary source error class.
@@ -130,9 +219,9 @@ impl<V: Vfs + Clone> Database<V> {
                     root: view.partition_root().0,
                     as_of: at,
                 };
-                execute(snapshot, binding, call, options, scope, execution, |_| {
-                    Ok(())
-                })
+                execute(
+                    snapshot, binding, call, options, scope, execution, Unmetered,
+                )
             },
         )
     }
@@ -141,59 +230,315 @@ impl<V: Vfs + Clone> Database<V> {
 // The optional caller meter adds fixed session policy to the SAME source,
 // builder and kernel. It never replaces the live signed execution permit.
 pub(super) fn execute<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     binding: SnapshotBinding,
     call: &FnxCallSpec,
     options: FnxReadOptions,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
-    observe: impl FnMut(SourceEvent) -> Result<(), QueryError>,
+    observe: impl Observe,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
     let observe = RefCell::new(observe);
     let checkpoint = || {
         execution.borrow_mut().checkpoint()?;
-        observe.borrow_mut()(SourceEvent::Work)
+        observe.borrow_mut().event(SourceEvent::Work)
     };
-    let mut work = 0u64;
-    let mut scratch = 0u64;
-    let mut control = |event| {
+    let (work, scratch) = (Cell::new(0u64), Cell::new(0u64));
+    let control = |event: SourceEvent| -> Result<(), Error> {
         execution.borrow_mut().checkpoint().map_err(control_error)?;
-        observe.borrow_mut()(event).map_err(control_error)?;
+        observe.borrow_mut().event(event).map_err(control_error)?;
         let (counter, limit, resource) = match event {
-            SourceEvent::Work | SourceEvent::SnapshotRecord => (
-                &mut work,
-                options.source_limits.max_work_units,
-                "work units",
-            ),
+            SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                (&work, options.source_limits.max_work_units, "work units")
+            }
             SourceEvent::ScratchEntry => (
-                &mut scratch,
+                &scratch,
                 options.source_limits.max_scratch_entries,
                 "scratch entries",
             ),
         };
-        *counter = counter.checked_add(1).ok_or(Error::SizeOverflow)?;
-        source_admit(resource, u128::from(*counter), u128::from(limit))
+        let count = counter.get().checked_add(1).ok_or(Error::SizeOverflow)?;
+        counter.set(count);
+        source_admit(resource, u128::from(count), u128::from(limit))
     };
-    // FG-INV-20: history the capability cannot see is walked through `scan`,
+    // FG-INV-20: history the capability cannot see is walked through `poll`,
     // which polls cancellation and charges nothing. Only records that pass the
     // scope (and, for edges, whose endpoints were admitted) are charged, so no
     // signed or source limit's refusal point depends on hidden data.
-    let mut scan = |_| execution.borrow_mut().poll().map_err(control_error);
+    let poll = || execution.borrow_mut().poll().map_err(control_error);
+    // Each admitted record's and builder checkpoint's live calls. A build and
+    // a reuse both spend through here, so their sequences cannot drift apart.
+    let spend = |step: Step| -> Result<(), Error> {
+        match step {
+            Step::Vertex(labels) => {
+                control(SourceEvent::Work)?;
+                for _ in 0..labels {
+                    control(SourceEvent::Work)?;
+                }
+                execution.borrow_mut().node().map_err(control_error)?;
+            }
+            Step::Edge => control(SourceEvent::Work)?,
+            Step::Checkpoint => return checkpoint().map_err(control_error),
+        }
+        observe
+            .borrow_mut()
+            .event(SourceEvent::SnapshotRecord)
+            .map_err(control_error)?;
+        observe
+            .borrow_mut()
+            .event(SourceEvent::ScratchEntry)
+            .map_err(control_error)
+    };
+    // The graph and its live call sequence are functions of the exact source
+    // allocation/cut, request and compiled masks. Authentication has already
+    // produced this execution's fresh permit; a cached graph grants nothing.
+    // Different principals may share derived data only when those inputs are
+    // exactly equal, and all live charges still reach their own permits.
+    let request = ProjectionRequest {
+        binding,
+        selection: options.selection,
+        projection: options.projection,
+        projection_limits: options.projection_limits,
+        source_limits: options.source_limits,
+    };
+    let key = ProjectionKey::new(request, scope);
+    // Admission and the projection's replay or build are one phase: their
+    // signed work is charged in runs.
+    let graph = super::work_runs(execution, control_error, || {
+        Ok::<_, Error>(
+            match key.as_ref().and_then(|key| REUSE.lookup(snapshot, key)) {
+                Some((graph, tape)) => {
+                    replay(&tape, execution, &observe, &work, options, poll, spend)?;
+                    graph
+                }
+                None => {
+                    // A fragmented masked history may not run-length encode
+                    // compactly. Bound temporary replay metadata by both the
+                    // source staging ceiling and this cache's allowance. If
+                    // it cannot fit, the build succeeds without caching.
+                    let tape = key.as_ref().map(|key| {
+                        RefCell::new(Tape::bounded(
+                            options
+                                .source_limits
+                                .max_staging_bytes
+                                .min(PROJECTION_CACHE_BYTES)
+                                .saturating_sub(key.retained_bytes()),
+                        ))
+                    });
+                    let graph = build(
+                        snapshot,
+                        binding,
+                        options,
+                        scope,
+                        tape.as_ref(),
+                        poll,
+                        spend,
+                    )?;
+                    if let (Some(key), Some(tape)) = (key, tape) {
+                        let tape = tape.into_inner().finish();
+                        remember_projection(&REUSE, snapshot, key, &graph, tape);
+                    }
+                    graph
+                }
+            },
+        )
+    })?;
+    let signed_rows = scope.limits().max_rows;
+    let mut limits = options.execution_limits;
+    limits.max_result_rows = limits
+        .max_result_rows
+        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    // The kernel's units are charged to the signed permit in runs, and the
+    // caller meter still sees each one. Nothing else borrows either while the
+    // kernel runs.
+    let outer = std::mem::replace(&mut execution.borrow_mut().in_runs, true);
+    let result = call.execute(
+        &graph,
+        limits,
+        KernelMeter {
+            execution: &mut execution.borrow_mut(),
+            observe: &mut *observe.borrow_mut(),
+        },
+    );
+    // Every unit the kernel spent is charged before its result or its own
+    // error is judged, as it was when each was charged on the spot. A kernel
+    // our control stopped keeps that refusal and charges nothing more.
+    {
+        let mut live = execution.borrow_mut();
+        live.in_runs = outer;
+        if matches!(result, Err(FnxExecutionError::Cancelled(_))) {
+            live.discard_runs();
+        } else {
+            live.settle().map_err(control_error)?;
+        }
+    }
+    // Translate a signed-row refusal back to Warden, without allocating a
+    // forbidden result first. The shared delivery gate still checks successful
+    // results with fresh time; zero rows do not bypass retirement or expiry.
+    if let Err(FnxExecutionError::LimitExceeded {
+        resource: "result rows",
+        requested,
+        ..
+    }) = &result
+        && *requested as u128 > u128::from(signed_rows)
+    {
+        execution
+            .borrow_mut()
+            .deliver(*requested)
+            .map_err(control_error)?;
+    }
+    let result = result.map_err(|error| match error {
+        FnxExecutionError::Cancelled(error) => control_error(error),
+        other => Error::Execution(other),
+    })?;
+    // The kernel's certificate is trusted-host provenance, not a capability
+    // response. Releasing it could expose the unmasked root/history identity.
+    Ok(result.rows)
+}
+
+/// Replay `tape` exactly as `Tape::replay` through `poll` and `spend`, but a
+/// run whose caller and source meters provably cannot refuse anywhere in it
+/// (every one of its events fits their allowances) is replayed as one loop
+/// over the live execution: each item's polls, work units and node in their
+/// order, so every signed charge, cancellation poll and clock read happens
+/// exactly where it did. Only the meters' pure counters, which no event of
+/// the run can trip, are added once - for the items the loop completed, as
+/// item-by-item replay would have left them.
+fn replay<Clock: FnMut() -> u64, O: Observe>(
+    tape: &Tape,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: &RefCell<O>,
+    work: &Cell<u64>,
+    options: FnxReadOptions,
+    poll: impl Fn() -> Result<(), Error>,
+    spend: impl Fn(Step) -> Result<(), Error>,
+) -> Result<(), Error> {
+    for (polls, step, count) in tape.runs() {
+        // Per item, as `spend` charges it: its live work units, whether it
+        // is a signed node, and whether it is an admitted record. Each unit
+        // of a record is also a source work unit and a caller Work event,
+        // and the record then a SnapshotRecord and a ScratchEntry event,
+        // each of which the caller meter counts as work too. A builder
+        // checkpoint is one live unit and one caller Work event; polls alone
+        // charge nothing.
+        let (units, node, record) = match step {
+            Some(Step::Vertex(labels)) => (1 + u64::from(labels), true, true),
+            Some(Step::Edge) => (1, false, true),
+            Some(Step::Checkpoint) => (1, false, false),
+            None => (0, false, false),
+        };
+        if count > 1 {
+            let n = u64::from(count);
+            let (records, source, meter) = if record {
+                (n, units.checked_mul(n), (units + 2).checked_mul(n))
+            } else {
+                (0, Some(0), units.checked_mul(n))
+            };
+            let source_fits = source
+                .and_then(|more| work.get().checked_add(more))
+                .is_some_and(|total| total <= options.source_limits.max_work_units);
+            let meter_fits =
+                meter.is_some_and(|more| observe.borrow().absorbs(records, more, records));
+            if source_fits && meter_fits {
+                // Items completed, and live units of the item a refusal
+                // stopped, each of which `spend` would already have counted.
+                let (mut done, mut partial) = (0_u64, 0_u64);
+                let ran = (|| {
+                    let mut live = execution.borrow_mut();
+                    // Nothing comes between these items' live units, so they
+                    // are one stretch of units; a remainder is the units of
+                    // the item a refusal stopped.
+                    if let Some(total) = units.checked_mul(n).filter(|_| polls == 0 && !node) {
+                        let mut taken = 0;
+                        let stretch = live.units_one_by_one(total, &mut taken);
+                        if let (Some(items), Some(rest)) =
+                            (taken.checked_div(units), taken.checked_rem(units))
+                        {
+                            (done, partial) = (items, rest);
+                        }
+                        return stretch.map_err(control_error);
+                    }
+                    for _ in 0..count {
+                        for _ in 0..polls {
+                            live.poll().map_err(control_error)?;
+                        }
+                        for _ in 0..units {
+                            live.checkpoint().map_err(control_error)?;
+                            partial += 1;
+                        }
+                        if node {
+                            live.node().map_err(control_error)?;
+                        }
+                        (done, partial) = (done + 1, 0);
+                    }
+                    Ok::<_, Error>(())
+                })();
+                #[cfg(test)]
+                if record {
+                    BULK_RECORDS.with(|bulk| bulk.set(bulk.get() + done));
+                }
+                let (records, meter) = if record {
+                    work.set(work.get() + units * done + partial);
+                    (done, (units + 2) * done + partial)
+                } else {
+                    (0, units * done + partial)
+                };
+                observe.borrow_mut().absorb(records, meter, records);
+                ran?;
+                continue;
+            }
+        }
+        for _ in 0..count {
+            for _ in 0..polls {
+                poll()?;
+            }
+            if let Some(step) = step {
+                spend(step)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Visit, admit and build. `tape`, when present, records every live call in
+/// order for a later reuse.
+fn build(
+    snapshot: &Snapshot,
+    binding: SnapshotBinding,
+    options: FnxReadOptions,
+    scope: &PlannerPredicates,
+    tape: Option<&RefCell<Tape>>,
+    poll: impl Fn() -> Result<(), Error>,
+    spend: impl Fn(Step) -> Result<(), Error>,
+) -> Result<SnapshotGraphView, Error> {
+    #[cfg(test)]
+    BUILDS.with(|builds| builds.set(builds.get() + 1));
+    let mut scan = |_| {
+        if let Some(tape) = tape {
+            tape.borrow_mut().poll();
+        }
+        poll()
+    };
+    let admit = |step| {
+        if let Some(tape) = tape {
+            tape.borrow_mut().emit(Some(step));
+        }
+        spend(step)
+    };
     let mut vertices: Vec<VId> = Vec::new();
     let mut staged_bytes = 0;
     source::visit_vertices(&snapshot.patches, binding.as_of, &mut scan, |row, _| {
         if !scope.allows_vertex(&row.labels) {
             return Ok(());
         }
-        control(SourceEvent::Work)?;
-        for &label in &row.labels {
-            if scope.allows_label(label) {
-                control(SourceEvent::Work)?;
-            }
-        }
-        execution.borrow_mut().node().map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
+        let labels = row
+            .labels
+            .iter()
+            .filter(|&&label| scope.allows_label(label))
+            .count();
+        admit(Step::Vertex(
+            u32::try_from(labels).map_err(|_| Error::SizeOverflow)?,
+        ))?;
         if options.selection.vertex_label.is_some_and(|label| {
             !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
         }) {
@@ -208,6 +553,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             options.source_limits.max_staging_bytes,
         )
     })?;
+    let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
     let mut edges = Vec::new();
     source::visit_edges_with_properties(snapshot, binding.as_of, &mut scan, |entry, props, _| {
         if !scope.allows_relation(entry.relation)
@@ -215,14 +561,12 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
                 .selection
                 .relation
                 .is_some_and(|relation| relation != entry.relation)
-            || vertices.binary_search(&entry.src).is_err()
-            || vertices.binary_search(&entry.dst).is_err()
+            || !selected_vertices.contains(entry.src)
+            || !selected_vertices.contains(entry.dst)
         {
             return Ok(());
         }
-        control(SourceEvent::Work)?;
-        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
+        admit(Step::Edge)?;
         if entry.src == entry.dst {
             match options.projection.self_loops {
                 SelfLoopPolicy::Drop => return Ok(()),
@@ -265,44 +609,132 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             options.source_limits.max_staging_bytes,
         )
     })?;
-    let graph = SnapshotGraphView::build_owned_with_checkpoint(
+    SnapshotGraphView::build_owned_with_checkpoint(
         binding,
         vertices,
         edges,
         options.projection,
         options.projection_limits,
-        checkpoint,
+        || admit(Step::Checkpoint),
     )
     .map_err(|error| match error {
-        ProjectionBuildError::Cancelled(error) => control_error(error),
+        ProjectionBuildError::Cancelled(error) => error,
         ProjectionBuildError::Projection(error) => Error::Projection(error),
-    })?;
-    let signed_rows = scope.limits().max_rows;
-    let mut limits = options.execution_limits;
-    limits.max_result_rows = limits
-        .max_result_rows
-        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
-    let result = call.execute(&graph, limits, checkpoint);
-    // Translate a signed-row refusal back to Warden, without allocating a
-    // forbidden result first. The shared delivery gate still checks successful
-    // results with fresh time; zero rows do not bypass retirement or expiry.
-    if let Err(FnxExecutionError::LimitExceeded {
-        resource: "result rows",
-        requested,
-        ..
-    }) = &result
-        && *requested as u128 > u128::from(signed_rows)
-    {
-        execution
-            .borrow_mut()
-            .deliver(*requested)
-            .map_err(control_error)?;
-    }
-    let result = result.map_err(|error| match error {
-        FnxExecutionError::Cancelled(error) => control_error(error),
-        other => Error::Execution(other),
-    })?;
-    // The kernel's certificate is trusted-host provenance, not a capability
-    // response. Releasing it could expose the unmasked root/history identity.
-    Ok(result.rows)
+    })
 }
+
+/// The caller meter an analytics call reports to, every event in order.
+/// `work(n)` is n Work events, with the same total and refusal ordinal; a
+/// counting meter answers it in one step.
+pub(super) trait Observe {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError>;
+    fn work(&mut self, n: usize) -> Result<(), QueryError> {
+        (0..n).try_for_each(|_| self.event(SourceEvent::Work))
+    }
+    /// Whether `records` admitted records, `work` Work events and `scratch`
+    /// scratch entries (each record also one SnapshotRecord event) can all be
+    /// observed with no refusal among them. A meter that cannot tell says no,
+    /// and every record is then observed event by event.
+    fn absorbs(&self, _records: u64, _work: u64, _scratch: u64) -> bool {
+        false
+    }
+    /// Observe counts [`Self::absorbs`] admitted, in one step.
+    fn absorb(&mut self, _records: u64, _work: u64, _scratch: u64) {
+        unreachable!("absorb follows a successful absorbs")
+    }
+}
+
+impl<F: FnMut(SourceEvent) -> Result<(), QueryError>> Observe for F {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
+        self(event)
+    }
+}
+
+/// No caller meter beside the signed permit: it observes nothing, so no
+/// count can refuse.
+struct Unmetered;
+
+impl Observe for Unmetered {
+    fn event(&mut self, _: SourceEvent) -> Result<(), QueryError> {
+        Ok(())
+    }
+    fn absorbs(&self, _records: u64, _work: u64, _scratch: u64) -> bool {
+        true
+    }
+    fn absorb(&mut self, _records: u64, _work: u64, _scratch: u64) {}
+}
+
+/// A caller meter over one [`AdmissionUsage`] allowance.
+pub(super) struct UsageObserver<'u> {
+    pub(super) usage: &'u mut AdmissionUsage,
+    pub(super) policy: GqlQueryPolicy,
+}
+
+impl Observe for UsageObserver<'_> {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
+        self.usage
+            .observe::<ReadError, QueryError>(self.policy, event)
+            .map_err(super::query_error)
+    }
+    fn work(&mut self, n: usize) -> Result<(), QueryError> {
+        self.usage
+            .observe_work::<ReadError, QueryError>(self.policy, n as u64)
+            .map_err(super::query_error)
+    }
+    fn absorbs(&self, records: u64, work: u64, scratch: u64) -> bool {
+        self.usage.absorbs(self.policy, records, work, scratch)
+    }
+    fn absorb(&mut self, records: u64, work: u64, scratch: u64) {
+        self.usage.absorb(records, work, scratch);
+    }
+}
+
+/// A Prism kernel's meter over the live execution. Signed and caller work
+/// interleave in that order, even when their limits would refuse within the
+/// same run. A caller that admits the whole run may count the signed meter's
+/// completed prefix in bulk (fgdb-62mzm).
+struct KernelMeter<'m, 'cx, 'permit, Clock, O> {
+    execution: &'m mut Execution<'cx, 'permit, Clock>,
+    observe: &'m mut O,
+}
+
+impl<Clock, O> FnxMeter<QueryError> for KernelMeter<'_, '_, '_, Clock, O>
+where
+    Clock: FnMut() -> u64,
+    O: Observe,
+{
+    fn poll(&mut self) -> Result<(), QueryError> {
+        self.execution.poll()?;
+        // Arithmetic has already charged its work. A cached charge-time
+        // sample must not hide expiry throughout this physical phase.
+        let now = self.execution.sample();
+        let checked = self.execution.permit.checkpoint_at(now);
+        checked.map_err(|error| self.execution.refusal(error))
+    }
+    fn unit(&mut self) -> Result<(), QueryError> {
+        self.execution.work_units(1)?;
+        self.observe.work(1)
+    }
+    fn units(&mut self, n: usize) -> Result<(), QueryError> {
+        if n > 1 && self.observe.absorbs(0, n as u64, 0) {
+            // The caller cannot refuse anywhere in this run, but the signed
+            // permit still can. Keep its per-unit settlement/poll boundaries
+            // and report every completed unit, including a partial prefix
+            // when the signed charge refuses.
+            let mut done = 0;
+            let result = self.execution.units_one_by_one(n as u64, &mut done);
+            self.observe.work(done as usize)?;
+            return result;
+        }
+        // Without that proof, charging all signed units first could hide an
+        // earlier caller refusal behind a later signed refusal.
+        for _ in 0..n {
+            self.unit()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "analytics_tests.rs"]
+mod tests;

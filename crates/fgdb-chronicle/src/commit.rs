@@ -393,7 +393,7 @@ impl<V: Vfs> CommitCoordinator<V> {
             }
         })
         .await?;
-        let (chain, discarded_tail_bytes) = Self::recover_chain(cx, &vfs, &dir).await?;
+        let (chain, discarded_tail_bytes) = Self::recover_chain(cx, &vfs, &dir, true).await?;
         Ok(Self {
             vfs,
             dir,
@@ -450,6 +450,21 @@ impl<V: Vfs> CommitCoordinator<V> {
 
     pub fn chain(&self) -> &MarkerChain {
         &self.chain
+    }
+
+    /// The committed marker chain, read WITHOUT the writer lease and without
+    /// repairing anything, for a read-only observer of a database that a live
+    /// writer (another process, or another handle) may be appending to. The
+    /// chain stops at the last complete entry; damage to a complete entry
+    /// still fails closed. A missing log is an empty chain, as for `open`.
+    pub async fn scan_committed_chain(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+    ) -> Result<MarkerChain, CommitError> {
+        Self::recover_chain(cx, vfs, database_dir.as_ref(), false)
+            .await
+            .map(|(chain, _)| chain)
     }
 
     /// Install the steps-2–3 validator every subsequent commit is judged by.
@@ -1156,10 +1171,16 @@ impl<V: Vfs> CommitCoordinator<V> {
     /// as a tail would let one bad entry silently delete every commit after it
     /// while recovery reported success, which is the worst outcome available to
     /// a commit log: durable data lost with a green light.
+    ///
+    /// `repair_tail` truncates a torn tail, which only the lease holder may
+    /// do. A read-only scan leaves the file untouched: its torn tail is an
+    /// append still in flight, or a crash the next writer repairs, and in
+    /// either case not a committed entry.
     async fn recover_chain(
         cx: &CommitCx,
         vfs: &V,
         dir: &Path,
+        repair_tail: bool,
     ) -> Result<(MarkerChain, usize), CommitError> {
         cx.with_restriction_async(async {
             let path = dir.join(COMMIT_LOG_NAME);
@@ -1233,7 +1254,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                         "discarded commit-log tail does not fit usize",
                     ))
                 })?;
-            if discarded_tail_bytes != 0 {
+            if repair_tail && discarded_tail_bytes != 0 {
                 // O_APPEND uses the file's physical end, not the recovered
                 // chain's logical end. Leaving the torn bytes in place would put
                 // the next acknowledged entry after an undecodable prefix; the

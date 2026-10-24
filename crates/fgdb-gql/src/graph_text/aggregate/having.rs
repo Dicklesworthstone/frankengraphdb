@@ -30,8 +30,8 @@ impl Operand {
                 }
                 // List declarations refuse at the typed number parser; bind is
                 // infallible over the admitted operand domain.
-                GqlParameterValue::List(_) => {
-                    unreachable!("list parameters never become HAVING operands")
+                GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
+                    unreachable!("collection parameters never become HAVING operands")
                 }
             },
         }
@@ -341,8 +341,27 @@ impl HavingParser<'_, '_> {
         }
         self.atom()
     }
+    /// An output alias, group key or aggregate. An `IS [NOT] NULL` after it
+    /// is this HAVING's own test, so the key reader stops before it.
+    fn result_column(&mut self) -> Result<GraphAggregateColumn, GraphPatternTextError> {
+        let outer = core::mem::replace(&mut self.parser.having_operand, true);
+        let column =
+            self.parser
+                .result_column(self.returned, self.groups, self.hidden, self.computed);
+        self.parser.having_operand = outer;
+        column
+    }
+
     fn operand(&mut self) -> Result<Operand, GraphPatternTextError> {
         let at = self.parser.current.at;
+        // Reuse the ordinary finite decimal/exponent parser on either side
+        // of a comparison and in IN/BETWEEN. A float remains a canonical
+        // scalar operand; integer-only predicates keep their legacy lowering.
+        if let Some(value) = self.parser.float_literal()? {
+            return ScalarPredicate::new(value, IntegerComparison::Equal)
+                .map(Operand::Scalar)
+                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
+        }
         let scalar = match self.parser.current.kind {
             TokenKind::Quoted(raw) => Some(super::super::literal::text_scalar(raw, at)?),
             TokenKind::Word(word) => {
@@ -354,10 +373,7 @@ impl HavingParser<'_, '_> {
                         .iter()
                         .any(|group| group.property.is_none() && group.variable.text == word)
                 {
-                    return self
-                        .parser
-                        .result_column(self.returned, self.groups, self.hidden, self.computed)
-                        .map(Operand::Column);
+                    return self.result_column().map(Operand::Column);
                 }
                 if word.eq_ignore_ascii_case("TRUE") {
                     Some(CanonicalScalar::Bool(true))
@@ -366,10 +382,7 @@ impl HavingParser<'_, '_> {
                 } else if word.eq_ignore_ascii_case("NULL") {
                     Some(CanonicalScalar::Null)
                 } else {
-                    return self
-                        .parser
-                        .result_column(self.returned, self.groups, self.hidden, self.computed)
-                        .map(Operand::Column);
+                    return self.result_column().map(Operand::Column);
                 }
             }
             _ => None,

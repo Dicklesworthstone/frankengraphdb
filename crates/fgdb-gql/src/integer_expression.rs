@@ -2,8 +2,10 @@
 //!
 //! Bounded typed postfix IR compiles to private linear bytecode. CASE and
 //! COALESCE are lazy. Integer arithmetic remains checked. Scalar Int/Float
-//! arithmetic uses finite binary64 with integer-only rounding; exact aggregate
-//! cells never implicitly convert to float.
+//! arithmetic uses finite binary64 with integer-only rounding; counts and wide
+//! sums never implicitly convert to float. An exact average that arithmetic
+//! or a conversion reads is its correctly rounded binary64 first, as
+//! openCypher's avg is a Float (fgdb-y255t); comparisons keep it exact.
 //! Int/Float comparisons use exact numeric value, not storage type ranks.
 //! Text operations use Unicode scalar positions and UCS_BASIC result collation.
 
@@ -44,12 +46,110 @@ pub enum GraphIntegerBinary {
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
 /// selector once, and selects the first nonnull equality. Conditions use eager
 /// three-valued Boolean evaluation; unselected CASE arms are not executed.
+/// A one-operand numeric function (openCypher). Every result is binary64
+/// except sign's Int.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphNumericFunction {
+    ToFloat,
+    Floor,
+    Ceil,
+    /// Nearest integral value, exact half ties toward positive infinity.
+    Round,
+    Sqrt,
+    /// e^x, natural and base-10 logarithms, and the trigonometric functions
+    /// in radians: fgdb-types' pinned kernels, the same bits on every target.
+    Exp,
+    Log,
+    Log10,
+    Sin,
+    Cos,
+    Tan,
+    /// 1 / tan(x).
+    Cot,
+    Asin,
+    Acos,
+    Atan,
+    /// Radians to degrees and back, one multiplication by the binary64
+    /// nearest 180/pi or pi/180.
+    Degrees,
+    Radians,
+    /// (1 - cos(x)) / 2.
+    Haversin,
+    /// -1, 0 or 1 as an Int.
+    Sign,
+}
+
+impl GraphNumericFunction {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::ToFloat => 0,
+            Self::Floor => 1,
+            Self::Ceil => 2,
+            Self::Round => 3,
+            Self::Sqrt => 4,
+            Self::Exp => 5,
+            Self::Log => 6,
+            Self::Log10 => 7,
+            Self::Sin => 8,
+            Self::Cos => 9,
+            Self::Tan => 10,
+            Self::Cot => 11,
+            Self::Asin => 12,
+            Self::Acos => 13,
+            Self::Atan => 14,
+            Self::Degrees => 15,
+            Self::Radians => 16,
+            Self::Haversin => 17,
+            Self::Sign => 18,
+        }
+    }
+
+    /// The function a name spells, case-insensitively. Out of line, with a
+    /// static table: the scalar parser's unary level repeats once per nested
+    /// parenthesis and must not widen.
+    #[inline(never)]
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        static NAMES: [(&str, GraphNumericFunction); 19] = [
+            ("TOFLOAT", GraphNumericFunction::ToFloat),
+            ("FLOOR", GraphNumericFunction::Floor),
+            ("CEIL", GraphNumericFunction::Ceil),
+            ("ROUND", GraphNumericFunction::Round),
+            ("SQRT", GraphNumericFunction::Sqrt),
+            ("EXP", GraphNumericFunction::Exp),
+            ("LOG", GraphNumericFunction::Log),
+            ("LOG10", GraphNumericFunction::Log10),
+            ("SIN", GraphNumericFunction::Sin),
+            ("COS", GraphNumericFunction::Cos),
+            ("TAN", GraphNumericFunction::Tan),
+            ("COT", GraphNumericFunction::Cot),
+            ("ASIN", GraphNumericFunction::Asin),
+            ("ACOS", GraphNumericFunction::Acos),
+            ("ATAN", GraphNumericFunction::Atan),
+            ("DEGREES", GraphNumericFunction::Degrees),
+            ("RADIANS", GraphNumericFunction::Radians),
+            ("HAVERSIN", GraphNumericFunction::Haversin),
+            ("SIGN", GraphNumericFunction::Sign),
+        ];
+        NAMES
+            .iter()
+            .find(|(spelling, _)| name.eq_ignore_ascii_case(spelling))
+            .map(|&(_, function)| function)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphIntegerOp {
     Column(usize),
     Literal(Option<i64>),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    /// openCypher id(x) (an Int) or elementId(x) (`text`) of the vertex or
+    /// edge a column holds (fgdb-j687q); NULL for NULL. An identity above
+    /// i64::MAX has no Int and fails typed (Overflow).
+    IdentityColumn {
+        column: usize,
+        text: bool,
+    },
     /// A list-comprehension element (fgdb-20foe): the scalar `k` positions
     /// before the END of the input row. An element scope evaluates over its
     /// row followed by one value per enclosing element binding, innermost
@@ -62,12 +162,47 @@ pub enum GraphIntegerOp {
     /// openCypher toString: NULL, integer, Boolean or text to text.
     ToText,
     /// openCypher toInteger: NULL, integer, Boolean or integer text to an
-    /// integer; other text is NULL, as in openCypher.
+    /// integer; other text is NULL, as in openCypher. A float truncates
+    /// toward zero; a non-finite float is NULL.
     ToInteger,
+    /// openCypher toBoolean: NULL, a Boolean, or the text `true` or `false` in
+    /// any case to a Boolean; other text is NULL. An integer is FALSE only at
+    /// zero. A float or any other value is an error.
+    ToBoolean,
+    /// openCypher `base ^ exponent`: always a float, NULL when either operand
+    /// is. The exponent must be integral; see `power` for exactness.
+    Power,
+    /// openCypher `atan2(y, x)`: the angle of the point (x, y), a float in
+    /// (-pi, pi]; NULL when either operand is. The pinned kernel's.
+    Atan2,
+    /// An openCypher one-operand numeric function over a number.
+    Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
     /// compiled once, at preparation (fgdb regex profile 1).
     Matches(Box<crate::regex::CompiledRegex>),
+    /// GQL/SQL SUBSTRING(text FROM start FOR length): `length` characters
+    /// from the 1-based start. Positions outside the text clamp.
     Substring,
+    /// SUBSTRING(text FROM start) without FOR: every character from the
+    /// 1-based start on, clamped as SUBSTRING clamps (fgdb-20foe).
+    SubstringFrom,
+    /// openCypher substring(text, start, length): `length` characters from
+    /// the 0-based start. A negative start or length is InvalidSubstring, as
+    /// in Neo4j; a start past the end is the empty text (fgdb-qkeq2).
+    CypherSubstring,
+    /// openCypher substring(text, start): every character from the 0-based
+    /// start on (fgdb-qkeq2).
+    CypherSubstringToEnd,
+    /// openCypher left(text, length) and right(text, length): the first or
+    /// last `length` characters (Unicode scalars), or all of a shorter text.
+    /// A negative length is InvalidSubstring (fgdb-20foe).
+    Left,
+    Right,
+    /// openCypher replace(text, search, replacement): every non-overlapping
+    /// occurrence, left to right. An empty search matches at every character
+    /// boundary, both ends included, as Java's String.replace does for
+    /// Neo4j (fgdb-20foe).
+    Replace,
     Concat,
     StartsWith,
     EndsWith,
@@ -84,6 +219,8 @@ pub enum GraphIntegerOp {
     Not,
     And,
     Or,
+    /// openCypher `a XOR b`: NULL when either side is NULL, else `a != b`.
+    Xor,
     Case,
     SimpleCase {
         alternatives: usize,
@@ -148,6 +285,7 @@ impl GraphIntegerOp {
             Self::Not => bytes.push(8),
             Self::And => bytes.push(9),
             Self::Or => bytes.push(10),
+            Self::Xor => bytes.push(36),
             Self::Scalar(value) => {
                 bytes.push(15);
                 let value = value.canonical_value_bytes();
@@ -164,6 +302,10 @@ impl GraphIntegerOp {
             Self::CharLength => bytes.push(20),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
+            Self::ToBoolean => bytes.push(37),
+            Self::Power => bytes.push(38),
+            Self::Atan2 => bytes.push(39),
+            Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
                 let source = regex.source().as_bytes();
@@ -171,6 +313,12 @@ impl GraphIntegerOp {
                 bytes.extend_from_slice(source);
             }
             Self::Substring => bytes.push(21),
+            Self::SubstringFrom => bytes.push(40),
+            Self::CypherSubstring => bytes.push(44),
+            Self::CypherSubstringToEnd => bytes.push(45),
+            Self::Left => bytes.push(41),
+            Self::Right => bytes.push(42),
+            Self::Replace => bytes.push(43),
             Self::Concat => bytes.push(22),
             Self::StartsWith => bytes.push(23),
             Self::EndsWith => bytes.push(24),
@@ -189,6 +337,10 @@ impl GraphIntegerOp {
                 bytes.push(33);
                 bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
             }
+            Self::IdentityColumn { column, text } => {
+                bytes.extend_from_slice(&[35, u8::from(*text)]);
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
         }
     }
 }
@@ -199,6 +351,11 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Literal(_) => f.write_str("Literal([REDACTED])"),
             Self::Scalar(_) => f.write_str("Scalar([REDACTED])"),
             Self::ScalarColumn(_) => f.write_str("ScalarColumn([REDACTED])"),
+            Self::IdentityColumn { text, .. } => f
+                .debug_struct("IdentityColumn")
+                .field("column", &"[REDACTED]")
+                .field("text", text)
+                .finish(),
             Self::Local(_) => f.write_str("Local([REDACTED])"),
             Self::Upper => f.write_str("Upper"),
             Self::Lower => f.write_str("Lower"),
@@ -206,8 +363,18 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::CharLength => f.write_str("CharLength"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
+            Self::ToBoolean => f.write_str("ToBoolean"),
+            Self::Power => f.write_str("Power"),
+            Self::Atan2 => f.write_str("Atan2"),
+            Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
+            Self::SubstringFrom => f.write_str("SubstringFrom"),
+            Self::CypherSubstring => f.write_str("CypherSubstring"),
+            Self::CypherSubstringToEnd => f.write_str("CypherSubstringToEnd"),
+            Self::Left => f.write_str("Left"),
+            Self::Right => f.write_str("Right"),
+            Self::Replace => f.write_str("Replace"),
             Self::Concat => f.write_str("Concat"),
             Self::StartsWith => f.write_str("StartsWith"),
             Self::EndsWith => f.write_str("EndsWith"),
@@ -222,6 +389,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Not => f.write_str("Not"),
             Self::And => f.write_str("And"),
             Self::Or => f.write_str("Or"),
+            Self::Xor => f.write_str("Xor"),
             Self::Case => f.write_str("Case"),
             Self::SimpleCase { alternatives } => f
                 .debug_struct("SimpleCase")
@@ -242,7 +410,34 @@ pub enum GraphIntegerBuildError {
 }
 impl core::fmt::Display for GraphIntegerBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "integer expression definition: {self:?}")
+        match self {
+            Self::Empty => f.write_str("empty scalar expression"),
+            Self::TooManyInstructions { limit, observed } => {
+                write!(
+                    f,
+                    "scalar expression has {observed} instructions, limit {limit}"
+                )
+            }
+            Self::MissingOperand { instruction } => {
+                write!(
+                    f,
+                    "scalar expression instruction {instruction} lacks an operand"
+                )
+            }
+            Self::ExtraOperands { remaining } => {
+                write!(f, "scalar expression leaves {remaining} unused operands")
+            }
+            Self::OperandType { instruction } => write!(
+                f,
+                "scalar expression instruction {instruction} has an operand of the wrong type"
+            ),
+            Self::EmptyCase { instruction } => {
+                write!(
+                    f,
+                    "CASE at scalar expression instruction {instruction} has no branch"
+                )
+            }
+        }
     }
 }
 impl core::error::Error for GraphIntegerBuildError {}
@@ -256,21 +451,75 @@ pub enum GraphIntegerErrorKind {
     NonText,
     NonBoolean,
     NonScalar,
+    /// A bound graph element requires an enumerating property-map source.
+    PropertyMapSourceRequired,
+    /// A property-map source returned a non-map or a noncanonical map.
+    NonMap,
     IncompatibleOperands,
     InvalidSubstring,
     /// openCypher range() with a step of 0 (fgdb-20foe).
     InvalidRangeStep,
     TextConstruction,
+    /// A temporal constructor's argument names no value: an unknown or
+    /// non-integer field, a mix of calendars, malformed text, or a day that
+    /// does not exist (fgdb-txbg9).
+    TemporalConstruction,
+    /// A field a temporal value does not have, such as `d.hour` of a date.
+    TemporalField,
+    /// A stored List or Map property exceeds the query value bounds
+    /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`), so no complete
+    /// query value can hold it (fgdb-k3nub). It is never truncated.
+    StoredValueBounds,
+    /// A stored List or Map property reached an operator that reads only
+    /// scalars, such as a numeric aggregate or a path weight (fgdb-k3nub).
+    /// Refused, never read as NULL: NULL would silently change the answer.
+    StoredCollection,
+    /// An argument outside its function's domain: a percentile outside
+    /// [0, 1] (openCypher ArgumentError NumberOutOfRange, fgdb-qbaex).
+    NumberOutOfRange,
+    /// A pattern comprehension's list reached an executor that does not
+    /// collect it (fgdb-7nwox).
+    CollectionSourceRequired,
+    /// A pattern comprehension collected more than one query value holds
+    /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`). It is never
+    /// truncated.
+    CollectionBounds,
 }
 impl GraphIntegerErrorKind {
-    /// An arithmetic data exception (GQL class 22: division by zero, numeric
-    /// overflow) that every statement family raises, a WHERE predicate
-    /// included. The other kinds are a value that does not fit its operator.
-    /// A Boolean predicate reads those as UNKNOWN, so a property holding
-    /// mixed types never escapes as a query error.
+    /// A data exception that every statement family raises, a WHERE predicate
+    /// included: division by zero, numeric overflow (GQL class 22), a stored
+    /// value or a collected list too large to read whole, a stored value read
+    /// by a scalar-only operator, and an argument outside its function's
+    /// domain. The other kinds are a
+    /// value that does not fit its operator. A Boolean predicate reads those
+    /// as UNKNOWN, so a property holding mixed types never escapes as a
+    /// query error.
     #[must_use]
     pub const fn is_arithmetic_exception(self) -> bool {
-        matches!(self, Self::DivisionByZero | Self::Overflow)
+        matches!(
+            self,
+            Self::DivisionByZero
+                | Self::Overflow
+                | Self::StoredValueBounds
+                | Self::StoredCollection
+                | Self::NumberOutOfRange
+                | Self::CollectionBounds
+        )
+    }
+}
+
+/// The scalar a scalar-only operator reads from a stored property value
+/// (fgdb-k3nub): absent stays absent, a scalar is itself, and a List or Map
+/// raises `StoredCollection` instead of reading as NULL.
+pub(crate) fn stored_scalar(
+    value: Option<&fgdb_types::CanonicalPropertyValue>,
+) -> Result<Option<&CanonicalScalar>, GraphIntegerError> {
+    match value {
+        None => Ok(None),
+        Some(value) => value.as_scalar().map(Some).ok_or(GraphIntegerError {
+            instruction: 0,
+            kind: GraphIntegerErrorKind::StoredCollection,
+        }),
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +582,27 @@ impl ExpressionCell<'_> {
         }
     }
 
+    /// Arithmetic reads an exact average as openCypher's Float: replace it
+    /// with its correctly rounded binary64 (fgdb-y255t, option C). True when
+    /// this cell was an average.
+    fn round_average(&mut self) -> bool {
+        let Self::Average(average) = self else {
+            return false;
+        };
+        *self = CanonicalScalar::Float(average.binary64()).into();
+        true
+    }
+
+    fn float(&self) -> Option<fgdb_types::CanonicalF64> {
+        match self {
+            Self::Scalar(value) => match value.as_ref() {
+                CanonicalScalar::Float(value) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn boolean(&self) -> Result<Option<bool>, GraphIntegerErrorKind> {
         match self {
             Self::Scalar(value) => scalar_boolean(value),
@@ -355,8 +625,15 @@ impl ExpressionCell<'_> {
                     CanonicalScalar::Null
                         | CanonicalScalar::Int(_)
                         | CanonicalScalar::Float(_)
+                        | CanonicalScalar::Decimal(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
+                        | CanonicalScalar::Date(_)
+                        | CanonicalScalar::LocalTime(_)
+                        | CanonicalScalar::Time(_)
+                        | CanonicalScalar::LocalDateTime(_)
+                        | CanonicalScalar::Timestamp(_)
+                        | CanonicalScalar::Duration(_)
                 ) =>
             {
                 Err(GraphIntegerErrorKind::NonScalar)
@@ -390,6 +667,7 @@ enum Instruction {
     NumericUnary(GraphIntegerUnary),
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
+    IdentityColumn { column: usize, text: bool },
     Local(usize),
     Upper,
     Lower,
@@ -397,8 +675,18 @@ enum Instruction {
     CharLength,
     ToText,
     ToInteger,
+    ToBoolean,
+    Power,
+    Atan2,
+    Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
+    SubstringFrom,
+    CypherSubstring,
+    CypherSubstringToEnd,
+    Left,
+    Right,
+    Replace,
     Concat,
     StartsWith,
     EndsWith,
@@ -413,6 +701,7 @@ enum Instruction {
     Not,
     And,
     Or,
+    Xor,
     JumpUnlessTrue(usize),
     JumpUnlessEqual(usize),
     Jump(usize),
@@ -473,9 +762,29 @@ impl GraphIntegerExpression {
         })
     }
 
+    /// Every input column this program reads, scalar or element.
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
+            Instruction::Column(column)
+            | Instruction::ScalarColumn(column)
+            | Instruction::IdentityColumn { column, .. } => Some(*column),
+            _ => None,
+        })
+    }
+
+    /// The input columns read as scalars; each must admit a scalar.
+    pub fn scalar_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.code.iter().filter_map(|op| match op {
             Instruction::Column(column) | Instruction::ScalarColumn(column) => Some(*column),
+            _ => None,
+        })
+    }
+
+    /// The input columns read for id()/elementId(); each must admit a vertex
+    /// or an edge (fgdb-j687q).
+    pub fn element_columns(&self) -> impl Iterator<Item = usize> + '_ {
+        self.code.iter().filter_map(|op| match op {
+            Instruction::IdentityColumn { column, .. } => Some(*column),
             _ => None,
         })
     }
@@ -512,6 +821,7 @@ impl GraphIntegerExpression {
                 Some(_) => Err(GraphIntegerErrorKind::NonScalar),
                 None => Err(GraphIntegerErrorKind::MissingColumn),
             },
+            |column| element_identity(values.get(column)),
             control,
         )?;
         let ExpressionCell::Scalar(value) = value else {
@@ -527,13 +837,28 @@ impl GraphIntegerExpression {
     /// operands widen arithmetic to checked i128; scalar-only arithmetic still
     /// checks i64 bounds. Returned payloads remain borrowed until their caller
     /// reserves storage for an owned output. `width` is the loaded row's
-    /// width: a Local(k) element loads column `width - 1 - k`.
+    /// width: a Local(k) element loads column `width - 1 - k`. `load_element`
+    /// answers only IdentityColumn: the identity of the vertex or edge a column
+    /// holds, None for NULL. Every other instruction reads scalars through
+    /// `load`, so no element ever reaches the stack (fgdb-j687q).
     pub(crate) fn evaluate_loaded_with_control<'a, E>(
         &'a self,
         width: usize,
         mut load: impl FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
+        mut load_element: impl FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+        self.evaluate_loaded_dyn(width, &mut load, &mut load_element, control)
+    }
+
+    fn evaluate_loaded_dyn<'a, E>(
+        &'a self,
+        width: usize,
+        load: &mut dyn FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
+        load_element: &mut dyn FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
+        mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+        let control = &mut control;
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry)
                 .map_err(GraphIntegerEvaluationError::Control)?;
@@ -572,6 +897,21 @@ impl GraphIntegerExpression {
                         .ok_or_else(|| failure(GraphIntegerErrorKind::MissingColumn))?;
                     stack.push(load(column).map_err(failure)?);
                 }
+                Instruction::IdentityColumn { column, text } => {
+                    let value = match load_element(*column).map_err(failure)? {
+                        None => CanonicalScalar::Null,
+                        Some(identity) if *text => {
+                            control(GlaExecutionEvent::ScratchEntry)
+                                .map_err(GraphIntegerEvaluationError::Control)?;
+                            make_text(&identity.to_string(), at, control)?
+                        }
+                        Some(identity) => CanonicalScalar::Int(
+                            i64::try_from(identity)
+                                .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                        ),
+                    };
+                    stack.push(value.into());
+                }
                 Instruction::Scalar(value) => {
                     stack.push(ExpressionCell::Scalar(Cow::Borrowed(value.value())));
                 }
@@ -579,7 +919,8 @@ impl GraphIntegerExpression {
                 Instruction::Truth(value) => stack.push(boolean_scalar(*value).into()),
                 Instruction::Unary(op) | Instruction::NumericUnary(op) => {
                     let value = stack.last_mut().expect("validated unary stack");
-                    if matches!(self.code[at], Instruction::NumericUnary(_))
+                    let averaged = value.round_average();
+                    if (averaged || matches!(self.code[at], Instruction::NumericUnary(_)))
                         && let Some(result) = numeric::unary(*op, value).map_err(failure)?
                     {
                         *value = result.into();
@@ -605,9 +946,13 @@ impl GraphIntegerExpression {
                     .map_err(failure)?;
                 }
                 Instruction::Binary(op) | Instruction::NumericBinary(op) => {
-                    let right = stack.pop().expect("validated right operand");
+                    let mut right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
-                    if matches!(self.code[at], Instruction::NumericBinary(_)) {
+                    // Arithmetic rounds each average operand once; NULLIF is
+                    // an equality and keeps it exact.
+                    let averaged = *op != GraphIntegerBinary::NullIf
+                        && (left.round_average() | right.round_average());
+                    if averaged || matches!(self.code[at], Instruction::NumericBinary(_)) {
                         if *op == GraphIntegerBinary::NullIf {
                             // Equality stays exact; do not round an integer
                             // merely to decide whether NULLIF should retain it.
@@ -618,6 +963,18 @@ impl GraphIntegerExpression {
                             {
                                 *left = CanonicalScalar::Null.into();
                             }
+                            at += 1;
+                            continue;
+                        }
+                        // A temporal operand takes openCypher's temporal
+                        // arithmetic (TCK Temporal8) before the binary64 kernel.
+                        if let (ExpressionCell::Scalar(a), ExpressionCell::Scalar(b)) =
+                            (&*left, &right)
+                            && let Some(result) =
+                                crate::set_ops::temporal_arithmetic(*op, a.as_ref(), b.as_ref())
+                                    .map_err(failure)?
+                        {
+                            *left = result.into();
                             at += 1;
                             continue;
                         }
@@ -675,12 +1032,16 @@ impl GraphIntegerExpression {
                     *value = boolean_scalar(value.boolean().map_err(failure)?.map(|value| !value))
                         .into();
                 }
-                Instruction::And | Instruction::Or => {
+                Instruction::And | Instruction::Or | Instruction::Xor => {
                     let right = stack.pop().expect("validated Boolean right operand");
                     let left = stack.last_mut().expect("validated Boolean left operand");
                     let a = left.boolean().map_err(failure)?;
                     let b = right.boolean().map_err(failure)?;
-                    let result = if matches!(op, Instruction::And) {
+                    let result = if matches!(op, Instruction::Xor) {
+                        // Three-valued XOR has no short circuit: either
+                        // unknown side makes the result unknown.
+                        a.zip(b).map(|(a, b)| a != b)
+                    } else if matches!(op, Instruction::And) {
                         if a == Some(false) || b == Some(false) {
                             Some(false)
                         } else if a.is_none() || b.is_none() {
@@ -707,6 +1068,13 @@ impl GraphIntegerExpression {
                             .checked_mul(regex.program_len())
                             .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
                         charge_payload(steps, false, control)?;
+                        // Two thread sets and the epsilon-closure stack are
+                        // bounded by the checked program. Admit their slots
+                        // before the matcher allocates, including empty text.
+                        for _ in 0..regex.program_len() {
+                            control(GlaExecutionEvent::ScratchEntry)
+                                .map_err(GraphIntegerEvaluationError::Control)?;
+                        }
                         Some(regex.is_match(text))
                     } else {
                         None
@@ -716,6 +1084,30 @@ impl GraphIntegerExpression {
                 Instruction::ToText | Instruction::ToInteger => {
                     let value = stack.last_mut().expect("validated conversion operand");
                     let result = convert(value, matches!(op, Instruction::ToText), at, control)?;
+                    *value = result.into();
+                }
+                Instruction::ToBoolean => {
+                    let value = stack.last_mut().expect("validated conversion operand");
+                    let result = to_boolean(value, at, control)?;
+                    *value = result.into();
+                }
+                Instruction::Power => {
+                    let exponent = stack.pop().expect("validated exponent operand");
+                    let base = stack.last_mut().expect("validated base operand");
+                    let result = power(base, &exponent).map_err(failure)?;
+                    *base = result.into();
+                }
+                Instruction::Atan2 => {
+                    let x = stack.pop().expect("validated atan2 x operand");
+                    let y = stack.last_mut().expect("validated atan2 y operand");
+                    control(GlaExecutionEvent::Work)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    let result = atan2(y, &x).map_err(failure)?;
+                    *y = result.into();
+                }
+                Instruction::Numeric(function) => {
+                    let value = stack.last_mut().expect("validated numeric operand");
+                    let result = numeric(value, *function, at, control)?;
                     *value = result.into();
                 }
                 Instruction::Upper
@@ -758,8 +1150,13 @@ impl GraphIntegerExpression {
                 | Instruction::Contains => {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
-                    let a = left.text().map_err(failure)?;
-                    let b = right.text().map_err(failure)?;
+                    let (a, b) = if matches!(op, Instruction::Concat) {
+                        (left.text(), right.text())
+                    } else {
+                        (predicate_text(left.text()), predicate_text(right.text()))
+                    };
+                    let a = a.map_err(failure)?;
+                    let b = b.map_err(failure)?;
                     let result = if let (Some(a), Some(b)) = (a, b) {
                         charge_payload(a.len(), false, control)?;
                         charge_payload(b.len(), false, control)?;
@@ -784,16 +1181,36 @@ impl GraphIntegerExpression {
                     };
                     *left = result.into();
                 }
-                Instruction::Substring => {
-                    let length = stack.pop().expect("validated substring length");
+                Instruction::Substring
+                | Instruction::SubstringFrom
+                | Instruction::CypherSubstring
+                | Instruction::CypherSubstringToEnd => {
+                    let length =
+                        matches!(op, Instruction::Substring | Instruction::CypherSubstring)
+                            .then(|| stack.pop().expect("validated substring length"));
                     let start = stack.pop().expect("validated substring start");
                     let value = stack.last_mut().expect("validated substring text");
                     let text = value.text().map_err(failure)?;
                     let start = start.integer().map_err(failure)?;
-                    let length = length.integer().map_err(failure)?;
+                    // Without a length, SUBSTRING runs to the end of the text.
+                    let length = match length {
+                        Some(length) => length.integer().map_err(failure)?,
+                        None => Some(i128::MAX),
+                    };
                     if length.is_some_and(|length| length < 0) {
                         return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
                     }
+                    // openCypher's comma form counts from 0 and refuses a
+                    // negative start, as Neo4j does; SUBSTRING ... FROM counts
+                    // from 1 and clamps (fgdb-qkeq2).
+                    let zero_based = matches!(
+                        op,
+                        Instruction::CypherSubstring | Instruction::CypherSubstringToEnd
+                    );
+                    if zero_based && start.is_some_and(|start| start < 0) {
+                        return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
+                    }
+                    let start = start.map(|start| start.saturating_add(i128::from(zero_based)));
                     let result =
                         if let (Some(text), Some(start), Some(length)) = (text, start, length) {
                             charge_payload(text.len(), false, control)?;
@@ -817,6 +1234,70 @@ impl GraphIntegerExpression {
                         } else {
                             CanonicalScalar::Null
                         };
+                    *value = result.into();
+                }
+                Instruction::Left | Instruction::Right => {
+                    let length = stack.pop().expect("validated left/right length");
+                    let value = stack.last_mut().expect("validated left/right text");
+                    let text = value.text().map_err(failure)?;
+                    let length = length.integer().map_err(failure)?;
+                    if length.is_some_and(|length| length < 0) {
+                        return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
+                    }
+                    let result = if let (Some(text), Some(length)) = (text, length) {
+                        charge_payload(text.len(), false, control)?;
+                        // A length beyond any text keeps all of it.
+                        let length = usize::try_from(length).unwrap_or(usize::MAX);
+                        let kept = if matches!(op, Instruction::Left) {
+                            let end = text
+                                .char_indices()
+                                .nth(length)
+                                .map_or(text.len(), |(byte, _)| byte);
+                            &text[..end]
+                        } else if length == 0 {
+                            ""
+                        } else {
+                            let begin = text
+                                .char_indices()
+                                .rev()
+                                .nth(length - 1)
+                                .map_or(0, |(byte, _)| byte);
+                            &text[begin..]
+                        };
+                        make_text(kept, at, control)?
+                    } else {
+                        CanonicalScalar::Null
+                    };
+                    *value = result.into();
+                }
+                Instruction::Replace => {
+                    let replacement = stack.pop().expect("validated replacement text");
+                    let search = stack.pop().expect("validated search text");
+                    let value = stack.last_mut().expect("validated replaced text");
+                    let text = value.text().map_err(failure)?;
+                    let search = search.text().map_err(failure)?;
+                    let replacement = replacement.text().map_err(failure)?;
+                    let result = if let (Some(text), Some(search), Some(replacement)) =
+                        (text, search, replacement)
+                    {
+                        // Counting the occurrences is one scan; it sizes the
+                        // result, reserved before the second scan builds it.
+                        charge_payload(text.len(), false, control)?;
+                        charge_payload(search.len(), false, control)?;
+                        charge_payload(replacement.len(), false, control)?;
+                        let count = text.matches(search).count();
+                        let size = count
+                            .checked_mul(replacement.len())
+                            .and_then(|added| {
+                                (text.len() - count * search.len()).checked_add(added)
+                            })
+                            .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                        charge_payload(text.len(), false, control)?;
+                        charge_payload(size, true, control)?;
+                        make_text(&text.replace(search, replacement), at, control)?
+                    } else {
+                        CanonicalScalar::Null
+                    };
                     *value = result.into();
                 }
                 Instruction::InList { members } => {
@@ -956,6 +1437,7 @@ impl GraphIntegerExpression {
                 Instruction::Not => bytes.push(8),
                 Instruction::And => bytes.push(9),
                 Instruction::Or => bytes.push(10),
+                Instruction::Xor => bytes.push(36),
                 Instruction::JumpUnlessTrue(target) => {
                     bytes.push(11);
                     bytes.extend_from_slice(&(*target as u64).to_be_bytes());
@@ -985,6 +1467,10 @@ impl GraphIntegerExpression {
                 Instruction::CharLength => bytes.push(20),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
+                Instruction::ToBoolean => bytes.push(37),
+                Instruction::Power => bytes.push(38),
+                Instruction::Atan2 => bytes.push(39),
+                Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
                     let source = regex.source().as_bytes();
@@ -992,6 +1478,12 @@ impl GraphIntegerExpression {
                     bytes.extend_from_slice(source);
                 }
                 Instruction::Substring => bytes.push(21),
+                Instruction::SubstringFrom => bytes.push(40),
+                Instruction::CypherSubstring => bytes.push(44),
+                Instruction::CypherSubstringToEnd => bytes.push(45),
+                Instruction::Left => bytes.push(41),
+                Instruction::Right => bytes.push(42),
+                Instruction::Replace => bytes.push(43),
                 Instruction::Concat => bytes.push(22),
                 Instruction::StartsWith => bytes.push(23),
                 Instruction::EndsWith => bytes.push(24),
@@ -1003,6 +1495,10 @@ impl GraphIntegerExpression {
                 Instruction::Local(offset) => {
                     bytes.push(30);
                     bytes.extend_from_slice(&(*offset as u64).to_be_bytes());
+                }
+                Instruction::IdentityColumn { column, text } => {
+                    bytes.extend_from_slice(&[35, u8::from(*text)]);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                 }
             }
         }
@@ -1031,6 +1527,18 @@ fn scalar_boolean(value: &CanonicalScalar) -> Result<Option<bool>, GraphIntegerE
         CanonicalScalar::Null => Ok(None),
         CanonicalScalar::Bool(value) => Ok(Some(*value)),
         _ => Err(GraphIntegerErrorKind::NonBoolean),
+    }
+}
+
+/// openCypher: STARTS WITH, ENDS WITH and CONTAINS over a scalar that is not
+/// text are NULL, as they are in WHERE (TCK String8-10 [8]). Concatenation
+/// still requires text.
+fn predicate_text(
+    text: Result<Option<&str>, GraphIntegerErrorKind>,
+) -> Result<Option<&str>, GraphIntegerErrorKind> {
+    match text {
+        Err(GraphIntegerErrorKind::NonText) => Ok(None),
+        text => text,
     }
 }
 
@@ -1070,8 +1578,165 @@ fn charge_payload<E>(
 
 /// openCypher toString / toInteger (fgdb-j687q). NULL stays NULL. Text that
 /// is not an i64 literal converts to NULL under toInteger, as openCypher
-/// defines it. Decimal, float, timestamp, bytes and average cells are a typed
-/// failure, never a guessed rendering.
+/// defines it. Decimal conversion stays exact: toString uses the canonical
+/// fixed-scale spelling and toInteger truncates its scale-18 coefficient
+/// toward zero without a binary64 intermediate. Bytes remain a typed
+/// failure; an exact average converts as its correctly rounded binary64.
+/// openCypher `base ^ exponent` (TCK Precedence2, Return2 [1]): a float, NULL
+/// when either operand is. A Count or wide sum, or a non-number, is an error;
+/// an exact average is its correctly rounded binary64 (fgdb-y255t). The
+/// exponent must be integral (a fractional one is NonInteger, never a host
+/// `powf`, whose last bit differs across platforms).
+///
+/// An integer base to a non-negative integer power is computed exactly and
+/// rounded once, so `4 ^ 18` is exactly 68719476736.0. Any other integral
+/// exponent multiplies by squaring with checked binary64 steps: deterministic
+/// on every target, though not always the correctly rounded power. A
+/// non-finite result is Overflow, as every float operation here.
+fn power(
+    base: &ExpressionCell<'_>,
+    exponent: &ExpressionCell<'_>,
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    use fgdb_types::CanonicalF64;
+
+    let number = |cell: &ExpressionCell<'_>| match cell {
+        ExpressionCell::Scalar(value) => match value.as_ref() {
+            CanonicalScalar::Null => Ok(None),
+            CanonicalScalar::Int(value) => {
+                Ok(Some((Some(*value), CanonicalF64::from_i64_rounded(*value))))
+            }
+            CanonicalScalar::Float(value) => Ok(Some((None, *value))),
+            _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+        },
+        ExpressionCell::Average(average) => Ok(Some((None, average.binary64()))),
+        _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+    };
+    let (base, exponent) = (number(base)?, number(exponent)?);
+    let (Some((base_int, base)), Some((exponent_int, exponent))) = (base, exponent) else {
+        return Ok(CanonicalScalar::Null);
+    };
+    let exponent = match exponent_int {
+        Some(exponent) => exponent,
+        None => {
+            let value = exponent.get();
+            if !value.is_finite() || value.fract() != 0.0 || value.abs() > f64::from(i32::MAX) {
+                return Err(GraphIntegerErrorKind::NonInteger);
+            }
+            // Integral and within i32, so this conversion is exact.
+            value as i64
+        }
+    };
+    if let (Some(base), Ok(exponent)) = (base_int, u32::try_from(exponent))
+        && let Some(exact) = i128::from(base).checked_pow(exponent)
+    {
+        // Rust rounds an i128 to the nearest binary64, ties to even.
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(exact as f64)));
+    }
+    let overflow = |_| GraphIntegerErrorKind::Overflow;
+    let one = CanonicalF64::from_i64_rounded(1);
+    let (mut result, mut square, mut remaining) = (one, base, exponent.unsigned_abs());
+    while remaining > 0 {
+        if remaining & 1 == 1 {
+            result = result.checked_mul(square).map_err(overflow)?;
+        }
+        remaining >>= 1;
+        if remaining > 0 {
+            square = square.checked_mul(square).map_err(overflow)?;
+        }
+    }
+    if exponent < 0 {
+        result = one.checked_div(result).map_err(|error| match error {
+            fgdb_types::FloatArithmeticError::DivisionByZero => {
+                GraphIntegerErrorKind::DivisionByZero
+            }
+            _ => GraphIntegerErrorKind::Overflow,
+        })?;
+    }
+    Ok(CanonicalScalar::Float(result))
+}
+
+/// A numeric cell as the nearest binary64: counts, integers and exact
+/// averages round once; a float is itself. None for NULL.
+fn binary64(
+    cell: &ExpressionCell<'_>,
+) -> Result<Option<fgdb_types::CanonicalF64>, GraphIntegerErrorKind> {
+    use fgdb_types::ExactBinary64Sum;
+    let integer = |value: i128| {
+        let mut exact = ExactBinary64Sum::new();
+        exact.add_integer(value);
+        exact.sum()
+    };
+    Ok(Some(match cell {
+        ExpressionCell::Count(value) => integer(i128::from(*value)),
+        ExpressionCell::Integer(value) => integer(*value),
+        ExpressionCell::Average(average) => average.binary64(),
+        ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
+            CanonicalScalar::Null => return Ok(None),
+            CanonicalScalar::Int(value) => integer(i128::from(*value)),
+            CanonicalScalar::Float(value) => *value,
+            _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
+        },
+    }))
+}
+
+/// A pinned kernel's refusal: a pole divides by zero, a finite argument whose
+/// result leaves binary64 overflows, as the arithmetic kernel reports them.
+fn kernel_error(error: fgdb_types::FloatArithmeticError) -> GraphIntegerErrorKind {
+    match error {
+        fgdb_types::FloatArithmeticError::DivisionByZero => GraphIntegerErrorKind::DivisionByZero,
+        fgdb_types::FloatArithmeticError::Overflow
+        | fgdb_types::FloatArithmeticError::NonFinite => GraphIntegerErrorKind::Overflow,
+    }
+}
+
+/// openCypher atan2(y, x) by the pinned kernel; NULL when either is NULL.
+fn atan2(
+    y: &ExpressionCell<'_>,
+    x: &ExpressionCell<'_>,
+) -> Result<CanonicalScalar, GraphIntegerErrorKind> {
+    let (Some(y), Some(x)) = (binary64(y)?, binary64(x)?) else {
+        return Ok(CanonicalScalar::Null);
+    };
+    y.atan2(x).map(CanonicalScalar::Float).map_err(kernel_error)
+}
+
+/// openCypher toBoolean (TCK TypeConversion1): NULL stays NULL, a Boolean is
+/// itself, and the text `true` or `false` in any case converts. Any other
+/// text is NULL, untrimmed (`' tru '` is NULL). An integer is FALSE only at
+/// zero, as in Neo4j. A float, an average or any other value is an error.
+fn to_boolean<E>(
+    cell: &ExpressionCell<'_>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    Ok(match cell {
+        ExpressionCell::Count(value) => CanonicalScalar::Bool(*value != 0),
+        ExpressionCell::Integer(value) => CanonicalScalar::Bool(*value != 0),
+        ExpressionCell::Average(_) => {
+            return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+        }
+        ExpressionCell::Scalar(value) => match value.as_ref() {
+            CanonicalScalar::Null => CanonicalScalar::Null,
+            CanonicalScalar::Bool(value) => CanonicalScalar::Bool(*value),
+            CanonicalScalar::Int(value) => CanonicalScalar::Bool(*value != 0),
+            CanonicalScalar::Text(text) => {
+                let text = text.as_str();
+                charge_payload(text.len(), false, control)?;
+                if text.eq_ignore_ascii_case("true") {
+                    CanonicalScalar::Bool(true)
+                } else if text.eq_ignore_ascii_case("false") {
+                    CanonicalScalar::Bool(false)
+                } else {
+                    CanonicalScalar::Null
+                }
+            }
+            _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+        },
+    })
+}
+
 fn convert<E>(
     cell: &ExpressionCell<'_>,
     to_text: bool,
@@ -1083,8 +1748,11 @@ fn convert<E>(
     let number = match cell {
         ExpressionCell::Count(value) => i128::from(*value),
         ExpressionCell::Integer(value) => *value,
-        ExpressionCell::Average(_) => {
-            return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+        // openCypher avg is a Float: convert its correctly rounded binary64
+        // (fgdb-y255t).
+        ExpressionCell::Average(average) => {
+            let float = CanonicalScalar::Float(average.binary64()).into();
+            return convert(&float, to_text, instruction, control);
         }
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
@@ -1102,20 +1770,243 @@ fn convert<E>(
                     make_text(text, instruction, control)
                 } else {
                     charge_payload(text.len(), false, control)?;
-                    Ok(text
-                        .parse::<i64>()
-                        .map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                    // openCypher parses the text as a number and truncates a
+                    // fraction toward zero: toInteger('2.9') is 2 (TCK
+                    // TypeConversion2 [4], [5]). Text that is not a finite
+                    // number, or does not fit an i64, is NULL.
+                    Ok(match text.parse::<i64>() {
+                        Ok(integer) => CanonicalScalar::Int(integer),
+                        Err(_) => text
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite())
+                            .and_then(|value| {
+                                fgdb_types::CanonicalF64::new(value)
+                                    .checked_to_i64_truncated()
+                                    .ok()
+                            })
+                            .map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                    })
                 };
+            }
+            CanonicalScalar::Float(value) => {
+                return if to_text {
+                    // Binary64's shortest decimal spelling has a fixed small
+                    // bound. Formatting owns a String before make_text sees it.
+                    control(GlaExecutionEvent::ScratchEntry)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    make_text(&float_text(*value), instruction, control)
+                } else {
+                    match value.checked_to_i64_truncated() {
+                        Ok(integer) => Ok(CanonicalScalar::Int(integer)),
+                        Err(fgdb_types::FloatArithmeticError::Overflow) => {
+                            Err(failure(GraphIntegerErrorKind::Overflow))
+                        }
+                        Err(_) => Ok(CanonicalScalar::Null),
+                    }
+                };
+            }
+            CanonicalScalar::Decimal(value) => {
+                if to_text {
+                    // The fixed-scale decimal spelling is bounded by its
+                    // canonical profile. Reserve the temporary formatter and
+                    // then the returned text payload under the same evaluator.
+                    control(GlaExecutionEvent::ScratchEntry)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    return make_text(&value.to_string(), instruction, control);
+                }
+                let unit = 10_i128.pow(fgdb_types::STRICT_PORTABLE_DECIMAL_SCALE);
+                let integer = value.coefficient() / unit;
+                return i64::try_from(integer)
+                    .map(CanonicalScalar::Int)
+                    .map_err(|_| failure(GraphIntegerErrorKind::Overflow));
+            }
+            // toString of a temporal value is its ISO 8601 text with the
+            // java.time spelling (fgdb-txbg9); a temporal value is not a number.
+            CanonicalScalar::Date(_)
+            | CanonicalScalar::LocalTime(_)
+            | CanonicalScalar::Time(_)
+            | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Timestamp(_)
+            | CanonicalScalar::Duration(_)
+                if to_text =>
+            {
+                // At most a zone's 255 bytes past the fixed temporal text;
+                // make_text reserves the payload of what formatting built.
+                control(GlaExecutionEvent::ScratchEntry)
+                    .map_err(GraphIntegerEvaluationError::Control)?;
+                let text = match value.as_ref() {
+                    CanonicalScalar::Date(value) => value.to_string(),
+                    CanonicalScalar::LocalTime(value) => value.to_string(),
+                    CanonicalScalar::Time(value) => value.to_string(),
+                    CanonicalScalar::LocalDateTime(value) => value.to_string(),
+                    CanonicalScalar::Duration(value) => value.to_string(),
+                    CanonicalScalar::Timestamp(value) => {
+                        crate::set_ops::timestamp_text(value).map_err(failure)?
+                    }
+                    _ => unreachable!("the arm admits only temporal kinds"),
+                };
+                return make_text(&text, instruction, control);
             }
             _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
         },
     };
     if to_text {
+        // An i128 spelling fits in 40 bytes, but formatting allocates before
+        // make_text's payload reservation. Keep that temporary governed too.
+        control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
         make_text(&number.to_string(), instruction, control)
     } else {
         i64::try_from(number)
             .map(CanonicalScalar::Int)
             .map_err(|_| failure(GraphIntegerErrorKind::Overflow))
+    }
+}
+
+/// openCypher toString of a float: the shortest text that reads back as the
+/// same binary64 (`1.0`, `0.1`, `1e100`), and Infinity/-Infinity/NaN.
+fn float_text(value: fgdb_types::CanonicalF64) -> String {
+    let value = value.get();
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+    } else {
+        format!("{value:?}")
+    }
+}
+
+/// The one-operand numeric functions. Integers (counts and exact averages
+/// too) become the nearest binary64 first; numeric text is toFloat's alone.
+/// Finite values use the integer-only binary64 kernel, rounding once, and
+/// exp, log, log10 and the trigonometric functions its pinned kernels. NaN
+/// and the infinities follow IEEE 754; an argument outside a function's real
+/// domain is NaN (sqrt or log of a negative, asin(2)); a pole (log 0, cot 0)
+/// is DivisionByZero and a finite overflow (exp 710) Overflow, as arithmetic
+/// reports them. NULL is NULL.
+fn numeric<E>(
+    cell: &ExpressionCell<'_>,
+    function: GraphNumericFunction,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    use fgdb_types::{CanonicalF64, ExactBinary64Sum};
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    let incompatible = || failure(GraphIntegerErrorKind::IncompatibleOperands);
+    let integer = |value: i128| {
+        let mut exact = ExactBinary64Sum::new();
+        exact.add_integer(value);
+        exact.sum()
+    };
+    let value = match cell {
+        ExpressionCell::Count(value) => integer(i128::from(*value)),
+        ExpressionCell::Integer(value) => integer(*value),
+        ExpressionCell::Average(average) => average.binary64(),
+        ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
+            CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
+            CanonicalScalar::Int(value) => integer(i128::from(*value)),
+            CanonicalScalar::Float(value) => *value,
+            CanonicalScalar::Text(text) if function == GraphNumericFunction::ToFloat => {
+                let text = text.as_str();
+                charge_payload(text.len(), false, control)?;
+                return Ok(text
+                    .trim()
+                    .parse::<f64>()
+                    .map_or(CanonicalScalar::Null, |value| {
+                        CanonicalScalar::Float(CanonicalF64::new(value))
+                    }));
+            }
+            _ => return Err(incompatible()),
+        },
+    };
+    control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
+    let finite = value.get().is_finite();
+    let kernel = |result: Result<CanonicalF64, fgdb_types::FloatArithmeticError>| {
+        result.map_err(|error| failure(kernel_error(error)))
+    };
+    let one = CanonicalF64::from_i64_rounded(1);
+    let result = match function {
+        GraphNumericFunction::Sign => {
+            // NaN has no sign and is 0, as Java's (long) Math.signum(NaN).
+            let value = value.get();
+            return Ok(CanonicalScalar::Int(if value > 0.0 {
+                1
+            } else if value < 0.0 {
+                -1
+            } else {
+                0
+            }));
+        }
+        GraphNumericFunction::ToFloat => value,
+        GraphNumericFunction::Floor
+        | GraphNumericFunction::Ceil
+        | GraphNumericFunction::Round
+        | GraphNumericFunction::Degrees
+        | GraphNumericFunction::Radians
+            if !finite =>
+        {
+            value
+        }
+        GraphNumericFunction::Floor => value.checked_floor().map_err(|_| incompatible())?,
+        GraphNumericFunction::Ceil => value.checked_ceil().map_err(|_| incompatible())?,
+        GraphNumericFunction::Round => value.checked_round().map_err(|_| incompatible())?,
+        GraphNumericFunction::Sqrt => match value.checked_sqrt() {
+            Ok(root) => root,
+            // +Infinity is its own root; NaN, -Infinity and negatives are NaN.
+            Err(_) if value.get() == f64::INFINITY => value,
+            Err(_) => CanonicalF64::new(f64::NAN),
+        },
+        GraphNumericFunction::Exp => kernel(value.exp())?,
+        GraphNumericFunction::Log => kernel(value.ln())?,
+        GraphNumericFunction::Log10 => kernel(value.log10())?,
+        GraphNumericFunction::Sin => kernel(value.sin())?,
+        GraphNumericFunction::Cos => kernel(value.cos())?,
+        GraphNumericFunction::Tan => kernel(value.tan())?,
+        GraphNumericFunction::Asin => kernel(value.asin())?,
+        GraphNumericFunction::Acos => kernel(value.acos())?,
+        GraphNumericFunction::Atan => kernel(value.atan())?,
+        GraphNumericFunction::Cot => {
+            // cot(0) is a pole, as 1 / 0 is; a NaN tangent stays NaN.
+            let tangent = kernel(value.tan())?;
+            if tangent.get().is_nan() {
+                tangent
+            } else {
+                kernel(one.checked_div(tangent))?
+            }
+        }
+        // Java's toDegrees and toRadians: one multiplication by the binary64
+        // nearest 180/pi (0x404CA5DC1A63C1F8) or pi/180 (0x3F91DF46A2529D39).
+        GraphNumericFunction::Degrees => {
+            kernel(value.checked_mul(CanonicalF64::new(f64::from_bits(0x404C_A5DC_1A63_C1F8))))?
+        }
+        GraphNumericFunction::Radians => {
+            kernel(value.checked_mul(CanonicalF64::new(f64::from_bits(0x3F91_DF46_A252_9D39))))?
+        }
+        GraphNumericFunction::Haversin => {
+            let cosine = kernel(value.cos())?;
+            if cosine.get().is_nan() {
+                cosine
+            } else {
+                let two = CanonicalF64::from_i64_rounded(2);
+                kernel(one.checked_sub(cosine).and_then(|gap| gap.checked_div(two)))?
+            }
+        }
+    };
+    Ok(CanonicalScalar::Float(result))
+}
+
+/// The identity an IdentityColumn reads from one loaded row value: a vertex
+/// or an edge has one, NULL has none, anything else is not an element.
+pub(crate) fn element_identity(
+    value: Option<&GraphValue>,
+) -> Result<Option<u128>, GraphIntegerErrorKind> {
+    match value {
+        Some(GraphValue::Vertex(vertex)) => Ok(Some(vertex.0)),
+        Some(GraphValue::Edge(edge)) => Ok(Some(edge.0)),
+        Some(GraphValue::Scalar(CanonicalScalar::Null)) => Ok(None),
+        Some(_) => Err(GraphIntegerErrorKind::IncompatibleOperands),
+        None => Err(GraphIntegerErrorKind::MissingColumn),
     }
 }
 
@@ -1148,31 +2039,66 @@ fn compare_cells<E>(
     if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
         return compare_scalars(comparison, left, right, instruction, control);
     }
+    // Every other cell is a number: a count, a wide sum or an exact average.
+    // It is unequal to a scalar of another domain (fgdb-v6ku6).
+    if matches!(
+        comparison,
+        IntegerComparison::Equal | IntegerComparison::NotEqual
+    ) && [left, right].into_iter().any(|cell| {
+        matches!(cell, ExpressionCell::Scalar(value) if !crate::algebra::numeric_domain(value))
+    }) {
+        return Ok(comparison.across_domains());
+    }
     let incompatible = |_| {
         GraphIntegerEvaluationError::Value(GraphIntegerError {
             instruction,
             kind: GraphIntegerErrorKind::IncompatibleOperands,
         })
     };
-    let order = match (left, right) {
-        (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
-        (ExpressionCell::Average(left), right) => left.compare_integer(
-            right
-                .integer()
-                .map_err(incompatible)?
-                .expect("nonnull integer operand"),
-        ),
-        (left, ExpressionCell::Average(right)) => right
-            .compare_integer(
-                left.integer()
+    let compare_float = |floating: fgdb_types::CanonicalF64, exact: &ExpressionCell<'_>| {
+        let (numerator, denominator) = match exact {
+            ExpressionCell::Average(average) => (average.numerator(), average.denominator()),
+            _ => (
+                exact
+                    .integer()
                     .map_err(incompatible)?
                     .expect("nonnull integer operand"),
-            )
-            .reverse(),
-        (left, right) => left
-            .integer()
-            .map_err(incompatible)?
-            .cmp(&right.integer().map_err(incompatible)?),
+                1,
+            ),
+        };
+        Ok::<_, GraphIntegerEvaluationError<E>>(
+            floating.compare_rational(
+                numerator,
+                core::num::NonZeroU64::new(denominator)
+                    .expect("aggregate fractions have positive denominators"),
+            ),
+        )
+    };
+    let order = if let Some(floating) = left.float() {
+        compare_float(floating, right)?
+    } else if let Some(floating) = right.float() {
+        compare_float(floating, left)?.reverse()
+    } else {
+        match (left, right) {
+            (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
+            (ExpressionCell::Average(left), right) => left.compare_integer(
+                right
+                    .integer()
+                    .map_err(incompatible)?
+                    .expect("nonnull integer operand"),
+            ),
+            (left, ExpressionCell::Average(right)) => right
+                .compare_integer(
+                    left.integer()
+                        .map_err(incompatible)?
+                        .expect("nonnull integer operand"),
+                )
+                .reverse(),
+            (left, right) => left
+                .integer()
+                .map_err(incompatible)?
+                .cmp(&right.integer().map_err(incompatible)?),
+        }
     };
     Ok(Some(match comparison {
         IntegerComparison::Equal => order == Ordering::Equal,
@@ -1199,7 +2125,17 @@ fn compare_scalars<E>(
         (CanonicalScalar::Int(_), CanonicalScalar::Float(_))
             | (CanonicalScalar::Float(_), CanonicalScalar::Int(_))
     );
-    if !numeric_pair && core::mem::discriminant(left) != core::mem::discriminant(right) {
+    // `=` and `<>` answer across value domains (fgdb-v6ku6). An ordering
+    // across domains, and Decimal against Int or Float, remain typed errors.
+    let across_domains = matches!(
+        comparison,
+        IntegerComparison::Equal | IntegerComparison::NotEqual
+    ) && !(crate::algebra::numeric_domain(left)
+        && crate::algebra::numeric_domain(right));
+    if !numeric_pair
+        && !across_domains
+        && core::mem::discriminant(left) != core::mem::discriminant(right)
+    {
         return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
             instruction,
             kind: GraphIntegerErrorKind::IncompatibleOperands,
@@ -1547,5 +2483,73 @@ mod tests {
             )
             .contains("123456789")
         );
+    }
+
+    #[test]
+    fn decimal_to_string_and_integer_never_round_through_binary64() {
+        use fgdb_types::CanonicalDecimal;
+
+        let decimal = |coefficient| {
+            GraphIntegerOp::Scalar(
+                ScalarPredicate::new(
+                    CanonicalScalar::Decimal(
+                        CanonicalDecimal::from_coefficient(coefficient).unwrap(),
+                    ),
+                    IntegerComparison::Equal,
+                )
+                .unwrap(),
+            )
+        };
+        let evaluate_scalar = |ops: &[GraphIntegerOp]| {
+            GraphIntegerExpression::prepare_scalar(ops)
+                .unwrap()
+                .evaluate_scalar_with_control(&[], &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+        };
+
+        let unit = 10_i128.pow(fgdb_types::STRICT_PORTABLE_DECIMAL_SCALE);
+        let beyond_binary64 = 9_007_199_254_740_993_i128 * unit + 1;
+        assert_eq!(
+            evaluate_scalar(&[decimal(beyond_binary64), GraphIntegerOp::ToText]),
+            CanonicalScalar::ucs_basic_text("9007199254740993.000000000000000001").unwrap()
+        );
+        assert_eq!(
+            evaluate_scalar(&[decimal(beyond_binary64), GraphIntegerOp::ToInteger]),
+            CanonicalScalar::Int(9_007_199_254_740_993)
+        );
+
+        for (coefficient, expected) in [
+            (unit - 1, 0),
+            (-(unit - 1), 0),
+            (7 * unit + unit / 2, 7),
+            (-(7 * unit + unit / 2), -7),
+        ] {
+            assert_eq!(
+                evaluate_scalar(&[decimal(coefficient), GraphIntegerOp::ToInteger]),
+                CanonicalScalar::Int(expected)
+            );
+        }
+
+        let expression =
+            GraphIntegerExpression::prepare_scalar(&[decimal(-1), GraphIntegerOp::ToText]).unwrap();
+        let mut events = 0;
+        assert_eq!(
+            expression
+                .evaluate_scalar_with_control(&[], &mut |_| {
+                    events += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
+            CanonicalScalar::ucs_basic_text("-0.000000000000000001").unwrap()
+        );
+        for stop in 1..=events {
+            let mut seen = 0;
+            let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GraphIntegerEvaluationError::Control(at)) if at == stop));
+            assert_eq!(seen, stop);
+        }
     }
 }

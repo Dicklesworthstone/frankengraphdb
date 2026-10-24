@@ -3,6 +3,9 @@
 //! against the real durable engine. Temporary artifacts are retained for
 //! diagnosis; no fixture deletes files. Key files are created owner-only
 //! (0600), as the CLI requires on Unix.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
@@ -132,6 +135,124 @@ fn directory_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// Copy a stopped database with ordinary file copies: adoption must establish
+/// durability without relying on a writer handle in the copying process.
+fn copy_directory(source: &Path, target: &Path) {
+    std::fs::create_dir(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_directory(&entry.path(), &destination);
+        } else {
+            assert!(entry.file_type().unwrap().is_file());
+            std::fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+#[test]
+fn adopt_copied_database_preserves_bytes_and_allows_fresh_process_writes() {
+    let fixture = Fixture::new("adopt-copy");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let before_seq = succeeded(
+        &fixture.robot("write", &["CREATE (:Person {id: 1})"]),
+        "written",
+    );
+    let copy = fixture.dir.join("copied database");
+    copy_directory(&fixture.db(), &copy);
+    let original_bytes = directory_bytes(&fixture.db());
+    let copied_bytes = directory_bytes(&copy);
+
+    // There is no key file argument or open writer in the adoption process.
+    let adopted = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "adopt", "--db"])
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(adopted.status.success(), "{adopted:?}");
+    assert!(terminal(&adopted).contains("\"kind\":\"adopted\""));
+    assert_eq!(directory_bytes(&copy), copied_bytes);
+    assert_eq!(directory_bytes(&fixture.db()), original_bytes);
+
+    let write = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "write", "--db"])
+        .arg(&copy)
+        .arg("--key-file")
+        .arg(fixture.dir.join("keys"))
+        .args([
+            "--label",
+            "Person=1",
+            "--property",
+            "id=1",
+            "CREATE (:Person {id: 2})",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(succeeded(&write, "written"), before_seq + 1);
+    let query = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "query", "--db"])
+        .arg(&copy)
+        .arg("--key-file")
+        .arg(fixture.dir.join("keys"))
+        .args([
+            "--label",
+            "Person=1",
+            "--property",
+            "id=1",
+            "MATCH (n:Person) RETURN n.id AS id ORDER BY id",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(succeeded(&query, "rows"), before_seq + 1);
+    assert_eq!(
+        rows(&query),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"1"}]}"#,
+            r#"{"v":1,"event":"row","cells":[{"type":"int","value":"2"}]}"#,
+        ]
+    );
+    assert_eq!(directory_bytes(&fixture.db()), original_bytes);
+}
+
+#[test]
+fn adopt_refuses_non_database_and_invalid_invocations_without_writing() {
+    let fixture = Fixture::new("adopt-refusals");
+    let ordinary = fixture.dir.join("ordinary");
+    std::fs::create_dir(&ordinary).unwrap();
+    std::fs::write(ordinary.join("keep"), b"unrelated data").unwrap();
+    let before = directory_bytes(&ordinary);
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "adopt", "--db"])
+        .arg(&ordinary)
+        .output()
+        .unwrap();
+    refused(&output, 4, "open");
+    assert_eq!(directory_bytes(&ordinary), before);
+
+    succeeded(&fixture.robot("create", &[]), "created");
+    let before = directory_bytes(&fixture.db());
+    let database = fixture.db();
+    let database = database.to_str().unwrap();
+    for arguments in [
+        vec![],
+        vec!["--db"],
+        vec!["--db", database, "--db", database],
+        vec!["--db", database, "--key-file", "not-read"],
+        vec!["--db", database, "CREATE (:Person)"],
+        vec!["--unknown", database],
+        vec!["--db", ""],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .args(["--robot", "adopt"])
+            .args(arguments)
+            .output()
+            .unwrap();
+        refused(&output, 2, "usage");
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+}
+
 /// The keys `Fixture` writes, for the embedded library.
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -256,6 +377,138 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
     assert!(rows(&count)[0].contains("\"type\":\"count\",\"value\":\"0\""));
 }
 
+/// fgdb-694ga: in a write RETURN, `[x IN collect(n) | x.q]` names post-write
+/// values that no element reader there serves. It is a typed query error
+/// that publishes nothing, never the pre-write snapshot's NULL. The same
+/// write returning `collect(n.q)` sees its own assignments, and a read
+/// answers the element form.
+#[test]
+fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
+    let fixture = Fixture::new("write-collect");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let run = |operation: &str, text: &str| fixture.robot(operation, &["--property", "q=2", text]);
+    succeeded(
+        &run("write", "CREATE (:Person {id: 1}), (:Person {id: 2})"),
+        "written",
+    );
+    let before = directory_bytes(&fixture.db());
+    refused(
+        &run(
+            "write",
+            "MATCH (n:Person) SET n.q = n.id * 3 RETURN [x IN collect(n) | x.q] AS qs",
+        ),
+        3,
+        "query",
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    let unchanged = run("query", "MATCH (n:Person) RETURN n.q AS q");
+    succeeded(&unchanged, "rows");
+    assert_eq!(
+        rows(&unchanged),
+        [r#"{"v":1,"event":"row","cells":[{"type":"null"}]}"#; 2]
+    );
+    let read = run(
+        "query",
+        "MATCH (n:Person) WITH n ORDER BY n.id RETURN [x IN collect(n) | x.id] AS ids",
+    );
+    succeeded(&read, "rows");
+    assert_eq!(
+        rows(&read),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"list","value":[{"type":"int","value":"1"},{"type":"int","value":"2"}]}]}"#
+        ]
+    );
+    let written = run(
+        "write",
+        "MATCH (n:Person) SET n.q = n.id * 3 RETURN collect(n.q) AS qs",
+    );
+    succeeded(&written, "written");
+    let mut qs: Vec<_> = rows(&written)[0]
+        .split("\"value\":\"")
+        .skip(1)
+        .map(|cell| cell[..cell.find('"').unwrap()].to_owned())
+        .collect();
+    qs.sort();
+    assert_eq!(qs, ["3", "6"]);
+}
+
+/// fgdb-dn9q3: `WHERE n.id IN $ids` with a list argument selects exactly
+/// the listed vertices in a pattern WHERE, as its WITH spelling does, and
+/// drives SET and DETACH DELETE the same way. NOT IN selects the rest.
+#[test]
+fn a_list_argument_selects_in_a_pattern_where_for_reads_and_writes() {
+    let fixture = Fixture::new("in-list-argument");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let run = |operation: &str, text: &str| {
+        fixture.robot(
+            operation,
+            &["--property", "hit=2", "--param", "ids=json:[1, 3]", text],
+        )
+    };
+    succeeded(
+        &fixture.robot(
+            "write",
+            &["CREATE (:Person {id: 1}), (:Person {id: 2}), (:Person {id: 3}), (:Person {id: 4})"],
+        ),
+        "written",
+    );
+    let id = |value: i64| {
+        format!(r#"{{"v":1,"event":"row","cells":[{{"type":"int","value":"{value}"}}]}}"#)
+    };
+    let count = |value: u64| {
+        format!(r#"{{"v":1,"event":"row","cells":[{{"type":"count","value":"{value}"}}]}}"#)
+    };
+    let selected = run(
+        "query",
+        "MATCH (n:Person) WHERE n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&selected, "rows");
+    assert_eq!(rows(&selected), [id(1), id(3)]);
+    let spelled = run(
+        "query",
+        "MATCH (n:Person) WITH n WHERE n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&spelled, "rows");
+    assert_eq!(rows(&spelled), rows(&selected));
+    let rest = run(
+        "query",
+        "MATCH (n:Person) WHERE NOT n.id IN $ids RETURN count(n) AS c",
+    );
+    succeeded(&rest, "rows");
+    assert_eq!(rows(&rest), [count(2)]);
+    succeeded(
+        &run(
+            "write",
+            "MATCH (n:Person) WHERE n.id IN $ids SET n.hit = true",
+        ),
+        "written",
+    );
+    // No `$ids` here: a declared parameter the text never reads is refused.
+    let hit = fixture.robot(
+        "query",
+        &[
+            "--property",
+            "hit=2",
+            "MATCH (n:Person) WHERE n.hit = true RETURN n.id AS id ORDER BY id",
+        ],
+    );
+    succeeded(&hit, "rows");
+    assert_eq!(rows(&hit), [id(1), id(3)]);
+    succeeded(
+        &run(
+            "write",
+            "MATCH (n:Person) WHERE n.id IN $ids DETACH DELETE n",
+        ),
+        "written",
+    );
+    let left = run(
+        "query",
+        "MATCH (n:Person) WHERE NOT n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&left, "rows");
+    assert_eq!(rows(&left), [id(2), id(4)]);
+}
+
 #[test]
 fn query_does_not_silently_create_a_missing_database() {
     let fixture = Fixture::new("missing");
@@ -322,6 +575,124 @@ fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
         "{}",
         String::from_utf8_lossy(&explain.stdout)
     );
+}
+
+/// An unbuffered spill read of a WITH pipeline: the typed refusal that names
+/// the missing pull execution, before any columns, with no scratch left.
+#[track_caller]
+fn not_pulled(output: &Output, scratch: &Path) {
+    refused(output, 3, "query");
+    assert!(
+        terminal(output).contains("has no supported pull execution"),
+        "{}",
+        terminal(output)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"event\":\"columns\""));
+    assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+}
+
+#[test]
+fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
+    let fixture = Fixture::new("spill-carried-properties");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let catalog = [
+        "--relation",
+        "KNOWS=1",
+        "--property",
+        "name=2",
+        "--property",
+        "score=3",
+        "--property",
+        "missing=4",
+    ];
+    let command = |operation: &str, options: &[&str], text: &str| {
+        let mut args = catalog.to_vec();
+        args.extend_from_slice(options);
+        args.push(text);
+        fixture.robot(operation, &args)
+    };
+    let basis = succeeded(
+        &command(
+            "write",
+            &[],
+            "CREATE (a:Person {id:1,name:'A',score:20}),(b:Person {id:2,name:'B',score:0}),(c:Person {id:3,name:'C'}),(a)-[:KNOWS {score:7}]->(b),(a)-[:KNOWS {score:9}]->(c)",
+        ),
+        "written",
+    );
+    let latest = succeeded(
+        &command(
+            "write",
+            &[],
+            "MATCH (n:Person) WHERE n.id=1 SET n.name='changed',n.score=30",
+        ),
+        "written",
+    );
+    let directory = fixture.dir.join("spill");
+    std::fs::create_dir(&directory).unwrap();
+    let spill = directory.to_str().unwrap();
+    let queries = [
+        ("MATCH (n:Person) WITH n AS kept RETURN kept.id AS id,kept.name AS name,kept.missing AS absent ORDER BY id".to_owned(), latest),
+        ("MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH {node:b,edge:r} AS record RETURN record.node.id AS id,record.edge.score AS score ORDER BY id".to_owned(), latest),
+        ("MATCH (n:Person) WITH [n] AS nodes RETURN [x IN nodes WHERE x.id>=2 | coalesce(x.score,5)] AS values,reduce(total=0,x IN nodes | total+coalesce(x.score,5)) AS total ORDER BY total,values".to_owned(), latest),
+        ("MATCH (n:Person) WITH n AS kept RETURN CASE WHEN kept.id=2 THEN 99 ELSE 10/coalesce(kept.score,5) END AS value ORDER BY value".to_owned(), latest),
+        (format!("MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {basis} WITH n AS kept RETURN kept.id AS id,kept.name AS name,kept.score AS score ORDER BY id"), basis),
+    ];
+    for phase in ["before compaction", "after compaction"] {
+        if phase == "after compaction" {
+            succeeded(&fixture.robot("compact", &[]), "compacted");
+        }
+        for (text, seq) in &queries {
+            let expected = command("query", &[], text);
+            assert_eq!(succeeded(&expected, "rows"), *seq, "{phase}: {text}");
+            for buffered in [false, true] {
+                let mut options = vec!["--spill-dir", spill, "--spill-memory-bytes", "2097152"];
+                if buffered {
+                    options.extend_from_slice(&["--buffered", "--buffer-memory-bytes", "8388608"]);
+                }
+                let actual = command("query", &options, text);
+                if !buffered {
+                    // Without --buffered, spill runs native vertex and
+                    // fixed-edge scans only (robot schema spilling.profile):
+                    // a WITH stage refuses before columns, leaving no scratch.
+                    not_pulled(&actual, &directory);
+                    continue;
+                }
+                assert_eq!(succeeded(&actual, "rows"), *seq, "{phase}: {text}");
+                assert_eq!(
+                    rows(&actual),
+                    rows(&expected),
+                    "{phase}, buffered={buffered}: {text}"
+                );
+                assert!(terminal(&actual).contains("\"stream\":true"));
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+            }
+        }
+    }
+    // LIMIT cannot hide a bad property expression in a later materialized
+    // row, and no columns, rows, result handle or scratch file may escape.
+    for limit in ["0", "1"] {
+        let text = format!(
+            "MATCH (n:Person) WITH n AS kept RETURN 10/kept.score AS value ORDER BY value LIMIT {limit}"
+        );
+        for buffered in [false, true] {
+            let mut options = vec!["--spill-dir", spill];
+            if buffered {
+                options.push("--buffered");
+            }
+            let failed = command("query", &options, &text);
+            if !buffered {
+                not_pulled(&failed, &directory);
+                continue;
+            }
+            refused(&failed, 3, "query");
+            assert!(terminal(&failed).contains("DivisionByZero"), "{text}");
+            let stdout = String::from_utf8(failed.stdout).unwrap();
+            for event in ["columns", "row", "result"] {
+                assert!(!stdout.contains(&format!("\"event\":\"{event}\"")));
+            }
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        }
+    }
 }
 
 #[test]
@@ -518,9 +889,13 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     let starved = fixture.robot("query", &["--max-work-units", "1", text]);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
     let starved = fixture.robot("query", &["--max-snapshot-records", "1", text]);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("SnapshotRecords"));
+    assert!(
+        String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-snapshot-records)")
+    );
 
     // A sufficient explicit limit answers exactly as the defaults do.
     let raised = fixture.robot("query", &["--max-work-units", "100000000", text]);
@@ -541,8 +916,10 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     let starved = fixture.robot("replay", &starved);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
 
-    // A repeated or malformed limit is a usage error; write takes none.
+    // A repeated or malformed limit is a usage error. Compact takes no
+    // execution limits.
     let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
     refused(&fixture.robot("query", &twice), 2, "usage");
     refused(
@@ -550,6 +927,257 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
         2,
         "usage",
     );
+    // A write is governed by the same limits (fgdb-ewc7i), and refused
+    // before anything commits.
     let write = ["--max-work-units", "1", "INSERT (:Person {id: 9})"];
-    refused(&fixture.robot("write", &write), 2, "usage");
+    let starved = fixture.robot("write", &write);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    let count = fixture.robot("query", &["MATCH (n:Person {id: 9}) RETURN count(*) AS c"]);
+    succeeded(&count, "rows");
+    assert!(String::from_utf8_lossy(&count.stdout).contains(r#""value":"0""#));
+    refused(
+        &fixture.robot("compact", &["--max-work-units", "1"]),
+        2,
+        "usage",
+    );
+}
+
+/// `--bindings-file` adds its bindings to the flags' (the fixture binds
+/// Person and id by flag), a name or ID repeated across the two is a usage
+/// error, and a FIFO is refused without being opened (opening one blocks).
+#[test]
+fn a_bindings_file_adds_to_the_flag_bindings() {
+    let fixture = Fixture::new("bindings-file");
+    let file = fixture.dir.join("bindings");
+    std::fs::write(
+        &file,
+        "# robots\nlabel Robot=2\nproperty serial=2\n\nrelation BUILT=3\n",
+    )
+    .unwrap();
+    let file = file.to_str().unwrap();
+    succeeded(&fixture.robot("create", &[]), "created");
+    let write = "INSERT (:Person {id: 1})-[:BUILT]->(:Robot {serial: 7})";
+    succeeded(
+        &fixture.robot("write", &["--bindings-file", file, write]),
+        "written",
+    );
+    let read = "MATCH (:Person {id: 1})-[:BUILT]->(r:Robot) RETURN r.serial AS serial";
+    let answer = fixture.robot("query", &["--bindings-file", file, read]);
+    succeeded(&answer, "rows");
+    assert_eq!(
+        rows(&answer),
+        [r#"{"v":1,"event":"row","cells":[{"type":"int","value":"7"}]}"#]
+    );
+    // Without the file, Robot is unbound.
+    refused(&fixture.robot("query", &[read]), 3, "query");
+
+    for (name, text) in [
+        ("same-name", "label Person=9\n"),
+        ("same-id", "property other=1\n"),
+    ] {
+        let repeated = fixture.dir.join(name);
+        std::fs::write(&repeated, text).unwrap();
+        let output = fixture.robot(
+            "query",
+            &["--bindings-file", repeated.to_str().unwrap(), read],
+        );
+        refused(&output, 2, "usage");
+    }
+
+    #[cfg(unix)]
+    {
+        let fifo = fixture.dir.join("bindings-fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&fixture.dir)
+            .args(["--robot", "query", "--db"])
+            .arg(fixture.db())
+            .args([
+                "--key-file",
+                "keys",
+                "--bindings-file",
+                "bindings-fifo",
+                read,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("a FIFO bindings file must be refused, not opened and read");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        refused(&child.wait_with_output().unwrap(), 2, "usage");
+    }
+}
+
+#[test]
+fn as_of_reads_report_selected_seq_and_certify_to_refuses_overwrite() {
+    let fixture = Fixture::new("as-of-seq-and-certify-overwrite");
+    succeeded(&fixture.robot("create", &[]), "created");
+    succeeded(
+        &fixture.robot("write", &["INSERT (:Person {id: 1})"]),
+        "written",
+    );
+    succeeded(
+        &fixture.robot("write", &["INSERT (:Person {id: 2})"]),
+        "written",
+    );
+
+    let historical = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at RETURN n, n.id";
+    let eager = fixture.robot("query", &["--param", "at=uint:1", historical]);
+    succeeded(&eager, "rows");
+    assert!(
+        String::from_utf8_lossy(&eager.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&eager.stdout)
+    );
+
+    let streamed = fixture.robot("query", &["--stream", "--param", "at=uint:1", historical]);
+    succeeded(&streamed, "rows");
+    assert!(
+        String::from_utf8_lossy(&streamed.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","stream":true,"seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&streamed.stdout)
+    );
+
+    let spill_dir = fixture.dir.join("spill");
+    std::fs::create_dir(&spill_dir).unwrap();
+    let spilled = fixture.robot(
+        "query",
+        &[
+            "--spill-dir",
+            spill_dir.to_str().unwrap(),
+            "--param",
+            "at=uint:1",
+            historical,
+        ],
+    );
+    succeeded(&spilled, "rows");
+    assert!(
+        String::from_utf8_lossy(&spilled.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","stream":true,"seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&spilled.stdout)
+    );
+
+    let certificate = fixture.dir.join("c1.cert");
+    let certificate_str = certificate.to_str().unwrap();
+    let certified = fixture.robot(
+        "query",
+        &[
+            "--certify-to",
+            certificate_str,
+            "--param",
+            "at=uint:1",
+            historical,
+        ],
+    );
+    succeeded(&certified, "rows");
+    let original_bytes = std::fs::read(&certificate).unwrap();
+
+    let overwrite = fixture.robot(
+        "query",
+        &[
+            "--certify-to",
+            certificate_str,
+            "MATCH (n:Person) RETURN n.id",
+        ],
+    );
+    refused(&overwrite, 2, "usage");
+    assert_eq!(std::fs::read(&certificate).unwrap(), original_bytes);
+}
+
+#[test]
+fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files() {
+    let fixture = Fixture::new("sealed-live-writer");
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    runtime.block_on(async {
+        let mut writer = Database::create(&commit, fixture.db(), keys())
+            .await
+            .unwrap();
+        let mut first = WriteBatch::new(RelationId(1));
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(EId(1), VId(1), VId(2), vec![]);
+        writer.write(&commit, first).await.unwrap();
+        let historical = writer.frontier().unwrap().0.to_string();
+        let mut second = WriteBatch::new(RelationId(1));
+        second.create_vertex(VId(3), vec![], vec![]);
+        second.add_edge(EId(2), VId(2), VId(3), vec![]);
+        writer.write(&commit, second).await.unwrap();
+        let current = writer.frontier().unwrap().0.to_string();
+        let before = directory_bytes(&fixture.db());
+        for (text, direction) in [
+            (
+                "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance",
+                "directed",
+            ),
+            (
+                "CALL fnx.weakly_connected_components() YIELD vertex,component",
+                "directed",
+            ),
+            (
+                "CALL fnx.closeness_centrality() YIELD vertex,score",
+                "undirected",
+            ),
+            (
+                "CALL fnx.harmonic_centrality() YIELD vertex,score",
+                "undirected",
+            ),
+        ] {
+            let mut previous_rows = None;
+            for cut in [&historical, &current] {
+                let mut arguments = vec![
+                    "--relation",
+                    "KNOWS=1",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--parallel-edges",
+                    "collapse",
+                    "--direction",
+                    direction,
+                    "--as-of",
+                    cut.as_str(),
+                ];
+                arguments.push(text);
+                let decoded = fixture.robot("query", &arguments);
+                assert_eq!(succeeded(&decoded, "rows"), cut.parse::<u64>().unwrap());
+                arguments.insert(arguments.len() - 1, "--sealed");
+                let sealed = fixture.robot("query", &arguments);
+                assert_eq!(succeeded(&sealed, "rows"), cut.parse::<u64>().unwrap());
+                assert_eq!(
+                    sealed.stdout, decoded.stdout,
+                    "complete NDJSON differs at cut {cut}: {text}"
+                );
+                let actual_rows = rows(&sealed);
+                assert_eq!(actual_rows.len(), if cut == &historical { 2 } else { 3 });
+                if let Some(old) = previous_rows.replace(actual_rows.clone()) {
+                    assert_ne!(old, actual_rows, "historical output must remain historical");
+                }
+                assert_eq!(
+                    directory_bytes(&fixture.db()),
+                    before,
+                    "analytics must neither publish a root nor alter any database file"
+                );
+            }
+        }
+        drop(writer);
+    });
 }

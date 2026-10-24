@@ -234,6 +234,14 @@ impl WriteTxn {
             return Err(WriteTxnError::NoPreparedWrite);
         }
         checkpoint()?;
+        attempt
+            .database
+            .ensure_delta_window(cx, attempt.transaction.basis)
+            .await
+            .map_err(|error| match error {
+                crate::RebuildError::Interrupted(error) => WriteTxnError::Interrupted(error),
+                error => WriteTxnError::Write(WriteError::from(error)),
+            })?;
         // A new apply basis must never erase the interval over which earlier
         // point, negative and query observations need validation. Reuse the
         // ordinary witness checker BEFORE either policy can replace the basis.
@@ -290,6 +298,14 @@ impl WriteTxn {
         checkpoint()?;
         let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
             attempt.transaction.staged.clear();
+            // Completion consumes every rollback point. Release their shared
+            // prefixes before taking ownership for the ordinary commit path.
+            attempt.transaction.savepoints.clear();
+            let mut prepared = std::sync::Arc::unwrap_or_clone(prepared);
+            if prepared.authorization_decision_digest.is_none() {
+                prepared.authorization_decision_digest =
+                    attempt.transaction.authorization_decision_digest;
+            }
             // Set before polling the cancellable publication future. Drop
             // consults its retained database fence, never guesses rollback.
             attempt.entered_commit = true;
@@ -320,6 +336,7 @@ impl WriteTxn {
     fn discard_terminal_workspace(&mut self) {
         self.staged.clear();
         self.prepared = None;
+        self.authorization_decision_digest = None;
         self.savepoints.clear();
         self.read_set.get_mut().clear();
         self.point_reads.get_mut().clear();
@@ -342,9 +359,9 @@ impl WriteTxn {
     }
 
     fn overlay_property(
-        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, CanonicalScalar)>,
+        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)>,
         key: fgdb_delta_types::PropertyKeyId,
-        value: Option<&CanonicalScalar>,
+        value: Option<&CanonicalPropertyValue>,
     ) {
         match props.binary_search_by_key(&key, |(property, _)| *property) {
             Ok(at) => match value {

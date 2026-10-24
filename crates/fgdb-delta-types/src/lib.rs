@@ -34,9 +34,15 @@ mod index;
 pub mod zset;
 mod zweight;
 
-use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId,
+    VId,
+};
 
-pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
+pub use canonical::{
+    CanonicalError, DELTA_FORMAT_V1, DELTA_FORMAT_V2, DELTA_FORMAT_V3, canonicalize,
+    delta_format_for, is_supported_delta_format,
+};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use fold::fold_target_disjoint;
 pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
@@ -94,7 +100,8 @@ pub enum DeltaRow {
         vid: VId,
         birth_ordinal: u64,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Stored property values: scalars, Lists and Maps (fgdb-k3nub).
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         valid_time: Option<ValidTimePeriod>,
     },
     /// Create-family: an edge with endpoints, relation, optional canonical key.
@@ -105,7 +112,7 @@ pub enum DeltaRow {
         relation: RelationId,
         dst: VId,
         canonical_key: Option<CanonicalScalar>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         valid_time: Option<ValidTimePeriod>,
     },
     /// Delete-family: vertex retirement with its complete cascade
@@ -129,8 +136,8 @@ pub enum DeltaRow {
     Property {
         elem: ElementId,
         property: PropertyKeyId,
-        before: Option<CanonicalScalar>,
-        after: Option<CanonicalScalar>,
+        before: Option<CanonicalPropertyValue>,
+        after: Option<CanonicalPropertyValue>,
     },
     /// Valid-time-family: period transition under a named contract.
     ValidTime {
@@ -286,9 +293,11 @@ impl LogicalDeltaTemplate {
         source_intent_root_digest: [u8; 32],
         mut coordinate_entries: Vec<CoordinateEntry>,
     ) -> Result<Self, CanonicalError> {
-        canonicalize(&mut coordinate_entries)?;
+        // The entries are this call's own: an error drops them, so no row
+        // needs a defensive copy.
+        canonical::canonicalize_owned(&mut coordinate_entries)?;
         let template = LogicalDeltaTemplate {
-            format: DELTA_FORMAT_V1,
+            format: delta_format_for(&coordinate_entries),
             intent_semantics_oid,
             source_intent_root_digest,
             coordinate_entries,
@@ -446,7 +455,7 @@ impl LogicalDeltaBatch {
     ) -> Self {
         let commit_seq = marker.marker().commit_seq;
         LogicalDeltaBatch {
-            format: DELTA_FORMAT_V1,
+            format: template.format(),
             coordinate_entries: template.coordinate_entries().to_vec(),
             source_template_digest,
             commit_marker_identity: marker.marker(),
@@ -475,7 +484,7 @@ impl LogicalDeltaBatch {
         frontier: fgdb_types::CommitSeq,
     ) -> Self {
         LogicalDeltaBatch {
-            format: DELTA_FORMAT_V1,
+            format: delta_format_for(&coordinate_entries),
             coordinate_entries,
             source_template_digest,
             commit_marker_identity,
@@ -517,6 +526,17 @@ mod tests {
     use super::*;
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::{CommitSeq, PurposeContexts};
+
+    /// The delta index retains one row per change, two scalars wide for a
+    /// property change; it was 432 bytes while `CanonicalScalar` was 192.
+    #[test]
+    fn a_delta_row_stays_at_most_one_hundred_ninety_two_bytes() {
+        assert!(
+            core::mem::size_of::<DeltaRow>() <= 192,
+            "DeltaRow is {} bytes",
+            core::mem::size_of::<DeltaRow>()
+        );
+    }
 
     fn with_commit_cx<T, F>(seed: u64, run: F) -> T
     where
@@ -567,7 +587,7 @@ mod tests {
                 vid: VId(1),
                 birth_ordinal: 1,
                 labels: vec![LabelId(1)],
-                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1815))],
+                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(1815).into())],
                 valid_time: None,
             },
             DeltaRow::CreateEdge {
@@ -604,7 +624,8 @@ mod tests {
                 before: None,
                 after: Some(
                     CanonicalScalar::ucs_basic_text("Ada")
-                        .expect("small UCS_BASIC fixture is canonical"),
+                        .expect("small UCS_BASIC fixture is canonical")
+                        .into(),
                 ),
             },
             DeltaRow::ValidTime {

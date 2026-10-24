@@ -11,6 +11,11 @@ use crate::{
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use std::collections::BTreeSet;
 
+mod query;
+pub use query::{
+    GraphVertexReturnBinding, GraphVertexUpsertQueryBuildError, PreparedGraphVertexUpsertQuery,
+};
+
 pub const MAX_GRAPH_VERTEX_UPSERT_ACTIONS: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -18,6 +23,12 @@ pub enum GraphVertexUpsertAction {
     SetProperty {
         key: PropertyKeyId,
         value: GqlScalarParameter,
+    },
+    /// A constant List value (fgdb-k3nub): a literal or a List parameter,
+    /// evaluated once when the statement binds and written as it is.
+    SetStored {
+        key: PropertyKeyId,
+        value: fgdb_types::CanonicalPropertyValue,
     },
     /// Columns address `properties` in order, on the chosen vertex before
     /// this clause. Missing/masked fields are NULL. No ambient row or local
@@ -37,6 +48,7 @@ impl core::fmt::Debug for GraphVertexUpsertAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::SetProperty { .. } => f.write_str("SetProperty([REDACTED])"),
+            Self::SetStored { .. } => f.write_str("SetStored([REDACTED])"),
             Self::SetExpression { .. } => f.write_str("SetExpression([REDACTED])"),
             Self::SetLabel { present, .. } => f
                 .debug_struct("SetLabel")
@@ -69,7 +81,29 @@ pub enum GraphVertexUpsertBuildError {
 }
 impl core::fmt::Display for GraphVertexUpsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph vertex MERGE action definition: {self:?}")
+        match self {
+            Self::TooManyActions {
+                branch,
+                limit,
+                observed,
+            } => write!(f, "{branch} has {observed} actions, limit {limit}"),
+            Self::DuplicateProperty { branch } => {
+                write!(f, "{branch} sets the same property twice")
+            }
+            Self::DuplicateLabel { branch } => write!(f, "{branch} sets the same label twice"),
+            Self::ExpressionInputs { branch, action } => write!(
+                f,
+                "{branch} action {action} reads a value other than the merged vertex's"
+            ),
+        }
+    }
+}
+impl core::fmt::Display for GraphVertexUpsertBranch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Match => "ON MATCH",
+            Self::Create => "ON CREATE",
+        })
     }
 }
 impl core::error::Error for GraphVertexUpsertBuildError {}
@@ -118,6 +152,8 @@ pub enum GraphVertexUpsertError<E, A> {
         source: crate::GraphIntegerError,
     },
     Staging(E),
+    /// The MERGE RETURN projection over the chosen vertex failed.
+    Returning(crate::GraphSetExecutionError<E>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexUpsertError<E, A>
@@ -137,6 +173,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 write!(f, "MERGE clause {clause} action {action}: {source}")
             }
             Self::Staging(error) => error.fmt(f),
+            Self::Returning(error) => write!(f, "MERGE RETURN: {error}"),
         }
     }
 }
@@ -148,6 +185,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Merge(error) => Some(error),
             Self::Expression { source, .. } => Some(source),
             Self::Staging(error) => Some(error),
+            Self::Returning(error) => Some(error),
             Self::ActionLimit { .. } => None,
         }
     }
@@ -187,6 +225,7 @@ fn validate_branch(
     for (at, action) in actions.iter().enumerate() {
         match action {
             GraphVertexUpsertAction::SetProperty { key, .. }
+            | GraphVertexUpsertAction::SetStored { key, .. }
             | GraphVertexUpsertAction::SetExpression { key, .. } => {
                 if !properties.insert(*key) {
                     return Err(GraphVertexUpsertBuildError::DuplicateProperty { branch });
@@ -295,6 +334,20 @@ impl PreparedGraphVertexUpsert {
                         bytes.push(1);
                         bytes.extend_from_slice(&label.0.to_be_bytes());
                         bytes.push(u8::from(*present));
+                    }
+                    GraphVertexUpsertAction::SetStored { key, value } => {
+                        bytes.push(3);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        // Binding admitted the value through the stored
+                        // format's bounds, so it encodes; tag 4 marks the
+                        // impossible failure instead of a panic.
+                        match value.encode() {
+                            Ok(encoded) => {
+                                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                                bytes.extend_from_slice(&encoded);
+                            }
+                            Err(_) => bytes.push(4),
+                        }
                     }
                     GraphVertexUpsertAction::SetExpression {
                         key,

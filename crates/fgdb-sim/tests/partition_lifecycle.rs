@@ -30,6 +30,9 @@
 //! agrees before compaction is a partition that will disagree in production, where
 //! compaction is continuous. The last law compacts, republishes, reopens and demands
 //! the same agreement.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
@@ -99,7 +102,7 @@ fn vertex(vid: u128) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: vid as u64,
         labels: vec![LABEL],
-        props: vec![(PROP, fgdb_types::CanonicalScalar::Int(vid as i64))],
+        props: vec![(PROP, fgdb_types::CanonicalScalar::Int(vid as i64).into())],
         valid_time: None,
     }
 }

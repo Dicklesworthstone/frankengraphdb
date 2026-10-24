@@ -3,6 +3,9 @@
 
 mod rows;
 mod stage;
+pub use rows::SpillSetAggregateRowError;
+pub(super) use rows::{convert_row, finish_conversion};
+pub(crate) use stage::{WriteReturnGroup, WriteReturnGroupSpec};
 
 use super::*;
 use crate::{
@@ -40,6 +43,25 @@ impl core::fmt::Debug for PreparedGraphSetAggregate {
     }
 }
 
+impl GraphAggregateRow {
+    /// Copy this exact aggregate result into the ordinary relational row domain.
+    /// Keys precede values. This is the SAME checked conversion used by native
+    /// intermediate grouping and external grouping, not another value evaluator.
+    /// Counts and sums must fit Int64; exact averages refuse rather than round.
+    /// Canonical values and payloads retain their domains and governed copies.
+    ///
+    /// A maintained consumer must validate the complete expected row schema,
+    /// convert every changed group before downstream selection, and publish the
+    /// converted derivative atomically with its upstream group state. This call
+    /// neither scans a source nor spends a delivered-result-row allowance.
+    pub fn to_value_row_with_control<E>(
+        &self,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetAggregateRowError<E>> {
+        convert_row(self, control)
+    }
+}
+
 impl PreparedGraphSetAggregate {
     /// Keep an already checked relational aggregate in its source-aware owner.
     /// The complete input and all result clauses are retained unchanged. Plain
@@ -51,12 +73,29 @@ impl PreparedGraphSetAggregate {
             .then_some(Self { summary })
     }
 
+    /// Keep source ownership private while the native physical compiler reuses
+    /// complete-group normalization. Every input and output clause remains in
+    /// this definition; the consumer separately admits the entire relation.
+    pub(crate) fn prepare_spill_output(&self) -> Option<PreparedGraphAggregate> {
+        self.summary.prepare_complete_group_output()
+    }
+
     /// Reuse native post-HAVING expressions without exposing a graph executor.
     pub fn with_output_projection(
         mut self,
         projection: Vec<crate::GraphSetProjection>,
     ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_output_projection(projection)?;
+        Ok(self)
+    }
+
+    /// Rank by the computed output tuple, as
+    /// PreparedGraphAggregate::with_projected_order_by does.
+    pub fn with_projected_order_by(
+        mut self,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_projected_order_by(ordering)?;
         Ok(self)
     }
 
@@ -122,6 +161,14 @@ impl PreparedGraphSetAggregate {
         columns: &[usize],
     ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_key_output_columns(columns)?;
+        Ok(self)
+    }
+    /// See [`PreparedGraphAggregate::with_key_aliases`].
+    pub fn with_key_aliases(
+        mut self,
+        aliases: &[(usize, String)],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_key_aliases(aliases)?;
         Ok(self)
     }
     pub fn with_aggregate_output_prefix(
@@ -195,6 +242,112 @@ impl PreparedGraphSetAggregate {
         self.summary
             .execute_relational_with_source(policy, source, checkpoint)
     }
+
+    /// Execute CALL and row-expression inputs with the host's element reader.
+    /// The reader must use the SAME admitted cut and authority as every source;
+    /// a returned vertex or edge identity is not itself permission to read it.
+    /// Missing properties are NULL, but reader failures remain typed failures,
+    /// including beneath an empty final page. A host without an element reader
+    /// should keep using `execute_governed_with_procedures`, which refuses such
+    /// reads instead of fabricating absent properties.
+    ///
+    /// Both folded and materialized input profiles retain their existing
+    /// selection and share the native group engine. Source visits, expression
+    /// work, payload copies and grouping spend one cumulative allowance; only
+    /// final group rows spend the output-row budget. No eager fallback or new
+    /// aggregate/value semantics are introduced by supplying this reader.
+    pub fn execute_governed_with_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let source = WithElementReads {
+            source: WithProcedures {
+                patterns,
+                procedures,
+            },
+            elements,
+        };
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
+
+    /// Execute a terminal aggregate with identity-seeded pattern admission.
+    /// This is the same source capability as
+    /// [`PreparedGraphSet::execute_governed_with_seeded_elements`]: a necessary
+    /// equality to the complete leading bag restricts the right pattern's
+    /// roots, while the original join and aggregate still evaluate every row.
+    /// The host must re-read the seeds at the same pinned cut and authority;
+    /// returning `None` declines a shape before performing source work.
+    ///
+    /// Folded counts, ordered collections and materialized groups all forward
+    /// this source through their existing engines. Source visits, seed copies,
+    /// matching and grouping spend one cumulative allowance. Empty input and
+    /// LIMIT 0 retain source failures and cancellation; only final group rows
+    /// consume the result-row allowance.
+    pub fn execute_governed_with_seeded_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            &[fgdb_types::VId],
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
+        let source = WithSeededPatterns {
+            source: WithElementReads {
+                source: WithProcedures {
+                    patterns,
+                    procedures,
+                },
+                elements,
+            },
+            seeded,
+        };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
 }
 
 impl PreparedGraphSet {
@@ -204,7 +357,7 @@ impl PreparedGraphSet {
         match &self.node {
             SetNode::Pattern(pattern) => Some(pattern),
             SetNode::Aggregate(summary) => summary.input().first_pattern_input(),
-            SetNode::Values | SetNode::ProcedureCall(_) => None,
+            SetNode::Values | SetNode::ProcedureCall(_) | SetNode::Owned { .. } => None,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Unwind { input, .. }

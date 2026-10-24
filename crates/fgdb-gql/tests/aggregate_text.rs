@@ -2,15 +2,15 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GlaOperator, GraphColumn, GraphPatternBuilder, GraphValue, IntegerComparison,
-    VertexPredicate,
+    GlaDirection, GlaOperator, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValue,
+    IntegerComparison, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphAggregateError,
     GraphAggregateTextSlot, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -30,6 +30,101 @@ fn prepare(text: &str) -> PreparedGraphAggregate {
 }
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000)
+}
+
+#[test]
+fn external_distinct_numeric_cells_share_typed_arguments_without_resident_support() {
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::spill_aggregate::SpillAggregatePlan;
+    use fgdb_gql::stream::VertexScanEvent;
+    use fgdb_types::CanonicalF64;
+    use std::convert::Infallible;
+    type Error = GqlQueryError<GraphAggregateError<Infallible>, Infallible>;
+
+    let plan = SpillAggregatePlan::compile(&prepare(
+        "MATCH (n) RETURN COUNT(*) AS rows,COUNT(DISTINCT n.n) AS unique,\
+         SUM(n.n) AS bag_sum,SUM(DISTINCT n.n) AS total,AVG(DISTINCT n.n) AS average",
+    ))
+    .unwrap();
+    let definition = plan.definition();
+    assert_eq!(definition.input_width(), 1);
+    assert_eq!(
+        definition.distinct_argument_columns().collect::<Vec<_>>(),
+        vec![0]
+    );
+    let mut control = |_| Ok::<_, Error>(());
+    let mut state = definition.new_state(&mut control).unwrap();
+    let scalars = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Float(CanonicalF64::new(1.0)),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Null,
+    ];
+    for value in &scalars {
+        let row = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(value.clone())]);
+        definition.update(&mut state, &row, &mut control).unwrap();
+    }
+    // The host supplies canonical typed support. Numerically equal integer
+    // and float values remain different DISTINCT argument members.
+    for at in [0, 1, 4, 5] {
+        let row = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(scalars[at].clone())]);
+        definition
+            .update_distinct_argument(&mut state, &row, 0, &mut control)
+            .unwrap();
+    }
+    let row = definition.finish(Vec::new(), state, &mut control).unwrap();
+    assert_eq!(row.values()[0].as_count(), Some(6));
+    assert_eq!(row.values()[1].as_count(), Some(3));
+    for (at, value) in [(2, 6.0), (3, 4.0), (4, 4.0 / 3.0)] {
+        assert_eq!(
+            row.values()[at].as_value().and_then(GraphValue::as_scalar),
+            Some(&CanonicalScalar::Float(CanonicalF64::new(value)))
+        );
+    }
+
+    let scratch_entries = std::cell::Cell::new(0);
+    let mut control = |event| {
+        scratch_entries
+            .set(scratch_entries.get() + usize::from(event == VertexScanEvent::ScratchEntry));
+        Ok::<_, Error>(())
+    };
+    let mut state = definition.new_state(&mut control).unwrap();
+    let fixed_entries = scratch_entries.get();
+    for value in 0..10_000 {
+        let row =
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(value))]);
+        definition
+            .update_distinct_argument(&mut state, &row, 0, &mut control)
+            .unwrap();
+    }
+    assert_eq!(
+        scratch_entries.get(),
+        fixed_entries,
+        "numeric support is external, not a resident set"
+    );
+    let row = definition
+        .finish(Vec::new(), state, &mut |_| Ok::<_, Error>(()))
+        .unwrap();
+    assert_eq!(row.values()[1].as_count(), Some(10_000));
+    assert_eq!(row.values()[3].as_integer(), Some(49_995_000));
+    assert_eq!(row.values()[4].as_average().unwrap().to_string(), "9999/2");
+
+    let plan = SpillAggregatePlan::compile(&prepare("MATCH (n) RETURN SUM(DISTINCT n.n) LIMIT 0"))
+        .unwrap();
+    let invalid =
+        GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Bool(true))]);
+    assert!(matches!(
+        plan.definition()
+            .validate_input(&invalid, &mut |_| Ok::<_, Error>(())),
+        Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+            aggregate: 0
+        }))
+    ));
+    assert!(
+        SpillAggregatePlan::compile(&prepare("MATCH (n) RETURN COLLECT(n.n) LIMIT 0")).is_err()
+    );
 }
 
 #[test]
@@ -65,6 +160,7 @@ fn mixed_return_order_group_order_and_shared_arguments_match_typed_preparation()
         .unwrap();
     let actual = template.bind_parameters(&args).unwrap();
     let mut b = GraphPatternBuilder::new();
+    b.match_mode(GraphMatchMode::DifferentEdges);
     for name in ["a", "b", "c"] {
         b.vertex(name).unwrap();
     }
@@ -173,8 +269,8 @@ fn grouping_argument_reuse_and_count_only_do_not_create_accidental_distinct_chil
     assert_eq!(empty.value.len(), 1);
     assert_eq!(empty.value[0].get(0).unwrap().as_count(), Some(0));
     for (text, expected_rows) in [
-        ("MATCH (n) RETURN COUNT(*) HAVING count > 1", 0),
-        ("MATCH (n) RETURN COUNT(*) ORDER BY count", 1),
+        ("MATCH (n) RETURN COUNT(*) AS count HAVING count > 1", 0),
+        ("MATCH (n) RETURN COUNT(*) AS count ORDER BY count", 1),
     ] {
         let result = prepare(text)
             .execute_governed(
@@ -220,7 +316,7 @@ fn summaries_match_independent_oriented_edge_enumeration_and_paginate_groups() {
         (VId(2), RelationId(1), VId(1)),
         (VId(2), RelationId(1), VId(2)),
     ];
-    let high = CanonicalScalar::Int(i64::MAX);
+    let high = CanonicalPropertyValue::from(CanonicalScalar::Int(i64::MAX));
     for mask in 0..16 {
         let mut edges: Vec<_> = universe
             .iter()
@@ -449,7 +545,7 @@ fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() 
         (VId(1), RelationId(1), VId(2)),
         (VId(1), RelationId(1), VId(2)),
     ];
-    let amount = CanonicalScalar::Int(7);
+    let amount = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut events = 0;
     let full = t
         .execute_governed(
@@ -513,7 +609,7 @@ fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() 
         )),
         Err(GqlQueryError::Evaluator(_))
     ));
-    let noninteger = CanonicalScalar::Bool(true);
+    let noninteger = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     assert!(matches!(
         t.execute_governed(
             2,
@@ -630,11 +726,11 @@ fn implicit_computed_keys_do_not_duplicate_parameter_occurrences_or_resolve_on_b
 
 #[test]
 fn implicit_property_groups_merge_missing_and_null_and_preserve_native_sum_semantics() {
-    let properties = BTreeMap::from([
-        (VId(1), CanonicalScalar::Null),
-        (VId(3), CanonicalScalar::Int(7)),
-        (VId(4), CanonicalScalar::Int(7)),
-        (VId(5), CanonicalScalar::Int(9)),
+    let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+        (VId(1), CanonicalScalar::Null.into()),
+        (VId(3), CanonicalScalar::Int(7).into()),
+        (VId(4), CanonicalScalar::Int(7).into()),
+        (VId(5), CanonicalScalar::Int(9).into()),
     ]);
     let result = prepare(
         "MATCH (a) RETURN a.n AS key,COUNT(*) AS rows,COUNT(a.n) AS present, \
@@ -699,6 +795,79 @@ fn implicit_optional_grouping_keeps_null_extended_rows() {
     }
 }
 
+/// `r IS NULL` over an OPTIONAL edge is a computed key: rows group by
+/// whether the edge matched, not by the edge (TCK Match7 [29] to [31]).
+#[test]
+fn an_optional_element_null_test_groups_by_its_boolean() {
+    use fgdb_gql::GraphAggregateValue;
+
+    // Grouping by the relationship captures it, so the source identifies
+    // its edges.
+    let result = prepare(
+        "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) \
+         RETURN r IS NULL AS unmatched, COUNT(*) AS rows ORDER BY unmatched",
+    )
+    .execute_governed_with_identified_properties(
+        4,
+        [VId(1), VId(2), VId(3)],
+        [(fgdb_types::EId(1), VId(1), RelationId(1), VId(2))],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(None),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 2);
+    for (row, (unmatched, rows)) in result.value.iter().zip([(false, 1), (true, 2)]) {
+        let cells: Vec<_> = (row.keys().iter().cloned().map(GraphAggregateValue::Value))
+            .chain(row.values().iter().cloned())
+            .collect();
+        assert_eq!(
+            cells,
+            vec![
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(unmatched))),
+                GraphAggregateValue::Count(rows),
+            ]
+        );
+    }
+}
+
+/// ORDER BY sorts the rows RETURN produces and never groups them (openCypher
+/// InvalidAggregation, TCK ReturnOrderBy2 [14]). An aggregate only in ORDER
+/// BY is refused at its own offset, before any catalog access. GROUP BY,
+/// HAVING or a RETURN aggregate already groups the statement, and then the
+/// same ORDER BY aggregate is a hidden summary.
+#[test]
+fn an_order_by_aggregate_never_groups_a_statement_by_itself() {
+    for (text, at) in [
+        ("MATCH (a) RETURN a.n ORDER BY max(a.n)", "max"),
+        (
+            "MATCH (a) RETURN a.n AS key ORDER BY key, COUNT(*) DESC",
+            "COUNT",
+        ),
+    ] {
+        let mut calls = 0;
+        let error = PreparedGraphAggregateText::prepare(text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(error.offset, text.find(at).unwrap(), "{text}");
+        assert!(
+            matches!(error.kind, GraphPatternTextErrorKind::Expected(_)),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+    for text in [
+        "MATCH (a) RETURN a.n AS key GROUP BY a.n ORDER BY max(a.n)",
+        "MATCH (a) RETURN a.n AS key HAVING COUNT(*) > 1 ORDER BY max(a.n)",
+        "MATCH (a) RETURN a.n AS key, COUNT(*) AS rows ORDER BY max(a.n)",
+    ] {
+        prepare(text);
+    }
+}
+
 #[test]
 fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
     for text in [
@@ -739,4 +908,165 @@ fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
         );
         assert_eq!(calls, 0, "invalid grouping resolved symbols: {text}");
     }
+}
+
+/// fgdb-aw8lm (owner ruling 2026-09-30): an unaliased RETURN item is named by
+/// its exact source text, spacing and case included (TCK Return4 [7]
+/// `aVg(    n.aGe     )`), whatever its siblings; an alias is kept as
+/// written, and two equal names still refuse.
+#[test]
+fn unaliased_items_are_named_by_their_exact_source_text() {
+    for (text, columns) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN a.n, aVg(    b.n     ), COUNT(*)",
+            &["a.n", "aVg(    b.n     )", "COUNT(*)"][..],
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.n, sum(a.n) AS total",
+            &["b.n", "total"][..],
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN a, count(b)",
+            &["a", "count(b)"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+    }
+    for text in [
+        "MATCH (a)-[:R]->(b) RETURN a.n, a.n, count(*)",
+        "MATCH (a)-[:R]->(b) RETURN count(*), count(*)",
+        "MATCH (a)-[:R]->(b) RETURN a.n AS x, count(*) AS x",
+    ] {
+        assert!(
+            PreparedGraphAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// A projected function as a grouping key is that function, not its
+/// variable: `type(r)` grouped by the edge `r` (one group per edge), and
+/// `labels(n)` by the vertex. Unaliased, it is named by its source text, as
+/// in openCypher, and repeats of one function share one key.
+#[test]
+fn projected_function_keys_group_by_the_function_value_not_the_variable() {
+    for (text, columns) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN type(r), count(*)",
+            &["type(r)", "count(*)"][..],
+        ),
+        (
+            "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS c",
+            &["t", "c"][..],
+        ),
+        (
+            "MATCH (n) RETURN labels(n), count(*)",
+            &["labels(n)", "count(*)"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+        let pattern = prepared
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap();
+        let plan = pattern.input_pattern().plan();
+        assert!(
+            plan.projects_types() || plan.projects_labels(),
+            "{text}: the key reads the function, not the bare element"
+        );
+    }
+    let both = PreparedGraphAggregateText::prepare(
+        "MATCH (a)-[r:R]->(b) RETURN type(r), r, count(*)",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&fgdb_gql::GqlParameters::new())
+    .unwrap();
+    assert_eq!(
+        both.group_key_columns().len(),
+        2,
+        "type(r) and r are two keys"
+    );
+}
+
+#[test]
+fn list_and_map_arguments_aggregate_as_whole_values() {
+    // Independent expectation over n = 1..=12 plus vertex 13 without n:
+    // twelve distinct [n % 3, n] pairs, three {bucket: n % 3} maps and six
+    // (n % 3, n % 2) residue pairs (Chinese remainder theorem). Vertex 13
+    // contributes [NULL, NULL] and {bucket: NULL}: a list or map holding NULL
+    // is itself not NULL, so COUNT counts it, unlike COUNT(a.n).
+    let properties: BTreeMap<_, _> = (1..=12)
+        .map(|n| {
+            (
+                VId(n),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(n as i64)),
+            )
+        })
+        .collect();
+    let run = |text: &str, high: u128| {
+        prepare(text).execute_governed(
+            high as u64,
+            (1..=high).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, _| Ok(properties.get(&vid)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+    };
+    let counts = |text: &str, high: u128| -> Vec<Vec<Option<u64>>> {
+        run(text, high)
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values().iter().map(|cell| cell.as_count()).collect())
+            .collect()
+    };
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN COUNT(DISTINCT [a.n%3,a.n]) AS pairs,\
+             COUNT(DISTINCT {bucket:a.n%3}) AS buckets,COUNT([a.n%3]) AS lists,\
+             COUNT(a.n) AS present",
+            13
+        ),
+        [[Some(13), Some(4), Some(13), Some(12)]]
+    );
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN COUNT(DISTINCT [x IN [a.n%3,a.n%2] | x*2]) AS residues",
+            12
+        ),
+        [[Some(6)]]
+    );
+    // Each parity class meets all three buckets.
+    assert_eq!(
+        counts(
+            "MATCH (a) RETURN a.n%2 AS parity,COUNT(DISTINCT [a.n%3]) AS buckets \
+             GROUP BY a.n%2 ORDER BY parity",
+            12
+        ),
+        [[Some(3)], [Some(3)]]
+    );
+    // ORDER BY and HAVING may repeat a composite aggregate.
+    for (having, expected) in [(3, vec![vec![Some(12)]]), (4, Vec::new())] {
+        assert_eq!(
+            counts(
+                &format!(
+                    "MATCH (a) RETURN COUNT(*) AS rows HAVING COUNT(DISTINCT [a.n%3]) = {having} \
+                     ORDER BY COUNT(DISTINCT [a.n%3])"
+                ),
+                12
+            ),
+            expected
+        );
+    }
+    // A list never sums: the typed failure, not a coercion.
+    assert!(matches!(
+        run("MATCH (a) RETURN SUM([a.n]) AS total", 12),
+        Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+            aggregate: 0
+        }))
+    ));
 }

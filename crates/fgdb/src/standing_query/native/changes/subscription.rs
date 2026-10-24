@@ -9,6 +9,10 @@
 
 use super::*;
 
+mod coalesced;
+mod historical;
+mod owned;
+
 /// An opaque, subscription-specific receipt. It acknowledges a complete frame,
 /// not an arbitrary caller-selected commit frontier. Cloning a receipt permits
 /// retrying an ACK; it does not create another delivery position.
@@ -22,6 +26,8 @@ pub struct SubscriptionReceipt {
 /// a delta is integrated exactly once into the acknowledged preceding bag.
 /// Rows use the same columns and exact signed weights as standing_native_bag.
 /// ORDER BY rank moves are deliberately not represented as bag differences.
+/// poll_coalesced may combine several consecutive commits into one delta;
+/// its from/frontier pair identifies the entire net transition being ACKed.
 pub struct SubscriptionBatch {
     receipt: SubscriptionReceipt,
     from: Option<CommitSeq>,
@@ -65,6 +71,8 @@ pub enum SubscriptionError {
     Unacknowledged,
     ReceiptExhausted,
     ReplayAlreadyEnabled,
+    NotPrivate,
+    SharedRegistration,
 }
 impl core::fmt::Display for SubscriptionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -75,6 +83,10 @@ impl core::fmt::Display for SubscriptionError {
             Self::Unacknowledged => f.write_str("subscription already has an unacknowledged frame"),
             Self::ReceiptExhausted => f.write_str("subscription receipt sequence exhausted"),
             Self::ReplayAlreadyEnabled => f.write_str("subscription already has a replay sink"),
+            Self::NotPrivate => f.write_str("subscription does not own a private registration"),
+            Self::SharedRegistration => {
+                f.write_str("subscription registration was shared and cannot be reclaimed")
+            }
         }
     }
 }
@@ -95,6 +107,8 @@ impl From<StandingQueryError> for SubscriptionError {
 /// One independent delivery position over a database-owned native circuit.
 /// The first successful poll selects the then-current baseline, not the time
 /// this object was created. Commits before that poll are included in its bag.
+/// The explicit open_standing_replay_subscription_at constructor instead
+/// returns an already pending historical baseline, which must be ACKed first.
 /// An ACK advances only this consumer, never the producer's commit frontier.
 ///
 /// Keep the complete frame until the consumer transaction has applied it, then
@@ -111,6 +125,7 @@ pub struct NativeSubscription {
     serial: u64,
     pending: Option<Arc<SubscriptionBatch>>,
     closed: bool,
+    ownership: Option<owned::Ownership>,
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -134,6 +149,7 @@ impl<V: Vfs + Clone> Database<V> {
             serial: 0,
             pending: None,
             closed: false,
+            ownership: None,
         })
     }
 }
@@ -141,7 +157,10 @@ impl<V: Vfs + Clone> Database<V> {
 impl NativeSubscription {
     /// The underlying registration remains available for explicit repair and
     /// ordinary maintained reads. Consumers over the same handle are isolated.
+    /// Requesting this handle permanently shares a scoped registration: its
+    /// producer can then outlive this consumer, so close_and_release refuses.
     pub fn handle(&self) -> &StandingQueryHandle {
+        self.share_registration();
         &self.handle
     }
     pub fn acknowledged_frontier(&self) -> Option<CommitSeq> {
@@ -152,7 +171,12 @@ impl NativeSubscription {
     }
     /// The shared replay sink for window inspection or explicit rebuild.
     /// Rebuilding this sink alone never repairs an unavailable source view.
+    /// Requesting a handle permanently opts a scoped registration into shared
+    /// ownership, even when the caller does not clone the returned reference.
     pub fn replay_handle(&self) -> Option<&StandingQueryHandle> {
+        if self.replay.is_some() {
+            self.share_registration();
+        }
         self.replay.as_ref()
     }
 
@@ -227,12 +251,17 @@ impl NativeSubscription {
         }
         let mut consumer = database.open_standing_subscription(cx, &self.handle)?;
         consumer.replay = self.replay.clone();
+        // Only a successful fork escapes ownership; a refused fork leaves the
+        // original private registration releasable.
+        self.share_registration();
         Ok(consumer)
     }
 
     /// Return a complete replacement baseline, the FIRST unacknowledged
     /// successor, or None when caught up. With replay, later commits may be
     /// buffered behind this frame. Empty ticks still require acknowledgement.
+    /// A frame already selected by poll_coalesced is redelivered unchanged,
+    /// including its multi-commit range; changing poll modes cannot split it.
     ///
     /// Redelivery checks source ownership/health/cancellation, then shares the
     /// previously admitted frame, even if that frame has since left retention.
@@ -402,6 +431,7 @@ mod tests {
             serial: 0,
             pending: None,
             closed: false,
+            ownership: None,
         }
     }
 

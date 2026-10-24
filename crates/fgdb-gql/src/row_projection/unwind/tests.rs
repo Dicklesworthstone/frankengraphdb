@@ -399,3 +399,82 @@ fn checked_definition_preserves_inherited_names_but_checks_alias_shape_and_expre
     );
     assert!(!format!("{spec:?}").contains("left.x"));
 }
+
+/// UNWIND range() streams its members past the list-value bound
+/// (fgdb-85aal). A 70,000-member range is maintained and retracted exactly.
+/// A stepped range below the bound yields its members with the input
+/// multiplicity. A NULL bound unwinds nothing. A zero step is
+/// InvalidRangeStep, and a non-integer bound is NonInteger, as range() is.
+#[test]
+fn range_members_stream_past_the_list_bound_and_retract_exactly() {
+    let range = |step: Option<GraphSetValue>| {
+        RowProjectionSpec::unwind(
+            vec![GraphSetColumnType::Any, GraphSetColumnType::Any],
+            vec!["lo".into(), "hi".into()],
+            "i".into(),
+            GraphSetValue::Range {
+                start: Box::new(GraphSetValue::Column(0)),
+                end: Box::new(GraphSetValue::Column(1)),
+                step: step.map(Box::new),
+            },
+        )
+        .unwrap()
+    };
+    let bounds = |lo: GraphValue, hi: GraphValue| GraphValueRow::from_owned_values(vec![lo, hi]);
+    let member =
+        |lo: i64, hi: i64, i: i64| GraphValueRow::from_owned_values(vec![int(lo), int(hi), int(i)]);
+    let mut state = IncrementalRowProjection::new(range(None));
+    let input = z([(bounds(int(1), int(70_000)), 1)]);
+    state
+        .prepare(&input, LIMBS, None, &mut allow)
+        .unwrap()
+        .commit();
+    assert_eq!(state.rows().iter().count(), 70_000);
+    for i in [1, 65_537, 70_000] {
+        assert_eq!(
+            state.rows().weight(&member(1, 70_000, i)),
+            Some(&ZWeight::from_i128(1))
+        );
+    }
+    state
+        .prepare(
+            &input.negated(LIMBS, &mut allow).unwrap(),
+            LIMBS,
+            None,
+            &mut allow,
+        )
+        .unwrap()
+        .commit();
+    assert!(state.rows().is_empty());
+    let mut stepped = IncrementalRowProjection::new(range(Some(GraphSetValue::Value(int(3)))));
+    stepped
+        .prepare(&z([(bounds(int(2), int(10)), 2)]), LIMBS, None, &mut allow)
+        .unwrap()
+        .commit();
+    assert_eq!(stepped.rows(), &z([2, 5, 8].map(|i| (member(2, 10, i), 2))));
+    let mut nulls = IncrementalRowProjection::new(range(None));
+    nulls
+        .prepare(&z([(bounds(null(), int(5)), 1)]), LIMBS, None, &mut allow)
+        .unwrap()
+        .commit();
+    assert!(nulls.rows().is_empty());
+    let refused =
+        |spec: RowProjectionSpec, row: GraphValueRow| match IncrementalRowProjection::new(spec)
+            .prepare(&z([(row, 1)]), LIMBS, None, &mut allow)
+        {
+            Err(RowProjectionError::Expression { error, .. }) => error.kind,
+            other => panic!("expected an expression error, got {:?}", other.is_ok()),
+        };
+    assert_eq!(
+        refused(
+            range(Some(GraphSetValue::Value(int(0)))),
+            bounds(int(1), int(5))
+        ),
+        GraphIntegerErrorKind::InvalidRangeStep
+    );
+    let truth = GraphValue::Scalar(CanonicalScalar::Bool(true));
+    assert_eq!(
+        refused(range(None), bounds(null(), truth)),
+        GraphIntegerErrorKind::NonInteger
+    );
+}

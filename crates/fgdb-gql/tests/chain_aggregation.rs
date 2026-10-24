@@ -4,7 +4,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphAggregateRow,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 type Edge = (VId, RelationId, VId);
@@ -87,9 +87,13 @@ fn oracle(edges: &[Edge], atoms: &[Atom], variables: usize, unequal: bool) -> Ve
 #[test]
 fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enumeration() {
     type Case<'a> = (&'a str, &'a [Atom], usize, bool);
+    // The oracle multiplies per-atom edge counts: it counts homomorphisms,
+    // which is what the factorized chain engine computes. Repeated -[:S]->
+    // atoms may share an edge, so each law asks for REPEATABLE ELEMENTS; the
+    // DIFFERENT EDGES default would need edge identities (fgdb-vexfr).
     let cases: [Case<'_>; 6] = [
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -100,7 +104,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)<-[:R]-(b)<-[:S]-(h)<-[:S]-(k)<-[:S]-(c)",
+            "MATCH REPEATABLE ELEMENTS (a)<-[:R]-(b)<-[:S]-(h)<-[:S]-(k)<-[:S]-(c)",
             &[
                 (0, 0, 1, 1),
                 (1, u64::MAX, 1, 2),
@@ -111,7 +115,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]-(b)-[:S]-(h)-[:S]-(k)-[:S]-(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]-(b)-[:S]-(h)-[:S]-(k)-[:S]-(c)",
             &[
                 (0, 0, 2, 1),
                 (1, u64::MAX, 2, 2),
@@ -122,7 +126,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c), (c)-[:T]->(a)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c), (c)-[:T]->(a)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -134,7 +138,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h), (h)-[:T]->(side), (h)-[:S]->(k)-[:S]->(c)",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h), (h)-[:T]->(side), (h)-[:S]->(k)-[:S]->(c)",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -146,7 +150,7 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
             false,
         ),
         (
-            "MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c) WHERE h<>a",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(k)-[:S]->(c) WHERE h<>a",
             &[
                 (0, 0, 0, 1),
                 (1, u64::MAX, 0, 2),
@@ -212,8 +216,10 @@ fn chains_cycles_directions_and_forest_attachments_match_complete_assignment_enu
     }
 }
 
+/// A chain of repeated -[:S]-> atoms, counted as homomorphisms (REPEATABLE
+/// ELEMENTS), as the factorized engine counts them (fgdb-vexfr).
 fn path(length: usize, tail: &str) -> String {
-    let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+    let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
     for at in 1..=length {
         statement.push_str(&format!("-[:S]->(x{at})"));
     }
@@ -239,7 +245,7 @@ fn a_billion_paths_keep_their_returned_endpoint_without_visiting_a_billion_bindi
             [],
             edges.iter().copied(),
             |_, _| Err::<bool, _>("topology-only path read a vertex"),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("topology-only path read a property"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("topology-only path read a property"),
             GqlQueryPolicy::new(65, 8, 65_536, 16_384),
             || Ok::<_, ()>(()),
         )
@@ -414,14 +420,16 @@ fn contraction_reuses_one_source_and_one_policy_and_propagates_every_interruptio
 
 #[test]
 fn property_bearing_connectors_keep_the_uncompressed_fallible_read_contract() {
-    let query = prepare("MATCH (a)-[:R]->(b)-[:S]->(h)-[:S]->(c) RETURN COUNT(c.n) AS n");
+    let query = prepare(
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:S]->(h)-[:S]->(c) RETURN COUNT(c.n) AS n",
+    );
     let edges = [
         (VId(0), R, VId(1)),
         (VId(0), R, VId(1)),
         (VId(1), S, VId(2)),
         (VId(2), S, VId(3)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut reads = 0;
     let result = query.execute_governed(
         4,
@@ -499,4 +507,104 @@ fn implicit_equalities_plus_maximum_explicit_identities_keep_a_valid_fallback() 
         .unwrap();
     assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(1));
     assert_eq!(result.value[0].get(1).unwrap().as_count(), Some(1));
+}
+
+/// A named relationship that nothing reads is not captured (fgdb-61p1n): the
+/// definition is its unnamed spelling's, operator for operator, so the
+/// topology-only evaluator answers it with the same rows and the same work.
+/// It used to require identified edges and enumerate every binding. A
+/// relationship that IS read keeps its capture and still requires them.
+#[test]
+fn unread_relationship_names_leave_the_unnamed_definition() {
+    use fgdb_gql::algebra::GlaOperator;
+    let captures = |query: &PreparedGraphAggregate| {
+        query
+            .input_pattern()
+            .plan()
+            .operators()
+            .iter()
+            .filter(|operator| matches!(operator, GlaOperator::CapturePath { .. }))
+            .count()
+    };
+    // Parallel edges, a 2-cycle and a triangle: multiplicities and the
+    // DIFFERENT EDGES default both matter to the counts.
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(1)),
+        (VId(2), R, VId(3)),
+        (VId(3), R, VId(1)),
+        (VId(3), S, VId(1)),
+    ];
+    let run = |query: &PreparedGraphAggregate| {
+        query.execute_governed(
+            9,
+            [VId(1), VId(2), VId(3)],
+            edges.iter().copied(),
+            |_, _| Ok::<bool, &str>(true),
+            |_, _| Ok::<Option<&CanonicalPropertyValue>, &str>(None),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+    };
+    for (named, unnamed) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c)-[t:R]->(a) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)<-[s:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
+            "MATCH (a)-[:R]->(b)<-[:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
+        ),
+        // A Boolean WHERE over vertices only reads no relationship.
+        (
+            "MATCH (a)-[r:R]->(b) WHERE a.n = 1 OR b.n = 2 RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) WHERE a.n = 1 OR b.n = 2 RETURN COUNT(*) AS n",
+        ),
+    ] {
+        let (named_query, unnamed_query) = (prepare(named), prepare(unnamed));
+        assert_eq!(captures(&named_query), 0, "{named}");
+        assert_eq!(
+            named_query.input_pattern().plan().operators(),
+            unnamed_query.input_pattern().plan().operators(),
+            "{named}"
+        );
+        let (answer, expected) = (run(&named_query).unwrap(), run(&unnamed_query).unwrap());
+        assert_eq!(answer.value, expected.value, "{named}");
+        assert_eq!(answer.evaluator, expected.evaluator, "{named}");
+        assert!(!answer.value.is_empty(), "{named}");
+    }
+    for read in [
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(r.n) AS n",
+        "MATCH (a)-[r:R]->(b) WHERE r.n = 1 RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b) WHERE r.n = 1 OR a.n = 2 RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(s) AS n",
+    ] {
+        let query = prepare(read);
+        assert!(captures(&query) > 0, "{read}");
+        assert!(
+            matches!(run(&query), Err(GqlQueryError::IdentifiedEdgesRequired)),
+            "{read}"
+        );
+    }
+    // A collection or a sum can observe the order occurrences arrive in, so
+    // an unread name still keeps its identified plan there.
+    for ordered in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(a.n) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN a,AVG(b.n) AS n GROUP BY a",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS c,SUM(a.n) AS n",
+    ] {
+        assert!(captures(&prepare(ordered)) > 0, "{ordered}");
+    }
 }

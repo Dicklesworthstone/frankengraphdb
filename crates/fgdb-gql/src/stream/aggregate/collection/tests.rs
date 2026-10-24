@@ -12,7 +12,7 @@ use std::sync::{
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const B: PropertyKeyId = PropertyKeyId(2);
-type Rows = BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>;
+type Rows = BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>;
 struct Source {
     rows: Rows,
     after: Option<VId>,
@@ -267,9 +267,9 @@ fn vertex_collections_match_independent_ordered_groups_and_batch_without_input_b
             let mut properties: Vec<_> = choices[(code >> (2 * at)) & 3]
                 .clone()
                 .into_iter()
-                .map(|v| (P, v))
+                .map(|v| (P, CanonicalPropertyValue::Scalar(v)))
                 .collect();
-            properties.push((B, CanonicalScalar::Int((at % 2) as i64)));
+            properties.push((B, CanonicalScalar::Int((at % 2) as i64).into()));
             rows.insert(VId(vid), properties);
         }
         for grouped in [false, true] {
@@ -279,16 +279,15 @@ fn vertex_collections_match_independent_ordered_groups_and_batch_without_input_b
             let mut groups = BTreeMap::<Option<i64>, (Vec<GraphValue>, Vec<GraphValue>)>::new();
             for (&vid, props) in &rows {
                 let bucket = match props.last().unwrap().1 {
-                    CanonicalScalar::Int(n) => n,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) => n,
                     _ => panic!(),
                 };
                 let (all, ids) = groups.entry(grouped.then_some(bucket)).or_default();
                 ids.push(GraphValue::Vertex(vid));
-                if let Some((_, value)) = props
-                    .iter()
-                    .find(|(k, v)| *k == P && !matches!(v, CanonicalScalar::Null))
-                {
-                    all.push(GraphValue::Scalar(value.clone()));
+                if let Some((_, value)) = props.iter().find(|(k, v)| {
+                    *k == P && !matches!(v, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+                }) {
+                    all.push(GraphValue::Scalar(value.as_scalar().unwrap().clone()));
                 }
             }
             let s = source(rows.clone());
@@ -340,14 +339,20 @@ fn computed_collection_requires_the_childs_existing_canonical_order_proof() {
             None,
         )
         .unwrap();
-        let rows = BTreeMap::from([
+        let rows: Rows = BTreeMap::from([
             (
                 VId(0),
-                vec![(P, CanonicalScalar::Int(9)), (B, CanonicalScalar::Int(0))],
+                vec![
+                    (P, CanonicalScalar::Int(9).into()),
+                    (B, CanonicalScalar::Int(0).into()),
+                ],
             ),
             (
                 VId(1),
-                vec![(P, CanonicalScalar::Int(-4)), (B, CanonicalScalar::Int(0))],
+                vec![
+                    (P, CanonicalScalar::Int(-4).into()),
+                    (B, CanonicalScalar::Int(0).into()),
+                ],
             ),
         ]);
         let expected = batch(&q, &rows);
@@ -391,8 +396,8 @@ fn completed_collection_outputs_use_shared_ranking_projection_and_distinct() {
             (
                 VId(id),
                 vec![
-                    (P, CanonicalScalar::Int((id % 2) as i64)),
-                    (B, CanonicalScalar::Int((id % 3) as i64)),
+                    (P, CanonicalScalar::Int((id % 2) as i64).into()),
+                    (B, CanonicalScalar::Int((id % 3) as i64).into()),
                 ],
             )
         })
@@ -434,18 +439,27 @@ fn completed_collection_outputs_use_shared_ranking_projection_and_distinct() {
 
 #[test]
 fn collection_cursor_uses_cumulative_limits_fuses_on_refusal_and_never_drains_on_close() {
-    let rows = BTreeMap::from([
+    let rows: Rows = BTreeMap::from([
         (
             VId(0),
-            vec![(P, CanonicalScalar::Int(9)), (B, CanonicalScalar::Int(0))],
+            vec![
+                (P, CanonicalScalar::Int(9).into()),
+                (B, CanonicalScalar::Int(0).into()),
+            ],
         ),
         (
             VId(1),
-            vec![(P, CanonicalScalar::Int(9)), (B, CanonicalScalar::Int(0))],
+            vec![
+                (P, CanonicalScalar::Int(9).into()),
+                (B, CanonicalScalar::Int(0).into()),
+            ],
         ),
         (
             VId(u128::MAX),
-            vec![(P, CanonicalScalar::Int(-4)), (B, CanonicalScalar::Int(0))],
+            vec![
+                (P, CanonicalScalar::Int(-4).into()),
+                (B, CanonicalScalar::Int(0).into()),
+            ],
         ),
     ]);
     let q = definition(false, None);
@@ -542,8 +556,8 @@ fn large_collections_are_one_result_row_and_empty_global_is_a_real_list() {
             (
                 VId(id),
                 vec![
-                    (P, CanonicalScalar::Int((id % 2) as i64)),
-                    (B, CanonicalScalar::Int(0)),
+                    (P, CanonicalScalar::Int((id % 2) as i64).into()),
+                    (B, CanonicalScalar::Int(0).into()),
                 ],
             )
         })

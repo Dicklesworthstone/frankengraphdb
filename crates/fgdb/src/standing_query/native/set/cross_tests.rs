@@ -63,7 +63,7 @@ fn expected<V: Vfs + Clone>(db: &Database<V>, distinct: bool) -> (CommitSeq, Que
                 v.props
                     .iter()
                     .find(|(k, _)| *k == P)
-                    .map(|(_, v)| v.clone())
+                    .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
                     .unwrap_or(CanonicalScalar::Null),
             )
         })

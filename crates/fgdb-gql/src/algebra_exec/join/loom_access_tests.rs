@@ -4,7 +4,7 @@ use crate::algebra::{
 };
 use core::convert::Infallible;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
 fn allow(_: GlaExecutionEvent) -> Result<(), Infallible> {
     Ok(())
@@ -188,7 +188,7 @@ fn visible(vid: VId, predicates: &[VertexPredicate]) -> bool {
     predicates.iter().all(|predicate| {
         predicate.matches(
             &[label],
-            &[(PropertyKeyId(1), CanonicalScalar::Int(vid.0 as i64))],
+            &[(PropertyKeyId(1), CanonicalScalar::Int(vid.0 as i64).into())],
         )
     })
 }
@@ -218,6 +218,7 @@ fn observe<Row: GlaIdentityOutput>(
     let project = |operator: &GlaOperator,
                    bindings: &[Option<VId>],
                    _paths: &[Option<crate::algebra::GraphPath>],
+                   _collected: &[Option<crate::algebra::GraphValue>],
                    projected: &mut crate::algebra_exec::ProjectedRows<Row>,
                    control: &mut _| {
         Row::collect(operator, bindings, projected, control)?;
@@ -503,7 +504,7 @@ fn native_labeled_cyclic_queries_use_the_same_governed_budget_boundaries() {
             [],
             edges.iter().copied(),
             |vid, predicates| Ok::<_, Infallible>(visible(vid, predicates)),
-            |_, _| -> Result<Option<&CanonicalScalar>, Infallible> {
+            |_, _| -> Result<Option<&CanonicalPropertyValue>, Infallible> {
                 panic!("identity projection performs no property lookup")
             },
             policy,

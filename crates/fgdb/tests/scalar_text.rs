@@ -148,13 +148,15 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
         // [V3], and none for the note/NULL shapes). Non-equality and
         // null-comparison shapes never consult the index: 7 full-domain
         // records. The ruling (fgdb-bupm 2026-09-17): an equality lookup
-        // charges only the candidates it resolves.
+        // charges only the candidates it resolves. V3's Int status and
+        // active are of another domain than the literals (fgdb-v6ku6): never
+        // `=`, always `<>`.
         for (predicate, expected, indexed_records) in [
             ("n.status = 'ready'", vec![VId(0), VId(1)], 2),
-            ("n.status <> 'ready'", vec![VId(2), HIGH], 7),
+            ("n.status <> 'ready'", vec![VId(2), VId(3), HIGH], 7),
             ("n.status = 'O''Reilly 🦀'", vec![HIGH], 1),
             ("n.active = TRUE", vec![VId(0), VId(2), HIGH], 3),
-            ("n.active <> false", vec![VId(0), VId(2), HIGH], 7),
+            ("n.active <> false", vec![VId(0), VId(2), VId(3), HIGH], 7),
             ("n.active = 1", vec![VId(3)], 1),
             ("n.note IS NULL", vec![VId(0), VId(1), HIGH], 7),
             ("n.note IS NOT NULL", vec![VId(2), VId(3)], 7),
@@ -177,10 +179,14 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
             .into_iter()
             .enumerate()
             {
-                assert_eq!(ids(&result.value), expected, "{predicate}");
-                // Transaction overlays have their own complete canonical source.
-                let records = if entrypoint == 4 { 7 } else { indexed_records };
-                assert_eq!(result.rows.snapshot_records, records, "{predicate}");
+                assert_eq!(ids(&result.value), expected, "{predicate} at {entrypoint}");
+                // A transaction overlay serves equality from the same property
+                // index (bound_vertex_sources, f7ac7617): every entrypoint
+                // charges only the candidates it resolves (ruling fgdb-bupm).
+                assert_eq!(
+                    result.rows.snapshot_records, indexed_records,
+                    "{predicate} at {entrypoint}"
+                );
             }
         }
         txn.abort();

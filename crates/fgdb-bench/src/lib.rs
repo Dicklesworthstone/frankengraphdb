@@ -297,11 +297,11 @@ pub fn shape_result(shape: &str, config: &str, metrics: &[(&str, u128)]) {
 }
 
 pub fn edge_weight(record: &fgdb::EdgeRecord) -> Result<i64, String> {
-    for (property, scalar) in &record.props {
+    for (property, value) in &record.props {
         if *property == WEIGHT {
-            return match scalar {
-                CanonicalScalar::Int(value) => Ok(*value),
-                other => Err(format!("edge weight is not an Int: {other:?}")),
+            return match value.as_scalar() {
+                Some(CanonicalScalar::Int(weight)) => Ok(*weight),
+                _ => Err(format!("edge weight is not an Int: {value:?}")),
             };
         }
     }
@@ -499,11 +499,40 @@ pub const EDGES_PER_NEW_VERTEX: usize = 3;
 const INGEST_BATCH_EDGES: usize = 64;
 pub const LOAD_SEED: u64 = 0x46474442; // "FGDB"
 
-/// Sealed-block files on disk == current root reference count (56 B each).
+/// Stored objects on disk == current root reference count (56 B each): the
+/// loose files of the block directory plus every object of each commit pack
+/// in its `packs` subdirectory (fgdb_strata::store::PACK_DIR; a pack's header
+/// declares its object count at bytes 8..12, little-endian).
 pub fn count_stored_blocks(dir: &Path) -> u128 {
-    std::fs::read_dir(dir.join("strata-blocks"))
-        .map(|entries| entries.flatten().count() as u128)
-        .unwrap_or(0)
+    let blocks = dir.join("strata-blocks");
+    let loose = std::fs::read_dir(&blocks)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .count() as u128
+        })
+        .unwrap_or(0);
+    let packed = std::fs::read_dir(blocks.join("packs"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+                .filter_map(|entry| {
+                    let mut header = [0u8; 12];
+                    std::io::Read::read_exact(
+                        &mut std::fs::File::open(entry.path()).ok()?,
+                        &mut header,
+                    )
+                    .ok()?;
+                    Some(u128::from(u32::from_le_bytes([
+                        header[8], header[9], header[10], header[11],
+                    ])))
+                })
+                .sum::<u128>()
+        })
+        .unwrap_or(0);
+    loose + packed
 }
 
 /// Shape 1: durable ingest under power-law degree skew. Every commit is the
@@ -556,16 +585,16 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
         rows.push(BulkRow::Vertex(BulkVertex {
             key: key.clone(),
             labels: vec![LabelId(2)],
-            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64).into())],
         }));
     }
     for index in 0..EDGES {
         rows.push(BulkRow::Edge(BulkEdge {
             key: format!("edge-{index}"),
-            source: vertex_keys[rng.below(VERTICES)].clone(),
-            destination: vertex_keys[rng.below(VERTICES)].clone(),
+            source: vertex_keys[rng.below(VERTICES)].clone().into(),
+            destination: vertex_keys[rng.below(VERTICES)].clone().into(),
             relation: if index % 2 == 0 { KNOWS } else { RelationId(2) },
-            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64).into())],
         }));
     }
     let dir = scratch("bulk-load");
@@ -629,17 +658,14 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
                     .edges
                     .get(&expected.key)
                     .ok_or_else(|| format!("bulk-load missing edge key {}", expected.key))?;
-                let source = checkpoint
-                    .vertices
-                    .get(&expected.source)
-                    .ok_or_else(|| format!("bulk-load missing endpoint {}", expected.source))?;
-                let destination =
-                    checkpoint
-                        .vertices
-                        .get(&expected.destination)
-                        .ok_or_else(|| {
-                            format!("bulk-load missing endpoint {}", expected.destination)
-                        })?;
+                let endpoint = |endpoint: &fgdb::BulkEndpoint| {
+                    endpoint
+                        .key()
+                        .and_then(|key| checkpoint.vertices.get(key))
+                        .ok_or_else(|| format!("bulk-load missing endpoint {endpoint:?}"))
+                };
+                let source = endpoint(&expected.source)?;
+                let destination = endpoint(&expected.destination)?;
                 let actual = db
                     .edge(*eid)
                     .map_err(|error| format!("bulk-load edge read: {error}"))?
@@ -1041,18 +1067,18 @@ async fn load_gql_fixture(
             key: k.to_string(),
             labels: vec![PERSON],
             props: vec![
-                (K_KEY, CanonicalScalar::Int(key)),
-                (NAME, CanonicalScalar::Int(name)),
-                (TEAM, CanonicalScalar::Int(team)),
-                (AGE, CanonicalScalar::Int(age)),
+                (K_KEY, CanonicalScalar::Int(key).into()),
+                (NAME, CanonicalScalar::Int(name).into()),
+                (TEAM, CanonicalScalar::Int(team).into()),
+                (AGE, CanonicalScalar::Int(age).into()),
             ],
         })
     });
     let edge_rows = model.edges.iter().map(|(eid, src, dst)| {
         BulkRow::Edge(BulkEdge {
             key: format!("edge-{}", eid.0),
-            source: src.0.to_string(),
-            destination: dst.0.to_string(),
+            source: src.0.to_string().into(),
+            destination: dst.0.to_string().into(),
             relation: KNOWS,
             props: Vec::new(),
         })

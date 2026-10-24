@@ -10,7 +10,16 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 #[derive(Clone)]
 pub(crate) enum VertexUpsertValueTemplate {
     Bound(GqlScalarParameter),
-    Parameter { index: usize, at: usize },
+    Parameter {
+        index: usize,
+        at: usize,
+    },
+    /// A constant list value (`['a', 'b']`, `$tags`), read in the value
+    /// language and evaluated when the statement binds (fgdb-k3nub).
+    Composite {
+        value: crate::set_text::ReadValueTemplate,
+        at: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -61,6 +70,23 @@ pub enum GraphVertexUpsertTextErrorKind {
     UpsertBuild(GraphVertexUpsertBuildError),
     Expression(GraphMutationTextErrorKind),
     DuplicateBranch,
+    /// A RETURN expression, page or projection name after MERGE.
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphVertexUpsertQueryBuildError),
+}
+impl From<crate::GraphSetTextError> for GraphVertexUpsertTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphVertexUpsertTextErrorKind::Query(kind)
+            }
+            kind => GraphVertexUpsertTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
 }
 impl From<GraphPatternTextError> for GraphVertexUpsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
@@ -78,13 +104,41 @@ impl From<GraphMutationTextError> for GraphVertexUpsertTextError {
         }
     }
 }
+impl core::fmt::Display for GraphVertexUpsertTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Query(kind) => kind.fmt(f),
+            Self::Merge(kind) => kind.fmt(f),
+            Self::UpsertBuild(error) => error.fmt(f),
+            Self::Expression(kind) => kind.fmt(f),
+            Self::DuplicateBranch => f.write_str("MERGE repeats an ON CREATE or ON MATCH branch"),
+            Self::Relation(kind) => kind.fmt(f),
+            Self::ReturnBuild(error) => error.fmt(f),
+        }
+    }
+}
+impl GraphVertexUpsertTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::Query(kind) => kind.class(),
+            Self::Merge(kind) => kind.class(),
+            Self::Expression(kind) => kind.class(),
+            Self::Relation(kind) => kind.class(),
+            Self::DuplicateBranch => crate::GqlRefusalClass::Syntax,
+            Self::UpsertBuild(_) | Self::ReturnBuild(_) => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
+impl GraphVertexUpsertTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphVertexUpsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph vertex MERGE action text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphVertexUpsertTextError {}
@@ -101,5 +155,48 @@ impl PreparedGraphVertexUpsertText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] {
         self.merge.parameter_schema()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct VertexReturnTemplate {
+    pub bindings: Vec<crate::GraphVertexReturnBinding>,
+    pub projection: Vec<crate::set_text::ReadProjectionTemplate>,
+    pub grouping: Option<crate::mutation_text::WriteReturnGroupTemplate>,
+    pub quantifier: crate::GraphSetQuantifier,
+    pub order: Vec<crate::algebra::GraphValueOrder>,
+    pub offset: crate::set_text::ReadPageNumber,
+    pub count: Option<crate::set_text::ReadPageNumber>,
+    pub at: usize,
+    pub property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// Native row stages after a WITH over the chosen vertex's final values.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
+}
+
+/// `MERGE (n ...) [ON MATCH SET ...] [ON CREATE SET ...] [SET ...] RETURN ...`.
+/// MERGE chooses exactly one vertex, so its result head projects one row: the
+/// merge variable's identity and its properties after every clause, read from
+/// the staged transaction state, plus expressions, DISTINCT, ordering and paging
+/// over them, including grouped COUNT/SUM/AVG/MIN/MAX/COLLECT with argument
+/// DISTINCT. A MERGE with no SET clause is accepted here. Grouped output keeps
+/// the ordinary row numeric domain. `properties(n)`, `keys(n)`, and selective
+/// or wildcard map projections read the final staged vertex through the same
+/// governed owner; complete maps and `labels(n)` require trusted reverse names.
+/// A WITH head continues through native row stages to a terminal RETURN
+/// (fgdb-cpny9), retaining the statement's rollback and cumulative budget.
+/// Carried vertex property reads are private final-state bindings, not another
+/// MATCH. This does not enable writes before MERGE or another write after it.
+#[derive(Clone)]
+pub struct PreparedGraphVertexUpsertQueryText {
+    pub(crate) statement: String,
+    pub(crate) upsert: PreparedGraphVertexUpsertText,
+    pub(crate) returning: VertexReturnTemplate,
+}
+impl core::fmt::Debug for PreparedGraphVertexUpsertQueryText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphVertexUpsertQueryText")
+            .field("output_columns", &self.returning.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }

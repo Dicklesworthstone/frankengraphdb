@@ -111,7 +111,7 @@ fn create_receipt_maps_occurrences_and_is_only_durable_after_commit() {
             );
             let staged = txn.vertex(&db, *vertex).unwrap().unwrap();
             assert_eq!(staged.labels, vec![COPY]);
-            assert_eq!(staged.props, vec![(P, CanonicalScalar::Int(10))]);
+            assert_eq!(staged.props, vec![(P, CanonicalScalar::Int(10).into())]);
             let staged_edge = txn.edge(&db, *edge).unwrap().unwrap();
             assert_eq!(
                 (staged_edge.entry.src, staged_edge.entry.dst),
@@ -318,12 +318,12 @@ fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
         assert!(db.vertex(VId(900)).unwrap().is_none());
         assert_eq!(
             txn.vertex(&db, VId(900)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(8))]
+            vec![(P, CanonicalScalar::Int(8).into())]
         );
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(
             db.vertex(VId(900)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(8))]
+            vec![(P, CanonicalScalar::Int(8).into())]
         );
 
         let bad_mutation =

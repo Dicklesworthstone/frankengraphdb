@@ -1,6 +1,6 @@
 use super::*;
 use crate::{GraphCheapestPathError, GraphCostPath, GraphPathCostError};
-use fgdb_types::{CanonicalScalar, EId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(7);
@@ -45,6 +45,10 @@ fn run(
     edges: &[Edge],
     weights: &BTreeMap<EId, CanonicalScalar>,
 ) -> Result<Vec<GraphCostPath>, GraphCheapestPathError<()>> {
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = weights
+        .iter()
+        .map(|(eid, weight)| (*eid, weight.clone().into()))
+        .collect();
     match q.ranked_count() {
         Some(count) => q.query().execute_k_with_control(
             count,
@@ -119,7 +123,8 @@ fn selectors_modes_directions_symbols_and_wide_anchors_lower_exactly_once() {
                         GraphWalkBounds::new(1, 3).unwrap(),
                     )
                     .unwrap()
-                    .with_mode(expected_mode);
+                    .with_mode(expected_mode)
+                    .with_match_mode(GraphMatchMode::DifferentEdges);
                     assert_eq!(bound.query().canonical_bytes(), expected.canonical_bytes());
                 }
                 assert_eq!(calls.len(), 2);
@@ -134,6 +139,93 @@ fn selectors_modes_directions_symbols_and_wide_anchors_lower_exactly_once() {
             .mode(),
         GraphCheapestPathMode::Walk
     );
+    assert_eq!(
+        q.bind(VId(0), VId(0), &GqlParameters::new())
+            .unwrap()
+            .query()
+            .match_mode(),
+        GraphMatchMode::DifferentEdges
+    );
+}
+
+#[test]
+fn match_mode_aliases_normalize_identity_independently_of_the_path_mode() {
+    for mode in ["WALK", "TRAIL", "ACYCLIC", "SIMPLE"] {
+        let base = text("ANY CHEAPEST", mode, GlaDirection::Undirected, "0..3");
+        let implicit = prepare(&base)
+            .bind(VId(0), VId(1), &GqlParameters::new())
+            .unwrap();
+        let repeatable = prepare(&base.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS ", 1))
+            .bind(VId(0), VId(1), &GqlParameters::new())
+            .unwrap();
+        assert_ne!(implicit.canonical_bytes(), repeatable.canonical_bytes());
+        for (prefix, expected) in [
+            ("", GraphMatchMode::DifferentEdges),
+            ("DIFFERENT EDGES ", GraphMatchMode::DifferentEdges),
+            ("DIFFERENT EDGE ", GraphMatchMode::DifferentEdges),
+            ("DIFFERENT EDGE BINDINGS ", GraphMatchMode::DifferentEdges),
+            ("DIFFERENT RELATIONSHIPS ", GraphMatchMode::DifferentEdges),
+            ("DIFFERENT RELATIONSHIP ", GraphMatchMode::DifferentEdges),
+            (
+                "DIFFERENT RELATIONSHIP BINDINGS ",
+                GraphMatchMode::DifferentEdges,
+            ),
+            ("REPEATABLE ELEMENTS ", GraphMatchMode::RepeatableElements),
+            ("REPEATABLE ELEMENT ", GraphMatchMode::RepeatableElements),
+            (
+                "REPEATABLE ELEMENT BINDINGS ",
+                GraphMatchMode::RepeatableElements,
+            ),
+            (
+                "repeatable element bindings ",
+                GraphMatchMode::RepeatableElements,
+            ),
+        ] {
+            let input = base.replacen("MATCH ", &format!("MATCH {prefix}"), 1);
+            let bound = prepare(&input)
+                .bind(VId(0), VId(1), &GqlParameters::new())
+                .unwrap();
+            assert_eq!(bound.query().match_mode(), expected);
+            assert_eq!(bound.query().mode(), implicit.query().mode());
+            let canonical = if expected == GraphMatchMode::DifferentEdges {
+                implicit.canonical_bytes()
+            } else {
+                repeatable.canonical_bytes()
+            };
+            assert_eq!(bound.canonical_bytes(), canonical, "{input}");
+        }
+    }
+}
+
+#[test]
+fn default_match_ranks_valid_negative_simple_closures_and_repeatable_is_explicit() {
+    let edges = [(EId(1), VId(0), R, VId(1)), (EId(2), VId(0), R, VId(1))];
+    let weights = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-10)),
+        (EId(2), CanonicalScalar::Int(3)),
+    ]);
+    for path_mode in ["WALK", "SIMPLE"] {
+        for (selector, expected_count) in [("ANY CHEAPEST", 1), ("CHEAPEST 4", 2)] {
+            let base = text(selector, path_mode, GlaDirection::Undirected, "2");
+            for prefix in ["", "DIFFERENT EDGES "] {
+                let input = base.replacen("MATCH ", &format!("MATCH {prefix}"), 1);
+                let bound = prepare(&input)
+                    .bind(VId(0), VId(0), &GqlParameters::new())
+                    .unwrap();
+                let rows = run(&bound, &[VId(0), VId(1)], &edges, &weights).unwrap();
+                assert_eq!(rows.len(), expected_count);
+                assert_eq!(plain(&rows), oracle(&bound, &edges, &weights));
+                assert!(rows.iter().all(|row| row.cost() == -7));
+            }
+            let bound = prepare(&base.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS ", 1))
+                .bind(VId(0), VId(0), &GqlParameters::new())
+                .unwrap();
+            let rows = run(&bound, &[VId(0), VId(1)], &edges, &weights).unwrap();
+            assert_eq!(plain(&rows), oracle(&bound, &edges, &weights));
+            assert_eq!(rows[0].cost(), -20);
+            assert_eq!(rows[0].path().steps()[0].0, rows[0].path().steps()[1].0);
+        }
+    }
 }
 
 #[test]
@@ -163,9 +255,16 @@ fn repeated_parameters_are_exact_typed_and_never_substituted_into_text() {
         missing.kind,
         GraphCheapestPathTextErrorKind::Pattern(GraphPatternTextErrorKind::MissingParameter)
     );
+    // fgdb-3dnpu: a non-negative Int64 argument for the UInt64 K is that
+    // UInt64; a negative one still refuses as a type mismatch.
     let signed = GqlParameters::new().with_int64("n", 1).unwrap();
+    assert_eq!(
+        q.bind(VId(0), VId(1), &signed).unwrap().ranked_count(),
+        Some(1)
+    );
+    let negative = GqlParameters::new().with_int64("n", -1).unwrap();
     assert!(matches!(
-        q.bind(VId(0), VId(1), &signed).unwrap_err().kind,
+        q.bind(VId(0), VId(1), &negative).unwrap_err().kind,
         GraphCheapestPathTextErrorKind::Pattern(
             GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
         )
@@ -259,6 +358,14 @@ fn repeated_vertex_variables_enforce_identity_and_debug_does_not_export_secrets(
 fn malformed_or_unsupported_statements_refuse_before_any_catalog_access() {
     let base = text("ANY CHEAPEST", "WALK", GlaDirection::Forward, "1..4");
     let invalid = [
+        base.replacen("MATCH ", "MATCH REPEATABLE ", 1),
+        base.replacen("MATCH ", "MATCH DIFFERENT ", 1),
+        base.replacen("MATCH ", "MATCH REPEATABLE EDGES ", 1),
+        base.replacen("MATCH ", "MATCH DIFFERENT ELEMENTS ", 1),
+        base.replacen("MATCH ", "MATCH DIFFERENT EDGES REPEATABLE ELEMENTS ", 1),
+        base.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS DIFFERENT EDGES ", 1),
+        base.replacen("MATCH ", "MATCH DIFFERENT EDGES BINDINGS ", 1),
+        base.replacen("MATCH ", "MATCH REPEATABLE ELEMENTS BINDINGS ", 1),
         base.replace("ANY CHEAPEST", "ALL CHEAPEST"),
         base.replace("ANY CHEAPEST", "CHEAPEST -1"),
         base.replace("1..4", "4..1"),
@@ -441,7 +548,14 @@ fn oracle(
                         vertices.iter().collect::<BTreeSet<_>>().len() == vertices.len()
                     }
                 };
-                if allowed {
+                let different_edges = query.match_mode() == GraphMatchMode::RepeatableElements
+                    || steps
+                        .iter()
+                        .map(|step| step.0)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == steps.len();
+                if allowed && different_edges {
                     rows.push((*cost, steps.clone()));
                 }
             }

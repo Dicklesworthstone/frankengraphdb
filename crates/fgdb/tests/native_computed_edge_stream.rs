@@ -139,24 +139,25 @@ fn oracle(
     grouped: bool,
 ) -> Vec<Vec<GraphAggregateValue>> {
     let mut oriented = Vec::new();
-    for (_, a, b, q, p) in edges(cut) {
+    for (id, a, b, q, p) in edges(cut) {
         let value = q.map(|q| i128::from(q) * i128::from(p) * i128::from(scale));
         if direction == 1 {
-            oriented.push((b, a, value));
+            oriented.push((id, b, a, value));
         } else {
-            oriented.push((a, b, value));
+            oriented.push((id, a, b, value));
             if direction == 2 && a != b {
-                oriented.push((b, a, value));
+                oriented.push((id, b, a, value));
             }
         }
     }
+    // One MATCH binds both hops under DIFFERENT EDGES.
     let mut complete = Vec::new();
-    for &(_, b, value) in &oriented {
+    for &(rid, _, b, value) in &oriented {
         if hops == 1 {
             complete.push((b, value));
         } else {
-            for &(from, to, _) in &oriented {
-                if from == b {
+            for &(sid, from, to, _) in &oriented {
+                if from == b && sid != rid {
                     complete.push((to, value));
                 }
             }

@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -188,7 +188,10 @@ fn key_only_optional_groups_match_independent_hidden_filter_rank_and_page_oracle
                         value
                     })
                     .collect();
-                let scalars: Vec<_> = values.iter().map(|n| n.map(CanonicalScalar::Int)).collect();
+                let scalars: Vec<_> = values
+                    .iter()
+                    .map(|n| n.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))))
+                    .collect();
                 let mut expected = Vec::new();
                 for owner in [VId(1), VId(2), VId(3)] {
                     let bag: Vec<_> = edges
@@ -386,8 +389,8 @@ fn computed_width_and_malformed_private_references_refuse_before_catalog_access(
 
 #[test]
 fn hidden_inputs_and_invalid_numeric_domains_cannot_be_masked_by_zero_output() {
-    let good = CanonicalScalar::Int(7);
-    let bad = CanonicalScalar::Bool(true);
+    let good = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
+    let bad = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     for suffix in [
         "HAVING FALSE ORDER BY SUM(a.p) LIMIT 0",
         "HAVING TRUE OR AVG(a.p) IS NULL LIMIT 0",
@@ -459,7 +462,7 @@ fn hidden_inputs_and_invalid_numeric_domains_cannot_be_masked_by_zero_output() {
 
 #[test]
 fn hidden_extrema_are_borrowed_without_copying_their_return_payloads() {
-    let bytes = CanonicalScalar::bytes(vec![7; 8192]).unwrap();
+    let bytes = CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![7; 8192]).unwrap());
     let hidden = prepare(
         "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS n GROUP BY a ORDER BY MIN(b.p),a LIMIT 1",
     );
@@ -498,7 +501,8 @@ fn hidden_aggregation_uses_all_resource_limits_and_every_checkpoint() {
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(5),
         CanonicalScalar::Int(9),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(1), R, VId(10)),
         (VId(1), R, VId(10)),
@@ -582,9 +586,11 @@ fn hidden_aggregation_uses_all_resource_limits_and_every_checkpoint() {
 
 #[test]
 fn hidden_topology_counts_still_refuse_overflow_before_having_or_limit() {
+    // 64 parallel atoms over two parallel edges: 2^64 homomorphisms, which
+    // REPEATABLE ELEMENTS counts (DIFFERENT EDGES would admit none; fgdb-vexfr).
     let atoms = vec!["(a)-[:R]->(b)"; 64].join(",");
     let query = prepare(&format!(
-        "MATCH {atoms} RETURN a GROUP BY a HAVING TRUE OR COUNT(*) >= 0 LIMIT 0"
+        "MATCH REPEATABLE ELEMENTS {atoms} RETURN a GROUP BY a HAVING TRUE OR COUNT(*) >= 0 LIMIT 0"
     ));
     let result = query.execute_governed(
         2,

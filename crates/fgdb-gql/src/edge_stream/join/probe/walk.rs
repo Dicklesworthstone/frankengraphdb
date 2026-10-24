@@ -1,4 +1,4 @@
-//! Endpoint-support specialization of a finite, uncaptured VarLengthExpand.
+//! Endpoint-support specialization of an uncaptured VarLengthExpand.
 //!
 //! Inside EXISTS, multiplicity and chosen route are unobservable. ALL,
 //! ALL SHORTEST and ANY SHORTEST have the same endpoint support: shortest is
@@ -58,6 +58,18 @@ impl Endpoints {
         Ok(cursor)
     }
 
+    /// The depth a visited state is keyed by. Without an upper bound every
+    /// depth at or past the minimum has the same future (it may emit, and it
+    /// may always continue), so the key saturates there and an expansion
+    /// over a cycle still ends.
+    fn depth_class(&self, depth: usize) -> usize {
+        if self.bounds.is_bounded() {
+            depth
+        } else {
+            depth.min(self.bounds.minimum() as usize)
+        }
+    }
+
     fn merge_depths(&self) -> bool {
         matches!(
             self.search,
@@ -75,7 +87,8 @@ impl Endpoints {
         // discards the complete owning probe, never a partially advanced row.
         if self.merge_depths() {
             control(GlaExecutionEvent::ScratchEntry)?;
-            self.visited.insert((self.stack.len(), vertex));
+            self.visited
+                .insert((self.depth_class(self.stack.len()), vertex));
         } else if self.search == GraphWalkSearch::Trail {
             if let Some(edge) = incoming {
                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -170,7 +183,9 @@ impl Endpoints {
             let allowed = match self.search {
                 GraphWalkSearch::All
                 | GraphWalkSearch::AllShortest
-                | GraphWalkSearch::AnyShortest => !self.visited.contains(&(depth + 1, to)),
+                | GraphWalkSearch::AnyShortest => {
+                    !self.visited.contains(&(self.depth_class(depth + 1), to))
+                }
                 GraphWalkSearch::Trail => !self.edges.contains(&eid),
                 GraphWalkSearch::Acyclic => !self.vertices.contains(&to),
                 GraphWalkSearch::Simple => to == self.start || !self.vertices.contains(&to),

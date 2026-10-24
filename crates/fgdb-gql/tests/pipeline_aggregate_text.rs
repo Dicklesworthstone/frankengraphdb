@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetQuantifier, GraphSetTextErrorKind, GraphSetValue, GraphSymbol,
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphPipelineAggregateText, PreparedGraphSet,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeSet;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -36,13 +36,18 @@ fn run(
     input: &[CanonicalScalar],
     policy: GqlQueryPolicy,
 ) -> GqlQueryExecution<GraphAggregateRow> {
+    let stored: Vec<_> = input
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     query
         .execute_governed(
             input.len() as u64,
             (0..input.len()).map(|at| VId(at as u128)),
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, key| Ok((key == P).then(|| &input[vid.0 as usize])),
+            |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
             policy,
             || Ok::<_, ()>(()),
         )
@@ -400,6 +405,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         "MATCH (n) WITH n.p AS x WHERE x <> 0 WITH CASE WHEN x > 0 THEN 10/x ELSE 0 END AS y RETURN SUM(y) AS total",
     );
     let input = [-1, 0, 2, 5].map(CanonicalScalar::Int);
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     assert_eq!(
         run(&bound, &input, wide()).value[0].values()[0].as_integer(),
         Some(7)
@@ -410,7 +416,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         (0..4).map(VId),
         [],
         |_, _| Ok::<_, ()>(true),
-        |vid, _| Ok(Some(&input[vid.0 as usize])),
+        |vid, _| Ok(Some(&stored[vid.0 as usize])),
         wide(),
         || Ok::<_, ()>(()),
     );
@@ -425,7 +431,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         [VId(0)],
         [],
         |_, _| Ok(true),
-        |_, _| Err::<Option<&CanonicalScalar>, _>("unreadable input"),
+        |_, _| Err::<Option<&CanonicalPropertyValue>, _>("unreadable input"),
         wide(),
         || Ok::<_, ()>(()),
     );
@@ -436,7 +442,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
         )))
     ));
     let non_integer = query("MATCH (n) WITH n.p AS x RETURN SUM(x) AS total LIMIT 0");
-    let bad_value = CanonicalScalar::Bool(true);
+    let bad_value = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     assert!(matches!(
         non_integer.execute_governed(
             1,
@@ -459,6 +465,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
         "MATCH (n) WITH n.p AS x WHERE x > 0 RETURN x AS key,SUM(x+1) AS n HAVING n > 0 ORDER BY key DESC",
     );
     let input = [1, 1, 2].map(CanonicalScalar::Int);
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     let mut calls = 0;
     let measured = bound
         .execute_governed(
@@ -466,7 +473,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 calls += 1;
@@ -498,7 +505,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
                     [VId(0), VId(1), VId(2)],
                     [],
                     |_, _| Ok::<_, ()>(true),
-                    |vid, _| Ok(Some(&input[vid.0 as usize])),
+                    |vid, _| Ok(Some(&stored[vid.0 as usize])),
                     GqlQueryPolicy::new(cap[0], cap[1], cap[2], cap[3]),
                     || Ok::<_, ()>(())
                 )
@@ -512,7 +519,7 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 at += 1;
@@ -635,8 +642,10 @@ fn whole_expression_grouping_supports_explicit_aliases_and_repeated_output_keys(
     assert!(run(&compact, &[], wide()).value.is_empty());
 }
 
+/// An unaliased summary is named by its source text (openCypher), and the
+/// ALL, `*` and extremum DISTINCT spellings are one plan.
 #[test]
-fn optional_summary_aliases_and_all_star_keep_native_default_names() {
+fn summary_names_are_source_text_and_all_star_spellings_share_one_plan() {
     let implicit = PreparedGraphPipelineAggregateText::prepare(
         "MATCH (n) WITH n.p AS x RETURN COUNT(ALL *),SUM(x+1),AVG(x+1),MIN(x+1),MAX(x+1),COLLECT(x+1)",
         symbols,
@@ -644,15 +653,26 @@ fn optional_summary_aliases_and_all_star_keep_native_default_names() {
     .unwrap();
     assert_eq!(
         implicit.columns(),
-        &["count", "sum", "avg", "min", "max", "collect"]
+        &[
+            "COUNT(ALL *)",
+            "SUM(x+1)",
+            "AVG(x+1)",
+            "MIN(x+1)",
+            "MAX(x+1)",
+            "COLLECT(x+1)"
+        ]
+    );
+    let plain = query(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(ALL *) AS count,SUM(x+1) AS sum, \
+         AVG(x+1) AS avg,MIN(x+1) AS min,MAX(x+1) AS max,COLLECT(x+1) AS collect",
     );
     let explicit = query(
         "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS count,SUM(ALL x+1) AS sum, \
          AVG(x+1) AS avg,MIN(DISTINCT x+1) AS min,MAX(DISTINCT x+1) AS max, \
          COLLECT(x+1) AS collect",
     );
+    assert_eq!(plain.canonical_bytes(), explicit.canonical_bytes());
     let bound = implicit.bind_parameters(&GqlParameters::new()).unwrap();
-    assert_eq!(bound.canonical_bytes(), explicit.canonical_bytes());
     let input = [1, 1, 3].map(CanonicalScalar::Int);
     let rows = run(&bound, &input, wide()).value;
     assert_eq!(rows.len(), 1);
@@ -693,7 +713,7 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
         "MATCH (n) WITH n.p AS x RETURN 10/x AS key,COUNT(*) AS rows LIMIT 0",
     ] {
         let bound = query(text);
-        let zero = CanonicalScalar::Int(0);
+        let zero = CanonicalPropertyValue::from(CanonicalScalar::Int(0));
         assert!(matches!(
             bound.execute_governed(
                 1,
@@ -799,7 +819,7 @@ fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by()
         symbols,
     )
     .unwrap();
-    assert_eq!(template.columns(), &["p", "c"]);
+    assert_eq!(template.columns(), &["n.p", "c"]);
     for text in [
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(__fg_boundary_0) AS c",
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c GROUP BY __fg_boundary_0",
@@ -859,14 +879,13 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
     for text in [
         "MATCH (n) WITH n.p AS x RETURN SUM(SUM(x)) AS total",
         "MATCH (n) WITH n.p AS x RETURN SUM([x]) AS total",
-        "MATCH (n) WITH n.p AS x RETURN x+1,COUNT(*) AS rows",
         "MATCH (n) WITH n.p AS x RETURN x+1 AS key,COUNT(*) AS rows GROUP BY x+2",
         "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows GROUP BY x+1,x+1",
-        "MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)",
         "MATCH (n) WITH n.p AS x WITH x AS y RETURN SUM(x+1) AS total",
         "MATCH (n) WITH n.p AS x RETURN SUM(x+$p) AS total LIMIT $p",
         "MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT *)",
-        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows,SUM(x)+1 AS total",
+        // `SUM(x)+1` combines aggregate results after WITH since fgdb-4avot
+        // (9cc5346a); it is no longer a refusal.
         &too_deep,
     ] {
         let mut calls = 0;
@@ -880,6 +899,88 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
         );
         assert_eq!(calls, 0, "{text}");
     }
+    PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows,SUM(x)+1 AS total",
+        symbols,
+    )
+    .unwrap();
+    // Unaliased computed keys and repeated summaries take their source text.
+    for (text, columns) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN x+1,COUNT(*) AS rows",
+            &["x+1", "rows"][..],
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)",
+            &["SUM(x)", "SUM(x+1)"][..],
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x),COUNT(*)",
+            &["SUM(x)", "COUNT(*)"][..],
+        ),
+    ] {
+        let prepared = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.columns(), columns, "{text}");
+    }
+    let row = run(
+        &query("MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)"),
+        &[CanonicalScalar::Int(7)],
+        wide(),
+    )
+    .value
+    .remove(0);
+    assert_eq!(row.values()[0].as_integer(), Some(7));
+    assert_eq!(row.values()[1].as_integer(), Some(8));
+}
+
+/// fgdb-cxjqp: a projected key reports the name of its first RETURN alias,
+/// the name its result column has. Hosts that match the physical definition
+/// against the visible columns (the buffered spill and streamed aggregate
+/// layout checks) therefore accept an aliased or computed key. Only names
+/// change: the definition's bytes equal those of the unaliased form.
+#[test]
+fn a_projected_key_reports_the_name_of_its_return_alias() {
+    let relation = |text: &str| {
+        let template = PreparedGraphPipelineAggregateText::prepare(text, symbols).unwrap();
+        let bound = template
+            .bind_relation_parameters(&GqlParameters::new())
+            .unwrap();
+        (template, bound)
+    };
+    for (text, keys) in [
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x AS b, SUM(x) AS t GROUP BY x",
+            &["b"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x % 2 AS b, SUM(x) AS t GROUP BY x % 2",
+            &["b"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x, SUM(x) AS t GROUP BY x",
+            &["x"][..],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN x AS a, x AS b, SUM(x) AS t",
+            &["a"][..],
+        ),
+        (
+            "UNWIND [1, 2] AS x UNWIND [3] AS y RETURN y AS x, x AS y, COUNT(*) AS n GROUP BY x, y",
+            &["x", "y"][..],
+        ),
+    ] {
+        let (template, bound) = relation(text);
+        assert_eq!(bound.key_columns(), keys, "{text}");
+        assert_eq!(&template.columns()[..1], &keys[..1], "{text}");
+    }
+    assert_eq!(
+        relation("UNWIND [1, 2, 3] AS x RETURN x AS b, SUM(x) AS t GROUP BY x")
+            .1
+            .canonical_bytes(),
+        relation("UNWIND [1, 2, 3] AS x RETURN x, SUM(x) AS t GROUP BY x")
+            .1
+            .canonical_bytes()
+    );
 }
 
 #[test]
@@ -904,4 +1005,372 @@ fn existing_group_names_and_private_projection_names_cannot_be_captured() {
         .remove(0);
     assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(8)));
     assert_eq!(row.values()[0].as_integer(), Some(8));
+}
+
+/// A leading UNWIND joined by a MATCH, then a WITH, feeds an aggregate RETURN
+/// (`UNWIND $ids AS id MATCH (n {id: id}) WITH ... RETURN count(*)`), as the
+/// same rows do behind a leading WITH: one row per joined occurrence, a
+/// repeated value matching once per repeat, and an unmatched value none.
+#[test]
+fn a_leading_unwind_joined_by_match_feeds_an_aggregate_return() {
+    let input = [
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(3),
+    ];
+    let totals = |text: &str| {
+        let row = run(&query(text), &input, wide()).value.remove(0);
+        (
+            row.values()[0].as_count().unwrap(),
+            row.values()[1].as_integer().unwrap(),
+        )
+    };
+    let unwound = "UNWIND [2, 2, 3, 9] AS wanted MATCH (n {p: wanted}) WITH n.p AS matched \
+                   RETURN COUNT(*) AS rows, SUM(matched) AS total";
+    assert_eq!(totals(unwound), (3, 7));
+    // Without a WITH the RETURN reads the implicit row: the unwound column
+    // and the matched vertex, whose property is a hidden graph read.
+    assert_eq!(
+        totals(
+            "UNWIND [2, 2, 3, 9] AS wanted MATCH (n {p: wanted}) \
+             RETURN COUNT(*) AS rows, SUM(n.p) AS total"
+        ),
+        (3, 7)
+    );
+    assert_eq!(
+        totals(&format!("WITH 1 AS one {unwound}")),
+        totals(unwound),
+        "{unwound}"
+    );
+    // Grouped by the matched value, in the written key order.
+    let grouped = run(
+        &query(
+            "UNWIND [2, 2, 3] AS wanted MATCH (n {p: wanted}) WITH n.p AS matched \
+             RETURN matched, COUNT(*) AS copies ORDER BY matched",
+        ),
+        &input,
+        wide(),
+    );
+    let groups: Vec<_> = grouped
+        .value
+        .iter()
+        .map(|row| {
+            (
+                row.keys()[0].as_scalar().cloned(),
+                row.values()[0].as_count().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            (Some(CanonicalScalar::Int(2)), 2),
+            (Some(CanonicalScalar::Int(3)), 1)
+        ]
+    );
+}
+
+/// fgdb-4avot: a terminal RETURN after WITH may combine aggregate results with
+/// arithmetic and grouping keys (`SUM(x) * 10 / COUNT(x)`, `x + COUNT(*)`), as
+/// the plain MATCH ... RETURN facade already does. The rows equal that
+/// facade's answer over the same data. ORDER BY may rank a combined item, as
+/// in that facade. A non-aggregate operand that is not a grouping key refuses,
+/// as in openCypher, and HAVING over a combined item still refuses.
+#[test]
+fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
+    let graph = |text: &str| {
+        fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let pipeline = |text: &str| {
+        PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let input = [
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(9),
+    ];
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x) * 10 / COUNT(x) AS scaled, COUNT(*) + 1 AS more",
+            "MATCH (n) RETURN SUM(n.p) * 10 / COUNT(n.p) AS scaled, COUNT(*) + 1 AS more",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS doubled",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS doubled",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, x + COUNT(*) AS shifted",
+            "MATCH (n) RETURN n.p AS x, n.p + COUNT(*) AS shifted",
+        ),
+    ] {
+        let mut combined = run(&pipeline(with), &input, wide()).value;
+        let mut reference = run(&graph(plain), &input, wide()).value;
+        combined.sort();
+        reference.sort();
+        assert_eq!(combined, reference, "{with}");
+        assert!(!combined.is_empty(), "{with}");
+    }
+    // ORDER BY over a combined item ranks the computed output tuple, as the
+    // graph facade does. The rows are compared in delivered order.
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d ORDER BY d DESC, x",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS d ORDER BY d DESC, x",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, x + COUNT(*) AS s ORDER BY s LIMIT 2",
+            "MATCH (n) RETURN n.p AS x, n.p + COUNT(*) AS s ORDER BY s LIMIT 2",
+        ),
+    ] {
+        let ordered = run(&pipeline(with), &input, wide()).value;
+        assert_eq!(ordered, run(&graph(plain), &input, wide()).value, "{with}");
+        assert_eq!(
+            ordered.len(),
+            if with.contains("LIMIT") { 2 } else { 3 },
+            "{with}"
+        );
+    }
+    for text in [
+        // y is not a grouping key of the RETURN.
+        "MATCH (n) WITH n.p AS x, n.p AS y RETURN x, y + COUNT(*) AS z",
+        "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d HAVING x > 1",
+    ] {
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// percentileDisc and percentileCont in a pipeline's terminal aggregate
+/// RETURN (fgdb-qbaex) answer as the graph facade's do over the same rows,
+/// NULL skipped and per group. p may be a grouping key, read after
+/// aggregation, so out of [0, 1] it raises (TCK Aggregation6 [5]).
+#[test]
+fn a_terminal_return_takes_percentiles_like_the_graph_facade() {
+    let graph = |text: &str| {
+        fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let input = [
+        CanonicalScalar::Int(30),
+        CanonicalScalar::Int(10),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(40),
+        CanonicalScalar::Int(20),
+    ];
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x \
+             RETURN percentileDisc(x, 0.5) AS d, percentileCont(x, 0.25) AS c",
+            "MATCH (n) RETURN percentileDisc(n.p, 0.5) AS d, percentileCont(n.p, 0.25) AS c",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, percentileDisc(x, 1.0) AS top",
+            "MATCH (n) RETURN n.p AS x, percentileDisc(n.p, 1.0) AS top",
+        ),
+    ] {
+        let mut pipeline = run(&query(with), &input, wide()).value;
+        let mut reference = run(&graph(plain), &input, wide()).value;
+        pipeline.sort();
+        reference.sort();
+        assert_eq!(pipeline, reference, "{with}");
+        assert!(!pipeline.is_empty(), "{with}");
+    }
+    let stored: Vec<_> = input
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
+    let failure =
+        query("MATCH (n) WITH n.p AS deg LIMIT 100 RETURN percentileDisc(0.90, deg), deg")
+            .execute_governed(
+                input.len() as u64,
+                (0..input.len()).map(|at| VId(at as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_err();
+    assert!(
+        format!("{failure:?}").contains("NumberOutOfRange"),
+        "{failure:?}"
+    );
+}
+
+/// A terminal aggregate RETURN reads a pattern comprehension (fgdb-1f8f7,
+/// TCK Pattern2 [6]). With no WITH, the RETURN reads its MATCH through an
+/// implicit `WITH *`, whose head gathers the comprehension into a hidden list
+/// column, one list per row; after a WITH, that WITH's head gathers it.
+/// Vertex 0 has two parallel edges to vertex 1, vertex 1 one edge to vertex
+/// 2, and vertex 2 none: lists of 2, 1 and 0 paths.
+#[test]
+fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(0), R, VId(1)),
+        (fgdb_types::EId(3), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let rows = |text: &str| {
+        let mut rows = query(text)
+            .execute_governed_with_identified_properties(
+                (stored.len() + edges.len()) as u64,
+                (0..3).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows.sort();
+        rows
+    };
+    let single = |text: &str| {
+        let rows = rows(text);
+        assert_eq!(rows.len(), 1, "{text}");
+        rows[0].values()[0].clone()
+    };
+    // Every row has a list, empty or not: count counts all three.
+    assert_eq!(
+        single("MATCH (n) RETURN count([p = (n)-->() | p]) AS c").as_count(),
+        Some(3)
+    );
+    assert_eq!(
+        single("MATCH (n) RETURN sum(size([p = (n)-->() | p])) AS s").as_integer(),
+        Some(3)
+    );
+    // After a WITH, with a WHERE inside the comprehension over its local.
+    assert_eq!(
+        single("MATCH (n) WITH n RETURN sum(size([(n)-->(m) WHERE m.p > 20 | m])) AS s")
+            .as_integer(),
+        Some(1)
+    );
+    // As a grouping key: degrees 2, 1 and 0, one vertex each.
+    let grouped = rows("MATCH (n) RETURN size([(n)-->() | 1]) AS d, count(*) AS c");
+    let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
+    let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
+    assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
+    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
+    for text in [
+        "MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c",
+        "MATCH (n)-->(k) WITH n AS k RETURN count([(k)-->() | 1]) AS c",
+    ] {
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+/// A terminal aggregate RETURN over collected paths (TCK List12 [4]):
+/// `nodes(x)` and `relationships(x)` of each collected path value, and the
+/// aggregate output evaluator indexing those compact vertex and edge lists
+/// (`head(...)`, `[-1]`) as the lists of their elements. Two one-hop paths,
+/// 0 -> 1 over edge 1 and 1 -> 2 over edge 2.
+#[test]
+fn an_aggregate_output_indexes_compact_vertex_and_edge_lists() {
+    use fgdb_gql::algebra::GraphValue;
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let text = "MATCH p = (a)-[:R]->(b) RETURN [x IN collect(p) | head(nodes(x))] AS h, \
+                [x IN collect(p) | relationships(x)[-1]] AS r, \
+                [x IN collect(p) | nodes(x)[5]] AS beyond";
+    let rows = fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed_with_identified_properties(
+            (stored.len() + edges.len()) as u64,
+            (0..3).map(VId),
+            edges,
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"))
+        .value;
+    assert_eq!(rows.len(), 1);
+    let list = |at: usize| {
+        let mut values = rows[0].values()[at]
+            .as_value()
+            .and_then(GraphValue::as_list)
+            .unwrap_or_else(|| panic!("column {at}"))
+            .to_vec();
+        values.sort();
+        values
+    };
+    assert_eq!(list(0), [GraphValue::Vertex(VId(0)), GraphValue::Vertex(VId(1))]);
+    assert_eq!(
+        list(1),
+        [
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::Edge(fgdb_types::EId(2))
+        ]
+    );
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    assert_eq!(list(2), [null.clone(), null]);
+}
+
+/// A terminal aggregate RETURN over pattern counts, `size((n)-->())` and
+/// `COUNT { ... }`: as with a comprehension, the RETURN reads its MATCH
+/// through an implicit `WITH *` whose head gathers the count. Vertex 0 has
+/// two parallel edges to vertex 1, vertex 1 one edge to vertex 2.
+#[test]
+fn a_terminal_aggregate_return_reads_pattern_counts() {
+    let edges = [
+        (fgdb_types::EId(1), VId(0), R, VId(1)),
+        (fgdb_types::EId(2), VId(0), R, VId(1)),
+        (fgdb_types::EId(3), VId(1), R, VId(2)),
+    ];
+    let stored: Vec<CanonicalPropertyValue> = [10, 20, 30]
+        .map(|p| CanonicalPropertyValue::from(CanonicalScalar::Int(p)))
+        .to_vec();
+    let rows = |text: &str| {
+        let mut rows = query(text)
+            .execute_governed_with_identified_properties(
+                (stored.len() + edges.len()) as u64,
+                (0..3).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |vid, key| Ok((key == P).then(|| &stored[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows.sort();
+        rows
+    };
+    let total = rows("MATCH (n) RETURN sum(size((n)-->())) AS s");
+    assert_eq!(total.len(), 1);
+    assert_eq!(total[0].values()[0].as_integer(), Some(3));
+    let total = rows("MATCH (n) RETURN sum(COUNT { MATCH (n)-->(m) WHERE m.p > 10 }) AS s");
+    assert_eq!(total[0].values()[0].as_integer(), Some(3));
+    let grouped = rows("MATCH (n) RETURN COUNT { (n)-->() } AS d, count(*) AS c");
+    let int = |n: i64| fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n));
+    let keys: Vec<_> = grouped.iter().map(|row| row.keys().to_vec()).collect();
+    assert_eq!(keys, [[int(0)], [int(1)], [int(2)]]);
+    assert!(grouped.iter().all(|row| row.values()[0].as_count() == Some(1)));
 }

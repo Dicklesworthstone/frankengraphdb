@@ -116,7 +116,7 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -148,26 +148,189 @@ impl PreparedGraphAggregate {
     /// The caller must supply one immutable, authorized graph generation. EIds
     /// must be the real source identities, not ordinals assigned to edge triples.
     /// This is bounded materialization, not spill-backed path aggregation.
+    /// `labels(n)` and `type(r)` read NULL here; a host with the catalog uses
+    /// [`Self::execute_governed_with_element_accessors`].
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed_with_element_properties<'a, E, C>(
         &self,
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_governed_with_element_accessors(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// As [`Self::execute_governed_with_element_properties`], with each
+    /// vertex's label names and each edge's type name for `labels(n)` and
+    /// `type(r)`, in grouping keys, arguments and row stages alike.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_accessors<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
-        if !self.input.plan().requires_identified_edges() {
-            return self.execute_governed(
+        if self.input.plan().projects_property_maps() {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        self.execute_governed_with_element_maps(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Aggregate complete visible property maps through the ordinary row and
+    /// aggregate owners, with one cumulative source/expression/output budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_maps<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        vertex_properties: impl FnMut(VId) -> Result<Option<&'a GraphValue>, E>,
+        edge_properties: impl FnMut(EId) -> Result<Option<&'a GraphValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_with_maps_and_optional_reads(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            vertex_properties,
+            edge_properties,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Complete native element maps and stored-property reads over carried
+    /// vertices and edges share one pinned source and one cumulative budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_maps_and_reads<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        vertex_properties: impl FnMut(VId) -> Result<Option<&'a GraphValue>, E>,
+        edge_properties: impl FnMut(EId) -> Result<Option<&'a GraphValue>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_with_maps_and_optional_reads(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            vertex_properties,
+            edge_properties,
+            &mut |element, key| Some(elements(element, key)),
+            policy,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with_maps_and_optional_reads<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut edge_property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+        mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a GraphValue>, E>,
+        mut edge_properties: impl FnMut(EId) -> Result<Option<&'a GraphValue>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let plan = self.input.plan();
+        // A clause-complete DIFFERENT EDGES count (fgdb-ujaad) and a
+        // support-only quantified reach (fgdb-20vwx) are answered exactly
+        // without relationship identities.
+        if (!plan.requires_identified_edges() || super::weighted::answers_identified_exactly(self))
+            && !plan.projects_labels()
+            && !plan.projects_types()
+            && !plan.projects_property_maps()
+        {
+            type NoTest<E> = fn(u32, &[VertexPredicate]) -> Result<bool, E>;
+            return self.execute_input(
                 snapshot_records,
                 vertices,
                 edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
+                None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
                 test_vertex,
                 property,
+                elements,
                 policy,
                 checkpoint,
             );
@@ -177,22 +340,31 @@ impl PreparedGraphAggregate {
             // checkpoint. No RefCell borrow spans either executor invocation.
             let checkpoint = RefCell::new(&mut checkpoint);
             let mut admitted = Some((vertices, edges));
+            let mut source = |pattern: &PreparedGraphPattern<GraphValueRow>,
+                              remaining: GqlQueryPolicy| {
+                let (vertices, edges) = admitted
+                    .take()
+                    .expect("single-source aggregate preparation admits exactly one leaf");
+                pattern.plan().execute_governed_with_element_maps(
+                    snapshot_records,
+                    vertices,
+                    edges,
+                    &mut test_vertex,
+                    &mut property,
+                    &mut edge_property,
+                    &mut vertex_labels,
+                    &mut edge_type,
+                    &mut vertex_properties,
+                    &mut edge_properties,
+                    remaining,
+                    || (*checkpoint.borrow_mut())(),
+                )
+            };
             return self.execute_relational_with_source(
                 policy,
-                |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
-                    let (vertices, edges) = admitted
-                        .take()
-                        .expect("single-source aggregate preparation admits exactly one leaf");
-                    pattern.plan().execute_governed_with_element_properties(
-                        snapshot_records,
-                        vertices,
-                        edges,
-                        &mut test_vertex,
-                        &mut property,
-                        &mut edge_property,
-                        remaining,
-                        || (*checkpoint.borrow_mut())(),
-                    )
+                crate::set_ops::BorrowedSource {
+                    source: &mut source,
+                    elements: Some(elements),
                 },
                 || (*checkpoint.borrow_mut())(),
             );
@@ -206,18 +378,22 @@ impl PreparedGraphAggregate {
         let source = self
             .input
             .plan()
-            .execute_governed_with_element_properties(
+            .execute_governed_with_element_maps(
                 snapshot_records,
                 vertices,
                 edges,
                 test_vertex,
                 property,
                 edge_property,
+                vertex_labels,
+                edge_type,
+                vertex_properties,
+                edge_properties,
                 source_policy,
                 &mut checkpoint,
             )
             .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-        self.finish_materialized_governed(source, policy, checkpoint)
+        self.finish_materialized_governed(source, elements, policy, checkpoint)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,7 +403,8 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -254,7 +431,7 @@ impl PreparedGraphAggregate {
                 &mut checkpoint,
             )
             .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-        self.finish_materialized_governed(source, policy, checkpoint)
+        self.finish_materialized_governed(source, elements, policy, checkpoint)
     }
 
     /// Source rows are already admitted. Keep them alive until the shared
@@ -263,6 +440,7 @@ impl PreparedGraphAggregate {
     fn finish_materialized_governed<E, C>(
         &self,
         source: GqlQueryExecution<GraphValueRow>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -301,10 +479,17 @@ impl PreparedGraphAggregate {
                 // Reuse the read-projection evaluator, including payload charging,
                 // frozen column references and lazy scalar branches. Source reads
                 // above remain eager and source errors remain typed errors.
-                let value = GraphSetProjection::evaluate_row_with_control(
+                let value = GraphSetProjection::evaluate_row_with_control_and_elements(
                     &input,
                     projection,
                     &mut control,
+                    &mut |element, key| {
+                        elements(element, key).map(|value| {
+                            value.map_err(|error| {
+                                GqlQueryError::Source(GraphAggregateError::Source(error))
+                            })
+                        })
+                    },
                     |column, error| {
                         GqlQueryError::Source(GraphAggregateError::InputExpression {
                             row,
@@ -319,7 +504,7 @@ impl PreparedGraphAggregate {
         } else {
             source.value
         };
-        let value = self.summarize_projected_rows(&input, &mut control)?;
+        let value = self.summarize_projected_rows_with_elements(&input, elements, &mut control)?;
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution {
             value,
@@ -328,9 +513,24 @@ impl PreparedGraphAggregate {
         })
     }
 
-    pub(super) fn summarize_projected_rows<'a, E, C>(
+    pub(super) fn summarize_projected_rows<E, C>(
+        &self,
+        input: &[GraphValueRow],
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.summarize_projected_rows_with_elements(
+            input,
+            &mut crate::set_ops::no_element_reads,
+            control,
+        )
+    }
+
+    pub(super) fn summarize_projected_rows_with_elements<'a, E, C>(
         &self,
         input: &'a [GraphValueRow],
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         control: &mut impl FnMut(
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
@@ -340,9 +540,15 @@ impl PreparedGraphAggregate {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, control)?);
         }
+        // One row's values and group key, reused by every row (see
+        // `execute_governed`); a column past the row's own is null.
+        let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut written = 0;
         for row in input {
             control(GlaExecutionEvent::Work)?;
-            let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+            values[row.len()..written.max(row.len())].fill(ValueRef::Scalar(&NULL));
+            written = row.len();
             for (at, value) in row.values().iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
                 values[at] = match value {
@@ -359,7 +565,6 @@ impl PreparedGraphAggregate {
                     control(GlaExecutionEvent::Work)?;
                 }
             }
-            let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
             for (at, column) in self.keys.iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
                 key[at] = values[*column];
@@ -387,7 +592,7 @@ impl PreparedGraphAggregate {
         }
         // The existing result engine still owns HAVING, hidden keys/summaries,
         // exact averages, output DISTINCT, ranking, paging and owned release.
-        self.finish_groups(&groups, control)
+        self.finish_groups_with_elements(&groups, elements, control)
     }
 
     pub(super) fn append_input_projection(&self, bytes: &mut Vec<u8>) {

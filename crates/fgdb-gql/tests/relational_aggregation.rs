@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphSetExecutionError, GraphSetOperation, GraphSetQuantifier, GraphSymbol, GraphSymbolKind,
     MAX_GRAPH_SET_DEPTH, PreparedGraphAggregate, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -36,13 +36,18 @@ fn run(
     values: &[CanonicalScalar],
     policy: GqlQueryPolicy,
 ) -> fgdb_gql::GqlQueryExecution<fgdb_gql::GraphAggregateRow> {
+    let stored: Vec<_> = values
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     query
         .execute_governed(
             values.len() as u64,
             (0..values.len()).map(|i| VId(i as u128)),
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&values[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             policy,
             || Ok::<_, ()>(()),
         )
@@ -268,6 +273,7 @@ fn one_allowance_covers_input_grouping_and_every_interruption_boundary() {
     )
     .unwrap();
     let input = [1, 1, 2].map(CanonicalScalar::Int);
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     let calls = Cell::new(0);
     let measure = query
         .execute_governed(
@@ -275,7 +281,7 @@ fn one_allowance_covers_input_grouping_and_every_interruption_boundary() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 calls.set(calls.get() + 1);
@@ -307,7 +313,7 @@ fn one_allowance_covers_input_grouping_and_every_interruption_boundary() {
                     [VId(0), VId(1), VId(2)],
                     [],
                     |_, _| Ok::<_, ()>(true),
-                    |vid, _| Ok(Some(&input[vid.0 as usize])),
+                    |vid, _| Ok(Some(&stored[vid.0 as usize])),
                     GqlQueryPolicy::new(cap[0], cap[1], cap[2], cap[3]),
                     || Ok::<_, ()>(())
                 )
@@ -321,7 +327,7 @@ fn one_allowance_covers_input_grouping_and_every_interruption_boundary() {
             [VId(0), VId(1), VId(2)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(Some(&input[vid.0 as usize])),
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
             wide(),
             || {
                 at += 1;
@@ -344,12 +350,13 @@ fn late_pipeline_source_and_numeric_failures_are_not_hidden_by_zero_output() {
     )
     .unwrap();
     let input = [CanonicalScalar::Int(2), CanonicalScalar::Int(0)];
+    let stored = input.clone().map(CanonicalPropertyValue::from);
     let result = query.execute_governed(
         2,
         [VId(0), VId(1)],
         [],
         |_, _| Ok::<_, &str>(true),
-        |vid, _| Ok(Some(&input[vid.0 as usize])),
+        |vid, _| Ok(Some(&stored[vid.0 as usize])),
         wide(),
         || Ok::<_, ()>(()),
     );
@@ -368,7 +375,7 @@ fn late_pipeline_source_and_numeric_failures_are_not_hidden_by_zero_output() {
             if vid == VId(1) {
                 Err("late read")
             } else {
-                Ok(Some(&input[0]))
+                Ok(Some(&stored[0]))
             }
         },
         wide(),

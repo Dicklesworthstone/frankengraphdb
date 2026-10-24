@@ -79,7 +79,7 @@ fn aborted_edge_property_overlay_is_absent_from_reference_replay() {
                 .expect("overlay edge read succeeds")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(11))]
+            vec![(PROPERTY, CanonicalScalar::Int(11).into())]
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
@@ -156,7 +156,7 @@ fn committed_edge_property_overlay_is_present_in_reference_replay() {
             .expect("durable edge remains");
         assert_eq!(
             edge.props.get(&PROPERTY),
-            Some(&CanonicalScalar::Int(22)),
+            Some(&CanonicalScalar::Int(22).into()),
             "committed property is durable"
         );
     });
@@ -238,7 +238,7 @@ fn concurrent_property_change_of_observed_edge_aborts_and_replays_only_writer() 
                 .expect("edge remains durable")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(33)),
+            Some(&CanonicalScalar::Int(33).into()),
             "B's edge property is durable"
         );
         assert!(

@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -276,6 +276,7 @@ fn optional_predicates_are_inside_the_match_and_missing_bindings_never_read_vert
     let q =
         query("MATCH (a:L) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n >= 7 RETURN a,b,b.n AS value");
     let value = CanonicalScalar::Int(7);
+    let stored = CanonicalPropertyValue::from(value.clone());
     let edges = [(VId(0), R, VId(1)), (VId(0), R, VId(2))];
     let result = q
         .plan()
@@ -287,13 +288,18 @@ fn optional_predicates_are_inside_the_match_and_missing_bindings_never_read_vert
                 Ok::<_, &str>(predicates.iter().all(|predicate| {
                     predicate.matches(
                         &[L],
-                        &[(P, CanonicalScalar::Int(if vid == VId(2) { 7 } else { 1 }))],
+                        &[(
+                            P,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                                if vid == VId(2) { 7 } else { 1 },
+                            )),
+                        )],
                     )
                 }))
             },
             |vid, _| {
                 if vid == VId(2) {
-                    Ok(Some(&value))
+                    Ok(Some(&stored))
                 } else {
                     Err("null binding called the property resolver")
                 }
@@ -360,12 +366,12 @@ fn pattern_predicates_are_their_exists_spelling() {
             "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->() } RETURN a",
         ),
         (
-            "MATCH (a) WHERE (a)<-[:S]-(src:L) RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+            "MATCH (a) WHERE (a)<-[:S]-(:L) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)<-[:S]-(:L) } RETURN a",
         ),
         (
-            "MATCH (a) WHERE (a:L)-[:R]-(m {n: 2}) RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-(m {n: 2}) } RETURN a",
+            "MATCH (a) WHERE (a:L)-[:R]-(:L {n: 2}) RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a:L)-[:R]-(:L {n: 2}) } RETURN a",
         ),
         (
             "MATCH (a) WHERE a.n > 1 AND (a)-[:R]->() AND NOT (a)-[:S]->() RETURN a",
@@ -376,12 +382,29 @@ fn pattern_predicates_are_their_exists_spelling() {
             "MATCH (a)-[:R]->(b) WHERE NOT (b)-[:S]->(a) RETURN a, b",
             "MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(a) } RETURN a, b",
         ),
+        // A subquery RETURN of literals or `*` keeps every row, so it is the
+        // same existence test (TCK ExistentialSubquery2 [1]).
+        (
+            "MATCH (a) WHERE (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() RETURN true } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE NOT (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->() RETURN *, 1 AS one } RETURN a",
+        ),
     ] {
         assert_eq!(
             query(pattern).canonical_bytes(),
             query(exists).canonical_bytes(),
             "{pattern}"
         );
+    }
+    // An aggregate or a computed RETURN item could change the subquery's rows.
+    for text in [
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() RETURN count(*) } RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) RETURN b } RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
     }
     // Rows on a fixture: 0 -R-> 1, 2 -S-> 0.
     let rows = |text: &str| {
@@ -427,6 +450,39 @@ fn pattern_predicates_are_their_exists_spelling() {
     ] {
         assert!(PreparedGraphText::prepare(text, symbols).is_ok(), "{text}");
     }
+    // A pattern predicate tests bindings and introduces none (openCypher
+    // UndefinedVariable, TCK Pattern1 [10]). The first new named vertex or
+    // edge is refused at its own offset, bare, under NOT and in exists(...).
+    // Anonymous nodes and edges bind nothing, and the EXISTS { MATCH ... }
+    // spelling still declares existential locals.
+    for (text, at) in [
+        ("MATCH (a) WHERE (a)-[r]->(b) RETURN a", "r]"),
+        ("MATCH (a) WHERE (b)-->(a) RETURN a", "b)"),
+        ("MATCH (a) WHERE ()-[r]-() RETURN a", "r]"),
+        ("MATCH (a) WHERE NOT (a)-[:R]->(m:L) RETURN a", "m:"),
+        ("MATCH (a) WHERE exists((a)<-[r:S]-()) RETURN a", "r:"),
+        (
+            "MATCH (a) WHERE (a)-[:R]->(:L)<-[s:S]-(b {n: 5}) RETURN a",
+            "s:",
+        ),
+    ] {
+        let error = PreparedGraphText::prepare(text, symbols).unwrap_err();
+        assert_eq!(
+            (error.kind, error.offset),
+            (
+                GraphPatternTextErrorKind::UnknownVariable,
+                text.find(at).unwrap()
+            ),
+            "{text}"
+        );
+    }
+    assert!(
+        PreparedGraphText::prepare(
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[r]->(b) } RETURN a",
+            symbols
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -537,7 +593,7 @@ fn optional_text_and_aggregate_text_share_zero_preserving_semantics() {
         .with_uint64("take", 10)
         .unwrap();
     let aggregate = template.bind_parameters(&args).unwrap();
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let rows = aggregate
         .execute_governed(
             7,
@@ -572,7 +628,7 @@ fn optional_text_and_aggregate_text_share_zero_preserving_semantics() {
 #[test]
 fn scoped_text_retains_all_limits_and_errors_never_become_null_extension() {
     let q = query("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n >= 0 RETURN a,b,b.n AS value");
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let vertices = [VId(0), VId(9)];
     let edges = [(VId(0), R, VId(1)), (VId(0), R, VId(2))];
     let run = |policy| {
@@ -668,8 +724,8 @@ fn exists_function_on_a_pattern_is_the_pattern_predicate() {
             "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } RETURN a",
         ),
         (
-            "MATCH (a) WHERE NOT exists((a)<-[:S]-(src:L)) RETURN a",
-            "MATCH (a) WHERE NOT EXISTS { MATCH (a)<-[:S]-(src:L) } RETURN a",
+            "MATCH (a) WHERE NOT exists((a)<-[:S]-(:L)) RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)<-[:S]-(:L) } RETURN a",
         ),
         (
             "MATCH (a) WHERE a.n > 1 AND EXISTS((a)-[:R]->()) RETURN a",

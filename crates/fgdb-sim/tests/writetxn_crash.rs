@@ -6,7 +6,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_sim::replay;
 use fgdb_types::context::{CommitCx, PurposeContexts, TxnCx};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, GraphId, VId};
 use std::path::{Path, PathBuf};
 
 const GRAPH: GraphId = GraphId(1);
@@ -51,7 +51,7 @@ async fn seeded_database(cx: &CommitCx, dir: &Path) -> Database {
     database
 }
 
-async fn reference_property(cx: &CommitCx, dir: &Path) -> CanonicalScalar {
+async fn reference_property(cx: &CommitCx, dir: &Path) -> CanonicalPropertyValue {
     let coordinator = CommitCoordinator::open(cx, dir, oracle_keys())
         .await
         .expect("independent oracle coordinator opens durable stream");
@@ -103,7 +103,7 @@ fn crash_before_capsule_releases_pin_and_reference_sees_only_seed() {
 
         assert_eq!(
             reference_property(&commit_cx, &dir).await,
-            CanonicalScalar::Int(0),
+            CanonicalScalar::Int(0).into(),
             "BeforeCapsule is pre-D1 and pre-D2, so replay sees only the seed"
         );
     });
@@ -139,7 +139,7 @@ fn crash_seam_with_none_is_a_durable_commit() {
 
         assert_eq!(
             reference_property(&commit_cx, &dir).await,
-            CanonicalScalar::Int(22),
+            CanonicalScalar::Int(22).into(),
             "independent replay sees the crash-free transaction write"
         );
     });

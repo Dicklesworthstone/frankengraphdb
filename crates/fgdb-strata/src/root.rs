@@ -22,10 +22,13 @@
 //! sequence frontier does not regress. `first_seq` remains a conservative skip
 //! bound, not an ownership claim over an exclusive slice of the commit stream.
 
+use std::borrow::Borrow;
+
 use crate::BlockError;
 use crate::root_segment::{
-    SEGMENT_BYTES, SEGMENT_REFS, SegmentClass, SegmentEntry, SegmentError, SegmentRef,
-    encode_segment, segment_id, segment_span,
+    INDEX_BYTES, INDEX_REFS, SEGMENT_BYTES, SEGMENT_REF_LEN, SEGMENT_REFS, SegmentClass,
+    SegmentEntry, SegmentError, SegmentLevel, SegmentRef, encode_index, encode_segment, index_id,
+    index_span, segment_id, segment_span,
 };
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CanonicalScalarResolver, CommitSeq, EId, GraphId, VId};
@@ -75,17 +78,28 @@ const HEADER_LEN: usize = OFF_DIGEST + 32;
 /// patch_id(32) + first_seq(8) + last_seq(8).
 const REF_LEN: usize = 32 + 8 + 8;
 
-/// The largest number of blocks this build will read from one root.
-pub const MAX_ROOT_BLOCKS: u32 = 1 << 20;
+/// The largest number of blocks this build will read from one root: a V5
+/// root, whose three-level shape bounds its own bytes. A partition holds at
+/// least one block per (source, relation) family, so this also bounds a
+/// one-partition graph's source vertices; 2^20 refused roadnet-ca (1.97M
+/// sources) and pokec (1.6M) at load (fgdb-u9jln).
+pub const MAX_ROOT_BLOCKS: u32 = 1 << 24;
 /// The largest number of vertex patches this build will read from one root.
-pub const MAX_ROOT_PATCHES: u32 = 1 << 20;
-/// The largest canonical root byte string this format version can encode.
+pub const MAX_ROOT_PATCHES: u32 = 1 << 24;
+/// The largest number of blocks a flat (V3) or two-level (V4) root may name.
+/// Their encodings grow with every reference, so they keep the original
+/// ceiling: it bounds what a damaged count can make a reader allocate.
+pub const MAX_FLAT_ROOT_BLOCKS: u32 = 1 << 20;
+/// The vertex-patch counterpart of [`MAX_FLAT_ROOT_BLOCKS`].
+pub const MAX_FLAT_ROOT_PATCHES: u32 = 1 << 20;
+/// The largest canonical flat (V3) root byte string.
 ///
-/// Storage applies this before materializing a root. Keeping the byte ceiling
+/// Storage applies this before materializing a root object of any format; a
+/// segmented root's own bytes are far smaller. Keeping the byte ceiling
 /// derived beside the layout prevents the block store from drifting to a much
 /// larger, block-shaped allocation bound when the durable root format changes.
 pub const MAX_ENCODED_ROOT_BYTES: usize =
-    HEADER_LEN + (MAX_ROOT_BLOCKS as usize + MAX_ROOT_PATCHES as usize) * REF_LEN;
+    HEADER_LEN + (MAX_FLAT_ROOT_BLOCKS as usize + MAX_FLAT_ROOT_PATCHES as usize) * REF_LEN;
 
 /// One block a root names, and the sequence range it covers.
 ///
@@ -134,6 +148,32 @@ pub struct PartitionRoot {
     /// The vertex row patches this partition is made of, under the same
     /// publication-order and frontier laws as `blocks` (fgdb-3xoi).
     pub vertex_patches: Vec<PatchRef>,
+}
+
+/// Borrow the membership already owned by a publication memo. Keeping this
+/// private to Strata lets the append path reuse the canonical encoder without
+/// constructing another complete pair of reference vectors.
+#[derive(Clone, Copy)]
+pub(crate) struct PartitionRootRef<'a> {
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub blocks: &'a [BlockRef],
+    pub vertex_patches: &'a [PatchRef],
+}
+
+impl<'a> From<&'a PartitionRoot> for PartitionRootRef<'a> {
+    fn from(root: &'a PartitionRoot) -> Self {
+        Self {
+            graph: root.graph,
+            branch: root.branch,
+            partition: root.partition,
+            published_at: root.published_at,
+            blocks: &root.blocks,
+            vertex_patches: &root.vertex_patches,
+        }
+    }
 }
 
 /// The immutable birth bound to one permanently spent EId.
@@ -521,12 +561,38 @@ impl core::error::Error for RootError {}
 /// Producers call this before an invalid root can escape; encoders and decoders
 /// call the same function so publication and persistence cannot drift into two
 /// definitions of lawfulness.
+/// Refuse a root the flat (V3) and two-level (V4) formats cannot name: their
+/// decoders refuse counts past the flat ceilings, so their encoders must too.
+fn within_flat_ceilings(root: PartitionRootRef<'_>) -> Result<(), RootError> {
+    let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
+    if declared > MAX_FLAT_ROOT_BLOCKS {
+        return Err(RootError::ImplausibleBlockCount { declared });
+    }
+    let declared = u32::try_from(root.vertex_patches.len()).unwrap_or(u32::MAX);
+    if declared > MAX_FLAT_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount { declared });
+    }
+    Ok(())
+}
+
 pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
+    validate_root_suffix(root.into(), (0, 0))
+}
+
+/// The caller must have validated the carried prefixes at a publication no
+/// later than this root's. The first new reference still compares against the
+/// final carried reference: skipping that boundary would admit a regression.
+fn validate_root_suffix(
+    root: PartitionRootRef<'_>,
+    carried: (usize, usize),
+) -> Result<(), RootError> {
+    assert!(carried.0 <= root.blocks.len());
+    assert!(carried.1 <= root.vertex_patches.len());
     let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
     if declared > MAX_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared });
     }
-    for (index, block) in root.blocks.iter().enumerate() {
+    for (index, block) in root.blocks.iter().enumerate().skip(carried.0) {
         if block.first_seq.0 == 0 || block.last_seq.0 == 0 {
             return Err(RootError::SequenceZero { at: index });
         }
@@ -566,7 +632,7 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
             declared: declared_patches,
         });
     }
-    for (index, patch) in root.vertex_patches.iter().enumerate() {
+    for (index, patch) in root.vertex_patches.iter().enumerate().skip(carried.1) {
         if patch.first_seq.0 == 0 || patch.last_seq.0 == 0 {
             return Err(RootError::PatchSequenceZero { at: index });
         }
@@ -631,6 +697,7 @@ pub fn root_logical_digest(root: &PartitionRoot) -> [u8; 32] {
 /// Encode a root canonically, refusing anything that is not.
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
+    within_flat_ceilings(root.into())?;
 
     let mut out =
         Vec::with_capacity(HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN);
@@ -678,12 +745,13 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
     let u32_at = |at: usize| -> u32 {
         u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
     };
+    // A flat root's bytes grow with its counts: the flat ceilings bound them.
     let count = u32_at(OFF_BLOCK_COUNT);
-    if count > MAX_ROOT_BLOCKS {
+    if count > MAX_FLAT_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared: count });
     }
     let patch_count = u32_at(OFF_PATCH_COUNT);
-    if patch_count > MAX_ROOT_PATCHES {
+    if patch_count > MAX_FLAT_ROOT_PATCHES {
         return Err(RootError::ImplausiblePatchCount {
             declared: patch_count,
         });
@@ -756,26 +824,63 @@ pub const ROOT_FORMAT_V4: u16 = 4;
 /// Domain separator for the V4 logical digest, which binds each full
 /// segment through that segment's own logical digest.
 pub const ROOT_LOGICAL_DIGEST_DOMAIN_V4: &[u8] = b"fgdb.strata.root-logical-digest.v4";
-/// segment_id(32) + segment logical digest(32) + first_seq(8) + last_seq(8).
-const SEGMENT_REF_LEN: usize = 32 + 32 + 8 + 8;
 /// The largest canonical V4 root: every full segment of both lists at their
 /// ceilings, plus two tails just short of a segment.
 pub const MAX_ENCODED_ROOT_V4_BYTES: usize = HEADER_LEN
-    + (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
+    + (MAX_FLAT_ROOT_BLOCKS as usize / SEGMENT_REFS
+        + MAX_FLAT_ROOT_PATCHES as usize / SEGMENT_REFS)
         * SEGMENT_REF_LEN
     + 2 * (SEGMENT_REFS - 1) * REF_LEN;
 
-/// The most bytes one whole root read may consume: a V4 root together with
-/// every segment it names, or a flat V3 root, whichever ceiling is larger.
+/// Format V5 (fgdb-5gzaa): three-level. The header is V3's, with the TOTAL
+/// block and patch counts. After it come, per list, its full index segments
+/// (each naming [`INDEX_REFS`] full segments), then the full segments after
+/// the last full index, then the tail inline, all named by [`SegmentRef`] as
+/// in V4. A commit writes and hashes at most 15 segment references and 255
+/// tail references per list, plus one index reference per 4,096 references
+/// (256 at 2^20 references, 4,096 at the 2^24 ceiling), and at most one new
+/// segment and one new index segment per list. Additive over V3
+/// and V4 (§16.6 additive-minor): both still decode, and writers emit V5.
+pub const ROOT_FORMAT_V5: u16 = 5;
+/// Domain separator for the V5 logical digest, which binds each full index
+/// segment and each named segment through that object's own logical digest.
+pub const ROOT_LOGICAL_DIGEST_DOMAIN_V5: &[u8] = b"fgdb.strata.root-logical-digest.v5";
+/// References one full index segment covers.
+const INDEX_COVERS: usize = SEGMENT_REFS * INDEX_REFS;
+/// The most references a V5 root names in one list at a ceiling: every full
+/// index segment, plus segment references and a tail each just short of
+/// full. Not every term peaks at once, so this bounds the root from above.
+const fn max_v5_list_bytes(ceiling: u32) -> usize {
+    (ceiling as usize / INDEX_COVERS + INDEX_REFS - 1) * SEGMENT_REF_LEN
+        + (SEGMENT_REFS - 1) * REF_LEN
+}
+/// The largest canonical V5 root, from above: 682,334 bytes at any history up
+/// to the count ceilings (67,934 up to 2^20 references per list).
+pub const MAX_ENCODED_ROOT_V5_BYTES: usize =
+    HEADER_LEN + max_v5_list_bytes(MAX_ROOT_BLOCKS) + max_v5_list_bytes(MAX_ROOT_PATCHES);
+
+/// The most bytes one whole root read may consume: a V4 or V5 root together
+/// with every object it names, or a flat V3 root, whichever ceiling is
+/// largest.
 ///
 /// Each full segment costs its own header and the root's reference to it on
 /// top of the flat references it carries, so a V4 root at its count ceilings
-/// reads about 1.3% more bytes than [`MAX_ENCODED_ROOT_BYTES`]. A read budget
-/// clamped to the flat ceiling would refuse a lawful root.
+/// reads about 1.3% more bytes than [`MAX_ENCODED_ROOT_BYTES`], and a V5 root
+/// adds its index segments to that. A read budget clamped to the flat ceiling
+/// would refuse a lawful root.
 pub const MAX_ROOT_READ_BYTES: usize = {
-    let segmented = MAX_ENCODED_ROOT_V4_BYTES
-        + (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
-            * SEGMENT_BYTES;
+    let flat_segments = (MAX_FLAT_ROOT_BLOCKS as usize / SEGMENT_REFS
+        + MAX_FLAT_ROOT_PATCHES as usize / SEGMENT_REFS)
+        * SEGMENT_BYTES;
+    let segments = (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS
+        + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
+        * SEGMENT_BYTES;
+    let v4 = MAX_ENCODED_ROOT_V4_BYTES + flat_segments;
+    let v5 = MAX_ENCODED_ROOT_V5_BYTES
+        + segments
+        + (MAX_ROOT_BLOCKS as usize / INDEX_COVERS + MAX_ROOT_PATCHES as usize / INDEX_COVERS)
+            * INDEX_BYTES;
+    let segmented = if v5 > v4 { v5 } else { v4 };
     if segmented > MAX_ENCODED_ROOT_BYTES {
         segmented
     } else {
@@ -795,11 +900,63 @@ pub const MAX_ROOT_READ_BYTES: usize = {
 /// The cache owns the rest: every segment binds its root's graph, branch and
 /// partition, so a root at any other coordinate re-seals from scratch rather
 /// than naming segments its reader must refuse.
+///
+/// The full index segments (fgdb-5gzaa) chunk the segment lists the same
+/// way, `block_index[j]` naming `blocks[16 * j .. 16 * (j + 1)]`, and are
+/// dropped with them whenever a list is re-sealed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SegmentCache {
     coordinate: Option<(GraphId, BranchId, u64)>,
     blocks: Vec<SegmentRef>,
     patches: Vec<SegmentRef>,
+    block_index: Vec<SegmentRef>,
+    patch_index: Vec<SegmentRef>,
+}
+
+impl SegmentCache {
+    /// Identities retained by the already-admitted root, independent of any
+    /// later damage to its on-disk frame or either reference list, each with
+    /// the kind of segment it names.
+    pub(crate) fn object_ids(&self) -> impl Iterator<Item = (ObjectId, SegmentLevel)> + '_ {
+        let leaves = self
+            .blocks
+            .iter()
+            .chain(&self.patches)
+            .map(|reference| (reference.segment_id, SegmentLevel::Leaf));
+        let indexes = self
+            .block_index
+            .iter()
+            .chain(&self.patch_index)
+            .map(|reference| (reference.segment_id, SegmentLevel::Index));
+        leaves.chain(indexes)
+    }
+
+    /// The cache an encoder that sealed `frame`'s segments would hold. It is
+    /// valid for exactly the root assembled from this frame, once each named
+    /// segment has been read and proven against its reference: the decoder
+    /// derives the segment count from the list total (`count / SEGMENT_REFS`),
+    /// and every segment decodes to exactly [`SEGMENT_REFS`] references, so
+    /// these are the segments [`encode_root_v5`] would seal from scratch.
+    ///
+    /// A V5 root's frame is first flattened ([`RootFrameV5::flatten`]) once
+    /// its index segments are read and proven, and its index references are
+    /// passed here: every index decodes to exactly [`INDEX_REFS`] segment
+    /// references, so these are also the index segments [`encode_root_v5`]
+    /// would seal from scratch. A V4 frame passes none, and the first V5
+    /// encode seals them.
+    pub(crate) fn of_frame(
+        frame: &RootFrameV4,
+        block_index: Vec<SegmentRef>,
+        patch_index: Vec<SegmentRef>,
+    ) -> Self {
+        Self {
+            coordinate: Some(frame.coordinate()),
+            blocks: frame.block_segments.clone(),
+            patches: frame.patch_segments.clone(),
+            block_index,
+            patch_index,
+        }
+    }
 }
 
 /// A V4 root's own content, before its segments are read.
@@ -822,49 +979,109 @@ impl RootFrameV4 {
     }
 }
 
-/// A decoded root frame: a V3 root is complete in itself, and a V4 root still
-/// needs its segments.
+/// A V5 root's own content, before its index segments and segments are read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootFrameV5 {
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub block_index: Vec<SegmentRef>,
+    pub block_segments: Vec<SegmentRef>,
+    pub tail_blocks: Vec<BlockRef>,
+    pub patch_index: Vec<SegmentRef>,
+    pub patch_segments: Vec<SegmentRef>,
+    pub tail_patches: Vec<PatchRef>,
+}
+
+impl RootFrameV5 {
+    /// The coordinate every named index segment and segment must carry.
+    pub fn coordinate(&self) -> (GraphId, BranchId, u64) {
+        (self.graph, self.branch, self.partition)
+    }
+
+    /// The V4 frame naming every full segment, once each index segment has
+    /// been proven by [`crate::root_segment::read_index`] to be the one this
+    /// frame names: `block_children[j]` is the segment list of
+    /// `block_index[j]`. A V5 root's segments are then read, and the root
+    /// assembled, exactly as a V4 root's are.
+    pub fn flatten(
+        self,
+        block_children: Vec<Vec<SegmentRef>>,
+        patch_children: Vec<Vec<SegmentRef>>,
+    ) -> RootFrameV4 {
+        RootFrameV4 {
+            graph: self.graph,
+            branch: self.branch,
+            partition: self.partition,
+            published_at: self.published_at,
+            block_segments: block_children
+                .into_iter()
+                .flatten()
+                .chain(self.block_segments)
+                .collect(),
+            tail_blocks: self.tail_blocks,
+            patch_segments: patch_children
+                .into_iter()
+                .flatten()
+                .chain(self.patch_segments)
+                .collect(),
+            tail_patches: self.tail_patches,
+        }
+    }
+}
+
+/// A decoded root frame: a V3 root is complete in itself, a V4 root still
+/// needs its segments, and a V5 root its index segments and then those.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFrame {
     V3(PartitionRoot),
     V4(RootFrameV4),
+    V5(RootFrameV5),
 }
 
-/// An encoded V4 root and the segments it names that the cache did not
-/// already hold. Those must be published, before the root, in the same batch.
+/// An encoded segmented root and the segments and index segments it names
+/// that the cache did not already hold. Those must be published, before the
+/// root, in the same batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodedRoot {
     pub bytes: Vec<u8>,
     pub new_segments: Vec<(ObjectId, Vec<u8>)>,
+    pub new_index_segments: Vec<(ObjectId, Vec<u8>)>,
 }
 
-/// One list of a V4 root as its logical digest sees it: the total count, the
-/// full segments, and the inline tail.
+/// One list of a segmented root as its logical digest sees it: the total
+/// count, the full index segments (none in V4), the full segments after
+/// them, and the inline tail.
 struct ListDigest<'a> {
     count: usize,
+    index: &'a [SegmentRef],
     segments: &'a [SegmentRef],
     tail: &'a [SegmentEntry],
 }
 
-/// The V4 logical digest: UNKEYED, domain-separated, over the coordinate,
-/// publication, and per list its total count, each full segment's logical
-/// digest and span, and the tail references. Each segment digest binds that
-/// segment's entries, so this binds the root's complete logical content.
-fn root_logical_digest_v4(
+/// The V4 and V5 logical digest: UNKEYED, domain-separated, over the
+/// coordinate, publication, and per list its total count, each full index
+/// segment's and then each named segment's logical digest and span, and the
+/// tail references. Each of those digests binds its object's content, so this
+/// binds the root's complete logical content. A V4 list names no index
+/// segments, so its digest is the V4 transcript unchanged.
+fn root_logical_digest_segmented(
+    domain: &[u8],
     coordinate: (GraphId, BranchId, u64),
     published_at: CommitSeq,
     lists: [ListDigest<'_>; 2],
 ) -> [u8; 32] {
     let (graph, branch, partition) = coordinate;
     let mut hasher = fgdb_crypto::Hasher::new();
-    hasher.update(ROOT_LOGICAL_DIGEST_DOMAIN_V4);
+    hasher.update(domain);
     hasher.update(&graph.0.to_be_bytes());
     hasher.update(&branch.0.to_be_bytes());
     hasher.update(&partition.to_be_bytes());
     hasher.update(&published_at.0.to_be_bytes());
     for list in lists {
         hasher.update(&(list.count as u32).to_be_bytes());
-        for segment in list.segments {
+        for segment in list.index.iter().chain(list.segments) {
             hasher.update(&segment.digest);
             hasher.update(&segment.first_seq.0.to_be_bytes());
             hasher.update(&segment.last_seq.0.to_be_bytes());
@@ -878,7 +1095,8 @@ fn root_logical_digest_v4(
     hasher.finalize().0
 }
 
-/// Seal every full segment of `refs` the cache does not hold yet.
+/// Seal every full segment of `refs` the cache does not hold yet. Returns
+/// whether the cache was dropped first, which drops its index segments too.
 fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
     refs: &[R],
     cache: &mut Vec<SegmentRef>,
@@ -886,9 +1104,10 @@ fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
     class: SegmentClass,
     identity: (&[u8; 32], DatabaseSecurityNamespaceId),
     new_segments: &mut Vec<(ObjectId, Vec<u8>)>,
-) -> Result<(), RootError> {
+) -> Result<bool, RootError> {
     let full = refs.len() / SEGMENT_REFS;
-    if cache.len() > full {
+    let dropped = cache.len() > full;
+    if dropped {
         // The list shrank, so it was rewritten: nothing cached still chunks it.
         cache.clear();
     }
@@ -910,11 +1129,80 @@ fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
         });
         new_segments.push((segment_id, bytes));
     }
+    Ok(dropped)
+}
+
+/// Seal every full index segment over `segments` the cache does not hold yet.
+fn seal_full_index(
+    segments: &[SegmentRef],
+    cache: &mut Vec<SegmentRef>,
+    coordinate: (GraphId, BranchId, u64),
+    class: SegmentClass,
+    identity: (&[u8; 32], DatabaseSecurityNamespaceId),
+    new_index_segments: &mut Vec<(ObjectId, Vec<u8>)>,
+) -> Result<(), RootError> {
+    let full = segments.len() / INDEX_REFS;
+    if cache.len() > full {
+        cache.clear();
+    }
+    for index in cache.len()..full {
+        let named = &segments[index * INDEX_REFS..(index + 1) * INDEX_REFS];
+        let (graph, branch, partition) = coordinate;
+        let (bytes, digest) =
+            encode_index(graph, branch, partition, class, named).map_err(RootError::Segment)?;
+        let segment_id = index_id(identity.0, identity.1, &bytes);
+        let (first_seq, last_seq) = index_span(named);
+        cache.push(SegmentRef {
+            segment_id,
+            digest,
+            first_seq,
+            last_seq,
+        });
+        new_index_segments.push((segment_id, bytes));
+    }
+    Ok(())
+}
+
+/// The two segmented layouts: V4 names every full segment, V5 names full
+/// index segments first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Segmented {
+    V4,
+    V5,
+}
+
+/// New segments and new index segments, in sealing order.
+type Sealed = (Vec<(ObjectId, Vec<u8>)>, Vec<(ObjectId, Vec<u8>)>);
+
+/// Seal one list's new full segments and, in V5, its new full index
+/// segments. Only the objects a commit newly fills are encoded and hashed.
+fn seal_list<R: Copy + Into<SegmentEntry>>(
+    refs: &[R],
+    (segments, index): (&mut Vec<SegmentRef>, &mut Vec<SegmentRef>),
+    (coordinate, class): ((GraphId, BranchId, u64), SegmentClass),
+    identity: (&[u8; 32], DatabaseSecurityNamespaceId),
+    format: Segmented,
+    (new_segments, new_index_segments): &mut Sealed,
+) -> Result<(), RootError> {
+    if seal_full_segments(refs, segments, coordinate, class, identity, new_segments)? {
+        index.clear();
+    }
+    if format == Segmented::V5 {
+        seal_full_index(
+            segments,
+            index,
+            coordinate,
+            class,
+            identity,
+            new_index_segments,
+        )?;
+    }
     Ok(())
 }
 
 /// Encode a root in format V4, sealing only the full segments `cache` does
 /// not already hold. See [`SegmentCache`] for the caller's validity duty.
+/// Writers emit V5; V4 stays encodable so its decode path stays proven.
 pub fn encode_root_v4(
     root: &PartitionRoot,
     k_oid: &[u8; 32],
@@ -922,6 +1210,44 @@ pub fn encode_root_v4(
     cache: &mut SegmentCache,
 ) -> Result<EncodedRoot, RootError> {
     validate_root(root)?;
+    within_flat_ceilings(root.into())?;
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V4)
+}
+
+/// Encode a root in format V5, sealing only the full segments and full index
+/// segments `cache` does not already hold. See [`SegmentCache`] for the
+/// caller's validity duty.
+pub fn encode_root_v5(
+    root: &PartitionRoot,
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    cache: &mut SegmentCache,
+) -> Result<EncodedRoot, RootError> {
+    validate_root(root)?;
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V5)
+}
+
+/// Encode an extension of an authenticated publication memo. The store alone
+/// supplies `carried`, after checking the exact prior root identity, coordinate,
+/// reference counts and nonregressing publication. Everything after that prefix,
+/// including both append boundaries, takes the ordinary structural checks.
+pub(crate) fn encode_root_v5_append(
+    root: PartitionRootRef<'_>,
+    carried: (usize, usize),
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    cache: &mut SegmentCache,
+) -> Result<EncodedRoot, RootError> {
+    validate_root_suffix(root, carried)?;
+    encode_segmented(root, (k_oid, namespace), cache, Segmented::V5)
+}
+
+fn encode_segmented(
+    root: PartitionRootRef<'_>,
+    identity: (&[u8; 32], DatabaseSecurityNamespaceId),
+    cache: &mut SegmentCache,
+    format: Segmented,
+) -> Result<EncodedRoot, RootError> {
     let coordinate = (root.graph, root.branch, root.partition);
     if cache.coordinate != Some(coordinate) {
         *cache = SegmentCache {
@@ -929,23 +1255,32 @@ pub fn encode_root_v4(
             ..SegmentCache::default()
         };
     }
-    let mut new_segments = Vec::new();
-    seal_full_segments(
-        &root.blocks,
-        &mut cache.blocks,
-        coordinate,
-        SegmentClass::Blocks,
-        (k_oid, namespace),
-        &mut new_segments,
+    let mut sealed = (Vec::new(), Vec::new());
+    seal_list(
+        root.blocks,
+        (&mut cache.blocks, &mut cache.block_index),
+        (coordinate, SegmentClass::Blocks),
+        identity,
+        format,
+        &mut sealed,
     )?;
-    seal_full_segments(
-        &root.vertex_patches,
-        &mut cache.patches,
-        coordinate,
-        SegmentClass::VertexPatches,
-        (k_oid, namespace),
-        &mut new_segments,
+    seal_list(
+        root.vertex_patches,
+        (&mut cache.patches, &mut cache.patch_index),
+        (coordinate, SegmentClass::VertexPatches),
+        identity,
+        format,
+        &mut sealed,
     )?;
+    let (new_segments, new_index_segments) = sealed;
+    // What the root names directly, per list: V4 every full segment; V5 its
+    // full index segments, then the full segments after the last of them.
+    let (block_index, patch_index): (&[SegmentRef], &[SegmentRef]) = match format {
+        Segmented::V4 => (&[], &[]),
+        Segmented::V5 => (&cache.block_index, &cache.patch_index),
+    };
+    let block_segments = &cache.blocks[block_index.len() * INDEX_REFS..];
+    let patch_segments = &cache.patches[patch_index.len() * INDEX_REFS..];
     let tails = [
         root.blocks[cache.blocks.len() * SEGMENT_REFS..]
             .iter()
@@ -956,29 +1291,35 @@ pub fn encode_root_v4(
             .map(|patch| SegmentEntry::from(*patch))
             .collect::<Vec<_>>(),
     ];
-    let digest = root_logical_digest_v4(
+    let (domain, version) = match format {
+        Segmented::V4 => (ROOT_LOGICAL_DIGEST_DOMAIN_V4, ROOT_FORMAT_V4),
+        Segmented::V5 => (ROOT_LOGICAL_DIGEST_DOMAIN_V5, ROOT_FORMAT_V5),
+    };
+    let digest = root_logical_digest_segmented(
+        domain,
         coordinate,
         root.published_at,
         [
             ListDigest {
                 count: root.blocks.len(),
-                segments: &cache.blocks,
+                index: block_index,
+                segments: block_segments,
                 tail: &tails[0],
             },
             ListDigest {
                 count: root.vertex_patches.len(),
-                segments: &cache.patches,
+                index: patch_index,
+                segments: patch_segments,
                 tail: &tails[1],
             },
         ],
     );
+    let named = block_index.len() + block_segments.len() + patch_index.len() + patch_segments.len();
     let mut out = Vec::with_capacity(
-        HEADER_LEN
-            + (cache.blocks.len() + cache.patches.len()) * SEGMENT_REF_LEN
-            + (tails[0].len() + tails[1].len()) * REF_LEN,
+        HEADER_LEN + named * SEGMENT_REF_LEN + (tails[0].len() + tails[1].len()) * REF_LEN,
     );
     out.extend_from_slice(&ROOT_MAGIC);
-    out.extend_from_slice(&ROOT_FORMAT_V4.to_be_bytes());
+    out.extend_from_slice(&version.to_be_bytes());
     out.extend_from_slice(&root.graph.0.to_be_bytes());
     out.extend_from_slice(&root.branch.0.to_be_bytes());
     out.extend_from_slice(&root.partition.to_be_bytes());
@@ -986,8 +1327,11 @@ pub fn encode_root_v4(
     out.extend_from_slice(&(root.blocks.len() as u32).to_be_bytes());
     out.extend_from_slice(&(root.vertex_patches.len() as u32).to_be_bytes());
     out.extend_from_slice(&digest);
-    for (segments, tail) in [&cache.blocks, &cache.patches].into_iter().zip(&tails) {
-        for segment in segments {
+    for ((index, segments), tail) in [(block_index, block_segments), (patch_index, patch_segments)]
+        .into_iter()
+        .zip(&tails)
+    {
+        for segment in index.iter().chain(segments) {
             out.extend_from_slice(&segment.segment_id.0);
             out.extend_from_slice(&segment.digest);
             out.extend_from_slice(&segment.first_seq.0.to_be_bytes());
@@ -1002,12 +1346,14 @@ pub fn encode_root_v4(
     Ok(EncodedRoot {
         bytes: out,
         new_segments,
+        new_index_segments,
     })
 }
 
-/// Decode a root frame of either live format. A V3 root is fully decoded; a
-/// V4 frame is checked against its own digest, and its segments are the
-/// caller's to read and [`assemble_root`].
+/// Decode a root frame of any live format. A V3 root is fully decoded; a V4
+/// or V5 frame is checked against its own digest, and the objects it names
+/// are the caller's to read (a V5 frame's index segments first, then
+/// [`RootFrameV5::flatten`]) and [`assemble_root`].
 pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
     if bytes.len() < HEADER_LEN || bytes[..4] != ROOT_MAGIC {
         return Err(RootError::NotARoot);
@@ -1016,9 +1362,11 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
     if format == ROOT_FORMAT_V3 {
         return decode_root(bytes).map(RootFrame::V3);
     }
-    if format != ROOT_FORMAT_V4 {
-        return Err(RootError::UnsupportedFormat { format });
-    }
+    let format = match format {
+        ROOT_FORMAT_V4 => Segmented::V4,
+        ROOT_FORMAT_V5 => Segmented::V5,
+        _ => return Err(RootError::UnsupportedFormat { format }),
+    };
     let u128_at = |at: usize| -> u128 {
         let mut buf = [0u8; 16];
         buf.copy_from_slice(&bytes[at..at + 16]);
@@ -1037,26 +1385,38 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
         buf.copy_from_slice(&bytes[at..at + 32]);
         buf
     };
+    // A V4 root's reference lists grow with its counts, as a flat root's do;
+    // only V5's index level keeps the root bounded past the flat ceilings.
+    let (block_ceiling, patch_ceiling) = match format {
+        Segmented::V4 => (MAX_FLAT_ROOT_BLOCKS, MAX_FLAT_ROOT_PATCHES),
+        Segmented::V5 => (MAX_ROOT_BLOCKS, MAX_ROOT_PATCHES),
+    };
     let count = u32_at(OFF_BLOCK_COUNT);
-    if count > MAX_ROOT_BLOCKS {
+    if count > block_ceiling {
         return Err(RootError::ImplausibleBlockCount { declared: count });
     }
     let patch_count = u32_at(OFF_PATCH_COUNT);
-    if patch_count > MAX_ROOT_PATCHES {
+    if patch_count > patch_ceiling {
         return Err(RootError::ImplausiblePatchCount {
             declared: patch_count,
         });
     }
     let (count, patch_count) = (count as usize, patch_count as usize);
-    let lists = [
-        (count / SEGMENT_REFS, count % SEGMENT_REFS),
-        (patch_count / SEGMENT_REFS, patch_count % SEGMENT_REFS),
-    ];
-    let expected = HEADER_LEN
-        + lists
-            .iter()
-            .map(|(segments, tail)| segments * SEGMENT_REF_LEN + tail * REF_LEN)
-            .sum::<usize>();
+    // Each list's shape is a pure function of its count: how many full index
+    // segments, full segments after them, and tail references the root names.
+    let shape = |count: usize| match format {
+        Segmented::V4 => (0, count / SEGMENT_REFS, count % SEGMENT_REFS),
+        Segmented::V5 => (
+            count / INDEX_COVERS,
+            (count / SEGMENT_REFS) % INDEX_REFS,
+            count % SEGMENT_REFS,
+        ),
+    };
+    let lists = [shape(count), shape(patch_count)];
+    let list_len = |(index, segments, tail): (usize, usize, usize)| {
+        (index + segments) * SEGMENT_REF_LEN + tail * REF_LEN
+    };
+    let expected = HEADER_LEN + lists.iter().map(|list| list_len(*list)).sum::<usize>();
     if bytes.len() < expected {
         return Err(RootError::Truncated {
             expected,
@@ -1068,9 +1428,10 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
             extra: bytes.len() - expected,
         });
     }
-    // Each list is its full segments' references, then its inline tail.
-    let list_at = |at: usize, (segments, tail): (usize, usize)| {
-        let named: Vec<SegmentRef> = (0..segments)
+    // Each list is its full index segments' references, its named full
+    // segments' references, then its inline tail.
+    let refs_at = |at: usize, count: usize| -> Vec<SegmentRef> {
+        (0..count)
             .map(|index| {
                 let at = at + index * SEGMENT_REF_LEN;
                 SegmentRef {
@@ -1080,8 +1441,12 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
                     last_seq: CommitSeq(u64_at(at + 72)),
                 }
             })
-            .collect();
-        let tail_base = at + segments * SEGMENT_REF_LEN;
+            .collect()
+    };
+    let list_at = |at: usize, (index, segments, tail): (usize, usize, usize)| {
+        let index_refs = refs_at(at, index);
+        let named = refs_at(at + index * SEGMENT_REF_LEN, segments);
+        let tail_base = at + (index + segments) * SEGMENT_REF_LEN;
         let inline: Vec<SegmentEntry> = (0..tail)
             .map(|index| {
                 let at = tail_base + index * REF_LEN;
@@ -1092,34 +1457,39 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
                 }
             })
             .collect();
-        (named, inline)
+        (index_refs, named, inline)
     };
     let [blocks_shape, patches_shape] = lists;
-    let (block_segments, tail_blocks) = list_at(HEADER_LEN, blocks_shape);
-    let (patch_segments, tail_patches) = list_at(
-        HEADER_LEN + blocks_shape.0 * SEGMENT_REF_LEN + blocks_shape.1 * REF_LEN,
-        patches_shape,
-    );
+    let (block_index, block_segments, tail_blocks) = list_at(HEADER_LEN, blocks_shape);
+    let (patch_index, patch_segments, tail_patches) =
+        list_at(HEADER_LEN + list_len(blocks_shape), patches_shape);
     let coordinate = (
         GraphId(u128_at(OFF_GRAPH)),
         BranchId(u128_at(OFF_BRANCH)),
         u64_at(OFF_PARTITION),
     );
     let published_at = CommitSeq(u64_at(OFF_PUBLISHED));
-    // The digest binds counts, segment digests and spans, and the tails: a
-    // frame whose segments later resolve still cannot have been edited.
+    // The digest binds counts, index and segment digests and spans, and the
+    // tails: a frame whose objects later resolve still cannot have been edited.
     let declared = bytes32_at(OFF_DIGEST);
-    let recomputed = root_logical_digest_v4(
+    let domain = match format {
+        Segmented::V4 => ROOT_LOGICAL_DIGEST_DOMAIN_V4,
+        Segmented::V5 => ROOT_LOGICAL_DIGEST_DOMAIN_V5,
+    };
+    let recomputed = root_logical_digest_segmented(
+        domain,
         coordinate,
         published_at,
         [
             ListDigest {
                 count,
+                index: &block_index,
                 segments: &block_segments,
                 tail: &tail_blocks,
             },
             ListDigest {
                 count: patch_count,
+                index: &patch_index,
                 segments: &patch_segments,
                 tail: &tail_patches,
             },
@@ -1132,16 +1502,32 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
         });
     }
     let (graph, branch, partition) = coordinate;
-    Ok(RootFrame::V4(RootFrameV4 {
-        graph,
-        branch,
-        partition,
-        published_at,
-        block_segments,
-        tail_blocks: tail_blocks.into_iter().map(BlockRef::from).collect(),
-        patch_segments,
-        tail_patches: tail_patches.into_iter().map(PatchRef::from).collect(),
-    }))
+    let tail_blocks = tail_blocks.into_iter().map(BlockRef::from).collect();
+    let tail_patches = tail_patches.into_iter().map(PatchRef::from).collect();
+    Ok(match format {
+        Segmented::V4 => RootFrame::V4(RootFrameV4 {
+            graph,
+            branch,
+            partition,
+            published_at,
+            block_segments,
+            tail_blocks,
+            patch_segments,
+            tail_patches,
+        }),
+        Segmented::V5 => RootFrame::V5(RootFrameV5 {
+            graph,
+            branch,
+            partition,
+            published_at,
+            block_index,
+            block_segments,
+            tail_blocks,
+            patch_index,
+            patch_segments,
+            tail_patches,
+        }),
+    })
 }
 
 /// Rebuild a V4 root's flat lists from its frame and the entries of its
@@ -1345,7 +1731,7 @@ pub fn span_of(entries: &[crate::AdjacencyEntry]) -> Option<(CommitSeq, CommitSe
 /// on top of the answer; it produces the identical answer, and there is a law
 /// asserting exactly that.
 pub fn merge_neighbours(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     src: fgdb_types::VId,
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
@@ -1371,7 +1757,7 @@ pub fn merge_neighbours(
 /// point-lookup companion of [`merge_neighbours`], under the identical
 /// whole-history validation and tombstone-supersede model.
 pub fn merge_edge(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<crate::AdjacencyEntry>, RootError> {
@@ -1403,7 +1789,7 @@ fn visible_statement(
 /// and pays O(entries) for it, which is the truthful cost until the reverse
 /// family lands.
 pub fn merge_in_neighbours(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
     dst: fgdb_types::VId,
     relation: fgdb_delta_types::RelationId,
     as_of: CommitSeq,
@@ -1427,8 +1813,8 @@ pub fn merge_in_neighbours(
 /// read its locator there.
 #[allow(clippy::type_complexity)]
 pub fn merge_edge_with_props(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
     eid: EId,
     as_of: CommitSeq,
 ) -> Result<Option<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
@@ -1439,11 +1825,11 @@ pub fn merge_edge_with_props(
     let winner = *winner;
     let winner = &winner;
     for (block_at, block) in blocks.iter().enumerate().rev() {
-        if let Some(index) = block.iter().position(|entry| entry == winner) {
+        if let Some(index) = block.as_ref().iter().position(|entry| entry == winner) {
             let props = block_props
                 .get(block_at)
                 .and_then(Option::as_ref)
-                .map(|props| props.props_of(index))
+                .map(|props| props.borrow().props_of(index))
                 .unwrap_or_default();
             return Ok(Some((*winner, props)));
         }
@@ -1453,25 +1839,77 @@ pub fn merge_edge_with_props(
     Ok(Some((*winner, Vec::new())))
 }
 
-/// The row each EId's LAST statement carries, by one forward pass in
-/// publication order — the same last-block-wins rule the entry collapse
-/// applies, over the hosted columns instead. Shared by the whole-graph scan
-/// and compaction so neither can drift to a second precedence rule.
-pub(crate) fn winning_edge_rows(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
-) -> std::collections::BTreeMap<(EId, CommitSeq), crate::edge_props::EdgePropertyRow> {
-    let mut rows = std::collections::BTreeMap::new();
-    for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
-            let row = props
-                .as_ref()
-                .map(|props| props.props_of(index))
-                .unwrap_or_default();
-            rows.insert((entry.eid, entry.created_at), row);
+/// The row each statement's LAST copy carries, in publication order — the
+/// same last-block-wins rule the entry collapse applies, over the hosted
+/// columns instead. Shared by the whole-graph scan and compaction so neither
+/// can drift to a second precedence rule.
+///
+/// One sorted list of `(statement, block, index)` positions, the last copy of
+/// each statement kept, read through a cursor: both callers ask in ascending
+/// statement order, and a row is cloned only for a statement asked about. The
+/// ordered map this replaced inserted, and cloned a row for, every copy in the
+/// history in publication order, which a keyed EId permutation makes random
+/// key order: on a packed web-google (5.1M edges) that was about a quarter of
+/// a writable open (fgdb-e8gr4).
+pub(crate) struct WinningEdgeRows<'a, P> {
+    /// Ascending by statement, one position per statement.
+    positions: Vec<((EId, CommitSeq), usize, usize)>,
+    next: usize,
+    block_props: &'a [Option<P>],
+}
+
+impl<'a, P: Borrow<crate::edge_props::BlockProps>> WinningEdgeRows<'a, P> {
+    pub(crate) fn new(
+        blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+        block_props: &'a [Option<P>],
+    ) -> Self {
+        let mut positions: Vec<_> = blocks
+            .iter()
+            .zip(block_props)
+            .enumerate()
+            .flat_map(|(block_at, (block, _))| {
+                block
+                    .as_ref()
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| ((entry.eid, entry.created_at), block_at, index))
+            })
+            .collect();
+        // Within one statement the latest copy sorts first, so keeping the
+        // first of each run keeps the last copy in publication order.
+        positions.sort_unstable_by(|a, b| a.0.cmp(&b.0).then((b.1, b.2).cmp(&(a.1, a.2))));
+        positions.dedup_by_key(|position| position.0);
+        Self {
+            positions,
+            next: 0,
+            block_props,
         }
     }
-    rows
+
+    /// The row the last copy of `key` carries; the empty row when no block
+    /// holds `key`. Asked in ascending order the cursor only moves forward;
+    /// any other order is answered by a search.
+    pub(crate) fn row(&mut self, key: (EId, CommitSeq)) -> crate::edge_props::EdgePropertyRow {
+        let at = if self.next == 0 || self.positions[self.next - 1].0 < key {
+            while self
+                .positions
+                .get(self.next)
+                .is_some_and(|position| position.0 < key)
+            {
+                self.next += 1;
+            }
+            self.next
+        } else {
+            self.positions.partition_point(|position| position.0 < key)
+        };
+        match self.positions.get(at) {
+            Some(&(found, block_at, index)) if found == key => self.block_props[block_at]
+                .as_ref()
+                .map(|props| props.borrow().props_of(index))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        }
+    }
 }
 
 /// Every edge with a visible version at `as_of`, each beside the row its
@@ -1480,8 +1918,8 @@ pub(crate) fn winning_edge_rows(
 /// whole-history validation and precedence rules as every point lookup.
 #[allow(clippy::type_complexity)]
 pub fn merge_all_edges_with_props(
-    blocks: &[Vec<crate::AdjacencyEntry>],
-    block_props: &[Option<crate::edge_props::BlockProps>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
     as_of: CommitSeq,
 ) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
     if blocks.len() != block_props.len() {
@@ -1491,12 +1929,43 @@ pub fn merge_all_edges_with_props(
         });
     }
     let (statements, _) = collapse_edge_history(blocks)?;
-    let mut rows = winning_edge_rows(blocks, block_props);
-    Ok(statements
-        .into_iter()
+    Ok(visible_with_props(&statements, blocks, block_props, as_of))
+}
+
+/// [`merge_all_edges_with_props`] over a history a root walk already admitted
+/// (its validator's canonical collapse), instead of validating every block a
+/// second time. `admitted` must be the collapse of exactly these `blocks` in
+/// order; a writable open passes the walk's own (fgdb-e8gr4).
+#[allow(clippy::type_complexity)]
+pub fn merge_admitted_edges_with_props(
+    admitted: &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
+    as_of: CommitSeq,
+) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
+    if blocks.len() != block_props.len() {
+        return Err(RootError::BlockPropsArity {
+            blocks: blocks.len(),
+            props: block_props.len(),
+        });
+    }
+    Ok(visible_with_props(admitted, blocks, block_props, as_of))
+}
+
+/// The visible statements of a collapsed history at `as_of`, each beside the
+/// row its winning statement carries, in ascending (EId, created_at) order.
+fn visible_with_props(
+    statements: &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
+    as_of: CommitSeq,
+) -> Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)> {
+    let mut rows = WinningEdgeRows::new(blocks, block_props);
+    statements
+        .iter()
         .filter(|(_, entry)| entry.visible_at(as_of))
-        .map(|(key, entry)| (entry, rows.remove(&key).unwrap_or_default()))
-        .collect())
+        .map(|(key, entry)| (*entry, rows.row(*key)))
+        .collect()
 }
 
 /// Incremental proof that every block in one publication history agrees on EId
@@ -1513,11 +1982,145 @@ pub(crate) type CollapsedEdgeHistory = (
 
 #[derive(Debug, Default)]
 pub(crate) struct EdgeHistoryValidator {
-    /// One row per content STATEMENT, keyed `(eid, created_at)` — the FGSV V2
-    /// chain model applied to edges (fgdb-ls5b). Birth fields are immutable
-    /// across an EId's whole chain; `created_at` advances only at contiguity.
-    statements: std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    /// One chain of content STATEMENTS per EId — the FGSV V2 chain model
+    /// applied to edges (fgdb-ls5b). Birth fields are immutable across an
+    /// EId's whole chain; `created_at` advances only at contiguity. Kept in
+    /// first-admission order and found through `index`, because every
+    /// question admission asks is about one EId's chain: an entry costs one
+    /// hashed probe instead of a descent through millions of ordered keys
+    /// (fgdb-2n2a2, half of an open's main-task time). Only
+    /// [`Self::statements`] needs EId order, and sorts once.
+    chains: Vec<EdgeChain>,
+    index: EIdIndex,
+    statements: usize,
     seen: usize,
+}
+
+/// Open-addressed (linear probing) positions into the validator's chains.
+///
+/// The hash is a fixed mix, not seeded from ambient randomness: admission
+/// stays deterministic. Engine-issued EIds are keyed-permutation values and
+/// spread without help, but a host may also write EIds of its own choosing
+/// (fgdb-yzt2b). Both halves are therefore mixed, so a structured `(a, b)`
+/// identity does not fold into a few buckets, and a probe run is bounded: an
+/// EId that cannot be placed within `PROBE_LIMIT` slots goes to an ordered
+/// overflow. The worst EId distribution costs what the global ordered map
+/// this replaced did, never a quadratic scan.
+#[derive(Debug, Default)]
+struct EIdIndex {
+    /// `EMPTY` or a position in `chains`; the length is zero or a power of
+    /// two, at most three-quarters full.
+    slots: Vec<u32>,
+    /// Positions of the EIds whose probe run was full when they arrived. A
+    /// slot never empties between rebuilds, so such an EId is never found,
+    /// and never shadowed, within its run.
+    overflow: std::collections::BTreeMap<EId, u32>,
+}
+
+impl EIdIndex {
+    const EMPTY: u32 = u32::MAX;
+    const PROBE_LIMIT: usize = 32;
+
+    fn bucket(eid: EId, slots: usize) -> usize {
+        // A folded 64x64 multiply of the two halves, each offset by an odd
+        // constant so a zero half does not zero the product.
+        let low = (eid.0 as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        let high = ((eid.0 >> 64) as u64) ^ 0xc2b2_ae3d_27d4_eb4f;
+        let product = u128::from(low) * u128::from(high);
+        let mixed = (product as u64) ^ ((product >> 64) as u64);
+        // `slots` is a power of two: keep the high bits.
+        (mixed >> (64 - slots.trailing_zeros())) as usize
+    }
+
+    /// The position of `eid`'s chain, if it has one.
+    fn find(&self, eid: EId, chains: &[EdgeChain]) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        for _ in 0..Self::PROBE_LIMIT {
+            match self.slots[at] {
+                Self::EMPTY => return None,
+                position if chains[position as usize].eid() == eid => {
+                    return Some(position as usize);
+                }
+                _ => at = (at + 1) & mask,
+            }
+        }
+        self.overflow.get(&eid).map(|position| *position as usize)
+    }
+
+    /// Record that `eid`, absent until now, has its chain at `position`.
+    fn insert(&mut self, eid: EId, position: usize, chains: &[EdgeChain]) {
+        if (position + 1) * 4 > self.slots.len() * 3 {
+            let grown = (self.slots.len() * 2).max(64);
+            self.slots = vec![Self::EMPTY; grown];
+            self.overflow.clear();
+            for (at, known) in chains.iter().enumerate().take(position) {
+                self.place(known.eid(), at);
+            }
+        }
+        self.place(eid, position);
+    }
+
+    fn place(&mut self, eid: EId, position: usize) {
+        let position = u32::try_from(position)
+            .ok()
+            .filter(|position| *position != Self::EMPTY)
+            .expect("a root names at most 2^28 entries");
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        for _ in 0..Self::PROBE_LIMIT {
+            if self.slots[at] == Self::EMPTY {
+                self.slots[at] = position;
+                return;
+            }
+            at = (at + 1) & mask;
+        }
+        self.overflow.insert(eid, position);
+    }
+}
+
+/// One EId's content statements, ascending by `created_at`. Almost every EId
+/// carries exactly one, which holds no separate allocation.
+#[derive(Debug)]
+enum EdgeChain {
+    One(crate::AdjacencyEntry),
+    Many(Vec<crate::AdjacencyEntry>),
+}
+
+impl EdgeChain {
+    /// The chain's EId; a chain is never empty.
+    fn eid(&self) -> EId {
+        self.statements()[0].eid
+    }
+
+    fn statements(&self) -> &[crate::AdjacencyEntry] {
+        match self {
+            Self::One(statement) => std::slice::from_ref(statement),
+            Self::Many(statements) => statements,
+        }
+    }
+
+    fn statements_mut(&mut self) -> &mut [crate::AdjacencyEntry] {
+        match self {
+            Self::One(statement) => std::slice::from_mut(statement),
+            Self::Many(statements) => statements,
+        }
+    }
+
+    fn insert(&mut self, at: usize, statement: crate::AdjacencyEntry) {
+        match self {
+            Self::One(first) => {
+                let mut statements = Vec::with_capacity(2);
+                statements.push(*first);
+                statements.insert(at, statement);
+                *self = Self::Many(statements);
+            }
+            Self::Many(statements) => statements.insert(at, statement),
+        }
+    }
 }
 
 impl EdgeHistoryValidator {
@@ -1561,80 +2164,114 @@ impl EdgeHistoryValidator {
                 dst: entry.dst,
                 created_at: entry.created_at,
             };
-            let key = (entry.eid, entry.created_at);
-            if let Some(existing) = self.statements.get(&key) {
-                // A restatement of one exact statement: birth fields must
-                // byte-match, and the only lawful change is live-to-retired.
-                if birth(existing) != birth(entry) {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(existing),
-                            found: birth(entry),
-                        }),
-                    });
+            // Most EIds carry one statement: an unknown EId has no
+            // restatement, predecessor or successor to check, and costs only
+            // its insert.
+            let Some(position) = self.index.find(entry.eid, &self.chains) else {
+                let position = self.chains.len();
+                self.chains.push(EdgeChain::One(*entry));
+                self.index.insert(entry.eid, position, &self.chains);
+                self.statements += 1;
+                continue;
+            };
+            let chain = &mut self.chains[position];
+            let statements = chain.statements();
+            match statements.binary_search_by_key(&entry.created_at, |known| known.created_at) {
+                Ok(at) => {
+                    // A restatement of one exact statement: birth fields must
+                    // byte-match, and the only lawful change is
+                    // live-to-retired.
+                    let existing = statements[at];
+                    if birth(&existing) != birth(entry) {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(&existing),
+                                found: birth(entry),
+                            }),
+                        });
+                    }
+                    if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
+                        return Err(RootError::EdgeRetirementMismatch {
+                            eid: entry.eid,
+                            expected: existing.retired_at,
+                            found: entry.retired_at,
+                        });
+                    }
+                    chain.statements_mut()[at] = *entry;
                 }
-                if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
-                    return Err(RootError::EdgeRetirementMismatch {
-                        eid: entry.eid,
-                        expected: existing.retired_at,
-                        found: entry.retired_at,
-                    });
-                }
-            } else {
-                // A NEW statement must extend its EId's chain contiguously —
-                // begin exactly where the predecessor retired (a gap is a
-                // resurrection, an overlap is aliasing) and carry the SAME
-                // topology, since (src, relation, dst) is immutable for the
-                // chain's whole life; only content versions advance
-                // (fgdb-ls5b, the FGSV V2 law on edges).
-                let predecessor = self
-                    .statements
-                    .range(..key)
-                    .next_back()
-                    .filter(|((eid, _), _)| *eid == entry.eid)
-                    .map(|(_, existing)| existing);
-                if let Some(predecessor) = predecessor
-                    && (predecessor.retired_at != Some(entry.created_at)
-                        || (predecessor.src, predecessor.relation, predecessor.dst)
-                            != (entry.src, entry.relation, entry.dst))
-                {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(predecessor),
-                            found: birth(entry),
-                        }),
-                    });
-                }
-                let successor = self
-                    .statements
-                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                    .next()
-                    .filter(|((eid, _), _)| *eid == entry.eid)
-                    .map(|(_, existing)| existing);
-                if let Some(successor) = successor
-                    && (entry.retired_at != Some(successor.created_at)
-                        || (successor.src, successor.relation, successor.dst)
-                            != (entry.src, entry.relation, entry.dst))
-                {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(entry),
-                            found: birth(successor),
-                        }),
-                    });
+                Err(at) => {
+                    // A NEW statement must extend its EId's chain contiguously
+                    // — begin exactly where the predecessor retired (a gap is
+                    // a resurrection, an overlap is aliasing) and carry the
+                    // SAME topology, since (src, relation, dst) is immutable
+                    // for the chain's whole life; only content versions
+                    // advance (fgdb-ls5b, the FGSV V2 law on edges).
+                    if let Some(predecessor) = at.checked_sub(1).map(|before| &statements[before])
+                        && (predecessor.retired_at != Some(entry.created_at)
+                            || (predecessor.src, predecessor.relation, predecessor.dst)
+                                != (entry.src, entry.relation, entry.dst))
+                    {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(predecessor),
+                                found: birth(entry),
+                            }),
+                        });
+                    }
+                    if let Some(successor) = statements.get(at)
+                        && (entry.retired_at != Some(successor.created_at)
+                            || (successor.src, successor.relation, successor.dst)
+                                != (entry.src, entry.relation, entry.dst))
+                    {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(entry),
+                                found: birth(successor),
+                            }),
+                        });
+                    }
+                    chain.insert(at, *entry);
+                    self.statements += 1;
                 }
             }
-            self.statements.insert(key, *entry);
         }
         Ok(())
     }
 
+    /// The canonical collapsed history admitted so far, one row per content
+    /// statement keyed `(eid, created_at)`: exactly what
+    /// [`collapse_edge_history`] would rebuild from the same blocks in the
+    /// same order. Built on request; admission itself never needs it.
+    pub(crate) fn statements(
+        &self,
+    ) -> std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
+        // Chains are in admission order: sort them by EId once. Each chain is
+        // ascending by created_at, so the pairs then arrive sorted and the
+        // map is bulk-built. Each chain's EId is read once, in order, beside
+        // its position: sorting references by a key read through them made
+        // every comparison a random read of the chains (6 s of a pokec open,
+        // 30.6M chains). One EId per chain, so the order is the same.
+        // (An (EId, usize) pair pads to the 32 bytes an (EId, u32) would.)
+        let mut order: Vec<(EId, usize)> = self
+            .chains
+            .iter()
+            .enumerate()
+            .map(|(at, chain)| (chain.eid(), at))
+            .collect();
+        order.sort_unstable();
+        order
+            .into_iter()
+            .flat_map(|(_, at)| self.chains[at].statements())
+            .map(|statement| ((statement.eid, statement.created_at), *statement))
+            .collect()
+    }
+
     fn into_canonical(self) -> CollapsedEdgeHistory {
-        let superseded = self.seen - self.statements.len();
-        (self.statements, superseded)
+        let superseded = self.seen - self.statements;
+        (self.statements(), superseded)
     }
 }
 
@@ -1649,11 +2286,11 @@ impl EdgeHistoryValidator {
 /// that `created_at` is a version discriminator. Contiguity also guarantees
 /// at most one statement per EId is visible at any sequence.
 pub(crate) fn collapse_edge_history(
-    blocks: &[Vec<crate::AdjacencyEntry>],
+    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
 ) -> Result<CollapsedEdgeHistory, RootError> {
     let mut validator = EdgeHistoryValidator::default();
     for (block_at, block) in blocks.iter().enumerate() {
-        validator.observe_block(block_at, block)?;
+        validator.observe_block(block_at, block.as_ref())?;
     }
     Ok(validator.into_canonical())
 }
@@ -1804,3 +2441,9 @@ pub fn patches_visible_at(root: &PartitionRoot, as_of: CommitSeq) -> Vec<usize> 
         .map(|(index, _)| index)
         .collect()
 }
+
+#[cfg(test)]
+mod edge_history_tests;
+
+#[cfg(test)]
+mod append_tests;

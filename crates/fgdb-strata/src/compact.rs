@@ -30,6 +30,7 @@ use crate::edge_props::{
 };
 use crate::root::{RootError, collapse_edge_history};
 use fgdb_types::CommitSeq;
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 /// The result of compacting a partition's blocks.
@@ -80,7 +81,7 @@ pub struct Compaction {
 /// patches must compact through [`compact_with_props`], or the replacement
 /// blocks silently shed their rows — this face cannot see them to carry them.
 pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Result<Compaction, RootError> {
-    compact_with_props(blocks, &vec![None; blocks.len()], floor)
+    compact_with_props(blocks, &vec![None::<BlockProps>; blocks.len()], floor)
 }
 
 /// [`compact`], carrying each retained entry's property row into the
@@ -98,8 +99,8 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Result<Compa
 /// packing splits one family into several blocks the caller must link each to
 /// its predecessor in emission order, or root admission refuses the chain.
 pub fn compact_with_props(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     floor: CommitSeq,
 ) -> Result<Compaction, RootError> {
     compact_with_limit(
@@ -112,8 +113,8 @@ pub fn compact_with_props(
 }
 
 fn compact_with_limit(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     floor: CommitSeq,
     max_entries: usize,
     max_patch_rows: usize,
@@ -133,7 +134,7 @@ fn compact_with_limit(
     // The winning statement's row, by the same forward last-block-wins pass
     // the collapse applied to the entries themselves — shared with the
     // whole-graph scan so the two cannot drift apart.
-    let mut winning_props = crate::root::winning_edge_rows(blocks, block_props);
+    let mut winning_props = crate::root::WinningEdgeRows::new(blocks, block_props);
 
     // DROP BY OBSERVABILITY, NOT BY AGE. A version whose life ended at or before
     // the floor can never be seen again; one still live at the floor must stay
@@ -143,7 +144,7 @@ fn compact_with_limit(
         .into_iter()
         .filter(|(_, entry)| entry.retired_at.is_none_or(|r| r.0 > floor.0))
         .map(|(key, entry)| {
-            let row = winning_props.remove(&key).unwrap_or_default();
+            let row = winning_props.row(key);
             (entry, row)
         })
         .collect();
@@ -173,18 +174,22 @@ pub fn compact_vertex_patches(
     patches: &[crate::vertex::VertexPatchRows],
     floor: CommitSeq,
 ) -> Result<(Vec<crate::vertex::VertexPatchRows>, usize), crate::vertex::VertexPatchError> {
-    let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), crate::vertex::VertexRow> =
+    // Borrow publication rows until restatements and the visibility floor
+    // have selected the retained winners. Cloning large property payloads only
+    // to replace or discard them needlessly amplifies maintenance work.
+    let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), &crate::vertex::VertexRow> =
         BTreeMap::new();
     let mut seen = 0usize;
     for rows in patches {
         for row in rows {
             seen += 1;
-            statements.insert((row.vid, row.created_at), row.clone());
+            statements.insert((row.vid, row.created_at), row);
         }
     }
     let retained: Vec<crate::vertex::VertexRow> = statements
         .into_values()
         .filter(|row| row.retired_at.is_none_or(|r| r.0 > floor.0))
+        .cloned()
         .collect();
     let superseded = seen - retained.len();
     let mut packed = crate::vertex::pack_rows(retained)?;
@@ -301,6 +306,62 @@ mod tests {
     use fgdb_types::{EId, VId};
     use std::collections::BTreeSet;
 
+    #[test]
+    fn borrowed_vertex_winners_preserve_all_retained_cuts_and_property_versions() {
+        use crate::vertex::{VertexRow, encode_patch, merge_all_vertices, pack_rows};
+        use fgdb_delta_types::{LabelId, PropertyKeyId};
+        use fgdb_types::CanonicalScalar;
+        let mut patches = Vec::new();
+        let count = 67usize;
+        for publication in 0..4 {
+            let rows = (0..count)
+                .map(|at| VertexRow {
+                    vid: VId((1u128 << 127) | ((at as u128) << 64) | at as u128),
+                    birth_ordinal: at as u64,
+                    created_at: CommitSeq(if publication < 2 { 1 } else { 3 }),
+                    retired_at: if publication == 1 {
+                        Some(CommitSeq(3))
+                    } else if publication == 3 && at % 2 == 0 {
+                        Some(CommitSeq(6))
+                    } else {
+                        None
+                    },
+                    labels: vec![LabelId(1), LabelId(3)],
+                    props: vec![(
+                        PropertyKeyId(2),
+                        CanonicalScalar::bytes(vec![if publication < 2 { 1 } else { 3 }; 127 + at])
+                            .expect("bounded payload")
+                            .into(),
+                    )],
+                })
+                .collect();
+            patches.extend(pack_rows(rows).expect("valid publication"));
+        }
+        let seen: usize = patches.iter().map(|rows| rows.len()).sum();
+        for floor in [0, 1, 3, 6, 8] {
+            let (packed, superseded) =
+                compact_vertex_patches(&patches, CommitSeq(floor)).expect("valid history");
+            let kept: usize = packed.iter().map(|rows| rows.len()).sum();
+            assert_eq!(superseded, seen - kept);
+            for cut in floor..=8 {
+                assert_eq!(
+                    merge_all_vertices(&patches, CommitSeq(cut)),
+                    merge_all_vertices(&packed, CommitSeq(cut)),
+                    "floor={floor} cut={cut}"
+                );
+            }
+            for rows in &packed {
+                assert!(
+                    encode_patch(rows).expect("canonical patch").len() as u64
+                        <= crate::store::MAX_STORED_OBJECT_BYTES
+                );
+            }
+            let twice = compact_vertex_patches(&packed, CommitSeq(floor)).expect("fixed point");
+            assert_eq!(twice.0, packed);
+            assert_eq!(twice.1, 0);
+        }
+    }
+
     fn entry(dst: u128) -> AdjacencyEntry {
         version(dst, 1, None)
     }
@@ -350,9 +411,9 @@ mod tests {
 
     #[test]
     fn capacity_is_part_of_the_minimum_block_count() {
-        let before = vec![(1..=5).map(entry).collect()];
+        let before = vec![(1..=5).map(entry).collect::<Vec<_>>()];
 
-        let result = compact_with_limit(&before, &[None], CommitSeq(1), 2, 2)
+        let result = compact_with_limit(&before, &[None::<BlockProps>], CommitSeq(1), 2, 2)
             .expect("distinct edge identities compact");
 
         assert_eq!(
@@ -380,7 +441,7 @@ mod tests {
             vec![version(5, 4, None), version(6, 4, None)],
             vec![version(7, 7, None), version(8, 7, None)],
         ];
-        let no_props = vec![None; before.len()];
+        let no_props = vec![None::<BlockProps>; before.len()];
 
         let once = compact_with_limit(&before, &no_props, CommitSeq(1), 2, 2)
             .expect("distinct edge identities compact");
@@ -451,8 +512,13 @@ mod tests {
     #[test]
     fn the_hosted_patch_row_ceiling_cuts_a_block_early() {
         use fgdb_delta_types::PropertyKeyId;
-        use fgdb_types::CanonicalScalar;
-        let row = |seed: u64| vec![(PropertyKeyId(seed), CanonicalScalar::Int(seed as i64))];
+        use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
+        let row = |seed: u64| {
+            vec![(
+                PropertyKeyId(seed),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(seed as i64)),
+            )]
+        };
 
         // Five entries, three propertied, entry capacity 5, row ceiling 2: the
         // third propertied entry cannot join the first block's patch.
@@ -506,7 +572,10 @@ mod tests {
             .map(|dst| {
                 (
                     entry(dst),
-                    vec![(PropertyKeyId(dst as u64), CanonicalScalar::Int(dst as i64))],
+                    vec![(
+                        PropertyKeyId(dst as u64),
+                        CanonicalScalar::Int(dst as i64).into(),
+                    )],
                 )
             })
             .collect();

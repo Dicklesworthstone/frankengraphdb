@@ -11,8 +11,8 @@ use super::*;
 mod cardinality;
 mod repeated;
 
-type Consumer<'a, Checkpoint, E, C> =
-    dyn FnMut(GraphValueRow, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
+type Consumer<'a, S, Checkpoint, E, C> =
+    dyn FnMut(GraphValueRow, &mut S, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
 
 impl PreparedGraphSet {
     /// A terminal expansion can be folded even if its children need a sort.
@@ -46,12 +46,14 @@ impl PreparedGraphSet {
         &self,
         policy: GqlQueryPolicy,
         mut source: impl GraphSetSource<E, C>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
         mut consume: impl FnMut(
             GraphValueRow,
             &mut dyn FnMut(GlaExecutionEvent) -> SetResult<(), E, C>,
         ) -> SetResult<(), E, C>,
     ) -> SetResult<(GqlExecutionStats, GlaExecutionStats), E, C> {
+        let source: &mut dyn GraphSetSource<E, C> = &mut source;
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut meter = Meter {
             policy,
             checkpoint,
@@ -64,10 +66,10 @@ impl PreparedGraphSet {
         let mut operand = 0;
         visit(
             self,
-            &mut source,
+            &mut *source,
             &mut meter,
             &mut operand,
-            &mut |row, meter| consume(row, &mut |event| meter.event(event)),
+            &mut |row, _, meter| consume(row, &mut |event| meter.event(event)),
         )?;
         meter.event(GlaExecutionEvent::Work)?;
         Ok((meter.rows, meter.evaluator))
@@ -90,11 +92,12 @@ impl<E> Window<E> {
         }
     }
 
-    fn push<C, Checkpoint>(
+    fn push<C, S: ?Sized, Checkpoint>(
         &mut self,
         row: GraphValueRow,
+        source: &mut S,
         meter: &mut Meter<Checkpoint>,
-        consume: &mut Consumer<'_, Checkpoint, E, C>,
+        consume: &mut Consumer<'_, S, Checkpoint, E, C>,
     ) -> SetResult<(), E, C>
     where
         Checkpoint: FnMut() -> Result<(), C>,
@@ -111,7 +114,7 @@ impl<E> Window<E> {
             *remaining -= 1;
         }
         if self.downstream.is_none() {
-            remember(consume(row, meter), &mut self.downstream)?;
+            remember(consume(row, source, meter), &mut self.downstream)?;
         }
         Ok(())
     }
@@ -154,10 +157,10 @@ pub(super) fn visit<E, C, S, Checkpoint>(
     source: &mut S,
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     // Nonfoldable sorting/projection barriers keep their complete selected
@@ -167,7 +170,7 @@ where
         let rows = run(query, source, meter, operand)?;
         let mut forward = Window::new(0, None);
         for row in rows {
-            forward.push(row, meter, consume)?;
+            forward.push(row, source, meter, consume)?;
         }
         return forward.finish();
     }
@@ -189,10 +192,10 @@ pub(super) fn visit_unwindowed<E, C, S, Checkpoint>(
     source: &mut S,
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(query.has_foldable_node());
@@ -205,19 +208,22 @@ fn visit_expansion<E, C, S, Checkpoint>(
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
     mut window: Window<E>,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs() {
         // The materialized and folded paths share the exact selected-pair walk.
         // Complete both original children first; even LIMIT 0 cannot hide a
         // late source or child-expression failure. Never retain the joined bag.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
+        let right = match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+            Some(rows) => rows,
+            None => run(right, source, meter, operand)?,
+        };
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         selected_cross::visit_with_context(
             &left,
@@ -233,7 +239,7 @@ where
                     })?;
                 // Keep the ordinary window and deferred downstream-error law.
                 // The probe walk drains even after the output page is full.
-                window.push(row, meter, consume)
+                window.push(row, source, meter, consume)
             },
         )?;
         return window.finish();
@@ -270,7 +276,7 @@ where
                 // Move the occurrence directly into the ordinary window/sink.
                 // A full page or deferred semantic sink failure still drains
                 // the merge; interruption/resource refusal stops immediately.
-                window.push(row, meter, consume)?;
+                window.push(row, source, meter, consume)?;
             }
         }
         SetNode::CrossJoin { left, right } => {
@@ -280,59 +286,40 @@ where
             let right = run(right, source, meter, operand)?;
             for a in &left {
                 for b in &right {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut values = Vec::new();
-                    for value in a.values().iter().chain(b.values()) {
-                        values.push(projection::copy_value(value, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    window.push(GraphValueRow::from_owned_values(values), meter, consume)?;
+                    let row = copy_cross_pair(a, b, &mut |event| meter.event(event))?;
+                    window.push(row, source, meter, consume)?;
                 }
             }
         }
         SetNode::Unwind { input, value } => {
             let mut row_at = 0_usize;
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 if local.is_some() {
                     return Ok(());
                 }
                 let result = (|| {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    let column = row.len();
-                    let list = projection::evaluate_value(value, &row, column, &mut |event| {
-                        meter.event(event)
-                    })
-                    .map_err(|error| projected(error, row_at))?;
-                    let values = match list {
-                        GraphValue::List(values) => values,
-                        value if value.is_null() => return Ok(()),
-                        _ => {
-                            return Err(GqlQueryError::Source(
-                                GraphSetExecutionError::Projection {
-                                    row: row_at,
-                                    column,
-                                    error: crate::GraphIntegerError {
-                                        instruction: 0,
-                                        kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-                                    },
-                                },
-                            ));
-                        }
+                    // The same host reader as Project, so an UNWIND list can
+                    // read carried elements' properties. It is released before
+                    // the window takes the source back.
+                    let mut read = |element, key| {
+                        source.element_property(element, key).map(|read| {
+                            read.map_err(|error| {
+                                GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                            })
+                        })
                     };
-                    for value in values.into_vec() {
-                        meter.event(GlaExecutionEvent::Work)?;
-                        meter.event(GlaExecutionEvent::ScratchEntry)?;
-                        let mut cells = Vec::new();
-                        for cell in row.values() {
-                            cells.push(projection::copy_value(cell, &mut |event| {
-                                meter.event(event)
-                            })?);
-                        }
-                        meter.event(GlaExecutionEvent::ScratchEntry)?;
-                        cells.push(value);
-                        window.push(GraphValueRow::from_owned_values(cells), meter, consume)?;
+                    let mut rows = projection::UnwindRows::new(
+                        row,
+                        value,
+                        &mut |event| meter.event(event),
+                        &mut read,
+                    )
+                    .map_err(|error| projected(error, row_at))?;
+                    while let Some((row, next)) =
+                        rows.next_with_control(&mut |event| meter.event(event))?
+                    {
+                        rows = next;
+                        window.push(row, source, meter, consume)?;
                     }
                     Ok(())
                 })();
@@ -346,15 +333,15 @@ where
             })?;
         }
         SetNode::Scope(input) => {
-            visit(input, source, meter, operand, &mut |row, meter| {
-                window.push(row, meter, consume)
+            visit(input, source, meter, operand, &mut |row, source, meter| {
+                window.push(row, source, meter, consume)
             })?;
         }
         SetNode::Filter { input, predicate } => {
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 meter.event(GlaExecutionEvent::Work)?;
                 if predicate.evaluate(&row, &mut |event| meter.event(event))? {
-                    window.push(row, meter, consume)?;
+                    window.push(row, source, meter, consume)?;
                 }
                 Ok(())
             })?;
@@ -365,15 +352,30 @@ where
             // Admission proves ALL and order preservation. Implicit canonical
             // projection sorting is never bypassed just because the sink sums.
             let mut row_at = 0_usize;
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 if local.is_some() {
                     return Ok(());
                 }
                 meter.event(GlaExecutionEvent::Work)?;
-                let result =
-                    projection::evaluate(&row, projection, &mut |event| meter.event(event))
-                        .map_err(|error| projected(error, row_at))
-                        .and_then(|row| window.push(row, meter, consume));
+                // Numbered like project_rows, so rand() draws the same here.
+                // Carry the same host through the fold so aliases keep its
+                // saved snapshot, masking and element-read error semantics.
+                let mut read = |element, key| {
+                    source.element_property(element, key).map(|read| {
+                        read.map_err(|error| {
+                            GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                        })
+                    })
+                };
+                let result = projection::evaluate(
+                    &row,
+                    projection,
+                    Some(row_at as u64),
+                    &mut |event| meter.event(event),
+                    &mut read,
+                )
+                .map_err(|error| projected(error, row_at))
+                .and_then(|row| window.push(row, source, meter, consume));
                 remember(result, &mut local)?;
                 row_at = row_at.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {

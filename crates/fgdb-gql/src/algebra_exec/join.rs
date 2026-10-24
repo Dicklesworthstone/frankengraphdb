@@ -8,8 +8,10 @@
 //! carry exact multiplicities up to the sealed collector's retention bound;
 //! aggregate visitors and fallible property projections still see every row.
 
-use super::{GlaDirection, GlaExecutionEvent, GlaOperator, Index, RelationId, VId};
+use super::{EdgeRelation, GlaDirection, GlaExecutionEvent, GlaOperator, Index, VId};
 use crate::algebra::{BindingSlot, MAX_PATTERN_EDGES, ValueProjection};
+#[cfg(test)]
+use fgdb_delta_types::RelationId;
 
 #[cfg(test)]
 mod loom_access_tests;
@@ -132,7 +134,7 @@ impl TerminalClosure {
 fn closing_edge(
     operators: &[GlaOperator],
     at: usize,
-) -> Option<(usize, RelationId, GlaDirection, usize, usize)> {
+) -> Option<(usize, EdgeRelation, GlaDirection, usize, usize)> {
     let GlaOperator::Expand {
         source,
         relation,
@@ -164,7 +166,7 @@ fn closing_edge(
 struct IntersectionAccess {
     candidate: usize,
     anchor: BindingSlot,
-    relation: RelationId,
+    relation: EdgeRelation,
     direction: GlaDirection,
 }
 
@@ -610,12 +612,12 @@ mod tests {
         vec![
             GlaOperator::Expand {
                 source: BindingSlot(1),
-                relation: RelationId(2),
+                relation: EdgeRelation::One(RelationId(2)),
                 direction: GlaDirection::Forward,
             },
             GlaOperator::Expand {
                 source: BindingSlot(if fan_in { 0 } else { 2 }),
-                relation: RelationId(3),
+                relation: EdgeRelation::One(RelationId(3)),
                 direction,
             },
             GlaOperator::VertexIdentity {
@@ -859,7 +861,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(scratch, 1);
-        assert!(index.contains_key(&(RelationId(3), GlaDirection::Reverse)));
+        assert!(index.contains_key(&(EdgeRelation::One(RelationId(3)), GlaDirection::Reverse)));
     }
 
     #[test]
@@ -885,7 +887,7 @@ mod tests {
         ops.extend([
             GlaOperator::Expand {
                 source: BindingSlot(2),
-                relation: RelationId(4),
+                relation: EdgeRelation::One(RelationId(4)),
                 direction: GlaDirection::Forward,
             },
             GlaOperator::VertexIdentity {
@@ -895,7 +897,7 @@ mod tests {
             },
             GlaOperator::Expand {
                 source: BindingSlot(1),
-                relation: RelationId(5),
+                relation: EdgeRelation::One(RelationId(5)),
                 direction: GlaDirection::Reverse,
             },
             GlaOperator::VertexIdentity {
@@ -1003,8 +1005,18 @@ mod tests {
         assert_eq!(
             tail,
             vec![
-                (2, 0, RelationId(4), GlaDirection::Reverse),
-                (2, 1, RelationId(5), GlaDirection::Reverse),
+                (
+                    2,
+                    0,
+                    EdgeRelation::One(RelationId(4)),
+                    GlaDirection::Reverse
+                ),
+                (
+                    2,
+                    1,
+                    EdgeRelation::One(RelationId(5)),
+                    GlaDirection::Reverse
+                ),
             ]
         );
         let mut index = Index::new();
@@ -1020,7 +1032,7 @@ mod tests {
             (4, GlaDirection::Reverse),
             (5, GlaDirection::Reverse),
         ] {
-            assert!(index.contains_key(&(RelationId(relation), direction)));
+            assert!(index.contains_key(&(EdgeRelation::One(RelationId(relation)), direction)));
         }
         for barrier in [
             GlaOperator::Select {
@@ -1071,7 +1083,7 @@ mod tests {
             (5, GlaDirection::Reverse, VId(1), vec![VId(2)]),
         ] {
             index
-                .entry((RelationId(relation), direction))
+                .entry((EdgeRelation::One(RelationId(relation)), direction))
                 .or_default()
                 .insert(anchor, values);
         }
@@ -1101,7 +1113,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cursor.next(&mut |_| Ok::<_, ()>(())).unwrap(), None);
-        index.remove(&(RelationId(5), GlaDirection::Reverse));
+        index.remove(&(EdgeRelation::One(RelationId(5)), GlaDirection::Reverse));
         let mut cursor = candidates(&ops, 0, &bindings, &primary, &index, &mut |_| {
             Ok::<_, ()>(())
         })

@@ -6,6 +6,12 @@
 use super::*;
 use crate::algebra::{MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES};
 
+mod asynchronous;
+pub use asynchronous::{
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
+    AsyncIncidentCandidateResult,
+};
+
 mod probe;
 pub(crate) use probe::Probe;
 
@@ -17,7 +23,7 @@ enum Instruction {
 #[derive(Clone, Copy)]
 struct Expansion {
     source: usize,
-    relation: RelationId,
+    relation: crate::algebra::EdgeRelation,
     direction: GlaDirection,
 }
 
@@ -63,12 +69,13 @@ impl EdgeScanPlan {
     /// including parallel edges and undirected orientations. ResultRows counts
     /// these intermediate occurrences and must receive an explicit input cap.
     /// The consumer must sort, apply complete-row DISTINCT when requested,
-    /// then SKIP/LIMIT under its final output allowance. Even LIMIT 0 does not
-    /// make the input empty or suppress a later source/data error.
+    /// then SKIP/LIMIT under its final output allowance, and finally remove
+    /// compiler-owned hidden key cells. Even LIMIT 0 does not make the input
+    /// empty or suppress a later source/data error.
     ///
     /// Ordinary ordered streams and aggregate compilation retain their own
-    /// eligibility rules. Optional/variable-length joins, hidden sort columns,
-    /// catalog-name projections and unsupported instructions still refuse.
+    /// eligibility rules. Optional/variable-length joins, catalog-name
+    /// projections and unsupported instructions still refuse.
     pub fn compile_sort_input(
         plan: &GlaPlan<GraphValueRow>,
     ) -> Result<(Self, crate::scan_stream::ScanSortTail), EdgeScanBuildError> {
@@ -135,6 +142,12 @@ fn compile_output(
             GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => {}
             GlaOperator::VertexIdentity { left, right, .. }
                 if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {}
+            GlaOperator::DifferentEdges { segments }
+                if !segments.is_empty()
+                    && segments.len() <= MAX_PATTERN_EDGES
+                    && segments
+                        .iter()
+                        .all(|slot| slot.ordinal() > 0 && (slot.ordinal() as usize) < width) => {}
             GlaOperator::CapturePath {
                 capture,
                 start,
@@ -185,11 +198,17 @@ fn compile_output(
                     matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
                         if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
                 };
-                if output == Output::OrderedRows
-                    && (!edge_column(columns.first(), 0)
-                        || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                        || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step)))
-                {
+                // A directed root EId fixes both endpoints, so its source
+                // vertex need not occupy a public result column. An undirected
+                // root needs that orientation discriminator before appended
+                // edge identities. Every appended EId then fixes one traversal
+                // step, even when that step itself is undirected or a self-loop.
+                let directed_prefix = *direction != GlaDirection::Undirected
+                    && (0..width - 1).all(|step| edge_column(columns.get(step), step));
+                let oriented_prefix = edge_column(columns.first(), 0)
+                    && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                    && (1..width - 1).all(|step| edge_column(columns.get(step + 1), step));
+                if output == Output::OrderedRows && !directed_prefix && !oriented_prefix {
                     return Err(bad());
                 }
                 for column in columns {
@@ -242,7 +261,7 @@ fn compile_output(
         Some(GlaOperator::OrderByValueColumns { .. }) => output == Output::SortInput,
         _ => false,
     };
-    if plan.visible_columns.is_some() || !ordering_supported {
+    if (plan.visible_columns.is_some() && output != Output::SortInput) || !ordering_supported {
         return Err(EdgeScanBuildError { operator: at });
     }
     at += 1;
@@ -281,6 +300,9 @@ fn compile_output(
 #[derive(Clone, Copy)]
 struct Choice {
     eid: EId,
+    /// The bound endpoint the edge was expanded from. A captured path reads
+    /// an edge from whichever endpoint it already stands on (fgdb-tk2u6).
+    from: VId,
     target: VId,
 }
 
@@ -319,12 +341,16 @@ impl Traversal {
 
 pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
     cursor: &mut EdgeScanCursor<S, F>,
-) -> ScanResult<Option<GraphValueRow>, S::Error, C> {
+    remaining: &mut usize,
+) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C> {
     let plan = cursor.plan.joined.as_ref().expect("joined plan");
     let meter = &mut cursor.meter;
-    meter.event(GlaExecutionEvent::Work)?;
+    if !cursor.advancing {
+        meter.event(GlaExecutionEvent::Work)?;
+        cursor.advancing = true;
+    }
     if cursor.plan.count == Some(0) {
-        return Ok(None);
+        return Ok(core::task::Poll::Ready(None));
     }
     let source = cursor.source.as_mut().expect("open cursor owns its source");
     let hops = plan.expansions.len() + 1;
@@ -337,19 +363,36 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         traversal.resume = false;
     }
     loop {
-        meter.event(GlaExecutionEvent::Work)?;
+        if *remaining == 0 {
+            return Ok(core::task::Poll::Pending);
+        }
+        *remaining -= 1;
+        if !cursor.source_pending {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
         let depth = traversal.choices.len();
         let (eid, from, to) = if depth == 0 {
             let (eid, second) = if let Some(eid) = cursor.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(
-                    source.next_edge_for_relation(cursor.plan.relation, &mut |event| {
-                        meter.event(event)
-                    }),
-                )?
-                else {
-                    return Ok(None);
+                let next = flatten(source.next_edge_step_for_relation(
+                    cursor.plan.relation,
+                    cursor.source_pending,
+                    &mut |event| meter.event(event),
+                ))?;
+                let eid = match next {
+                    crate::scan_stream::SourceStep::Item(eid) => {
+                        cursor.source_pending = false;
+                        eid
+                    }
+                    crate::scan_stream::SourceStep::Skipped(_) => {
+                        cursor.source_pending = true;
+                        continue;
+                    }
+                    crate::scan_stream::SourceStep::Exhausted => {
+                        cursor.source_pending = false;
+                        return Ok(core::task::Poll::Ready(None));
+                    }
                 };
                 meter.event(GlaExecutionEvent::Work)?;
                 if cursor.last.is_some_and(|last| eid <= last) {
@@ -365,7 +408,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let Some(edge) = flatten(source.edge(eid, &mut |event| meter.event(event)))? else {
                 continue;
             };
-            if edge.relation != cursor.plan.relation {
+            if !cursor.plan.relation.matches(edge.relation) {
                 continue;
             }
             let (from, to) = match cursor.plan.direction {
@@ -384,11 +427,12 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         } else {
             let expansion = plan.expansions[depth - 1];
             let from = traversal.bindings[expansion.source].expect("positive bound endpoint");
-            let next = source.next_incident_edge_for_relation(
+            let next = source.next_incident_edge_step_for_relation(
                 from,
                 expansion.relation,
                 expansion.direction,
                 traversal.after[depth],
+                cursor.source_pending,
                 &mut |event| meter.event(event),
             );
             let next = match next {
@@ -398,9 +442,24 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
                 }
                 Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
             };
-            let Some(eid) = next else {
-                traversal.pop();
-                continue;
+            let eid = match next {
+                crate::scan_stream::SourceStep::Item(eid) => {
+                    cursor.source_pending = false;
+                    eid
+                }
+                crate::scan_stream::SourceStep::Skipped(eid) => {
+                    if traversal.after[depth].is_some_and(|prior| eid <= prior) {
+                        return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                    }
+                    traversal.after[depth] = Some(eid);
+                    cursor.source_pending = true;
+                    continue;
+                }
+                crate::scan_stream::SourceStep::Exhausted => {
+                    cursor.source_pending = false;
+                    traversal.pop();
+                    continue;
+                }
             };
             meter.event(GlaExecutionEvent::Work)?;
             if traversal.after[depth].is_some_and(|prior| eid <= prior) {
@@ -414,7 +473,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let Some(edge) = flatten(source.edge(eid, &mut |event| meter.event(event)))? else {
                 continue;
             };
-            if edge.relation != expansion.relation {
+            if !expansion.relation.matches(edge.relation) {
                 continue;
             }
             // Incidence indexes contain historical candidates, not necessarily
@@ -435,7 +494,11 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         if depth == 0 {
             traversal.bindings.push(Some(from));
         }
-        traversal.choices.push(Choice { eid, target: to });
+        traversal.choices.push(Choice {
+            eid,
+            from,
+            target: to,
+        });
         traversal.bindings.push(Some(to));
         // Probe candidates share this very meter, but never count as output.
         // The two short-lived borrows cannot overlap: source callbacks return
@@ -490,7 +553,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             meter.event(GlaExecutionEvent::Work)?;
         }
         traversal.resume = true;
-        return Ok(Some(row));
+        return Ok(core::task::Poll::Ready(Some(row)));
     }
 }
 
@@ -507,7 +570,7 @@ fn property<'a, S: EdgeScanSource, C>(
     vid: VId,
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
+) -> ScanResult<Option<&'a fgdb_types::CanonicalPropertyValue>, S::Error, C> {
     flatten(source.vertex_property(vid, key, control))?
         .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))
 }
@@ -516,7 +579,7 @@ fn edge_property<'a, S: EdgeScanSource, C>(
     eid: EId,
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
+) -> ScanResult<Option<&'a fgdb_types::CanonicalPropertyValue>, S::Error, C> {
     flatten(source.edge_property(eid, key, control))?
         .ok_or(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))
 }
@@ -538,34 +601,77 @@ fn test_stage<S: EdgeScanSource, C>(
                     return Ok(None);
                 }
             }
-            Instruction::Native(GlaOperator::CapturePath {
-                start, segments, ..
-            }) => {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                for _ in segments {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                }
-                let steps = segments
-                    .iter()
-                    .map(|slot| {
-                        let choice = traversal.choices[slot.ordinal() as usize - 1];
-                        (choice.eid, choice.target)
-                    })
-                    .collect::<Vec<_>>();
-                paths.push(Some(GraphPath::new(
-                    ids[start.ordinal() as usize].expect("captured start"),
-                    steps.into_boxed_slice(),
-                )));
-            }
             Instruction::Native(op) => {
-                if !accepts(op, ids, &paths, source, control)? {
+                if !test_native_stage(op, traversal, &mut paths, source, control)? {
                     return Ok(None);
                 }
             }
         }
     }
     Ok(Some(paths))
+}
+
+// Captures and fixed-edge constraints stay in this one kernel when the stage
+// driver must await a probe. The driver owns instruction order and its Work
+// event; paths remain live across a probe without rerunning earlier predicates.
+fn test_native_stage<S: EdgeScanSource, C>(
+    op: &GlaOperator,
+    traversal: &Traversal,
+    paths: &mut Vec<Option<GraphPath>>,
+    source: &S,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<bool, S::Error, C> {
+    let ids = &traversal.bindings;
+    match op {
+        GlaOperator::CapturePath {
+            start, segments, ..
+        } => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for _ in segments {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+            // A closing edge back to a bound vertex was expanded from its
+            // other end: step to whichever endpoint the path is not on.
+            let start = ids[start.ordinal() as usize].expect("captured start");
+            let mut endpoint = start;
+            let mut steps = Vec::with_capacity(segments.len());
+            for slot in segments {
+                let choice = traversal.choices[slot.ordinal() as usize - 1];
+                endpoint = if choice.from == endpoint {
+                    choice.target
+                } else if choice.target == endpoint {
+                    choice.from
+                } else {
+                    break;
+                };
+                steps.push((choice.eid, endpoint));
+            }
+            // Same as the eager executor: a chain that does not connect
+            // captures no path rather than a fabricated one.
+            paths.push(
+                (steps.len() == segments.len())
+                    .then(|| GraphPath::new(start, steps.into_boxed_slice())),
+            );
+            Ok(true)
+        }
+        GlaOperator::DifferentEdges { segments } => {
+            // Every admitted segment is one retained fixed edge. Compare
+            // identities, not endpoint pairs: parallel edges may form a
+            // valid return path, but traversing one EId twice may not.
+            for (index, slot) in segments.iter().enumerate() {
+                let eid = traversal.choices[slot.ordinal() as usize - 1].eid;
+                for prior in &segments[..index] {
+                    control(GlaExecutionEvent::Work)?;
+                    if traversal.choices[prior.ordinal() as usize - 1].eid == eid {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        }
+        op => accepts(op, ids, paths, source, control),
+    }
 }
 
 // Shared by outer stages and probe-local stages. In particular, NOT EXISTS
@@ -632,13 +738,19 @@ fn accepts<S: EdgeScanSource, C>(
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn collect_element_properties<'a, Row: GlaOutput, E>(
+fn collect_element_properties<'a, Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
     projected: &mut ProjectedRows<Row>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
+    edge_property: &mut impl FnMut(
+        EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
     vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
     edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,

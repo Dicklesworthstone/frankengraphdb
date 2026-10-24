@@ -16,10 +16,10 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use asupersync::Cx;
@@ -213,12 +213,15 @@ impl PurposeContexts {
             query: QueryCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
                 tracker: Arc::clone(&tracker),
+                pacer: CheckpointPacer::due(),
+                host_clock_interval: NonZeroU32::MIN,
                 #[cfg(feature = "simulation-checkpoints")]
                 checkpoint_probe: None,
             },
             txn: TxnCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
                 tracker: Arc::clone(&tracker),
+                pacer: CheckpointPacer::due(),
             },
             commit: CommitCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
@@ -339,6 +342,72 @@ impl SimulationCheckpointProbe {
     }
 }
 
+/// Evaluation-context checkpoints between two full foundation checkpoints.
+///
+/// asupersync's `Cx::checkpoint` reads the timer clock, takes the context's
+/// read lock and records progress with two atomics on every call. Query and
+/// transaction evaluation meter every GLA event through it, 3 to 50 times per
+/// element, and measured that cost at 17-36% of execution (fgdb-57col). The
+/// evaluation contexts therefore observe the lock-free published cancellation
+/// bit on every call and run the full checkpoint when it is set; deadline,
+/// poll-quota and cost-budget exhaustion, which need the clock, are evaluated
+/// once per interval. Work-unit accounting is a separate exact counter, so no
+/// refusal moves. At 64 the clock read alone was still 4.5% of a fgdbd
+/// triangle count (2026-10-14); 256 calls are about 10 us of evaluation, far
+/// inside any deadline's resolution.
+const FULL_CHECKPOINT_INTERVAL: u32 = 256;
+
+/// Per-context countdown to the next full foundation checkpoint.
+///
+/// A fresh context, and every clone, starts due: its first checkpoint is a
+/// full one. Relaxed load/store keeps the single-owner hot path to two plain
+/// memory operations; concurrent callers of one clone can only shift a full
+/// checkpoint by a few calls, never suppress it.
+#[derive(Debug)]
+struct CheckpointPacer(AtomicU32);
+
+impl CheckpointPacer {
+    const fn due() -> Self {
+        Self(AtomicU32::new(0))
+    }
+
+    /// Whether this call must run the full foundation checkpoint.
+    #[inline]
+    fn full_checkpoint_due(&self) -> bool {
+        let remaining = self.0.load(Ordering::Relaxed);
+        if remaining == 0 {
+            self.0
+                .store(FULL_CHECKPOINT_INTERVAL - 1, Ordering::Relaxed);
+            true
+        } else {
+            self.0.store(remaining - 1, Ordering::Relaxed);
+            false
+        }
+    }
+}
+
+impl Clone for CheckpointPacer {
+    fn clone(&self) -> Self {
+        Self::due()
+    }
+}
+
+/// The paced checkpoint shared by the evaluation contexts.
+///
+/// Every runtime cancellation producer publishes the cancellation bit before
+/// `Cx::checkpoint` can observe it, so an explicit cancellation is still
+/// delivered (masks included) on the very next call.
+#[inline]
+fn paced_checkpoint<Caps>(
+    inner: &Cx<Caps>,
+    pacer: &CheckpointPacer,
+) -> Result<(), Box<asupersync::error::Error>> {
+    if pacer.full_checkpoint_due() || inner.published_cancel_requested() {
+        inner.checkpoint().map_err(Box::new)?;
+    }
+    Ok(())
+}
+
 /// Query-only effects.
 ///
 /// ```compile_fail
@@ -354,6 +423,8 @@ impl SimulationCheckpointProbe {
 pub struct QueryCx {
     inner: Cx<LocalDatabaseCaps>,
     tracker: Arc<ObligationTracker>,
+    pacer: CheckpointPacer,
+    host_clock_interval: NonZeroU32,
     #[cfg(feature = "simulation-checkpoints")]
     checkpoint_probe: Option<Arc<SimulationCheckpointProbe>>,
 }
@@ -364,8 +435,10 @@ impl QueryCx {
         LOCAL_DATABASE_CAPABILITIES
     }
 
+    /// Observes cancellation on every call; evaluates deadline and budget
+    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls.
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
-        self.inner.checkpoint().map_err(Box::new)?;
+        paced_checkpoint(&self.inner, &self.pacer)?;
         #[cfg(feature = "simulation-checkpoints")]
         if let Some(probe) = &self.checkpoint_probe {
             let ordinal = probe.calls.fetch_add(1, Ordering::Relaxed) + 1;
@@ -376,6 +449,29 @@ impl QueryCx {
             }
         }
         Ok(())
+    }
+
+    /// How many charges of an authorized execution may share one sample of
+    /// the host clock its capability is judged against (fgdb-er71y). One, the
+    /// default, samples the host clock on every charge.
+    #[must_use]
+    pub const fn host_clock_interval(&self) -> NonZeroU32 {
+        self.host_clock_interval
+    }
+
+    /// Clones this context so an authorized execution samples its host clock
+    /// at most once per `interval` charges. The host chooses this beside the
+    /// clock it supplies: its wall clock can cost more than the charge it
+    /// times (fgdbd's measured 22-55% of busy CPU). Each execution still
+    /// samples afresh on its first charge and on every delivery, so nothing
+    /// is delivered against a stale reading, and expiry is observed within
+    /// `interval` charges. Retirement, limits and cancellation stay exact on
+    /// every charge.
+    #[must_use]
+    pub fn with_host_clock_interval(&self, interval: NonZeroU32) -> Self {
+        let mut context = self.clone();
+        context.host_clock_interval = interval;
+        context
     }
 
     /// Clones this context with a simulation-only checkpoint probe attached.
@@ -453,6 +549,7 @@ impl StorageReadCx for QueryCx {
 pub struct TxnCx {
     inner: Cx<LocalDatabaseCaps>,
     tracker: Arc<ObligationTracker>,
+    pacer: CheckpointPacer,
 }
 
 impl TxnCx {
@@ -461,8 +558,10 @@ impl TxnCx {
         LOCAL_DATABASE_CAPABILITIES
     }
 
+    /// Observes cancellation on every call; evaluates deadline and budget
+    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls.
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
-        self.inner.checkpoint().map_err(Box::new)
+        paced_checkpoint(&self.inner, &self.pacer)
     }
 
     pub fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T {
@@ -2501,6 +2600,45 @@ mod tests {
             }
 
             assert_eq!(contexts.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn checkpoint_pacer_runs_a_full_checkpoint_first_and_once_per_interval() {
+        let interval = FULL_CHECKPOINT_INTERVAL;
+        let pacer = CheckpointPacer::due();
+        let due: Vec<u32> = (0..=3 * interval)
+            .filter(|_| pacer.full_checkpoint_due())
+            .collect();
+        assert_eq!(due, vec![0, interval, 2 * interval, 3 * interval]);
+
+        // Mid-interval, a clone is due at once and the original is not.
+        assert!(!pacer.full_checkpoint_due());
+        assert!(pacer.clone().full_checkpoint_due());
+        assert!(!pacer.full_checkpoint_due());
+    }
+
+    #[test]
+    fn paced_evaluation_checkpoints_observe_cancellation_on_the_next_call() {
+        under_cancelled_lab(57, |contexts, root| {
+            let query = contexts.query();
+            let txn = contexts.txn();
+            // Spend the full first checkpoint so the next calls are paced ones.
+            for _ in 0..3 {
+                assert!(query.checkpoint().is_ok(), "healthy query checkpoint");
+                assert!(txn.checkpoint().is_ok(), "healthy txn checkpoint");
+            }
+            root.set_cancel_reason(
+                CancelReason::new(CancelKind::User).with_message("paced checkpoint fixture"),
+            );
+            assert!(
+                query.checkpoint().is_err(),
+                "a paced query checkpoint must deliver a pending cancellation"
+            );
+            assert!(
+                txn.checkpoint().is_err(),
+                "a paced txn checkpoint must deliver a pending cancellation"
+            );
         });
     }
 }

@@ -1,12 +1,21 @@
 //! Finite binary64 arithmetic with integer-only rounding.
 //!
-//! Every operation rounds once to nearest, ties to even, with gradual underflow
-//! and canonical positive zero. No native floating arithmetic, libm, FMA,
+//! Arithmetic rounds once to nearest, ties to even, with gradual underflow.
+//! Integral rounding has explicit floor/ceiling/nearest-ties-positive policies.
+//! All results have canonical positive zero. No native floating arithmetic, libm, FMA,
 //! allocation, or ambient rounding mode is used by the kernel. Non-finite
 //! operands, overflow and division by zero are explicit refusals. This is not
-//! the complete STRICT_PORTABLE numeric profile or a transcendental library.
+//! the complete STRICT_PORTABLE numeric profile.
+//!
+//! [`ExactBinary64Sum`] is the aggregate counterpart: it accumulates binary64
+//! and integer inputs exactly and rounds once, so SUM and AVG are the
+//! correctly rounded exact sum and mean whatever order the inputs arrive in.
+//! The `transcendental` child builds pinned exp, ln, log10 and trigonometric
+//! kernels from these operations alone.
 
 use crate::CanonicalF64;
+
+mod transcendental;
 
 const SIGN: u64 = 1 << 63;
 const FRACTION: u64 = (1 << 52) - 1;
@@ -154,7 +163,110 @@ fn add(mut a: Number, mut b: Number) -> Result<CanonicalF64, FloatArithmeticErro
     pack(a.negative, magnitude, a.exponent - 3)
 }
 
+#[derive(Clone, Copy)]
+enum IntegralRounding {
+    Floor,
+    Ceiling,
+    NearestTiesPositive,
+}
+
+// Inspect the exact binary fraction, not floor(x + 0.5): adding half can round
+// a value just BELOW a tie up to that tie. Very small magnitudes are known to
+// lie below half without shifting by more than a machine word. Values with a
+// nonnegative significand exponent are already integral, including f64::MAX.
+fn round_integral(
+    input: CanonicalF64,
+    mode: IntegralRounding,
+) -> Result<CanonicalF64, FloatArithmeticError> {
+    let number = Number::read(input)?;
+    if number.significand == 0 || number.exponent >= 0 {
+        return Ok(input);
+    }
+    let shift = number.exponent.unsigned_abs();
+    let (whole, fractional, half_order) = if shift > 53 {
+        (0, true, core::cmp::Ordering::Less)
+    } else {
+        let remainder = number.significand & ((1_u64 << shift) - 1);
+        (
+            number.significand >> shift,
+            remainder != 0,
+            remainder.cmp(&(1_u64 << (shift - 1))),
+        )
+    };
+    let increment = fractional
+        && match mode {
+            IntegralRounding::Floor => number.negative,
+            IntegralRounding::Ceiling => !number.negative,
+            IntegralRounding::NearestTiesPositive => {
+                half_order.is_gt() || (half_order.is_eq() && !number.negative)
+            }
+        };
+    pack(
+        number.negative,
+        u128::from(whole) + u128::from(increment),
+        0,
+    )
+}
+
 impl CanonicalF64 {
+    /// Compare this binary64 value with an exact signed rational. No operand
+    /// is rounded or converted to the other's representation. The positive
+    /// denominator may span all of u64; the numerator may span all of i128.
+    /// Canonical NaN retains its STRICT_PORTABLE position above positive
+    /// infinity. This does not change canonical scalar equality or hashing.
+    ///
+    /// The comparison uses a fixed number of integer operations and no
+    /// allocation: a 53-bit significand times a 64-bit denominator fits in
+    /// u128, and unequal bit lengths settle every otherwise oversized shift.
+    #[must_use]
+    pub fn compare_rational(
+        self,
+        numerator: i128,
+        denominator: core::num::NonZeroU64,
+    ) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+
+        let number = match Number::read(self) {
+            Ok(number) => number,
+            Err(_) => {
+                return if self.to_bits() & SIGN != 0 {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+        };
+        if number.significand == 0 {
+            return 0_i128.cmp(&numerator);
+        }
+        if numerator == 0 || number.negative != numerator.is_negative() {
+            return if number.negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        let scaled = u128::from(number.significand) * u128::from(denominator.get());
+        let integer = numerator.unsigned_abs();
+        let scaled_bits = (128 - scaled.leading_zeros()) as i32;
+        let integer_bits = (128 - integer.leading_zeros()) as i32;
+        let magnitude = (scaled_bits + number.exponent)
+            .cmp(&integer_bits)
+            .then_with(|| {
+                // Equal bit lengths prove the shifted operand fits in u128.
+                if number.exponent >= 0 {
+                    (scaled << number.exponent as u32).cmp(&integer)
+                } else {
+                    scaled.cmp(&(integer << number.exponent.unsigned_abs()))
+                }
+            });
+        if number.negative {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
+    }
+
     /// Convert a signed integer using round-to-nearest, ties-to-even. Integers
     /// outside binary64's exact precision are rounded, never truncated through
     /// a host cast. This explicit conversion does not change scalar equality.
@@ -241,6 +353,307 @@ impl CanonicalF64 {
         Number::read(self)?;
         Ok(value(self.to_bits() & !SIGN))
     }
+
+    /// Greatest integral binary64 value not greater than this finite input.
+    /// No i64 narrowing occurs: all finite exponents are accepted.
+    pub fn checked_floor(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::Floor)
+    }
+
+    /// Least integral binary64 value not less than this finite input.
+    pub fn checked_ceil(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::Ceiling)
+    }
+
+    /// Nearest integral binary64 value, with exact half ties toward positive
+    /// infinity, as in single-argument openCypher round(). This is deliberately
+    /// distinct from arithmetic's nearest-even and Rust's ties-away rounding.
+    /// Negative values rounded to zero produce canonical positive zero.
+    pub fn checked_round(self) -> Result<Self, FloatArithmeticError> {
+        round_integral(self, IntegralRounding::NearestTiesPositive)
+    }
+
+    /// The correctly rounded square root of a finite, nonnegative value, by
+    /// an exact integer square root and one nearest-even rounding. A negative
+    /// operand has no real root and refuses as non-finite, as does a
+    /// non-finite operand.
+    pub fn checked_sqrt(self) -> Result<Self, FloatArithmeticError> {
+        let number = Number::read(self)?;
+        if number.significand == 0 {
+            return Ok(value(0));
+        }
+        if number.negative {
+            return Err(FloatArithmeticError::NonFinite);
+        }
+        // value = significand * 2^exponent; make the exponent even, then
+        // scale by an even power so the radicand fills 126 bits.
+        let (mut significand, mut exponent) = (u128::from(number.significand), number.exponent);
+        if exponent % 2 != 0 {
+            significand <<= 1;
+            exponent -= 1;
+        }
+        let scaled = significand << 72;
+        let root = scaled.isqrt();
+        let sticky = u128::from(root * root != scaled);
+        pack(false, (root << 1) | sticky, (exponent - 72) / 2 - 1)
+    }
+
+    /// The integer part, rounding toward zero (openCypher toInteger). A value
+    /// outside i64 overflows; a non-finite value refuses.
+    pub fn checked_to_i64_truncated(self) -> Result<i64, FloatArithmeticError> {
+        let number = Number::read(self)?;
+        let magnitude = if number.exponent >= 0 {
+            if number.exponent > 11 {
+                return Err(FloatArithmeticError::Overflow);
+            }
+            u128::from(number.significand) << number.exponent
+        } else {
+            let shift = number.exponent.unsigned_abs();
+            if shift >= 64 {
+                0
+            } else {
+                u128::from(number.significand >> shift)
+            }
+        };
+        if number.negative {
+            if magnitude > 1_u128 << 63 {
+                return Err(FloatArithmeticError::Overflow);
+            }
+            Ok((magnitude as i128).wrapping_neg() as i64)
+        } else {
+            i64::try_from(magnitude).map_err(|_| FloatArithmeticError::Overflow)
+        }
+    }
+}
+
+/// Fixed-point limbs of an exact sum, in units of the least subnormal
+/// (2^-1074). A finite binary64 is below 2^1024 and an i128 below 2^127, so
+/// 2^64 inputs stay below 2^1265: far inside 34 two's-complement limbs.
+const SUM_LIMBS: usize = 34;
+const SUM_BASE: i32 = -1074;
+
+/// The exact sum of binary64 and integer inputs, rounded only when read.
+///
+/// Finite inputs accumulate without any rounding, so the result is the
+/// correctly rounded (nearest, ties to even) exact sum or mean: independent of
+/// input order, batching or partitioning, with no intermediate overflow or
+/// cancellation loss. Reading follows IEEE 754 addition for the rest: a NaN,
+/// or both infinities, give NaN; one infinity gives itself; an exact finite
+/// result beyond binary64 range rounds to the infinity of its sign. Zero is
+/// always canonical positive zero. Values are not exposed through Debug.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExactBinary64Sum {
+    limbs: [u64; SUM_LIMBS],
+    positive_infinity: bool,
+    negative_infinity: bool,
+    nan: bool,
+}
+
+impl Default for ExactBinary64Sum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for ExactBinary64Sum {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ExactBinary64Sum([REDACTED])")
+    }
+}
+
+impl ExactBinary64Sum {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            limbs: [0; SUM_LIMBS],
+            positive_infinity: false,
+            negative_infinity: false,
+            nan: false,
+        }
+    }
+
+    /// Add one binary64 exactly; non-finite inputs are remembered by class.
+    pub fn add(&mut self, value: CanonicalF64) {
+        self.add_repeated(value, 1);
+    }
+
+    /// Add `times` occurrences of one binary64 exactly, as one product.
+    pub fn add_repeated(&mut self, value: CanonicalF64, times: u64) {
+        if times == 0 {
+            return;
+        }
+        let bits = value.to_bits();
+        let encoded = ((bits >> 52) & 0x7ff) as u32;
+        let fraction = bits & FRACTION;
+        let negative = bits & SIGN != 0;
+        if encoded == 0x7ff {
+            if fraction != 0 {
+                self.nan = true;
+            } else if negative {
+                self.negative_infinity = true;
+            } else {
+                self.positive_infinity = true;
+            }
+            return;
+        }
+        // value = significand * 2^(offset - 1074), subnormals included.
+        let (significand, offset) = if encoded == 0 {
+            (fraction, 0)
+        } else {
+            (fraction | HIDDEN, encoded - 1)
+        };
+        // A 53-bit significand times a u64 fits 117 bits.
+        self.add_magnitude(
+            negative,
+            u128::from(significand) * u128::from(times),
+            offset,
+        );
+    }
+
+    /// Add one integer exactly (an integer is 2^1074 units).
+    pub fn add_integer(&mut self, value: i128) {
+        self.add_magnitude(value < 0, value.unsigned_abs(), SUM_BASE.unsigned_abs());
+    }
+
+    /// Add `times` occurrences of one i64 exactly; the product fits 127 bits.
+    pub fn add_integer_repeated(&mut self, value: i64, times: u64) {
+        self.add_magnitude(
+            value < 0,
+            u128::from(value.unsigned_abs()) * u128::from(times),
+            SUM_BASE.unsigned_abs(),
+        );
+    }
+
+    fn add_magnitude(&mut self, negative: bool, magnitude: u128, offset: u32) {
+        if magnitude == 0 {
+            return;
+        }
+        let index = (offset / 64) as usize;
+        let shift = offset % 64;
+        let low = magnitude << shift;
+        let high = if shift == 0 {
+            0
+        } else {
+            (magnitude >> (128 - shift)) as u64
+        };
+        let words = [low as u64, (low >> 64) as u64, high];
+        let mut carry = false;
+        for (at, limb) in self.limbs[index..].iter_mut().enumerate() {
+            if at >= words.len() && !carry {
+                break;
+            }
+            let word = words.get(at).copied().unwrap_or(0);
+            let (value, first, second) = if negative {
+                let (value, first) = limb.overflowing_sub(word);
+                let (value, second) = value.overflowing_sub(u64::from(carry));
+                (value, first, second)
+            } else {
+                let (value, first) = limb.overflowing_add(word);
+                let (value, second) = value.overflowing_add(u64::from(carry));
+                (value, first, second)
+            };
+            *limb = value;
+            carry = first || second;
+        }
+    }
+
+    fn special(&self) -> Option<CanonicalF64> {
+        if self.nan || (self.positive_infinity && self.negative_infinity) {
+            Some(CanonicalF64::new(f64::NAN))
+        } else if self.positive_infinity {
+            Some(CanonicalF64::new(f64::INFINITY))
+        } else if self.negative_infinity {
+            Some(CanonicalF64::new(f64::NEG_INFINITY))
+        } else {
+            None
+        }
+    }
+
+    fn magnitude(&self) -> (bool, [u64; SUM_LIMBS]) {
+        let negative = self.limbs[SUM_LIMBS - 1] & SIGN != 0;
+        let mut magnitude = self.limbs;
+        if negative {
+            let mut carry = true;
+            for limb in &mut magnitude {
+                let (value, overflow) = (!*limb).overflowing_add(u64::from(carry));
+                *limb = value;
+                carry = overflow;
+            }
+        }
+        (negative, magnitude)
+    }
+
+    /// The correctly rounded sum of every input so far.
+    #[must_use]
+    pub fn sum(&self) -> CanonicalF64 {
+        if let Some(special) = self.special() {
+            return special;
+        }
+        let (negative, magnitude) = self.magnitude();
+        round_limbs(negative, &magnitude, false, SUM_BASE)
+    }
+
+    /// The correctly rounded exact sum divided by `count`; None for zero.
+    #[must_use]
+    pub fn mean(&self, count: u64) -> Option<CanonicalF64> {
+        if count == 0 {
+            return None;
+        }
+        if let Some(special) = self.special() {
+            return Some(special);
+        }
+        let (negative, magnitude) = self.magnitude();
+        // Divide magnitude * 2^64: the appended zero limb keeps every quotient
+        // bit a u64 divisor can remove, and the remainder becomes sticky.
+        let mut quotient = [0_u64; SUM_LIMBS + 1];
+        let mut remainder = 0_u128;
+        let divisor = u128::from(count);
+        for at in (0..=SUM_LIMBS).rev() {
+            let limb = if at == 0 { 0 } else { magnitude[at - 1] };
+            let current = (remainder << 64) | u128::from(limb);
+            quotient[at] = (current / divisor) as u64;
+            remainder = current % divisor;
+        }
+        Some(round_limbs(
+            negative,
+            &quotient,
+            remainder != 0,
+            SUM_BASE - 64,
+        ))
+    }
+}
+
+/// Round `(-1)^negative * (magnitude + tail) * 2^base` once, where `tail` is a
+/// nonzero fraction below bit zero when `sticky`. The top 126 bits plus one
+/// jammed sticky bit carry every bit that can decide nearest-even rounding.
+fn round_limbs(negative: bool, magnitude: &[u64], sticky: bool, base: i32) -> CanonicalF64 {
+    let Some(top) = magnitude.iter().rposition(|limb| *limb != 0) else {
+        // A tail alone is below half the least subnormal: base <= -1076.
+        return value(0);
+    };
+    let width = top as u32 * 64 + (64 - magnitude[top].leading_zeros());
+    let word = |at: usize| magnitude.get(at).map_or(0, |limb| u128::from(*limb));
+    let (bits, exponent) = if width <= 126 {
+        let exact = (word(1) << 64) | word(0);
+        ((exact << 1) | u128::from(sticky), base - 1)
+    } else {
+        let shift = width - 126;
+        let index = (shift / 64) as usize;
+        let offset = shift % 64;
+        let mut kept = ((word(index + 1) << 64) | word(index)) >> offset;
+        if offset != 0 {
+            kept |= word(index + 2) << (128 - offset);
+        }
+        let tail = sticky
+            || magnitude[..index].iter().any(|limb| *limb != 0)
+            || (offset != 0 && magnitude[index] & ((1_u64 << offset) - 1) != 0);
+        ((kept << 1) | u128::from(tail), base + shift as i32 - 1)
+    };
+    match pack(negative, bits, exponent) {
+        Ok(rounded) => rounded,
+        Err(_) if negative => CanonicalF64::new(f64::NEG_INFINITY),
+        Err(_) => CanonicalF64::new(f64::INFINITY),
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +697,162 @@ mod tests {
             (i64::MIN, 0xc3e0_0000_0000_0000),
         ] {
             assert_eq!(CanonicalF64::from_i64_rounded(integer).to_bits(), encoded);
+        }
+    }
+
+    #[test]
+    fn rational_comparison_keeps_extreme_widths_subnormals_and_canonical_specials_exact() {
+        use core::cmp::Ordering::{Equal, Greater, Less};
+        use core::num::NonZeroU64;
+
+        for (floating, numerator, denominator, expected) in [
+            (0.0, 0, 1, Equal),
+            (-0.0, 0, u64::MAX, Equal),
+            (0.0, 1, u64::MAX, Less),
+            (0.0, -1, u64::MAX, Greater),
+            (0.5, 1, 2, Equal),
+            (-0.5, -1, 2, Equal),
+            (0.1, 1, 10, Greater),
+            (-0.1, -1, 10, Less),
+            (1.0 / 3.0, 1, 3, Less),
+            (-1.0 / 3.0, -1, 3, Greater),
+            (9_007_199_254_740_992.0, (1_i128 << 53) + 1, 1, Less),
+            (-9_007_199_254_740_992.0, -(1_i128 << 53) - 1, 1, Greater),
+            (f64::from_bits(0x47e0_0000_0000_0000), i128::MAX, 1, Greater),
+            (f64::from_bits(0xc7e0_0000_0000_0000), i128::MIN, 1, Equal),
+            (f64::from_bits(0x47df_ffff_ffff_ffff), i128::MAX, 1, Less),
+            (f64::from_bits(0xc7df_ffff_ffff_ffff), i128::MIN, 1, Greater),
+            (9_223_372_036_854_775_808.0, i128::MAX, u64::MAX, Less),
+            (-9_223_372_036_854_775_808.0, i128::MIN, u64::MAX, Greater),
+            (f64::from_bits(1), 0, 1, Greater),
+            (f64::from_bits(1), 1, u64::MAX, Less),
+            (-f64::from_bits(1), -1, u64::MAX, Greater),
+            (f64::MAX, i128::MAX, 1, Greater),
+            (-f64::MAX, i128::MIN, 1, Less),
+            (f64::INFINITY, i128::MAX, 1, Greater),
+            (f64::NEG_INFINITY, i128::MIN, 1, Less),
+            (f64::NAN, i128::MAX, 1, Greater),
+        ] {
+            assert_eq!(
+                f(floating).compare_rational(numerator, NonZeroU64::new(denominator).unwrap()),
+                expected,
+                "{floating:?} versus {numerator}/{denominator}"
+            );
+        }
+    }
+
+    #[test]
+    fn rational_comparison_matches_independent_bounded_cross_products() {
+        // Each floating input is an exactly represented eighth. Integer cross
+        // products are therefore an independent oracle, with no rounding and
+        // no decomposition/bit-length algorithm shared with the implementation.
+        for eighths in -64_i128..=64 {
+            let floating = f(eighths as f64 / 8.0);
+            for numerator in -33_i128..=33 {
+                for denominator in 1_u64..=17 {
+                    let expected = (eighths * i128::from(denominator)).cmp(&(numerator * 8));
+                    assert_eq!(
+                        floating.compare_rational(
+                            numerator,
+                            core::num::NonZeroU64::new(denominator).unwrap(),
+                        ),
+                        expected,
+                        "{eighths}/8 versus {numerator}/{denominator}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integral_rounding_keeps_signs_exact_ties_and_neighboring_values() {
+        for (input, floor, ceil, nearest) in [
+            (-2.75, -3.0, -2.0, -3.0),
+            (-2.5, -3.0, -2.0, -2.0),
+            (-1.5, -2.0, -1.0, -1.0),
+            (-0.5, -1.0, 0.0, 0.0),
+            (-0.25, -1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0),
+            (0.25, 0.0, 1.0, 0.0),
+            (0.5, 0.0, 1.0, 1.0),
+            (1.5, 1.0, 2.0, 2.0),
+            (2.75, 2.0, 3.0, 3.0),
+        ] {
+            assert_eq!(f(input).checked_floor(), Ok(f(floor)));
+            assert_eq!(f(input).checked_ceil(), Ok(f(ceil)));
+            assert_eq!(f(input).checked_round(), Ok(f(nearest)));
+        }
+        let half = 0x3fe0_0000_0000_0000;
+        assert_eq!(bits(half - 1).checked_round(), Ok(f(0.0)));
+        assert_eq!(bits(half + 1).checked_round(), Ok(f(1.0)));
+        assert_eq!(bits(SIGN | (half - 1)).checked_round(), Ok(f(0.0)));
+        assert_eq!(bits(SIGN | (half + 1)).checked_round(), Ok(f(-1.0)));
+        assert_eq!(f(-0.0).checked_round().unwrap().to_bits(), 0);
+    }
+
+    #[test]
+    fn integral_rounding_admits_every_finite_exponent_and_refuses_nonfinite() {
+        for raw in [1, FRACTION, HIDDEN] {
+            assert_eq!(bits(raw).checked_floor(), Ok(f(0.0)));
+            assert_eq!(bits(raw).checked_ceil(), Ok(f(1.0)));
+            assert_eq!(bits(raw).checked_round(), Ok(f(0.0)));
+            assert_eq!(bits(SIGN | raw).checked_floor(), Ok(f(-1.0)));
+            assert_eq!(bits(SIGN | raw).checked_ceil(), Ok(f(0.0)));
+            assert_eq!(bits(SIGN | raw).checked_round(), Ok(f(0.0)));
+        }
+        for raw in [
+            0x4330_0000_0000_0001,
+            0x43e0_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+        ] {
+            for sign in [0, SIGN] {
+                let number = bits(sign | raw);
+                assert_eq!(number.checked_floor(), Ok(number));
+                assert_eq!(number.checked_ceil(), Ok(number));
+                assert_eq!(number.checked_round(), Ok(number));
+            }
+        }
+        for nonfinite in [f(f64::INFINITY), f(f64::NEG_INFINITY), f(f64::NAN)] {
+            assert_eq!(
+                nonfinite.checked_floor(),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                nonfinite.checked_ceil(),
+                Err(FloatArithmeticError::NonFinite)
+            );
+            assert_eq!(
+                nonfinite.checked_round(),
+                Err(FloatArithmeticError::NonFinite)
+            );
+        }
+    }
+
+    #[test]
+    fn integral_rounding_matches_independent_hardware_neighbors() {
+        let mut state = 0x696e_7465_6772_616c_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
+                continue;
+            }
+            let input = f64::from_bits(state);
+            let lower = input.floor();
+            let upper = input.ceil();
+            let nearest = if input - lower < upper - input {
+                lower
+            } else {
+                upper
+            };
+            assert_eq!(f(input).checked_floor(), Ok(f(lower)), "bits={state:016x}");
+            assert_eq!(f(input).checked_ceil(), Ok(f(upper)), "bits={state:016x}");
+            assert_eq!(
+                f(input).checked_round(),
+                Ok(f(nearest)),
+                "bits={state:016x}"
+            );
         }
     }
 
@@ -361,6 +930,200 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn exact(values: &[f64]) -> ExactBinary64Sum {
+        let mut sum = ExactBinary64Sum::new();
+        for value in values {
+            sum.add(f(*value));
+        }
+        sum
+    }
+
+    #[test]
+    fn exact_sum_rounds_once_whatever_the_order() {
+        let max = f64::MAX;
+        for (values, expected) in [
+            // Naive left-to-right addition gives 0.6000000000000001.
+            (&[0.1, 0.2, 0.3][..], 0.6),
+            // Naive addition loses the 1.0 to cancellation.
+            (&[1e100, 1.0, -1e100][..], 1.0),
+            // No intermediate overflow.
+            (&[max, max, -max][..], max),
+            (&[max, max][..], f64::INFINITY),
+            (&[-max, -max][..], f64::NEG_INFINITY),
+            (&[2.5, -2.5][..], 0.0),
+            (&[][..], 0.0),
+        ] {
+            let mut order = values.to_vec();
+            for _ in 0..values.len().max(1) * 2 {
+                if !order.is_empty() {
+                    order.rotate_left(1);
+                }
+                if order.len() > 2 {
+                    order.swap(0, 1);
+                }
+                assert_eq!(exact(&order).sum(), f(expected), "{order:?}");
+            }
+        }
+        assert_eq!(exact(&[-2.5, 2.5]).sum().to_bits(), 0);
+        assert_eq!(exact(&[max, max]).mean(2), Some(f(max)));
+        assert_eq!(exact(&[1.0, 2.0]).mean(2), Some(f(1.5)));
+        assert_eq!(exact(&[1.0]).mean(0), None);
+    }
+
+    #[test]
+    fn exact_sum_follows_ieee_for_non_finite_inputs() {
+        let nan = f(f64::NAN);
+        assert_eq!(exact(&[1.0, f64::NAN]).sum(), nan);
+        assert_eq!(exact(&[f64::INFINITY, f64::NEG_INFINITY]).sum(), nan);
+        assert_eq!(exact(&[f64::INFINITY, -f64::MAX]).sum(), f(f64::INFINITY));
+        assert_eq!(
+            exact(&[f64::NEG_INFINITY, 1.0]).mean(2),
+            Some(f(f64::NEG_INFINITY))
+        );
+    }
+
+    #[test]
+    fn exact_mean_rounds_subnormal_quotients_to_nearest_even() {
+        let units = |count: u64| bits(count);
+        for (input, count, expected) in [(3, 3, 1), (3, 2, 2), (1, 3, 0), (2, 3, 1), (5, 2, 2)] {
+            let mut sum = ExactBinary64Sum::new();
+            sum.add(units(input));
+            assert_eq!(sum.mean(count), Some(units(expected)), "{input}/{count}");
+        }
+        let mut negative = ExactBinary64Sum::new();
+        negative.add(bits(SIGN | 1));
+        assert_eq!(negative.mean(3).map(|value| value.to_bits()), Some(0));
+    }
+
+    #[test]
+    fn exact_sum_mixes_integers_exactly() {
+        let mut sum = ExactBinary64Sum::new();
+        sum.add_integer(i128::from(i64::MAX));
+        sum.add(f(0.5));
+        // 2^63 - 0.5 rounds to 2^63.
+        assert_eq!(sum.sum().to_bits(), 0x43e0_0000_0000_0000);
+        let mut low = ExactBinary64Sum::new();
+        low.add_integer(i128::MIN);
+        assert_eq!(low.sum().to_bits(), 0xc7e0_0000_0000_0000);
+        low.add_integer(i128::MAX);
+        low.add_integer(1);
+        assert_eq!(low.sum().to_bits(), 0);
+        let mut mean = ExactBinary64Sum::new();
+        for value in [1, 2, 4] {
+            mean.add_integer(value);
+        }
+        assert_eq!(mean.mean(3), Some(f(7.0 / 3.0)));
+    }
+
+    #[test]
+    fn square_roots_match_ieee_sqrt_on_a_deterministic_finite_corpus() {
+        let mut state = 0x7371_7274_2d72_6f6f_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // Every exponent, including subnormals; finite and nonnegative.
+            let mut bits = state & !SIGN;
+            if bits & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
+                bits ^= 0x0010_0000_0000_0000;
+            }
+            let x = f(f64::from_bits(bits));
+            // IEEE 754 requires sqrt to be correctly rounded.
+            assert_eq!(x.checked_sqrt(), Ok(f(x.get().sqrt())), "{bits:016x}");
+        }
+        for (input, root) in [(0.0, 0.0), (4.0, 2.0), (2.0, core::f64::consts::SQRT_2)] {
+            assert_eq!(f(input).checked_sqrt(), Ok(f(root)));
+        }
+        assert_eq!(bits(1).checked_sqrt(), Ok(f(5e-324_f64.sqrt())));
+        assert_eq!(f(-1.0).checked_sqrt(), Err(FloatArithmeticError::NonFinite));
+        assert_eq!(
+            f(f64::INFINITY).checked_sqrt(),
+            Err(FloatArithmeticError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn truncation_to_i64_rounds_toward_zero_and_refuses_overflow() {
+        const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+        for (input, expected) in [
+            (3.7, 3),
+            (-3.7, -3),
+            (0.5, 0),
+            (-0.5, 0),
+            (5e-324, 0),
+            (9.007_199_254_740_993e15, 9_007_199_254_740_992),
+            (-TWO_63, i64::MIN),
+        ] {
+            assert_eq!(f(input).checked_to_i64_truncated(), Ok(expected), "{input}");
+        }
+        for input in [TWO_63, -9.3e18, 1e300] {
+            assert_eq!(
+                f(input).checked_to_i64_truncated(),
+                Err(FloatArithmeticError::Overflow),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            f(f64::NAN).checked_to_i64_truncated(),
+            Err(FloatArithmeticError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn repeated_addition_equals_that_many_single_additions() {
+        for (value, times) in [(0.1, 10_u64), (-1e300, 7), (5e-324, 3), (f64::MAX, 2)] {
+            let mut repeated = ExactBinary64Sum::new();
+            repeated.add_repeated(f(value), times);
+            let mut single = ExactBinary64Sum::new();
+            for _ in 0..times {
+                single.add(f(value));
+            }
+            assert_eq!(repeated, single, "{value} x {times}");
+        }
+        let mut repeated = ExactBinary64Sum::new();
+        repeated.add_integer_repeated(i64::MIN, u64::MAX);
+        let mut product = ExactBinary64Sum::new();
+        product.add_integer(i128::from(i64::MIN) * i128::from(u64::MAX));
+        assert_eq!(repeated, product);
+        let mut none = ExactBinary64Sum::new();
+        none.add_repeated(f(f64::NAN), 0);
+        assert_eq!(none, ExactBinary64Sum::new());
+    }
+
+    #[test]
+    fn exact_sum_matches_single_ieee_addition_and_exact_cancellation() {
+        let mut state = 0x7375_6d6d_6174_696f_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let encoded = if state & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 {
+                state ^ 0x0010_0000_0000_0000
+            } else {
+                state
+            };
+            f(f64::from_bits(encoded))
+        };
+        for _ in 0..20_000 {
+            let (a, b) = (next(), next());
+            let mut pair = ExactBinary64Sum::new();
+            pair.add(a);
+            pair.add(b);
+            // One IEEE addition is the correctly rounded exact sum.
+            assert_eq!(
+                pair.sum(),
+                f(a.get() + b.get()),
+                "a={:016x} b={:016x}",
+                a.to_bits(),
+                b.to_bits()
+            );
+            assert_eq!(pair.mean(1), Some(pair.sum()));
+            // Adding -a cancels a exactly at any magnitude gap.
+            pair.add(a.checked_neg().unwrap());
+            assert_eq!(pair.sum(), b);
         }
     }
 }

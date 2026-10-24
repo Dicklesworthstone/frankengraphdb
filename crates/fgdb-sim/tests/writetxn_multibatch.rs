@@ -92,7 +92,7 @@ fn two_writes_commit_as_one_capsule_and_replay_the_composed_state() {
             .expect("composed vertex creation is durable");
         assert_eq!(
             vertex.props.get(&PROPERTY),
-            Some(&CanonicalScalar::Int(42)),
+            Some(&CanonicalScalar::Int(42).into()),
             "the one capsule contains both staged writes"
         );
     });
@@ -165,7 +165,7 @@ fn abort_after_a_write_preserves_the_pre_begin_stream_and_graph() {
                 .expect("seed vertex remains")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(9))
+            Some(&CanonicalScalar::Int(9).into())
         );
         assert!(
             graph.vertex(VId(3)).is_none(),
@@ -256,10 +256,13 @@ fn overlapping_two_write_txns_are_fcw_and_replay_only_the_winner() {
             2,
             "no property from the losing transaction may survive"
         );
-        assert_eq!(vertex.props.get(&PROPERTY), Some(&CanonicalScalar::Int(1)));
+        assert_eq!(
+            vertex.props.get(&PROPERTY),
+            Some(&CanonicalScalar::Int(1).into())
+        );
         assert_eq!(
             vertex.props.get(&PROPERTY_B),
-            Some(&CanonicalScalar::Int(10))
+            Some(&CanonicalScalar::Int(10).into())
         );
     });
     assert!(

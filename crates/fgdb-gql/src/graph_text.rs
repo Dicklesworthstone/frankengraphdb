@@ -10,10 +10,11 @@ mod boolean;
 pub(crate) mod literal;
 mod ordering;
 mod parameters;
+mod row_fields;
 mod scoped;
 pub use crate::algebra::GraphPathFunction;
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
     IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
     VertexPredicate,
@@ -26,16 +27,43 @@ use std::collections::BTreeMap;
 
 /// Definition admission, not execution work or a promise of cheap matching.
 pub const MAX_GRAPH_TEXT_BYTES: usize = 65_536;
-pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
+/// At least two bytes a token on average, so a statement at the token limit
+/// still fits the byte limit with room to spare. 24576 admits the openCypher
+/// TCK's largest single statement, Create4 [2] (about 16,400 tokens).
+pub const MAX_GRAPH_TEXT_TOKENS: usize = 24_576;
 
 /// Scalar function names the shared expression compiler accepts before `(`.
 /// TOUPPER, TOLOWER and SIZE are the openCypher spellings of UPPER, LOWER and
 /// CHAR_LENGTH (fgdb-xakp1): a scalar is never a list, so SIZE of one is its
 /// character count. A leading SIZE(...) row value keeps the list-or-text
 /// Size node instead. The Boolean lowering lookahead and the compiler read
-/// this one table, so a name cannot be known to one and not the other.
-const SCALAR_FUNCTIONS: [&str; 13] = [
+/// this one table, so a name cannot be known to one and not the other. PI()
+/// and E() take no argument; ATAN2, LEFT and RIGHT take two, REPLACE three.
+/// LENGTH is not here: `text_length_call` tells text's length from a path's.
+const SCALAR_FUNCTIONS: [&str; 39] = [
     "ABS",
+    "TOFLOAT",
+    "FLOOR",
+    "CEIL",
+    "ROUND",
+    "SQRT",
+    "EXP",
+    "LOG",
+    "LOG10",
+    "SIN",
+    "COS",
+    "TAN",
+    "COT",
+    "ASIN",
+    "ACOS",
+    "ATAN",
+    "ATAN2",
+    "DEGREES",
+    "RADIANS",
+    "HAVERSIN",
+    "SIGN",
+    "PI",
+    "E",
     "COALESCE",
     "NULLIF",
     "UPPER",
@@ -44,10 +72,14 @@ const SCALAR_FUNCTIONS: [&str; 13] = [
     "TOLOWER",
     "TRIM",
     "SUBSTRING",
+    "LEFT",
+    "RIGHT",
+    "REPLACE",
     "CHAR_LENGTH",
     "SIZE",
     "TOSTRING",
     "TOINTEGER",
+    "TOBOOLEAN",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +126,10 @@ pub const COMMON_GRAPH_SYMBOLS: &[&str] = &[
 pub struct ReverseSymbolCatalog {
     pub labels: BTreeMap<LabelId, String>,
     pub relations: BTreeMap<RelationId, String>,
+    /// Host-declared names for actual property IDs. Enumeration reads the
+    /// source row and refuses any visible ID missing here; this map is never
+    /// treated as evidence that an unlisted property does not exist.
+    pub properties: BTreeMap<PropertyKeyId, String>,
 }
 
 impl ReverseSymbolCatalog {
@@ -108,6 +144,10 @@ impl ReverseSymbolCatalog {
 
     pub fn insert_relation(&mut self, id: RelationId, name: impl Into<String>) {
         self.relations.insert(id, name.into());
+    }
+
+    pub fn insert_property(&mut self, id: PropertyKeyId, name: impl Into<String>) {
+        self.properties.insert(id, name.into());
     }
 
     pub fn from_resolver<R: GraphSymbolResolver + ?Sized>(resolver: &mut R, text: &str) -> Self {
@@ -143,6 +183,12 @@ impl ReverseSymbolCatalog {
 
 pub trait GraphSymbolResolver {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol>;
+    /// The host's pinned tzdb for named time zones (`timezone:
+    /// 'Europe/Stockholm'`). A statement prepared without one refuses a
+    /// named zone; asking for it is not a catalog symbol lookup.
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        None
+    }
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         None
     }
@@ -160,6 +206,33 @@ where
 {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         self(kind, name)
+    }
+}
+
+/// Lends a resolver to a callee that takes one by value. Every method
+/// forwards, so the callee keeps the lender's reverse catalog; wrapping the
+/// lender in a closure would drop it.
+pub(crate) struct LentResolver<'r, R: ?Sized>(pub(crate) &'r mut R);
+
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for LentResolver<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.0.resolve_symbol(kind, name)
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.0.time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.0.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        self.0.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.0.reverse_relation(id)
     }
 }
 
@@ -205,13 +278,126 @@ pub enum GraphPatternTextErrorKind {
     AggregateBuild(crate::GraphAggregateBuildError),
 }
 
+/// What a statement-preparation refusal asks of its author. A closed set:
+/// hosts map every text error onto one (the CLI's robot `code`), so a new
+/// error kind must choose its class here, not at each boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GqlRefusalClass {
+    /// The text does not parse; fix it at the reported byte.
+    Syntax,
+    /// A recognized construct this engine does not support yet.
+    Unsupported,
+    /// A label, relation or property name has no binding in the catalog.
+    NotFound,
+    /// A parameter is missing, unexpected or mistyped, or a literal is out of
+    /// range for its type.
+    InvalidValue,
+    /// The statement parses but its definition is refused: a static limit,
+    /// an inadmissible shape or a mix of clauses one statement cannot hold.
+    Statement,
+}
+
+/// `expected "("` for punctuation, `expected RETURN` for words. The item is
+/// the grammar's own static text, never a fragment of the statement.
+pub(crate) fn write_expected(f: &mut core::fmt::Formatter<'_>, item: &str) -> core::fmt::Result {
+    if item.bytes().any(|byte| byte.is_ascii_alphanumeric()) {
+        write!(f, "expected {item}")
+    } else {
+        write!(f, "expected \"{item}\"")
+    }
+}
+
+impl core::fmt::Display for GraphSymbolKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Relation => "relation",
+            Self::Label => "label",
+            Self::Property => "property",
+        })
+    }
+}
+
+impl core::fmt::Display for GraphPatternTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DefinitionTooLarge => f.write_str("statement text is too large"),
+            Self::TooManyTokens => f.write_str("statement has too many tokens"),
+            Self::InvalidToken => f.write_str("invalid token"),
+            Self::NameTooLong => f.write_str("name is too long"),
+            Self::Expected(item) => write_expected(f, item),
+            Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
+            Self::ScalarLiteral => f.write_str("literal is not a valid scalar value here"),
+            Self::BooleanExpression => f.write_str("invalid boolean expression"),
+            Self::BooleanNesting { limit } => {
+                write!(f, "boolean expression nests deeper than {limit} levels")
+            }
+            Self::UnsupportedBooleanScope => {
+                f.write_str("an existential subquery is not supported in this expression")
+            }
+            Self::UnknownVariable => f.write_str("unknown variable"),
+            Self::UnknownSymbol(kind) => write!(f, "unknown {kind} name"),
+            Self::WrongSymbolKind { expected, found } => {
+                write!(f, "expected a {expected} name, found a {found} name")
+            }
+            Self::ParameterDeclaration => f.write_str("invalid parameter declaration"),
+            Self::UnusedParameterDeclaration => f.write_str("a declared parameter is never used"),
+            Self::ConflictingParameterTypes => {
+                f.write_str("a parameter is used where two different types are required")
+            }
+            Self::MissingParameter => f.write_str("missing parameter value"),
+            Self::ParameterTypeMismatch { expected, found } => {
+                write!(f, "parameter has type {found}, expected {expected}")
+            }
+            Self::UnexpectedArguments => {
+                f.write_str("arguments supplied for parameters the statement does not use")
+            }
+            Self::Build(error) => error.fmt(f),
+            Self::OrderBuild(error) => error.fmt(f),
+            Self::AggregateBuild(error) => error.fmt(f),
+        }
+    }
+}
+
+impl GraphPatternTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> GqlRefusalClass {
+        use GqlRefusalClass as C;
+        match self {
+            Self::InvalidToken
+            | Self::Expected(_)
+            | Self::BooleanExpression
+            | Self::UnknownVariable => C::Syntax,
+            Self::UnsupportedBooleanScope => C::Unsupported,
+            Self::UnknownSymbol(_) | Self::WrongSymbolKind { .. } => C::NotFound,
+            Self::IntegerOutOfRange
+            | Self::ScalarLiteral
+            | Self::ParameterDeclaration
+            | Self::UnusedParameterDeclaration
+            | Self::ConflictingParameterTypes
+            | Self::MissingParameter
+            | Self::ParameterTypeMismatch { .. }
+            | Self::UnexpectedArguments => C::InvalidValue,
+            Self::DefinitionTooLarge
+            | Self::TooManyTokens
+            | Self::NameTooLong
+            | Self::BooleanNesting { .. }
+            | Self::Build(_)
+            | Self::OrderBuild(_)
+            | Self::AggregateBuild(_) => C::Statement,
+        }
+    }
+}
+
+impl GraphPatternTextError {
+    #[must_use]
+    pub fn class(&self) -> GqlRefusalClass {
+        self.kind.class()
+    }
+}
+
 impl core::fmt::Display for GraphPatternTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph-pattern text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphPatternTextError {}
@@ -231,9 +417,15 @@ struct Name<'a> {
     text: &'a str,
     at: usize,
 }
-#[derive(Clone, Copy)]
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind<'a> {
     Word(&'a str),
+    // A name that is never a grammar word: a delimited keyword spelling, or
+    // a reserved word where only a schema name can stand (`n.order`,
+    // `:Order`, `{limit: 1}`). Schema-name positions admit it; variable,
+    // alias and operand positions retain their explicit refusal.
+    DelimitedKeyword(&'a str),
     Digits(&'a str),
     Parameter(&'a str),
     Quoted(&'a str),
@@ -244,6 +436,112 @@ enum TokenKind<'a> {
 struct Token<'a> {
     kind: TokenKind<'a>,
     at: usize,
+}
+
+/// The magnitude a `Digits` token spells: decimal, or the openCypher and GQL
+/// hexadecimal `0x`, octal `0o` and binary `0b` forms. `None` past `u64`.
+pub(crate) fn integer_magnitude(digits: &str) -> Option<u64> {
+    let (radix, body) = match digits.as_bytes() {
+        [b'0', b'x', ..] => (16, &digits[2..]),
+        [b'0', b'o', ..] => (8, &digits[2..]),
+        [b'0', b'b', ..] => (2, &digits[2..]),
+        _ => (10, digits),
+    };
+    u64::from_str_radix(body, radix).ok()
+}
+
+/// Whether `statement` calls openCypher `id()` or `elementId()` (fgdb-j687q).
+/// Capability-scoped sessions refuse such statements before preparation,
+/// because engine identities are not masked (owner ruling 2026-09-30).
+///
+/// The scan reads the same tokens the parser does, so comments cannot split
+/// the call and quoted text cannot fake it. Surfaces strip their own framing
+/// (`SUBSCRIBE TO`, a trailing `;`, `AT BRANCH`) before the graph parser runs,
+/// so a byte this lexer rejects is skipped and the scan resumes after it: no
+/// text past an error goes unread. It over-approximates, never under: any other
+/// `id`/`elementId` word directly followed by `(` (a procedure of that name)
+/// refuses too, and so does a text beyond the parser's size or token caps.
+#[must_use]
+pub fn reads_element_identity(statement: &str) -> bool {
+    if statement.len() > MAX_GRAPH_TEXT_BYTES {
+        return true;
+    }
+    let mut lexer = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    let mut identity_word = false;
+    loop {
+        let token = match lexer.next() {
+            Ok(token) => token,
+            Err(error) if error.kind == GraphPatternTextErrorKind::TooManyTokens => return true,
+            Err(error) => {
+                // Resume after the rejected character.
+                let at = error.offset.max(lexer.at);
+                let Some(width) = statement.get(at..).and_then(|rest| rest.chars().next()) else {
+                    return false;
+                };
+                lexer.at = at + width.len_utf8();
+                identity_word = false;
+                continue;
+            }
+        };
+        match token.kind {
+            TokenKind::End => return false,
+            TokenKind::Punct(b'(') if identity_word => return true,
+            TokenKind::Word(word) => {
+                identity_word =
+                    word.eq_ignore_ascii_case("id") || word.eq_ignore_ascii_case("elementId");
+            }
+            _ => identity_word = false,
+        }
+    }
+}
+
+/// Whether a leading native Prism call selects its graph in the statement.
+/// An inline map or a named argument envelope belongs to the native compiler,
+/// including malformed contents that the compiler must diagnose. This routing
+/// hint reads the shared lexer; it does not parse arguments or inspect a tail.
+#[must_use]
+pub fn starts_fnx_graph_projection(statement: &str) -> bool {
+    if statement.len() > MAX_GRAPH_TEXT_BYTES {
+        return false;
+    }
+    let mut lexer = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    for position in 0..5 {
+        let Ok(token) = lexer.next() else {
+            return false;
+        };
+        let matches = match (position, token.kind) {
+            (0, TokenKind::Word(word)) => word.eq_ignore_ascii_case("CALL"),
+            (1, TokenKind::Word("fnx"))
+            | (2, TokenKind::Punct(b'.'))
+            | (3, TokenKind::Word(_))
+            | (4, TokenKind::Punct(b'(')) => true,
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    match lexer.next().map(|token| token.kind) {
+        Ok(TokenKind::Punct(b'{')) => true,
+        Ok(TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)) => {
+            matches!(
+                lexer.next().map(|token| token.kind),
+                Ok(TokenKind::Punct(b'='))
+            ) && matches!(
+                lexer.next().map(|token| token.kind),
+                Ok(TokenKind::Punct(b'>'))
+            )
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -294,6 +592,8 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: if parameter {
                     TokenKind::Parameter(name)
+                } else if self.names_schema(at, name) {
+                    TokenKind::DelimitedKeyword(name)
                 } else {
                     TokenKind::Word(name)
                 },
@@ -307,8 +607,18 @@ impl<'a> Lexer<'a> {
             ));
         }
         if ch.is_ascii_digit() {
-            self.at += 1;
-            while bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            // A radix prefix stays in the token; `integer_magnitude` reads it.
+            let radix = match (ch, bytes.get(at + 1), bytes.get(at + 2)) {
+                (b'0', Some(b'x'), Some(digit)) if digit.is_ascii_hexdigit() => 16,
+                (b'0', Some(b'o'), Some(b'0'..=b'7')) => 8,
+                (b'0', Some(b'b'), Some(b'0' | b'1')) => 2,
+                _ => 10,
+            };
+            self.at += if radix == 10 { 1 } else { 2 };
+            while bytes
+                .get(self.at)
+                .is_some_and(|byte| char::from(*byte).is_digit(radix))
+            {
                 self.at += 1;
             }
             return Ok(Token {
@@ -316,7 +626,7 @@ impl<'a> Lexer<'a> {
                 at,
             });
         }
-        if b"()[]{}:,.<>=!-*+/%|~".contains(&ch) {
+        if b"()[]{}:,.<>=!-*+/%|~^".contains(&ch) {
             self.at += 1;
             return Ok(Token {
                 kind: TokenKind::Punct(ch),
@@ -325,7 +635,42 @@ impl<'a> Lexer<'a> {
         }
         Err(error(at, GraphPatternTextErrorKind::InvalidToken))
     }
+
+    /// Whether the reserved word `word` at `at` (the lexer just past it)
+    /// stands where openCypher reads any SchemaName: directly after `.` or
+    /// `:` unless it opens a call (`{k: all(...)}`), or directly before a map
+    /// entry's `:`. No grammar word follows `.` or `:` or precedes `:`, so
+    /// such a spelling is a property key, label or type, and its delimited
+    /// token keeps every clause lookahead from reading `n.limit` as LIMIT.
+    fn names_schema(&self, at: usize, word: &str) -> bool {
+        if !RESERVED_NAMES
+            .iter()
+            .any(|reserved| word.eq_ignore_ascii_case(reserved))
+        {
+            return false;
+        }
+        let bytes = self.text.as_bytes();
+        let before = bytes[..at]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        let after = bytes[self.at..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace());
+        match before {
+            Some(b'.') => true,
+            Some(b':') => after != Some(&b'('),
+            _ => after == Some(&b':'),
+        }
+    }
 }
+
+/// The words no variable, alias or function name may spell undelimited:
+/// each starts or continues a clause wherever an operand may end.
+const RESERVED_NAMES: &[&str] = &[
+    "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT", "OPTIONAL",
+    "ORDER", "BY",
+];
 
 #[derive(Clone)]
 pub(crate) enum Number {
@@ -356,7 +701,9 @@ impl Number {
 struct Edge<'a> {
     variable: Option<Name<'a>>,
     source: Name<'a>,
-    relation: Name<'a>,
+    relation: Option<Name<'a>>,
+    /// The further types of an alternation `:A|B|:C`, after `relation`.
+    alternatives: Vec<Name<'a>>,
     direction: GlaDirection,
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,
@@ -416,10 +763,25 @@ struct Column<'a> {
     property: Option<Name<'a>>,
     path: Option<GraphPathFunction>,
     alias: Name<'a>,
+    /// The scope index of the pattern comprehension whose list this column
+    /// is (fgdb-7nwox).
+    collect: Option<usize>,
 }
 struct Syntax<'a> {
+    match_mode: GraphMatchMode,
     variables: Vec<Name<'a>>,
     path: Option<Name<'a>>,
+    /// Whether `path` names a variable-length relationship rather than a
+    /// path: `MATCH (a)-[r*1..2]->(b)` captures the path of its only edge
+    /// under `r`, and a bare `r` is that path's edge list (openCypher).
+    path_edges: bool,
+    /// Paths named by a later required or OPTIONAL MATCH (`OPTIONAL MATCH
+    /// p = (a)-->(b)`), in clause order. Each is exported like the clause's
+    /// vertices, and is NULL where an OPTIONAL clause has no witness.
+    scope_paths: Vec<Name<'a>>,
+    /// The `scope_paths` a clause captured for its only variable-length
+    /// relationship (`MATCH (a)-[r*2]->()`): a bare name is the edge list.
+    scope_edge_paths: Vec<&'a str>,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -434,9 +796,41 @@ struct Syntax<'a> {
     count: Option<Number>,
     distinct: bool,
     return_at: usize,
+    /// Every `x.key` read this part's expressions parsed, with the slot its
+    /// template binds through (fgdb-xnd7x). Resolution fills each slot once.
+    element_keys: Vec<(&'a str, crate::set_text::ElementKeySlot)>,
 }
 
 impl<'a> Syntax<'a> {
+    /// What a bare name denotes when it names the path or a relationship:
+    /// the path, or the edge list of a captured variable-length relationship
+    /// (`path_edges`), or the identity of a fixed relationship.
+    fn bare_path_function(&self, name: &str) -> Option<GraphPathFunction> {
+        if self.path.is_some_and(|path| path.text == name) {
+            Some(if self.path_edges {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Value
+            })
+        } else if self.scope_paths.iter().any(|path| path.text == name) {
+            Some(if self.scope_edge_paths.contains(&name) {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Value
+            })
+        } else if self.visible_edge(name).is_some() {
+            Some(GraphPathFunction::Edge)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `name` is a path bound by the root MATCH or a later clause.
+    fn names_path(&self, name: &str) -> bool {
+        self.path.is_some_and(|path| path.text == name)
+            || self.scope_paths.iter().any(|path| path.text == name)
+    }
+
     /// The root's relationship patterns, then those exported by each required
     /// or OPTIONAL clause, each with whether it can be NULL (OPTIONAL).
     fn visible_edges(&self) -> impl Iterator<Item = (&Edge<'a>, bool)> {
@@ -461,12 +855,111 @@ struct Parser<'a> {
     edge_count: usize,
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
-    read_correlations: Vec<(Name<'a>, Name<'a>, usize)>,
+    read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
+    /// Computed imported join keys, evaluated once per leading row before
+    /// its graph product. Their private columns never enter public schemas.
+    read_row_fields: Vec<crate::set_text::ReadValueTemplate>,
+    /// Enabled only while a multipart graph part can lower its WHERE to ON.
+    /// Other read/write owners must not silently accept an unexecuted predicate.
+    read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
+    /// The leading columns a column resolver addresses, named and typed,
+    /// while one runs over a known row (a write's WITH row): a map column's
+    /// `m.key` reads its entry, and a CASE or list operand over a column is
+    /// routed by its type as in a row scope. `None` keeps resolved columns
+    /// untyped.
+    resolved_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
     boundary_reads: Option<BoundaryReads<'a>>,
+    /// A resolved leaf followed by `.key` reads that entry (an imported
+    /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
+    /// (read_resolved_value/item), as does the insertion value compiler. A
+    /// write RETURN never does, except for an imported map's own leaf: its
+    /// other leaves are post-write values that an element read would miss.
+    resolved_entries: bool,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
+    /// The composite operands of the scalar expression being parsed, when
+    /// its caller can carry them as a `ReadValueTemplate::Let` (fgdb-o5o9t).
+    /// `None` keeps a composite operand refused.
+    lets: Option<Vec<crate::set_text::ReadValueTemplate>>,
+    /// The value nesting depth at which the current let-carrying expression
+    /// began. A composite operand continues from it plus the scalar depth,
+    /// so alternating values and expressions stay within one nesting bound.
+    let_base: usize,
+    /// Set for exactly the next value read: it is the list operand of `IN`,
+    /// which ends at the concatenation level, so a following AND, OR or
+    /// comparison stays outside it (fgdb-klah2).
+    membership_list: bool,
+    /// The repeatable items of the grouping or DISTINCT WITH whose own ORDER
+    /// BY is next: a repeat of one item's expression there is that output
+    /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
+    projected_sources: Option<ProjectedSources>,
+    /// The existence predicates of the WITH WHERE that is next, each a hidden
+    /// Boolean column of its head (hoist_existence_reads): the head's row
+    /// width and each predicate's (source start, source end, column).
+    existence_reads: Option<HoistedReads>,
+    /// The pattern comprehensions of the grouping WITH that is next, each a
+    /// hidden list column of its graph head (hoist_comprehension): the head's
+    /// row width and each comprehension's (source start, source end, column).
+    comprehension_reads: Option<HoistedReads>,
+    /// The rand() calls read so far: the next call's site (fgdb-13l85).
+    random_sites: u32,
+    /// An aggregate function's argument is being read. openCypher refuses a
+    /// non-constant rand() there (Return6 [15], NonConstantExpression).
+    aggregate_argument: bool,
+    /// The value reader asks the resolver for a percentile's collected
+    /// argument (fgdb-qbaex): a resolver that registers a hidden collect of
+    /// the expression here clears it, and one that leaves it set refuses.
+    percentile_leaf: bool,
+    /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
+    /// key belongs to the HAVING test, not to the key expression.
+    having_operand: bool,
+    /// A label test `v:L` over a row is being read (fgdb-qo3jv): the
+    /// resolver's boundary_read takes a carried element followed by `:` to
+    /// the labels() or type() column its boundary hoisted, and records here
+    /// which of the two it read.
+    label_test: Option<Option<GraphPathFunction>>,
+    /// The host's pinned tzdb, carried by every temporal constructor the
+    /// statement reads (fgdb-txbg9): named zones resolve only through it.
+    zones: Option<crate::GqlTimeZones>,
+    /// The read composition entry lets a root MATCH WHERE that needs the
+    /// value language run as a row filter after the match (fgdb-1c29d).
+    defer_where: bool,
+    /// An OPTIONAL MATCH continuation is being read: a later clause-level
+    /// MATCH or OPTIONAL MATCH ends it at an implicit `WITH *`, the boundary
+    /// openCypher's clause-by-clause left joins already draw.
+    optional_part: bool,
+    /// The lexer and token at that WHERE keyword, once it was deferred.
+    deferred_where: Option<(Lexer<'a>, Token<'a>)>,
+    /// Offsets of required continuation WHERE keywords that run as a row
+    /// filter after an implicit `WITH *`, because the graph predicate refused
+    /// them (unresolved_read_input). Every other WHERE parses as before.
+    deferred_wheres: Vec<usize>,
+    /// Offsets of MATCH or OPTIONAL MATCH clauses that start a new part at
+    /// an implicit `WITH *`, because they read a name their child scope
+    /// cannot see: an earlier clause's relationship, or an imported column
+    /// (unresolved_read_input).
+    implicit_withs: Vec<usize>,
+    /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
+    /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
+    write_row_scope: bool,
+    /// The WITH stages before a write are being read: the hidden reads of
+    /// the elements the row carries stay in it, for the write and RETURN.
+    write_prefix: bool,
+    /// A write's WITH tail may end at the next write of a chained statement
+    /// (`CREATE (a) WITH a CREATE (b)`) instead of a RETURN.
+    chain_write: bool,
+    /// The row such a tail ended with, for the next write to read.
+    chained_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
 }
+
+/// A WITH's row width and its repeatable items as (source start, source
+/// end, output column).
+type ProjectedSources = (usize, Vec<(usize, usize, usize)>);
+
+/// A WITH head's row width and the expressions it hoisted into hidden
+/// columns, as (source start, source end, column).
+type HoistedReads = (usize, Vec<(usize, usize, usize)>);
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
 /// binding (`WITH n WHERE n.p = 3 ORDER BY n.q RETURN n.r`). Each is a hidden
@@ -483,14 +976,30 @@ struct Parser<'a> {
 /// alias, the binding, the property and its hidden head column. The grouping
 /// stage turns each into a hidden key, and those keys become the grouped row's
 /// own `reads`.
+///
+/// `scoped` belongs to a plain WITH (openCypher): the MATCH bindings it drops,
+/// read by its own WHERE and pages only, never by the RETURN or a later
+/// stage. Each is the binding, the property (`None` for the element itself)
+/// and the hidden column.
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
     reads: Vec<(&'a str, Name<'a>, usize)>,
+    /// Native metadata of an unchanged carried element or captured path.
+    /// Kept separate from property names so a property named `labels` or
+    /// `type` cannot alias a function read.
+    functions: Vec<(&'a str, GraphPathFunction, usize)>,
     grouped: Vec<(&'a str, &'a str, Name<'a>, usize)>,
+    scoped: Vec<(&'a str, Option<&'a str>, usize)>,
 }
 
 impl<'a> Parser<'a> {
+    /// Carry the host's pinned tzdb into every temporal constructor read.
+    fn with_zones(mut self, zones: Option<crate::GqlTimeZones>) -> Self {
+        self.zones = zones;
+        self
+    }
+
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
         if text.len() > MAX_GRAPH_TEXT_BYTES {
             return Err(error(
@@ -513,11 +1022,40 @@ impl<'a> Parser<'a> {
             parameter_types: BTreeMap::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
+            read_row_fields: Vec::new(),
+            read_comparisons: None,
+            resolved_row: None,
             boundary_reads: None,
+            resolved_entries: false,
             elements: Vec::new(),
+            lets: None,
+            let_base: 0,
+            membership_list: false,
+            projected_sources: None,
+            existence_reads: None,
+            comprehension_reads: None,
+            random_sites: 0,
+            aggregate_argument: false,
+            percentile_leaf: false,
+            having_operand: false,
+            label_test: None,
+            zones: None,
+            defer_where: false,
+            optional_part: false,
+            deferred_where: None,
+            deferred_wheres: Vec::new(),
+            implicit_withs: Vec::new(),
+            write_row_scope: false,
+            write_prefix: false,
+            chain_write: false,
+            chained_row: None,
             syntax: Syntax {
+                match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
                 path: None,
+                path_edges: false,
+                scope_paths: Vec::new(),
+                scope_edge_paths: Vec::new(),
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
@@ -532,12 +1070,52 @@ impl<'a> Parser<'a> {
                 count: None,
                 distinct: false,
                 return_at: 0,
+                element_keys: Vec::new(),
             },
         })
     }
     fn advance(&mut self) -> Result<(), GraphPatternTextError> {
         self.current = self.lexer.next()?;
         Ok(())
+    }
+    /// A `map.key` read, with its key recorded for this part's preparation to
+    /// bind against a vertex or edge operand (fgdb-xnd7x).
+    fn map_get(
+        &mut self,
+        map: crate::set_text::ReadValueTemplate,
+        key: &'a str,
+    ) -> crate::set_text::ReadValueTemplate {
+        let property = crate::set_text::ElementKeySlot::default();
+        self.syntax.element_keys.push((key, property.clone()));
+        crate::set_text::ReadValueTemplate::MapGet {
+            map: Box::new(map),
+            key: key.into(),
+            property,
+        }
+    }
+    /// The statement text of `[at, end)` without trailing trivia: the
+    /// openCypher name of an unaliased RETURN item (`count(n)`, `a.title`).
+    fn source_name(&self, at: usize, end: usize) -> Name<'a> {
+        let text = self.lexer.text.get(at..end).unwrap_or("").trim_end();
+        Name { text, at }
+    }
+    /// The argument of an openCypher `length(...)` call (fgdb-20foe), read
+    /// through `after`, a look-ahead lexer just past a `length` word: `None`
+    /// when no call opens. A whole argument of one name is `Some(Some(name))`,
+    /// which only its scope can type: a path has a hop count, text a
+    /// character count. Any other argument is text's: `Some(None)`.
+    fn length_argument(
+        mut after: Lexer<'a>,
+    ) -> Result<Option<Option<&'a str>>, GraphPatternTextError> {
+        if !matches!(after.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let TokenKind::Word(name) = after.next()?.kind else {
+            return Ok(Some(None));
+        };
+        Ok(Some(
+            matches!(after.next()?.kind, TokenKind::Punct(b')')).then_some(name),
+        ))
     }
     fn is_word(&self, word: &str) -> bool {
         matches!(self.current.kind, TokenKind::Word(actual) if actual.eq_ignore_ascii_case(word))
@@ -601,18 +1179,16 @@ impl<'a> Parser<'a> {
         }
     }
     fn name(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        self.reject_delimited_keyword()?;
         let TokenKind::Word(text) = self.current.kind else {
             return Err(error(
                 self.current.at,
                 GraphPatternTextErrorKind::Expected("identifier"),
             ));
         };
-        if [
-            "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT",
-            "OPTIONAL", "ORDER", "BY",
-        ]
-        .iter()
-        .any(|word| text.eq_ignore_ascii_case(word))
+        if RESERVED_NAMES
+            .iter()
+            .any(|word| text.eq_ignore_ascii_case(word))
         {
             return Err(error(
                 self.current.at,
@@ -634,8 +1210,46 @@ impl<'a> Parser<'a> {
         self.advance()?;
         Ok(name)
     }
+    fn reject_delimited_keyword(&self) -> Result<(), GraphPatternTextError> {
+        if matches!(self.current.kind, TokenKind::DelimitedKeyword(_)) {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("a delimited identifier that is not a keyword"),
+            ));
+        }
+        Ok(())
+    }
+    /// A label, relationship type, property key or map key: openCypher's
+    /// SchemaName, which any keyword may spell (`:Order`, `n.limit`,
+    /// ``{`match`: 1}``). It has no clause or function dispatch, so it admits
+    /// the delimited token; plain names follow the identifier checks.
+    fn schema_name(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let TokenKind::DelimitedKeyword(text) = self.current.kind else {
+            return self.name();
+        };
+        let name = Name {
+            text,
+            at: self.current.at,
+        };
+        self.advance()?;
+        Ok(name)
+    }
+    /// Graph-only operand shortcuts must respect the same element scopes as
+    /// the scalar compiler. A shadowed name denotes the local value; it must
+    /// never silently rebind to a graph entity in id(), COUNT(), or metadata.
+    fn require_unshadowed_graph_binding(
+        &self,
+        name: Name<'a>,
+    ) -> Result<(), GraphPatternTextError> {
+        if self.elements.contains(&name.text) {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(())
+    }
+
     fn variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self
             .syntax
             .variables
@@ -647,6 +1261,7 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
     fn require_property_variable(&self, name: Name<'a>) -> Result<(), GraphPatternTextError> {
+        self.require_unshadowed_graph_binding(name)?;
         if self
             .syntax
             .variables
@@ -659,9 +1274,7 @@ impl<'a> Parser<'a> {
         {
             return Ok(());
         }
-        if self.syntax.path.is_some_and(|path| path.text == name.text)
-            || self.syntax.visible_edge(name.text).is_some()
-        {
+        if self.syntax.names_path(name.text) || self.syntax.visible_edge(name.text).is_some() {
             return Err(error(
                 name.at,
                 GraphPatternTextErrorKind::Expected("single fixed-length relationship or vertex"),
@@ -772,7 +1385,8 @@ impl<'a> Parser<'a> {
     fn node(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.punct(b'(', "(")?;
-        let name = if matches!(self.current.kind, TokenKind::Punct(b')' | b':')) {
+        // `()`, `(:L)` and openCypher `({k: v})` are anonymous.
+        let name = if matches!(self.current.kind, TokenKind::Punct(b')' | b':' | b'{')) {
             self.capacity(
                 self.syntax.variables.len(),
                 MAX_PATTERN_VERTICES,
@@ -800,7 +1414,7 @@ impl<'a> Parser<'a> {
             *self.syntax.variables.last().expect("just pushed")
         } else {
             let name = self.name()?;
-            if self.syntax.path.is_some_and(|path| path.text == name.text) {
+            if self.syntax.names_path(name.text) {
                 return Err(error(
                     name.at,
                     GraphPatternTextErrorKind::Expected("vertex distinct from path binding"),
@@ -827,11 +1441,11 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 PatternLimitDimension::Predicates,
             )?;
-            let label = self.name()?;
+            let label = self.schema_name()?;
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
-        self.node_property_map(name)?;
+        self.property_map(name, false)?;
         self.punct(b')', ")")?;
         Ok(name)
     }
@@ -839,7 +1453,13 @@ impl<'a> Parser<'a> {
     /// Inline maps are conjunctions in this positive pattern, not assignments
     /// or a separate evaluator. In particular, OPTIONAL owns these predicates
     /// before null extension, and equality with NULL is not an IS NULL test.
-    fn node_property_map(&mut self, variable: Name<'a>) -> Result<(), GraphPatternTextError> {
+    /// A relationship's map (`edge`) filters its captured edge the same way;
+    /// only a node map correlates with an earlier row binding.
+    fn property_map(
+        &mut self,
+        variable: Name<'a>,
+        edge: bool,
+    ) -> Result<(), GraphPatternTextError> {
         if !self.take(b'{')? || self.take(b'}')? {
             return Ok(());
         }
@@ -850,33 +1470,36 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 crate::algebra::PatternLimitDimension::Predicates,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if keys.contains(&key.text) {
                 return Err(error(
                     key.at,
-                    GraphPatternTextErrorKind::Expected("distinct property name in node map"),
+                    GraphPatternTextErrorKind::Expected(if edge {
+                        "distinct property name in relationship map"
+                    } else {
+                        "distinct property name in node map"
+                    }),
                 ));
             }
             self.punct(b':', ":")?;
-            let row = match self.current.kind {
-                TokenKind::Word(binding) => self
-                    .read_row_bindings
-                    .iter()
-                    .position(|candidate| candidate.text == binding),
-                _ => None,
+            let row = if edge {
+                None
+            } else {
+                self.imported_row_field()?
             };
             if let Some(row) = row {
-                self.advance()?;
-                self.read_correlations.push((variable, key, row));
+                self.read_correlations.push((variable, Some(key), row));
             } else {
                 let at = self.current.at;
                 let predicate = self.property_operand(variable, key, IntegerComparison::Equal)?;
                 if matches!(predicate, Filter::Properties { .. }) {
                     return Err(error(
                         at,
-                        GraphPatternTextErrorKind::Expected(
-                            "literal or typed parameter in node map",
-                        ),
+                        GraphPatternTextErrorKind::Expected(if edge {
+                            "literal or typed parameter in relationship map"
+                        } else {
+                            "literal or typed parameter in node map"
+                        }),
                     ));
                 }
                 self.syntax.filters.push(predicate);
@@ -891,6 +1514,7 @@ impl<'a> Parser<'a> {
     }
 
     fn number(&mut self, expected: GqlParameterType) -> Result<Number, GraphPatternTextError> {
+        self.reject_delimited_keyword()?;
         let at = self.current.at;
         if let TokenKind::Parameter(name) = self.current.kind {
             self.check_declared_parameter(name, expected, at)?;
@@ -930,9 +1554,8 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("typed integer or numeric parameter"),
             ));
         };
-        let magnitude = digits
-            .parse::<u64>()
-            .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
+        let magnitude = integer_magnitude(digits)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         let value = match expected {
             GqlParameterType::Scalar(_) => {
                 return Err(error(
@@ -952,10 +1575,12 @@ impl<'a> Parser<'a> {
                         .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
                 )
             }
-            GqlParameterType::List => {
+            GqlParameterType::List | GqlParameterType::Map => {
                 return Err(error(
                     at,
-                    GraphPatternTextErrorKind::Expected("list parameters are not scalar operands"),
+                    GraphPatternTextErrorKind::Expected(
+                        "collection parameters are not scalar operands",
+                    ),
                 ));
             }
         };
@@ -1023,19 +1648,26 @@ impl<'a> Parser<'a> {
                         property: None,
                         path: None,
                         alias: name,
+                        collect: None,
                     }),
             );
-            if let Some(name) = self.syntax.path {
+            let paths: Vec<_> = (self.syntax.path.iter())
+                .chain(&self.syntax.scope_paths)
+                .copied()
+                .collect();
+            for name in paths {
                 self.capacity(
                     self.syntax.columns.len(),
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
+                let path = self.syntax.bare_path_function(name.text);
                 self.syntax.columns.push(Column {
                     variable: name,
                     property: None,
-                    path: Some(GraphPathFunction::Value),
+                    path,
                     alias: name,
+                    collect: None,
                 });
             }
             let edges: Vec<_> = self
@@ -1054,6 +1686,7 @@ impl<'a> Parser<'a> {
                     property: None,
                     path: Some(GraphPathFunction::Edge),
                     alias: name,
+                    collect: None,
                 });
             }
         } else {
@@ -1063,6 +1696,7 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
+                let at = self.current.at;
                 let expression = self.name()?;
                 let start = expression.text.eq_ignore_ascii_case("startNode");
                 let (variable, property, path) = if self.is_punct(b'(')
@@ -1079,20 +1713,21 @@ impl<'a> Parser<'a> {
                     let variable = match function {
                         GraphPathFunction::Labels => self.vertex_variable()?,
                         GraphPathFunction::Type => self.edge_variable()?,
+                        GraphPathFunction::Properties => self.property_variable()?,
                         _ => self.path_variable()?,
                     };
                     self.punct(b')', ")")?;
                     (variable, None, Some(function))
-                } else if self
-                    .syntax
-                    .path
-                    .is_some_and(|path| path.text == expression.text)
-                {
-                    (expression, None, Some(GraphPathFunction::Value))
+                } else if self.syntax.names_path(expression.text) {
+                    (
+                        expression,
+                        None,
+                        self.syntax.bare_path_function(expression.text),
+                    )
                 } else if self.syntax.visible_edge(expression.text).is_some() {
                     let property = if self.take(b'.')? {
                         self.require_property_variable(expression)?;
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
@@ -1110,16 +1745,19 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     let property = if self.take(b'.')? {
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
                     (expression, property, None)
                 };
+                // An unaliased item is named by its exact source text, as in
+                // openCypher (`a.title`, `labels(p)`): never by its siblings.
+                let end = self.current.at;
                 let alias = if self.take_word("AS")? {
                     self.name()?
                 } else {
-                    property.unwrap_or(expression)
+                    self.source_name(at, end)
                 };
                 if self
                     .syntax
@@ -1137,6 +1775,7 @@ impl<'a> Parser<'a> {
                     property,
                     path,
                     alias,
+                    collect: None,
                 });
                 if !self.take(b',')? {
                     break;
@@ -1162,6 +1801,8 @@ impl<'a> Parser<'a> {
             Ok(GraphPathFunction::Labels)
         } else if name.text.eq_ignore_ascii_case("type") {
             Ok(GraphPathFunction::Type)
+        } else if name.text.eq_ignore_ascii_case("properties") {
+            Ok(GraphPathFunction::Properties)
         } else {
             Err(error(
                 name.at,
@@ -1172,6 +1813,7 @@ impl<'a> Parser<'a> {
 
     fn vertex_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text) {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1180,6 +1822,7 @@ impl<'a> Parser<'a> {
 
     fn edge_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if self.syntax.visible_edge(name.text).is_none() {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1230,7 +1873,8 @@ impl<'a> Parser<'a> {
 
     fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
-        if !self.syntax.path.is_some_and(|path| path.text == name.text) {
+        self.require_unshadowed_graph_binding(name)?;
+        if !self.syntax.names_path(name.text) {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
         Ok(name)
@@ -1240,8 +1884,9 @@ impl<'a> Parser<'a> {
         &mut self,
     ) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text)
-            && !self.syntax.path.is_some_and(|path| path.text == name.text)
+            && !self.syntax.names_path(name.text)
             && self.syntax.visible_edge(name.text).is_none()
         {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
@@ -1263,6 +1908,11 @@ impl<'a> Parser<'a> {
                 self.current.at,
                 GraphPatternTextErrorKind::Expected("end of statement"),
             ));
+        }
+        // A chain step parses with the statement's declarations, which other
+        // steps may read; the chain checks them once, over every step.
+        if self.chain_write {
+            return Ok(());
         }
         self.check_parameter_declarations()
     }
@@ -1289,9 +1939,14 @@ struct BoundColumn {
     variable: String,
     key: Option<PropertyKeyId>,
     path: Option<GraphPathFunction>,
+    /// A pattern comprehension's list: its Collect clause (fgdb-7nwox).
+    collect: Option<usize>,
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
+        if let Some(clause) = self.collect {
+            return GraphColumn::collection(&self.alias, clause);
+        }
         if self.path == Some(GraphPathFunction::Edge)
             && let Some(key) = self.key
         {
@@ -1339,6 +1994,41 @@ impl core::fmt::Debug for PreparedGraphText {
     }
 }
 
+/// Each declared parameter's admitted argument, in declaration order. A
+/// missing or mistyped argument refuses at its first use, and an argument no
+/// parameter names refuses at `end`.
+fn checked_parameter_values(
+    parameters: &[GqlParameterSpec],
+    offsets: &[usize],
+    end: usize,
+    arguments: &GqlParameters,
+) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
+    // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+    let admitted = arguments.admit_unsigned(parameters);
+    let arguments: &GqlParameters = &admitted;
+    let mut values = Vec::new();
+    for (index, spec) in parameters.iter().enumerate() {
+        let at = offsets[index];
+        let value = arguments
+            .get(&spec.name)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+        if !spec.parameter_type.accepts(value.parameter_type()) {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::ParameterTypeMismatch {
+                    expected: spec.parameter_type,
+                    found: value.parameter_type(),
+                },
+            ));
+        }
+        values.push(value);
+    }
+    if arguments.len() != values.len() {
+        return Err(error(end, GraphPatternTextErrorKind::UnexpectedArguments));
+    }
+    Ok(values)
+}
+
 impl PreparedGraphText {
     /// Prepare the bounded graph-pattern text profile. Keywords are ASCII
     /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
@@ -1366,14 +2056,18 @@ impl PreparedGraphText {
     /// positive WHERE expressions inside EXISTS and OPTIONAL are supported.
     /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
-    /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
+    /// Ordering precedes SKIP/LIMIT. An unprojected property, path function
+    /// or bound variable sorts through a hidden cell, refused under DISTINCT.
     ///
     /// Plain MATCH and explicit MATCH WALK accept bounded `[:R*min..max]`,
     /// `[:R*k]` and `[:R*..max]` atoms. The omitted minimum is one; zero is
     /// explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
-    /// Both use WALK semantics: repeated edges and vertices contribute distinct
-    /// occurrences, including duplicate endpoint rows. MATCH TRAIL forbids edge
-    /// reuse instead; explicit path selectors retain their own semantics.
+    /// The default DIFFERENT EDGES match mode forbids relationship reuse across
+    /// every atom and comma-separated part of one MATCH, in either direction.
+    /// Repeated vertices and parallel relationships remain distinct occurrences.
+    /// MATCH REPEATABLE ELEMENTS permits relationship reuse; MATCH TRAIL still
+    /// forbids reuse within its atom. Each later MATCH, OPTIONAL MATCH and
+    /// existential pattern has its own match mode and relationship inventory.
     /// A root `MATCH p = ...` captures its ordered path, including real edge IDs.
     /// MATCH ALL SHORTEST WALK prefix selects all tied minimum-hop occurrences
     /// within the interval, separately for each endpoint pair. This native
@@ -1401,7 +2095,8 @@ impl PreparedGraphText {
         statement: &str,
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
-        Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
+        let parser = Parser::new(statement)?.with_zones(resolve.time_zones());
+        Self::from_syntax(statement, parser.parse()?, resolve)
     }
 
     fn from_syntax<'a>(
@@ -1435,6 +2130,7 @@ impl PreparedGraphText {
             .filter_map(|(edge, _)| edge.variable.map(|name| name.text))
             .collect();
         let (builder, filters) = scoped::resolve_pattern(
+            syntax.match_mode,
             &syntax.variables[..syntax.root_variables],
             &syntax.labels,
             &syntax.edges,
@@ -1479,6 +2175,7 @@ impl PreparedGraphText {
                 } else {
                     column.path
                 },
+                collect: column.collect,
             });
         }
         // Compile the actual scope topology for structural validation. Do not
@@ -1493,7 +2190,11 @@ impl PreparedGraphText {
         let needs_reverse = columns.iter().any(|c| {
             matches!(
                 c.path,
-                Some(GraphPathFunction::Labels | GraphPathFunction::Type)
+                Some(
+                    GraphPathFunction::Labels
+                        | GraphPathFunction::Type
+                        | GraphPathFunction::Properties
+                )
             )
         });
         let reverse_catalog = if needs_reverse {
@@ -1586,6 +2287,16 @@ impl PreparedGraphText {
         }
         fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
             bytes.push(scope.kind_tag());
+            // A Collect scope's element follows its tag (fgdb-7nwox).
+            if scope.kind_tag() == 4 {
+                match scope.element() {
+                    Some(element) => {
+                        bytes.push(1);
+                        append_name(bytes, element);
+                    }
+                    None => bytes.push(0),
+                }
+            }
             bytes.extend_from_slice(&scope.builder().canonical_template_bytes());
             bytes.extend_from_slice(&(scope.filters().len() as u64).to_be_bytes());
             for filter in scope.filters() {
@@ -1613,9 +2324,14 @@ impl PreparedGraphText {
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
             }
-            match column.path {
-                None => bytes.push(0),
-                Some(function) => {
+            // A collected list is its clause, in the path slot's tag 2.
+            match (column.path, column.collect) {
+                (_, Some(clause)) => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(clause as u64).to_be_bytes());
+                }
+                (None, None) => bytes.push(0),
+                (Some(function), None) => {
                     bytes.push(1);
                     bytes.push(function as u8);
                 }
@@ -1639,6 +2355,16 @@ impl PreparedGraphText {
         if let Some(width) = self.visible_columns {
             bytes.extend_from_slice(b"visible-prefix\0");
             bytes.extend_from_slice(&(width as u64).to_be_bytes());
+        }
+        if self
+            .columns
+            .iter()
+            .any(|column| column.path == Some(GraphPathFunction::Properties))
+        {
+            crate::algebra::append_property_catalog_transcript(
+                self.reverse_catalog.as_deref(),
+                &mut bytes,
+            );
         }
         bytes
     }
@@ -1681,30 +2407,12 @@ impl PreparedGraphText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
-        let mut values = Vec::new();
-        for (index, spec) in self.parameters.iter().enumerate() {
-            let at = self.parameter_offsets[index];
-            let value = arguments
-                .get(&spec.name)
-                .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-            if !spec.parameter_type.accepts(value.parameter_type()) {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::ParameterTypeMismatch {
-                        expected: spec.parameter_type,
-                        found: value.parameter_type(),
-                    },
-                ));
-            }
-            values.push(value);
-        }
-        if arguments.len() != values.len() {
-            return Err(error(
-                self.statement.len(),
-                GraphPatternTextErrorKind::UnexpectedArguments,
-            ));
-        }
-        Ok(values)
+        checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.statement.len(),
+            arguments,
+        )
     }
 
     fn bind_values(
@@ -1744,6 +2452,9 @@ impl PreparedGraphText {
             pattern.logical.reverse_catalog = Some(std::sync::Arc::clone(catalog));
         }
         Ok(match self.visible_columns {
+            // parse_row_ordering admits a hidden cell under DISTINCT only
+            // when it is a property of an element RETURN projects bare.
+            Some(width) if self.distinct => pattern.with_dependent_visible_columns(width),
             Some(width) => pattern.with_visible_columns(width),
             None => pattern,
         })
@@ -1754,7 +2465,7 @@ impl PreparedGraphText {
 mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -1775,6 +2486,65 @@ mod tests {
     fn policy() -> GqlQueryPolicy {
         GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000)
     }
+
+    #[test]
+    fn native_prism_projection_routing_reads_parser_tokens() {
+        for text in [
+            "CALL fnx.connected_components({}) YIELD vertex RETURN vertex",
+            "/* before */ cAlL /* namespace */ fnx . connected_components ( {",
+            "CALL fnx.degree({unknown: 'invalid'}) YIELD vertex RETURN vertex",
+            "CALL fnx.degree(args => [], label => 'L') YIELD vertex RETURN vertex",
+            "CALL fnx.degree(label /* split */ = /* arrow */ > 'L')",
+            "CALL fnx.degree(unknown => 'invalid')",
+        ] {
+            assert!(starts_fnx_graph_projection(text), "{text}");
+        }
+        for text in [
+            "CALL fnx.connected_components() YIELD vertex RETURN vertex",
+            "CALL fnx.degree($projection) YIELD vertex RETURN vertex",
+            "CALL fnx.degree('literal { args => [] }')",
+            "CALL fnx.degree(args)",
+            "CALL fnx.degree(args = [1])",
+            "CALL fnx.degree($args => [])",
+            "CALL FNX.degree({})",
+            "CALL fnx_other.degree({})",
+            "RETURN 'CALL fnx.degree({})'",
+            "MATCH (n) CALL fnx.degree({})",
+            "CALL fnx.degree",
+        ] {
+            assert!(!starts_fnx_graph_projection(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn element_identity_scan_reads_parser_tokens_and_fails_closed() {
+        for text in [
+            "MATCH (n) RETURN id(n) AS i",
+            "MATCH (n) RETURN ElementId(n) AS e",
+            "MATCH (n) RETURN ID // a line comment\n(n) AS i",
+            "MATCH (n) RETURN id /* split */ (n) AS i",
+            // Over-approximation: a procedure of that name refuses too.
+            "CALL fnx.id(GRAPH g)",
+            // A rejected byte is skipped, never a reason to stop reading.
+            "SUBSCRIBE TO MATCH (n) RETURN id(n);",
+            "MATCH (n) RETURN ; id(n) AS i",
+            "MATCH (n) RETURN 'unterminated id(n)",
+        ] {
+            assert!(reads_element_identity(text), "{text}");
+        }
+        for text in [
+            "SUBSCRIBE TO MATCH (p:Person) WHERE p.name = 'Bob';",
+            "MATCH (n) RETURN 'unterminated",
+            "MATCH (n) RETURN n AS id",
+            "MATCH (n) RETURN n.id AS value",
+            "MATCH (n {id: 1}) RETURN n AS identity",
+            "MATCH (n) RETURN 'id(n)' AS quoted",
+            "MATCH (n) RETURN `id` AS name",
+            "MATCH (n) RETURN ids(n) AS plural",
+        ] {
+            assert!(!reads_element_identity(text), "{text}");
+        }
+    }
     fn vertex_rows(rows: &[GraphValueRow]) -> Vec<Vec<VId>> {
         rows.iter()
             .map(|row| {
@@ -1788,13 +2558,14 @@ mod tests {
 
     #[test]
     fn element_name_functions_prepare_and_lower_positively() {
-        for (function, expected_col) in [("labels(p)", "labels"), ("type(r)", "type")] {
+        // An unaliased call is named by its source text, as in openCypher.
+        for function in ["labels(p)", "type(r)"] {
             let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
             let template = PreparedGraphText::prepare(&text, symbols).expect("positive prepare");
             let pattern = template
                 .bind_parameters(&GqlParameters::new())
                 .expect("bind");
-            assert_eq!(pattern.columns(), &[expected_col]);
+            assert_eq!(pattern.columns(), &[function]);
             assert!(pattern.plan().reverse_catalog.is_some());
         }
     }
@@ -1820,6 +2591,7 @@ mod tests {
             .unwrap();
         let actual = template.bind_parameters(&arguments).unwrap();
         let mut expected = GraphPatternBuilder::new();
+        expected.match_mode(GraphMatchMode::DifferentEdges);
         for name in ["a", "b", "c", "d"] {
             expected.vertex(name).unwrap();
         }
@@ -1867,6 +2639,20 @@ mod tests {
     fn text_bags_and_cycles_match_independent_complete_assignment_enumeration() {
         type Atom = (usize, u64, u8, usize);
         type Case<'a> = (&'a str, &'a [Atom], [usize; 2], bool, bool);
+        fn edge_disjoint_assignments(choices: &[Vec<usize>], used: &mut Vec<usize>) -> usize {
+            let Some((first, rest)) = choices.split_first() else {
+                return 1;
+            };
+            let mut count = 0;
+            for &edge in first {
+                if !used.contains(&edge) {
+                    used.push(edge);
+                    count += edge_disjoint_assignments(rest, used);
+                    used.pop();
+                }
+            }
+            count
+        }
         let cases: [Case<'_>; 3] = [
             (
                 "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN a,c",
@@ -1916,12 +2702,13 @@ mod tests {
                     if unequal && assignment[0] == assignment[2] {
                         continue;
                     }
-                    let multiplicity = atoms
+                    let choices: Vec<Vec<usize>> = atoms
                         .iter()
                         .map(|&(left, relation, direction, right)| {
                             edges
                                 .iter()
-                                .filter(|&&(s, r, d)| {
+                                .enumerate()
+                                .filter(|&(_, &(s, r, d))| {
                                     if r != RelationId(relation) {
                                         return false;
                                     }
@@ -1932,9 +2719,11 @@ mod tests {
                                         _ => (s == a && d == b) || (s == b && d == a),
                                     }
                                 })
-                                .count()
+                                .map(|(index, _)| index)
+                                .collect()
                         })
-                        .product::<usize>();
+                        .collect();
+                    let multiplicity = edge_disjoint_assignments(&choices, &mut Vec::new());
                     for _ in 0..multiplicity {
                         expected.push(selected.map(|at| assignment[at]).to_vec());
                     }
@@ -1946,10 +2735,14 @@ mod tests {
                 let pattern = query(text);
                 let actual = pattern
                     .plan()
-                    .execute_governed_with_properties(
+                    .execute_governed_with_identified_properties(
                         edges.len() as u64,
                         [],
-                        edges.iter().copied(),
+                        edges.iter().enumerate().map(
+                            |(index, &(source, relation, destination))| {
+                                (EId(index as u128), source, relation, destination)
+                            },
+                        ),
                         |_, _| Ok::<_, ()>(true),
                         |_, _| Ok(None),
                         policy(),
@@ -1979,10 +2772,15 @@ mod tests {
         let run = |pattern: &PreparedGraphPattern<GraphValueRow>| -> Vec<Vec<VId>> {
             pattern
                 .plan()
-                .execute_governed_with_properties(
+                .execute_governed_with_identified_properties(
                     edges.len() as u64,
                     [],
-                    edges.iter().copied(),
+                    edges
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &(source, relation, destination))| {
+                            (EId(index as u128), source, relation, destination)
+                        }),
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     policy(),
@@ -2022,10 +2820,15 @@ mod tests {
         let anonymous_rows = vertex_rows(
             &anonymous
                 .plan()
-                .execute_governed_with_properties(
+                .execute_governed_with_identified_properties(
                     edges.len() as u64,
                     [],
-                    edges.iter().copied(),
+                    edges
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &(source, relation, destination))| {
+                            (EId(index as u128), source, relation, destination)
+                        }),
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(None),
                     policy(),
@@ -2151,7 +2954,6 @@ mod tests {
             "",
             "MATCH",
             "MATCH () RETURN *",
-            "MATCH (a)<-[:R]->(b) RETURN a",
             "MATCH (a)-[:R]->(b) RETURN DISTINCT ALL a",
             "MATCH (a)-[:R]->(b) RETURN missing",
             "MATCH (a) RETURN a;",
@@ -2159,9 +2961,10 @@ mod tests {
             "MATCH (a) RETURN a ORDER BY missing",
             "MATCH (a) WHERE a.n = 1 OR OR a.n = 2 RETURN a",
             "MATCH (a) WHERE a > a RETURN a",
-            // `1.5` is a Float literal (fgdb-qnqrj); these are not decimals.
+            // `1.5` and `.5` are Float literals (fgdb-qnqrj, fgdb-yyygp);
+            // these are not decimals.
             "MATCH (a) WHERE a.n = 1. RETURN a",
-            "MATCH (a) WHERE a.n = .5 RETURN a",
+            "MATCH (a) WHERE a.n = . 5 RETURN a",
             "MATCH (a) WHERE a.n = $ x RETURN a",
             "MATCH (a) RETURN a SKIP -1",
             "MATCH (a) RETURN a LIMIT 18446744073709551616",
@@ -2214,9 +3017,63 @@ mod tests {
     }
 
     #[test]
+    fn unprojected_bound_variables_sort_through_hidden_cells() {
+        // Edge ids rise with (source, target), so the order below holds
+        // whichever of the two an edge value compares by first.
+        let edges = [
+            (fgdb_types::EId(1), VId(1), RelationId(1), VId(2)),
+            (fgdb_types::EId(2), VId(1), RelationId(1), VId(3)),
+            (fgdb_types::EId(3), VId(3), RelationId(1), VId(1)),
+        ];
+        for (text, expected) in [
+            ("MATCH (a)-[e:R]->(b) RETURN b ORDER BY e", [2, 3, 1]),
+            ("MATCH (a)-[e:R]->(b) RETURN b ORDER BY e DESC", [1, 3, 2]),
+            (
+                "MATCH (a)-[:R]->(b) RETURN b ORDER BY a DESC, b DESC",
+                [1, 3, 2],
+            ),
+        ] {
+            let pattern = query(text);
+            assert_eq!(pattern.columns(), &["b"], "{text}");
+            let actual = pattern
+                .plan()
+                .execute_governed_with_identified_properties(
+                    3,
+                    [],
+                    edges,
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let expected: Vec<_> = expected.into_iter().map(|b| vec![VId(b)]).collect();
+            assert_eq!(vertex_rows(&actual.value), expected, "{text}");
+        }
+        assert_eq!(
+            query("MATCH p = (a)-[:R]->(b) RETURN b ORDER BY p").columns(),
+            &["b"]
+        );
+        assert_eq!(
+            PreparedGraphText::prepare(
+                "MATCH (a)-[e:R]->(b) RETURN DISTINCT b ORDER BY e",
+                symbols
+            )
+            .unwrap_err()
+            .kind,
+            GraphPatternTextErrorKind::Expected(
+                "projected ORDER BY expression or alias under DISTINCT"
+            )
+        );
+    }
+
+    #[test]
     fn inline_property_map_selects_only_equal_values() {
         let pattern = query("MATCH (a {n:1}) RETURN a");
-        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let values: [CanonicalPropertyValue; 2] = [
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ];
         let actual = pattern
             .plan()
             .execute_governed_with_properties(
@@ -2230,7 +3087,8 @@ mod tests {
                             comparison,
                             value,
                         } => {
-                            values.get(vid.0 as usize - 1) == Some(&CanonicalScalar::Int(*value))
+                            values.get(vid.0 as usize - 1)
+                                == Some(&CanonicalPropertyValue::from(CanonicalScalar::Int(*value)))
                                 && *comparison == IntegerComparison::Equal
                         }
                         _ => true,
@@ -2295,8 +3153,8 @@ mod tests {
 
     #[test]
     fn property_nulls_and_duplicate_pagination_use_existing_value_semantics() {
-        let null = CanonicalScalar::Null;
-        let value = CanonicalScalar::Int(7);
+        let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let edges = [
             (VId(1), RelationId(1), VId(2)),
             (VId(1), RelationId(1), VId(3)),
@@ -2329,16 +3187,32 @@ mod tests {
         assert!(run("b.n SKIP 1 LIMIT 1")[0].get(0).unwrap().is_null());
         assert_eq!(
             run("b.n SKIP 2 LIMIT 1")[0].get(0).unwrap().as_scalar(),
-            Some(&value)
+            Some(&CanonicalScalar::Int(7))
         );
         assert!(run("b.n LIMIT 0").is_empty());
         assert_eq!(
             query("match (a)-[:R]->(b) return b.n as value").columns(),
             &["value"]
         );
-        assert_eq!(query("MATCH (a)-[:R]->(b) RETURN b.n").columns(), &["n"]);
+        // An unaliased item is named by its source text, as openCypher names
+        // it, whatever its siblings; an explicit alias is never renamed.
+        assert_eq!(query("MATCH (a)-[:R]->(b) RETURN b.n").columns(), &["b.n"]);
         assert_eq!(
-            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n,b.n", symbols)
+            query("MATCH (a)-[:R]->(b) RETURN a.n,b.n").columns(),
+            &["a.n", "b.n"]
+        );
+        assert_eq!(
+            query("MATCH (a)-[:R]->(b) RETURN a.n AS n, b.n").columns(),
+            &["n", "b.n"]
+        );
+        assert_eq!(
+            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n AS x, b.n AS x", symbols)
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)
+        );
+        assert_eq!(
+            PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a.n, a.n", symbols)
                 .unwrap_err()
                 .kind,
             GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)
@@ -2373,14 +3247,14 @@ mod tests {
     fn text_queries_share_all_policy_dimensions_and_every_interruption_checkpoint() {
         let pattern = query("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN ALL a,c.n AS score");
         let edges = [
-            (VId(1), RelationId(1), VId(2)),
-            (VId(1), RelationId(1), VId(2)),
-            (VId(2), RelationId(2), VId(3)),
-            (VId(2), RelationId(2), VId(4)),
+            (EId(1), VId(1), RelationId(1), VId(2)),
+            (EId(2), VId(1), RelationId(1), VId(2)),
+            (EId(3), VId(2), RelationId(2), VId(3)),
+            (EId(4), VId(2), RelationId(2), VId(4)),
         ];
-        let scalar = CanonicalScalar::Int(7);
+        let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let run = |cap| {
-            pattern.plan().execute_governed_with_properties(
+            pattern.plan().execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,
@@ -2427,7 +3301,7 @@ mod tests {
         let mut calls = 0;
         pattern
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,
@@ -2442,7 +3316,7 @@ mod tests {
             .unwrap();
         for stop in 1..=calls {
             let mut at = 0;
-            let result = pattern.plan().execute_governed_with_properties(
+            let result = pattern.plan().execute_governed_with_identified_properties(
                 4,
                 [],
                 edges,
@@ -2556,9 +3430,15 @@ mod tests {
     #[test]
     fn inline_node_maps_keep_optional_rows_parallel_edges_and_null_semantics() {
         let values = BTreeMap::from([
-            (VId(1), CanonicalScalar::Int(1)),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Null),
+            (
+                VId(1),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+            ),
+            (
+                VId(2),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(7)),
+            ),
+            (VId(3), CanonicalPropertyValue::from(CanonicalScalar::Null)),
         ]);
         let edges = [
             (VId(1), RelationId(1), VId(2)),

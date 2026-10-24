@@ -10,10 +10,14 @@
 //! Whitespace is data. Blank records are not silently skipped. A final record
 //! terminator does not invent another record. Bare CR record endings refuse.
 //!
-//! Supported declarations are Int64, UInt64 and canonical Null/Bool/Int/Text.
-//! Other kinds refuse explicitly rather than guessing a representation. Only
-//! unquoted `\N` means canonical null; quoted `"\N"` remains text. Empty text
-//! and null are distinct. Numeric legacy declarations never accept null.
+//! Supported declarations are Int64, UInt64 and canonical Null/Bool/Int/Text,
+//! finite Float, exact fixed-scale Decimal and hexadecimal Bytes. Floats use
+//! decimal binary64 conversion; decimals never round and accept no exponent;
+//! bytes have no prefix and must have an even number of hexadecimal digits.
+//! Other kinds refuse explicitly rather than guessing a representation.
+//! Only unquoted `\N` means canonical null; quoted `"\N"` remains text.
+//! Empty text/bytes and null are distinct. Legacy Int64/UInt64 never accept null.
+//! Declarations choose types; values never infer or coerce a column's type.
 //!
 //! Count, input, decoded-field and aggregate canonical-parameter bounds all
 //! apply. These are admission bounds, not an exact allocator-byte accounting
@@ -24,6 +28,8 @@ use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+
+mod scalars;
 
 /// Admission limits. Values above the hard ceilings are clamped, not unlimited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,6 +371,14 @@ fn bind_field(
             GqlParameterType::Scalar(CanonicalScalarKind::Text) => {
                 arguments.with_text(spec.name.as_str(), text)
             }
+            GqlParameterType::Scalar(
+                kind @ (CanonicalScalarKind::Float
+                | CanonicalScalarKind::Decimal
+                | CanonicalScalarKind::Bytes),
+            ) => arguments.with_scalar(
+                spec.name.as_str(),
+                scalars::decode(kind, text).map_err(fail)?,
+            ),
             GqlParameterType::Scalar(CanonicalScalarKind::Null) => return Err(invalid()),
             _ => return Err(fail(CsvParameterErrorKind::UnsupportedType)),
         }
@@ -428,6 +442,9 @@ pub fn decode_csv_parameters(
                         | CanonicalScalarKind::Bool
                         | CanonicalScalarKind::Int
                         | CanonicalScalarKind::Text
+                        | CanonicalScalarKind::Float
+                        | CanonicalScalarKind::Decimal
+                        | CanonicalScalarKind::Bytes
                 )
         ) {
             return Err(error(0, None, 0, CsvParameterErrorKind::UnsupportedType));
@@ -739,9 +756,9 @@ mod tests {
     #[test]
     fn unsupported_schema_and_positive_limit_refuse_without_coercion() {
         for kind in [
-            CanonicalScalarKind::Float,
-            CanonicalScalarKind::Decimal,
-            CanonicalScalarKind::Bytes,
+            CanonicalScalarKind::Date,
+            CanonicalScalarKind::Time,
+            CanonicalScalarKind::Duration,
             CanonicalScalarKind::Timestamp,
         ] {
             let schema = specs(&[("n", GqlParameterType::Scalar(kind))]);

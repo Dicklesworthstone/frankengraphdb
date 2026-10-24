@@ -18,6 +18,9 @@ use std::cmp::Ordering;
 struct Rank {
     order: Arc<[GraphAggregateOrder]>,
     group: Arc<GraphAggregateRow>,
+    // Share the once-evaluated tuple with its class/candidate value. The raw
+    // group remains separate for before-image validation and canonical ties.
+    projected: Option<Arc<GraphAggregateRow>>,
 }
 
 fn order_field(order: &GraphAggregateOrder) -> (u8, usize, bool, bool) {
@@ -42,6 +45,18 @@ impl Ord for Rank {
             .iter()
             .map(order_field)
             .cmp(other.order.iter().map(order_field))
+            .then_with(|| self.projected.is_some().cmp(&other.projected.is_some()))
+            .then_with(|| {
+                self.projected
+                    .as_ref()
+                    .map(|row| (row.keys().len(), row.values().len()))
+                    .cmp(
+                        &other
+                            .projected
+                            .as_ref()
+                            .map(|row| (row.keys().len(), row.values().len())),
+                    )
+            })
             .then_with(|| {
                 (self.group.keys().len(), self.group.values().len())
                     .cmp(&(other.group.keys().len(), other.group.values().len()))
@@ -49,9 +64,26 @@ impl Ord for Rank {
         if schema != Ordering::Equal {
             return schema;
         }
+        // Projected rows have no key prefix. Equal computed sort cells must
+        // reach the ORIGINAL complete key, never the other visible columns.
+        if let (Some(left), Some(right)) = (&self.projected, &other.projected) {
+            match left
+                .compare_incremental_order(right, &self.order, &mut |_| Ok::<_, Infallible>(()))
+            {
+                Ok(Some(Ordering::Equal)) => {}
+                Ok(Some(order)) => return order,
+                Ok(None) => return left.cmp(right).then_with(|| self.group.cmp(&other.group)),
+                Err(never) => match never {},
+            }
+        }
+        let order: &[GraphAggregateOrder] = if self.projected.is_some() {
+            &[]
+        } else {
+            &self.order
+        };
         match self
             .group
-            .compare_incremental_order(&other.group, &self.order, &mut |_| Ok::<_, Infallible>(()))
+            .compare_incremental_order(&other.group, order, &mut |_| Ok::<_, Infallible>(()))
         {
             Ok(Some(order)) => order,
             // Unreachable for admitted ranks, but still total for an internal
@@ -83,6 +115,7 @@ type GroupPatch = BTreeMap<GroupKey, Option<Rank>>;
 #[derive(Default)]
 pub(super) struct State {
     order: Option<Arc<[GraphAggregateOrder]>>,
+    projected_order: bool,
     groups: Groups,
     classes: RankedClasses,
     candidates: Ranked,
@@ -183,16 +216,44 @@ impl State {
         meter: &mut Meter<'_>,
     ) -> Result<Update<'a>, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        let order = match &self.order {
-            Some(order) => Arc::clone(order),
-            None => {
-                meter.units(ZSetEvent::ScratchEntry, 1 + definition.ordering().len())?;
-                Arc::from(definition.ordering())
-            }
-        };
-        if order.as_ref() != definition.ordering() {
+        let projected_order = !definition.projected_ordering().is_empty();
+        if projected_order && !definition.ordering().is_empty() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
+        // Lower result positions once into the existing exact row comparator.
+        // No per-probe metadata allocation or expression evaluation is needed.
+        let columns =
+            || {
+                definition.ordering().iter().copied().chain(
+                    definition
+                        .projected_ordering()
+                        .iter()
+                        .map(|order| GraphAggregateOrder {
+                            column: GraphAggregateColumn::Aggregate(order.column),
+                            descending: order.descending,
+                            nulls: if order.nulls_first {
+                                GraphNullPlacement::First
+                            } else {
+                                GraphNullPlacement::Last
+                            },
+                        }),
+                )
+            };
+        let order = match &self.order {
+            Some(order) => {
+                if self.projected_order != projected_order || !order.iter().copied().eq(columns()) {
+                    return Err(StandingQueryFailure::InvalidDelta);
+                }
+                Arc::clone(order)
+            }
+            None => {
+                meter.units(
+                    ZSetEvent::ScratchEntry,
+                    1 + definition.ordering().len() + definition.projected_ordering().len(),
+                )?;
+                columns().collect::<Arc<[GraphAggregateOrder]>>()
+            }
+        };
         let distinct = definition.incremental_output_is_distinct();
         let mut groups: GroupPatch = BTreeMap::new();
         let mut classes: ClassPatch = BTreeMap::new();
@@ -221,8 +282,12 @@ impl State {
                         _ => StandingQueryFailure::InvalidDelta,
                     })?
                     .ok_or(StandingQueryFailure::InvalidDelta)?;
-                if row
-                    .compare_incremental_order(row, &order, &mut |event| govern(meter, event))?
+                if projected_order && !projected.keys().is_empty() {
+                    return Err(StandingQueryFailure::InvalidDelta);
+                }
+                let sort_row = if projected_order { &projected } else { row };
+                if sort_row
+                    .compare_incremental_order(sort_row, &order, &mut |event| govern(meter, event))?
                     .is_none()
                 {
                     return Err(StandingQueryFailure::InvalidDelta);
@@ -241,9 +306,14 @@ impl State {
                 }
                 reserve_row(row, meter)?;
                 meter.charge(ZSetEvent::ScratchEntry)?;
+                // This Arc is the tuple's sole allocation. Rank and delivered
+                // candidate share it; updates with equal rank replace both.
+                meter.charge(ZSetEvent::ScratchEntry)?;
+                let projected = Arc::new(projected);
                 let rank = Rank {
                     order: Arc::clone(&order),
                     group: Arc::new(row.clone()),
+                    projected: projected_order.then(|| Arc::clone(&projected)),
                 };
                 meter.units(ZSetEvent::ScratchEntry, 2)?;
                 groups.insert(key, if sign < 0 { None } else { Some(rank.clone()) });
@@ -256,7 +326,7 @@ impl State {
                             .get(&identity)
                             .and_then(|class| class.get(&rank))
                             .map(Arc::as_ref)
-                            != Some(&projected)
+                            != Some(projected.as_ref())
                     {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
@@ -267,30 +337,22 @@ impl State {
                             entry.insert(BTreeMap::new())
                         }
                     };
-                    meter.charge(ZSetEvent::ScratchEntry)?;
                     stage(
                         patch,
                         rank,
-                        if sign < 0 {
-                            None
-                        } else {
-                            Some(Arc::new(projected))
-                        },
+                        if sign < 0 { None } else { Some(projected) },
                         meter,
                     )?;
                 } else {
-                    if sign < 0 && self.candidates.get(&rank).map(Arc::as_ref) != Some(&projected) {
+                    if sign < 0
+                        && self.candidates.get(&rank).map(Arc::as_ref) != Some(projected.as_ref())
+                    {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
-                    meter.charge(ZSetEvent::ScratchEntry)?;
                     stage(
                         &mut candidates,
                         rank,
-                        if sign < 0 {
-                            None
-                        } else {
-                            Some(Arc::new(projected))
-                        },
+                        if sign < 0 { None } else { Some(projected) },
                         meter,
                     )?;
                 }
@@ -374,6 +436,7 @@ impl State {
         Ok(Update {
             owner: self,
             order,
+            projected_order,
             groups,
             classes,
             candidates,
@@ -390,6 +453,7 @@ impl State {
 pub(super) struct Update<'a> {
     owner: &'a mut State,
     order: Arc<[GraphAggregateOrder]>,
+    projected_order: bool,
     groups: GroupPatch,
     classes: ClassPatch,
     candidates: RankPatch,
@@ -414,6 +478,7 @@ impl Update<'_> {
         let Self {
             owner,
             order,
+            projected_order,
             groups,
             classes,
             candidates,
@@ -452,6 +517,7 @@ impl Update<'_> {
         }
         publish_ranked(&mut owner.candidates, candidates);
         owner.order = Some(order);
+        owner.projected_order = projected_order;
         if let Some(page) = page {
             owner.page = page;
         }
@@ -463,3 +529,6 @@ impl Update<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod projected_rank_tests;

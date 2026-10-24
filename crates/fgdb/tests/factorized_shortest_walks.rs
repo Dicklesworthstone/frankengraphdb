@@ -47,7 +47,7 @@ fn probe(anti: bool) -> PreparedGraphPattern<GraphValueRow> {
     let negate = if anti { "NOT " } else { "" };
     prepare(&format!(
         "MATCH (a:Root) WHERE {negate}EXISTS {{ \
-         MATCH ALL SHORTEST WALK (a)-[:R*1024]->(b) }} RETURN a"
+         MATCH REPEATABLE ELEMENTS ALL SHORTEST WALK (a)-[:R*1024]->(b) }} RETURN a"
     ))
 }
 
@@ -175,7 +175,7 @@ fn shared_layers_preserve_all_occurrences_in_the_public_value_row_pipeline() {
         seed(&mut db, &commit, 2).await;
         for (minimum, maximum, expected) in [(0, 6, 1), (1, 6, 2), (6, 6, 64)] {
             let plan = prepare(&format!(
-                "MATCH ALL SHORTEST WALK (a)-[:R*{minimum}..{maximum}]->(b) \
+                "MATCH REPEATABLE ELEMENTS ALL SHORTEST WALK (a)-[:R*{minimum}..{maximum}]->(b) \
                  WHERE a<>b RETURN ALL b"
             ));
             // No result: endpoint filtering must not invent a longer shortest
@@ -187,7 +187,7 @@ fn shared_layers_preserve_all_occurrences_in_the_public_value_row_pipeline() {
                     .is_empty()
             );
             let plan = prepare(&format!(
-                "MATCH ALL SHORTEST WALK (a)-[:R*{minimum}..{maximum}]->(b) RETURN ALL b"
+                "MATCH REPEATABLE ELEMENTS ALL SHORTEST WALK (a)-[:R*{minimum}..{maximum}]->(b) RETURN ALL b"
             ));
             let result = db
                 .execute_graph_pattern_governed(&query, &plan, policy())

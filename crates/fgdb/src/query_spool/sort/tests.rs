@@ -38,6 +38,16 @@ fn typed_cmp(a: &GraphValueRow, b: &GraphValueRow, order: &[GraphValueOrder]) ->
     a.cmp(b)
 }
 
+fn graph_map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
+    GraphValue::map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+    .unwrap()
+}
+
 #[test]
 fn encoded_order_matches_typed_cells_not_length_prefixes() {
     let ((), report) = run_async_under_lab(0x50a7_0001, |root| async move {
@@ -67,6 +77,34 @@ fn encoded_order_matches_typed_cells_not_length_prefixes() {
                 .into_boxed_slice(),
             ),
             GraphValue::List(Box::new([])),
+            graph_map(vec![]),
+            graph_map(vec![("z", GraphValue::Scalar(CanonicalScalar::Int(-1)))]),
+            graph_map(vec![("aa", GraphValue::Scalar(CanonicalScalar::Int(1)))]),
+            // All keys precede all values in the typed order. The first
+            // values deliberately oppose the later keys and key-vector length.
+            graph_map(vec![("a", GraphValue::Scalar(CanonicalScalar::Int(99)))]),
+            graph_map(vec![
+                ("a", GraphValue::Scalar(CanonicalScalar::Int(99))),
+                ("b", GraphValue::Scalar(CanonicalScalar::Null)),
+            ]),
+            graph_map(vec![
+                ("a", GraphValue::Scalar(CanonicalScalar::Int(-99))),
+                ("z", GraphValue::Scalar(CanonicalScalar::Null)),
+            ]),
+            graph_map(vec![
+                ("a", GraphValue::Scalar(CanonicalScalar::Int(100))),
+                ("b", GraphValue::Scalar(CanonicalScalar::Null)),
+            ]),
+            graph_map(vec![
+                ("", GraphValue::List(Box::new([]))),
+                (
+                    "\0é",
+                    graph_map(vec![("nested", GraphValue::Vertex(VId(2)))]),
+                ),
+            ]),
+            GraphValue::List(
+                vec![graph_map(vec![("a", GraphValue::Edge(EId(1)))])].into_boxed_slice(),
+            ),
         ];
         let rows: Vec<_> = values
             .into_iter()
@@ -147,6 +185,183 @@ fn every_truncated_frame_and_excess_depth_refuse_without_allocation() {
             .canonical_bytes()
             .unwrap();
         assert!(canonical::validate(&deep, 1, &mut work).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn map_admission_checks_complete_keys_children_depth_and_node_bounds() {
+    fn row_from_body(body: &[u8]) -> Vec<u8> {
+        let mut value = b"fgdb:graph-value:v1\0".to_vec();
+        value.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        value.extend_from_slice(body);
+        let mut row = canonical::ROW.to_vec();
+        row.extend_from_slice(&1_u64.to_be_bytes());
+        row.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        row.extend_from_slice(&value);
+        row
+    }
+    let ((), report) = run_async_under_lab(0x50a7_000a, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let mut work = Work {
+            cx: &cx,
+            used: 0,
+            limit: u64::MAX,
+        };
+        for keys in [["same", "same"], ["z", "a"]] {
+            let bad = GraphValue::Map {
+                keys: keys.into_iter().map(Box::<str>::from).collect(),
+                values: vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(2))]
+                    .into_boxed_slice(),
+            };
+            for value in [bad.clone(), GraphValue::List(vec![bad].into_boxed_slice())] {
+                let encoded = GraphValueRow::from_owned_values(vec![value])
+                    .canonical_bytes()
+                    .unwrap();
+                assert!(GraphValueRow::decode_canonical(&encoded).is_err());
+                assert!(matches!(
+                    canonical::validate(&encoded, 1, &mut work),
+                    Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+                ));
+            }
+        }
+        let child = GraphValue::Scalar(CanonicalScalar::Null)
+            .canonical_bytes()
+            .unwrap();
+        let child = child.strip_prefix(b"fgdb:graph-value:v1\0").unwrap();
+        for key in [
+            vec![0xff],
+            vec![0xc3],
+            vec![0xc0, 0x80],
+            vec![0xed, 0xa0, 0x80],
+            [vec![b'a'; 1023], vec![0xc3, b'x']].concat(),
+        ] {
+            let mut body = vec![7];
+            body.extend_from_slice(&1_u64.to_be_bytes());
+            body.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            body.extend_from_slice(&key);
+            body.extend_from_slice(child);
+            let encoded = row_from_body(&body);
+            assert!(GraphValueRow::decode_canonical(&encoded).is_err());
+            assert!(canonical::validate(&encoded, 1, &mut work).is_err());
+        }
+        let mut nested = GraphValue::Scalar(CanonicalScalar::Null);
+        for _ in 0..GraphValue::MAX_LIST_DEPTH {
+            nested = graph_map(vec![("child", nested)]);
+        }
+        let valid = GraphValueRow::from_owned_values(vec![nested.clone()])
+            .canonical_bytes()
+            .unwrap();
+        canonical::validate(&valid, 1, &mut work).unwrap();
+        for end in 0..valid.len() {
+            assert!(canonical::validate(&valid[..end], 1, &mut work).is_err());
+        }
+        let too_deep = GraphValueRow::from_owned_values(vec![graph_map(vec![("child", nested)])])
+            .canonical_bytes()
+            .unwrap();
+        assert!(canonical::validate(&too_deep, 1, &mut work).is_err());
+
+        let mut body = vec![7];
+        body.extend_from_slice(&((GraphValue::MAX_LIST_NODES - 1) as u64).to_be_bytes());
+        for index in 0..GraphValue::MAX_LIST_NODES - 1 {
+            let key = format!("{index:05}");
+            body.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            body.extend_from_slice(key.as_bytes());
+            body.extend_from_slice(child);
+        }
+        canonical::validate(&row_from_body(&body), 1, &mut work).unwrap();
+        body[1..9].copy_from_slice(&(GraphValue::MAX_LIST_NODES as u64).to_be_bytes());
+        work.used = 0;
+        assert!(canonical::validate(&row_from_body(&body), 1, &mut work).is_err());
+        assert_eq!(work.used, 2, "the child count refuses before reading keys");
+
+        // A hidden invalid map may not escape validation when only the first
+        // visible column is returned by an ordered query.
+        let hidden = GraphValue::Map {
+            keys: vec!["z".into(), "a".into()].into_boxed_slice(),
+            values: vec![GraphValue::Vertex(VId(1)); 2].into_boxed_slice(),
+        };
+        let encoded = GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(0)), hidden])
+            .canonical_bytes()
+            .unwrap();
+        assert!(canonical::visible_prefix(&encoded, 2, 1, &mut work).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn long_map_keys_preserve_utf8_boundaries_and_stop_at_every_control_cut() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+
+    let ((), report) = run_async_under_lab(0x50a7_000b, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        // The two-byte character crosses the first validation chunk. Identical
+        // long keys force both the key-vector and value-vector comparison passes.
+        let key = format!("{}é{}", "x".repeat(1023), "y".repeat(2048));
+        let left = GraphValueRow::from_owned_values(vec![graph_map(vec![
+            (&key, GraphValue::Scalar(CanonicalScalar::Int(-1))),
+            ("z", graph_map(vec![("inner", GraphValue::Vertex(VId(4)))])),
+        ])]);
+        let right = GraphValueRow::from_owned_values(vec![graph_map(vec![
+            (&key, GraphValue::Scalar(CanonicalScalar::Int(1))),
+            ("z", graph_map(vec![("inner", GraphValue::Vertex(VId(0)))])),
+        ])]);
+        let (a, b) = (
+            left.canonical_bytes().unwrap(),
+            right.canonical_bytes().unwrap(),
+        );
+        let order = [GraphValueOrder::ascending(0)];
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+        let mut work = Work {
+            cx: &observed,
+            used: 0,
+            limit: u64::MAX,
+        };
+        canonical::validate(&a, 1, &mut work).unwrap();
+        canonical::validate(&b, 1, &mut work).unwrap();
+        assert_eq!(
+            canonical::compare(&a, &b, &order, 1, &mut work).unwrap(),
+            left.cmp(&right)
+        );
+        let required = work.used;
+        assert!(required > key.len() as u64);
+        for limit in [required - 1, required] {
+            let mut work = Work {
+                cx: &cx,
+                used: 0,
+                limit,
+            };
+            let result = canonical::validate(&a, 1, &mut work)
+                .and_then(|()| canonical::validate(&b, 1, &mut work))
+                .and_then(|()| canonical::compare(&a, &b, &order, 1, &mut work));
+            if limit == required {
+                assert_eq!(result.unwrap(), left.cmp(&right));
+                assert_eq!(work.used, required);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(NativeSpoolError::SortWorkLimit { .. })
+                ));
+            }
+        }
+        for stop in 1..=probe.calls() {
+            let control = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&control));
+            let mut work = Work {
+                cx: &interrupted,
+                used: 0,
+                limit: u64::MAX,
+            };
+            let result = canonical::validate(&a, 1, &mut work)
+                .and_then(|()| canonical::validate(&b, 1, &mut work))
+                .and_then(|()| canonical::compare(&a, &b, &order, 1, &mut work));
+            assert!(matches!(
+                result,
+                Err(NativeSpoolError::Spill(SpillError::Interrupted(_)))
+            ));
+            assert_eq!(control.calls(), stop);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -356,6 +571,118 @@ fn real_native_results_merge_beyond_resident_limit_with_gla_order_and_original_s
                     assert_eq!(contents(&spool, &mut source, &cx).await, original);
                     assert_eq!(pool.used(), 0);
                 }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn map_frames_merge_beyond_the_pool_cap_in_native_key_then_value_order() {
+    let ((), report) = run_async_under_lab(0x50a7_000c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit(), 41).await;
+        let params = GqlParameters::new();
+        let prepared = plan();
+        let (_, cursor) = prepared.stream(&db, &cx, &params, policy()).unwrap();
+        let rows: Vec<_> = cursor
+            .enumerate()
+            .map(|(index, row)| {
+                let row = row.unwrap();
+                GraphValueRow::from_owned_values(vec![
+                    row.values()[0].clone(),
+                    graph_map(vec![
+                        ("a", row.values()[1].clone()),
+                        (
+                            if index % 2 == 0 { "b" } else { "z" },
+                            GraphValue::List(
+                                vec![graph_map(vec![("payload", row.values()[2].clone())])]
+                                    .into_boxed_slice(),
+                            ),
+                        ),
+                    ]),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ])
+            })
+            .collect();
+        let encoded: Vec<_> = rows
+            .iter()
+            .map(|row| row.canonical_bytes().unwrap())
+            .collect();
+        let pool = MemoryPool::new(24_000, 0).unwrap();
+        for run_rows in [1, 3] {
+            for descending in [false, true] {
+                let (mut source, _) = scratch(&cx, &pool).await;
+                let (mut destination, _) = scratch(&cx, &pool).await;
+                let mut spool = prepared
+                    .spool(&db, &cx, &params, policy(), &mut source, 97, 4096)
+                    .await
+                    .unwrap();
+                // A private sorter fixture, retaining the admitted native
+                // schema/row count, substitutes correctly framed map tuples.
+                // This exercises the real paged writer, reader and every merge.
+                let mut writer = source.paged_writer(&cx, 97).unwrap();
+                for frame in encoded.iter().rev() {
+                    writer
+                        .write(&cx, &(frame.len() as u64).to_be_bytes())
+                        .await
+                        .unwrap();
+                    writer.write(&cx, frame).await.unwrap();
+                }
+                spool.run = writer.finish(&cx).await.unwrap();
+                spool.max_row_bytes = encoded.iter().map(Vec::len).max().unwrap();
+                assert!(spool.encoded_len() > pool.limit());
+                let order = [GraphValueOrder {
+                    column: 1,
+                    descending,
+                    nulls_first: false,
+                }];
+                let mut expected = rows.clone();
+                expected.sort_by(|a, b| typed_cmp(a, b, &order));
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|row| row.canonical_bytes().unwrap())
+                    .collect();
+                let (sorted, work) = spool
+                    .sort_into(
+                        &cx,
+                        &mut source,
+                        &mut destination,
+                        &order,
+                        run_rows,
+                        64,
+                        113,
+                        u64::MAX,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(contents(&sorted, &mut destination, &cx).await, expected);
+                assert_eq!(sorted.row_stats(), spool.row_stats());
+                assert_eq!(sorted.evaluator_stats(), spool.evaluator_stats());
+                assert!(destination.stats().published_runs > 1);
+                assert_eq!(pool.used(), 0);
+
+                let (mut refused, _) = scratch(&cx, &pool).await;
+                let error = spool
+                    .sort_into(
+                        &cx,
+                        &mut source,
+                        &mut refused,
+                        &order,
+                        run_rows,
+                        64,
+                        113,
+                        work - 1,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, NativeSpoolError::SortWorkLimit { .. }));
+                assert_eq!(
+                    pool.used(),
+                    0,
+                    "a late map-sort refusal releases every row and page"
+                );
             }
         }
     });

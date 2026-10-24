@@ -33,9 +33,9 @@
 //! `retired_prefix_commitment` plus an `active_cut_ref`. The kinds are
 //! `reserved` rather than `active` so the ref is not spellable, and the
 //! commitment is a digest this crate cannot compute (`fgdb-crypto` is a higher
-//! foundation position). Entries are therefore held by value — which is
-//! consistent with the retention story, since the index is what retains a batch
-//! — and [`retire_prefix`](LocalDeltaBatchIndex::retire_prefix) *returns* the
+//! foundation position). Entries are therefore owned immutable values behind
+//! process-local Arcs: each index retains its batches, and a cloned generation
+//! shares their payloads. [`retire_prefix`](LocalDeltaBatchIndex::retire_prefix) *returns* the
 //! batches it dropped so the consumer that owns hashing can commit to exactly
 //! them. A commitment field stored here would be one nothing in this crate
 //! could verify, and so one free to lie.
@@ -43,6 +43,7 @@
 use crate::LogicalDeltaBatch;
 use fgdb_types::{CommitSeq, CommitSeqExhausted as CommitSeqExhaustion};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Index format version (§16.6: durable formats are versioned from day one).
 pub const INDEX_FORMAT_V1: u16 = 1;
@@ -55,6 +56,9 @@ pub const INDEX_FORMAT_V1: u16 = 1;
 /// §5.2 permanent fail-closed condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexError {
+    /// Sequence zero is the empty stream and cannot identify a committed
+    /// boundary, even when the caller holds a commit capability.
+    OriginAnchor,
     /// The persisted frontier is the largest representable sequence, so no
     /// further batch can be assigned without wrapping to the reserved origin.
     CommitSeqExhausted(CommitSeqExhaustion),
@@ -122,6 +126,7 @@ pub enum IndexError {
 impl core::fmt::Display for IndexError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::OriginAnchor => f.write_str("the delta origin is not a committed boundary"),
             Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
             Self::Gapped { expected, found } => write!(
                 f,
@@ -185,14 +190,19 @@ impl From<CommitSeqExhaustion> for IndexError {
 }
 
 /// The bounded window of retained local delta batches.
+///
+/// Cloning copies the map's entries and shares each immutable batch allocation.
+/// Scalar-bearing historical rows are never recursively copied just to retain
+/// an older generation while its successor appends or retires a prefix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalDeltaBatchIndex {
     format: u16,
     retained_after_commit_seq: CommitSeq,
     frontier: CommitSeq,
-    entries: BTreeMap<u64, LogicalDeltaBatch>,
+    entries: BTreeMap<u64, Arc<LogicalDeltaBatch>>,
     // Only the exact boundary identity, not its rows or a prefix commitment.
-    // Set exclusively by retiring a present, envelope-checked batch. This is
+    // Set by retiring a present, envelope-checked batch or by the recovered
+    // marker authority when checkpoint open omits its capsule. This is
     // process-local continuity evidence within the caller-authenticated index;
     // it neither authenticates an imported index nor authorizes object GC.
     retired_boundary: Option<(u16, fgdb_types::MarkerRef, [u8; 32])>,
@@ -234,6 +244,33 @@ impl LocalDeltaBatchIndex {
         }
     }
 
+    /// An empty window bound to a caller-authenticated committed marker.
+    ///
+    /// Checkpoint recovery can retain the exact frontier identity without
+    /// reading its capsule. The caller must authenticate BOTH the marker and
+    /// its declared template digest from the same recovered chain. As with
+    /// `LogicalDeltaBatch::order`, the commit capability is an authority
+    /// witness, not a storage observation performed by this crate.
+    ///
+    /// This does not fabricate a batch, attest any old rows, or authorize
+    /// retirement. Older cursors still refuse; a fresh snapshot consumer can
+    /// bind its topology to this exact marker before following successors.
+    pub fn empty_at_committed(
+        marker: crate::CommittedMarker,
+        source_template_digest: [u8; 32],
+    ) -> Result<Self, IndexError> {
+        let marker = marker.marker();
+        if marker.commit_seq == CommitSeq::ORIGIN {
+            return Err(IndexError::OriginAnchor);
+        }
+        let mut index = Self::empty_at(marker.commit_seq);
+        // The capsule is not read, so the anchor's own format is unknown; the
+        // boundary names the base format, which every reader accepts as an
+        // anchor (the format only ever gates the reading of rows).
+        index.retired_boundary = Some((crate::DELTA_FORMAT_V1, marker, source_template_digest));
+        Ok(index)
+    }
+
     /// Build a window from parts, INCLUDING incoherent ones.
     ///
     /// Test-facing. `insert` and `retire_prefix` maintain the gap-free
@@ -249,7 +286,7 @@ impl LocalDeltaBatchIndex {
     ) -> Self {
         let mut entries = BTreeMap::new();
         for (stored_seq, batch) in keyed_batches {
-            entries.insert(stored_seq.0, batch);
+            entries.insert(stored_seq.0, Arc::new(batch));
         }
         Self {
             format: INDEX_FORMAT_V1,
@@ -290,12 +327,12 @@ impl LocalDeltaBatchIndex {
     }
 
     pub fn get(&self, commit_seq: CommitSeq) -> Option<&LogicalDeltaBatch> {
-        self.entries.get(&commit_seq.0)
+        self.entries.get(&commit_seq.0).map(Arc::as_ref)
     }
 
     /// Every retained batch in commit order.
     pub fn iter(&self) -> impl Iterator<Item = &LogicalDeltaBatch> {
-        self.entries.values()
+        self.entries.values().map(Arc::as_ref)
     }
 
     /// The retained batches strictly after `after`, in commit order.
@@ -337,7 +374,7 @@ impl LocalDeltaBatchIndex {
                 std::ops::Bound::Excluded(after.0),
                 std::ops::Bound::Unbounded,
             ))
-            .map(|(_, batch)| batch))
+            .map(|(_, batch)| batch.as_ref()))
     }
 
     /// The sequence the next insertion must carry.
@@ -417,13 +454,15 @@ impl LocalDeltaBatchIndex {
             });
         }
 
-        self.entries.insert(commit_seq.0, batch);
+        self.entries.insert(commit_seq.0, Arc::new(batch));
         self.frontier = commit_seq;
         Ok(())
     }
 
     /// Retire everything at or below `through`, returning the dropped batches
-    /// in commit order.
+    /// in commit order. Unique batches transfer their existing payloads; a batch
+    /// still shared with another window is cloned only for this owned return.
+    /// Retained batches keep their shared allocations.
     ///
     /// They are RETURNED rather than discarded because the consumer owes a
     /// `retired_prefix_commitment` over exactly them, and it is the only layer
@@ -475,7 +514,7 @@ impl LocalDeltaBatchIndex {
             .collect();
         for key in keys {
             if let Some(batch) = self.entries.remove(&key) {
-                retired.push(batch);
+                retired.push(Arc::unwrap_or_clone(batch));
             }
         }
         self.retired_boundary = boundary;
@@ -581,3 +620,250 @@ mod tests {
 #[cfg(test)]
 #[path = "index/retired_tests.rs"]
 mod retired_tests;
+
+#[cfg(test)]
+mod shared_batch_tests {
+    use super::*;
+    use crate::{CoordinateEntry, DeltaRow, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+    use fgdb_types::{BranchId, CanonicalScalar, GraphId, MarkerRef, ObjectId, VId};
+
+    fn batch(seq: u64) -> LogicalDeltaBatch {
+        LogicalDeltaBatch::from_parts_for_test(
+            vec![CoordinateEntry {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                relation: RelationId(1),
+                schema_epoch: SchemaEpoch(1),
+                schema_transition: None,
+                rows: vec![DeltaRow::CreateVertex {
+                    vid: VId(u128::from(seq)),
+                    birth_ordinal: seq,
+                    labels: vec![LabelId(1), LabelId(9)],
+                    props: vec![
+                        (
+                            PropertyKeyId(3),
+                            CanonicalScalar::bytes(vec![seq as u8; 1024])
+                                .unwrap()
+                                .into(),
+                        ),
+                        (
+                            PropertyKeyId(8),
+                            CanonicalScalar::ucs_basic_text("retained change")
+                                .unwrap()
+                                .into(),
+                        ),
+                    ],
+                    valid_time: None,
+                }],
+            }],
+            [seq as u8; 32],
+            MarkerRef {
+                marker_oid: ObjectId([seq as u8; 32]),
+                commit_seq: CommitSeq(seq),
+            },
+            CommitSeq(seq),
+            CommitSeq(seq),
+        )
+    }
+
+    fn payload_addresses(batch: &LogicalDeltaBatch) -> [usize; 4] {
+        let coordinates = batch.coordinate_entries();
+        let rows = &coordinates[0].rows;
+        let DeltaRow::CreateVertex { labels, props, .. } = &rows[0] else {
+            panic!("the fixture must contain a scalar-bearing vertex creation");
+        };
+        [
+            coordinates.as_ptr() as usize,
+            rows.as_ptr() as usize,
+            labels.as_ptr() as usize,
+            props.as_ptr() as usize,
+        ]
+    }
+
+    #[test]
+    fn cloned_windows_share_payloads_while_appends_and_cursors_remain_independent() {
+        let mut live = LocalDeltaBatchIndex::new();
+        for seq in 1..=3 {
+            live.insert(batch(seq)).unwrap();
+        }
+        let pinned = live.clone();
+        for seq in 1..=3 {
+            let left = live.get(CommitSeq(seq)).unwrap();
+            let right = pinned.get(CommitSeq(seq)).unwrap();
+            assert!(
+                core::ptr::eq(left, right),
+                "cloning a delta window copied batch {seq}"
+            );
+            assert_eq!(payload_addresses(left), payload_addresses(right));
+        }
+
+        live.insert(batch(4)).unwrap();
+        live.verify().unwrap();
+        pinned.verify().unwrap();
+        assert_eq!(pinned.frontier(), CommitSeq(3));
+        assert!(pinned.get(CommitSeq(4)).is_none());
+        assert_eq!(
+            live.iter()
+                .map(LogicalDeltaBatch::commit_seq)
+                .collect::<Vec<_>>(),
+            vec![CommitSeq(1), CommitSeq(2), CommitSeq(3), CommitSeq(4)],
+        );
+        assert_eq!(
+            live.since(CommitSeq(2))
+                .unwrap()
+                .map(LogicalDeltaBatch::commit_seq)
+                .collect::<Vec<_>>(),
+            vec![CommitSeq(3), CommitSeq(4)],
+        );
+        assert_eq!(
+            pinned
+                .since(CommitSeq(2))
+                .unwrap()
+                .map(LogicalDeltaBatch::commit_seq)
+                .collect::<Vec<_>>(),
+            vec![CommitSeq(3)],
+        );
+        for (left, right) in live.iter().zip(pinned.iter()) {
+            assert!(core::ptr::eq(left, right));
+        }
+    }
+
+    #[test]
+    fn retirement_transfers_unique_payloads_and_copies_only_shared_removed_batches() {
+        let mut unique = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(3),
+            (1..=3).map(|seq| (CommitSeq(seq), batch(seq))).collect(),
+        );
+        unique.verify().unwrap();
+        let original: Vec<_> = unique.iter().map(payload_addresses).collect();
+        let retired = unique.retire_prefix(CommitSeq(2)).unwrap();
+        assert_eq!(retired, vec![batch(1), batch(2)]);
+        for (actual, expected) in retired.iter().map(payload_addresses).zip(&original) {
+            assert_eq!(
+                actual, *expected,
+                "unique retirement must transfer all nested allocations"
+            );
+        }
+        assert_eq!(
+            payload_addresses(unique.get(CommitSeq(3)).unwrap()),
+            original[2]
+        );
+        unique.verify().unwrap();
+
+        let mut live = LocalDeltaBatchIndex::new();
+        for seq in 1..=4 {
+            live.insert(batch(seq)).unwrap();
+        }
+        let pinned = live.clone();
+        let retained = live.entries.get(&3).unwrap().clone();
+        let removed = live.retire_prefix(CommitSeq(2)).unwrap();
+        assert_eq!(removed, vec![batch(1), batch(2)]);
+        for returned in &removed {
+            let still_pinned = pinned.get(returned.commit_seq()).unwrap();
+            for (owned_address, pinned_address) in payload_addresses(returned)
+                .into_iter()
+                .zip(payload_addresses(still_pinned))
+            {
+                assert_ne!(
+                    owned_address, pinned_address,
+                    "the owned retirement result aliases a still-pinned payload"
+                );
+            }
+        }
+        assert!(Arc::ptr_eq(live.entries.get(&3).unwrap(), &retained));
+        assert!(core::ptr::eq(
+            live.get(CommitSeq(4)).unwrap(),
+            pinned.get(CommitSeq(4)).unwrap(),
+        ));
+        assert_eq!(live.retained_after_commit_seq(), CommitSeq(2));
+        assert_eq!(pinned.retained_after_commit_seq(), CommitSeq(0));
+        assert_eq!(pinned.iter().count(), 4);
+        assert!(matches!(
+            live.since(CommitSeq(1)),
+            Err(IndexError::CursorRetired { .. })
+        ));
+        assert_eq!(pinned.since(CommitSeq(1)).unwrap().count(), 3);
+        live.verify().unwrap();
+        pinned.verify().unwrap();
+        let boundary = live.retired_boundary_identity();
+        assert_eq!(
+            boundary,
+            Some((
+                batch(2).format(),
+                batch(2).commit_marker_identity(),
+                [2; 32]
+            )),
+        );
+        assert!(live.retire_prefix(CommitSeq(2)).unwrap().is_empty());
+        assert_eq!(live.retired_boundary_identity(), boundary);
+    }
+
+    #[test]
+    fn refused_mutations_preserve_the_shared_window_and_payload_owners() {
+        let mut live = LocalDeltaBatchIndex::new();
+        live.insert(batch(1)).unwrap();
+        live.insert(batch(2)).unwrap();
+        let pinned = live.clone();
+        let wrong_marker = LogicalDeltaBatch::from_parts_for_test(
+            vec![],
+            [3; 32],
+            batch(2).commit_marker_identity(),
+            CommitSeq(3),
+            CommitSeq(3),
+        );
+        let wrong_frontier = LogicalDeltaBatch::from_parts_for_test(
+            vec![],
+            [3; 32],
+            batch(3).commit_marker_identity(),
+            CommitSeq(3),
+            CommitSeq(4),
+        );
+        for (candidate, expected) in [
+            (
+                batch(2),
+                IndexError::Duplicate {
+                    frontier: CommitSeq(2),
+                    found: CommitSeq(2),
+                },
+            ),
+            (
+                batch(4),
+                IndexError::Gapped {
+                    expected: CommitSeq(3),
+                    found: CommitSeq(4),
+                },
+            ),
+            (
+                wrong_marker,
+                IndexError::WrongMarker {
+                    batch_commit_seq: CommitSeq(3),
+                    marker_commit_seq: CommitSeq(2),
+                },
+            ),
+            (
+                wrong_frontier,
+                IndexError::WrongFrontier {
+                    commit_seq: CommitSeq(3),
+                    frontier: CommitSeq(4),
+                },
+            ),
+        ] {
+            assert_eq!(live.insert(candidate), Err(expected));
+            assert_eq!(live, pinned);
+            for (left, right) in live.iter().zip(pinned.iter()) {
+                assert!(core::ptr::eq(left, right));
+            }
+        }
+        assert!(matches!(
+            live.retire_prefix(CommitSeq(3)),
+            Err(IndexError::UnretirableInterval { .. })
+        ));
+        assert_eq!(live, pinned);
+        assert!(live.retired_boundary_identity().is_none());
+        for (left, right) in live.iter().zip(pinned.iter()) {
+            assert!(core::ptr::eq(left, right));
+        }
+        live.verify().unwrap();
+    }
+}

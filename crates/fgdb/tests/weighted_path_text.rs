@@ -3,7 +3,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, GqlError, MemVfs, WriteBatch, WriteError, WriteTxnError};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_gql::algebra::GlaDirection;
+use fgdb_gql::algebra::{GlaDirection, GraphMatchMode};
 use fgdb_gql::{
     BoundGraphCheapestPathQuery, GqlParameters, GqlQueryError, GqlQueryPolicy,
     GraphCheapestPathError, GraphCheapestPathMode, GraphPathCostError, GraphSymbol,
@@ -98,6 +98,129 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
 }
 
 #[test]
+fn weighted_match_modes_keep_parallel_identity_through_overlays_history_and_recovery() {
+    let ((), report) = run_async_under_lab(0xc0a5_2015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(START, vec![], vec![]);
+        batch.create_vertex(END, vec![], vec![]);
+        batch.add_edge(EId(1), START, END, vec![(W, CanonicalScalar::Int(-10))]);
+        let basis = db.write(&commit, batch).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let prepare = |prefix: &str, selector: &str| {
+            PreparedGraphCheapestPathText::prepare(
+                &format!(
+                    "MATCH {prefix}p = {selector} SIMPLE (s)-[e:ROAD*2]-(s) COST e.cost RETURN p"
+                ),
+                resolver,
+            )
+            .unwrap()
+            .bind(START, START, &GqlParameters::new())
+            .unwrap()
+        };
+        let default = prepare("", "ANY CHEAPEST");
+        let different = prepare("DIFFERENT EDGES ", "CHEAPEST 4");
+        let repeatable = prepare("REPEATABLE ELEMENTS ", "ANY CHEAPEST");
+        assert!(
+            db.execute_graph_cheapest_path_text_governed(&cx, &default, policy())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        let old_repeatable = db
+            .execute_graph_cheapest_path_text_governed(&cx, &repeatable, policy())
+            .unwrap()
+            .value;
+        assert_eq!(old_repeatable.len(), 1);
+        assert_eq!(old_repeatable[0].cost(), -20);
+        assert_eq!(
+            old_repeatable[0].path().steps(),
+            &[(EId(1), END), (EId(1), START)]
+        );
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut parallel = WriteBatch::new(R);
+        parallel.add_edge(EId(2), START, END, vec![(W, CanonicalScalar::Int(3))]);
+        txn.write(&mut db, parallel).unwrap();
+        let expected = txn
+            .execute_graph_cheapest_path_text_governed(&db, &cx, &different, policy())
+            .unwrap()
+            .value;
+        assert_eq!(expected.len(), 2);
+        assert!(
+            expected
+                .iter()
+                .all(|row| row.cost() == -7 && row.path().steps()[0].0 != row.path().steps()[1].0)
+        );
+        assert_eq!(
+            txn.execute_graph_cheapest_path_text_governed(&db, &cx, &default, policy())
+                .unwrap()
+                .value,
+            expected[..1]
+        );
+        assert_eq!(
+            txn.execute_graph_cheapest_path_text_governed(&db, &cx, &repeatable, policy())
+                .unwrap()
+                .value,
+            old_repeatable
+        );
+        assert!(
+            db.execute_graph_cheapest_path_text_governed(&cx, &different, policy())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.execute_graph_cheapest_path_text_governed(&cx, &different, policy())
+                .unwrap()
+                .value,
+            expected
+        );
+        assert_eq!(
+            db.execute_graph_cheapest_path_text_governed(&cx, &default, policy())
+                .unwrap()
+                .value,
+            expected[..1]
+        );
+        assert!(
+            db.execute_graph_cheapest_path_text_governed_at(&cx, &different, basis, policy())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        assert!(
+            pinned
+                .execute_graph_cheapest_path_text_governed(&cx, &different, policy())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            pinned
+                .execute_graph_cheapest_path_text_governed(&cx, &repeatable, policy())
+                .unwrap()
+                .value,
+            old_repeatable
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn weighted_text_has_native_accounting_across_live_history_pins_overlays_and_recovery() {
     let ((), report) = run_async_under_lab(0xc0a5_2011, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -135,7 +258,8 @@ fn weighted_text_has_native_accounting_across_live_history_pins_overlays_and_rec
                         GraphWalkBounds::new(0, 3).unwrap(),
                     )
                     .unwrap()
-                    .with_mode(mode);
+                    .with_mode(mode)
+                    .with_match_mode(GraphMatchMode::DifferentEdges);
                     assert_eq!(req.query().canonical_bytes(), typed.canonical_bytes());
                     let baseline = match count {
                         Some(k) => {

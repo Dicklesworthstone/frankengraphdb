@@ -50,7 +50,10 @@ use fgdb_reference::intents::{Intent, MismatchPolicy, Statement};
 use fgdb_reference::ssi::{DangerousStructure, TxnTrace, dangerous_structures};
 use fgdb_reference::txn::{Transaction, TxnOutcome};
 use fgdb_reference::{BranchOrigin, ConflictKey, ReferenceDatabase, ReferenceGraph};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, LogicalCommandSeq, ObjectId,
+    VId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -708,7 +711,7 @@ impl BranchCoverage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NaiveVertex {
     birth_ordinal: u64,
-    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -717,7 +720,7 @@ struct NaiveEdge {
     birth_ordinal: u64,
     src: u128,
     dst: u128,
-    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -742,7 +745,7 @@ impl NaiveGraph {
                         vid,
                         NaiveVertex {
                             birth_ordinal,
-                            props: BTreeMap::from([(PROP, CanonicalScalar::Int(value))]),
+                            props: BTreeMap::from([(PROP, CanonicalScalar::Int(value).into())]),
                             valid_time: None,
                         },
                     )
@@ -817,7 +820,7 @@ impl NaiveGraph {
                     }
                 };
                 if let Some(value) = after {
-                    props.insert(PROP, CanonicalScalar::Int(value));
+                    props.insert(PROP, CanonicalScalar::Int(value).into());
                 } else {
                     props.remove(&PROP);
                 }
@@ -862,7 +865,7 @@ impl NaiveGraph {
             .collect()
     }
 
-    fn property(&self, elem: ElementId) -> Option<&CanonicalScalar> {
+    fn property(&self, elem: ElementId) -> Option<&CanonicalPropertyValue> {
         match elem {
             ElementId::Vertex(vid) => self.vertices.get(&vid.0)?.props.get(&PROP),
             ElementId::Edge(eid) => self.edges.get(&eid.0)?.props.get(&PROP),
@@ -1459,7 +1462,7 @@ fn delta_row_for_branch(
                 vid: VId(vid),
                 birth_ordinal,
                 labels: vec![LABEL],
-                props: vec![(PROP, CanonicalScalar::Int(value))],
+                props: vec![(PROP, CanonicalScalar::Int(value).into())],
                 valid_time: None,
             })
         }
@@ -1521,7 +1524,7 @@ fn delta_row_for_branch(
                 elem,
                 property: PROP,
                 before,
-                after: after.map(CanonicalScalar::Int),
+                after: after.map(|value| CanonicalScalar::Int(value).into()),
             })
         }
         BranchStep::SetValidTime { elem, after } => {
@@ -2164,7 +2167,7 @@ fn branch_differential_detects_dropped_property_and_valid_time_rows() {
             vid: VId(1),
             birth_ordinal: 1,
             labels: vec![LABEL],
-            props: vec![(PROP, CanonicalScalar::Int(1))],
+            props: vec![(PROP, CanonicalScalar::Int(1).into())],
             valid_time: None,
         })
         .expect("control vertex applies");
@@ -2478,22 +2481,22 @@ fn compare_and_set_noop_guards_are_present_in_transaction_traces() {
         Statement::new(vec![Intent::CreateVertex {
             vid: VId(vid),
             labels: vec![LABEL],
-            props: vec![(PROP, CanonicalScalar::Int(1))],
+            props: vec![(PROP, CanonicalScalar::Int(1).into())],
         }])
     };
     let set = |vid, value| {
         Statement::new(vec![Intent::SetProp {
             elem: ElementId::Vertex(VId(vid)),
             name: PROP,
-            value: CanonicalScalar::Int(value),
+            value: CanonicalScalar::Int(value).into(),
         }])
     };
     let guard = |vid| {
         Statement::new(vec![Intent::CompareAndSet {
             elem: ElementId::Vertex(VId(vid)),
             name: PROP,
-            expected: Some(CanonicalScalar::Int(1)),
-            value: CanonicalScalar::Int(1),
+            expected: Some(CanonicalScalar::Int(1).into()),
+            value: CanonicalScalar::Int(1).into(),
             mismatch: MismatchPolicy::StatementError,
         }])
     };
@@ -2922,7 +2925,7 @@ fn txn_create_statement(vid: u128) -> Statement {
     Statement::new(vec![Intent::CreateVertex {
         vid: VId(vid),
         labels: vec![LABEL],
-        props: vec![(PROP, CanonicalScalar::Int(1))],
+        props: vec![(PROP, CanonicalScalar::Int(1).into())],
     }])
 }
 
@@ -2930,7 +2933,7 @@ fn txn_write_statement(vid: u128, value: i64) -> Statement {
     Statement::new(vec![Intent::SetProp {
         elem: ElementId::Vertex(VId(vid)),
         name: PROP,
-        value: CanonicalScalar::Int(value),
+        value: CanonicalScalar::Int(value).into(),
     }])
 }
 
@@ -2938,8 +2941,8 @@ fn txn_guard_statement(vid: u128, expected: i64, mismatch: MismatchPolicy) -> St
     Statement::new(vec![Intent::CompareAndSet {
         elem: ElementId::Vertex(VId(vid)),
         name: PROP,
-        expected: Some(CanonicalScalar::Int(expected)),
-        value: CanonicalScalar::Int(expected),
+        expected: Some(CanonicalScalar::Int(expected).into()),
+        value: CanonicalScalar::Int(expected).into(),
         mismatch,
     }])
 }
@@ -2972,10 +2975,10 @@ fn seeded_transaction_subject() -> Result<ReferenceDatabase, String> {
     Ok(db)
 }
 
-fn scalar_int(value: Option<CanonicalScalar>) -> Result<Option<i64>, String> {
+fn scalar_int(value: Option<CanonicalPropertyValue>) -> Result<Option<i64>, String> {
     match value {
         None => Ok(None),
-        Some(CanonicalScalar::Int(value)) => Ok(Some(value)),
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => Ok(Some(value)),
         Some(other) => Err(format!("expected integer property, got {other:?}")),
     }
 }

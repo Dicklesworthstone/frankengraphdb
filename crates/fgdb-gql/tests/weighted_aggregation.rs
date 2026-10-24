@@ -7,7 +7,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Edge = (VId, RelationId, VId);
@@ -158,8 +158,13 @@ fn weighted_counts_and_support_match_independent_multigraph_assignments() {
                 .flat_map(move |a| [VId(0), VId(u128::MAX)].into_iter().map(move |b| (a, r, b)))
         })
         .collect();
+    // The oracle multiplies per-atom multigraph counts: it counts
+    // homomorphisms, as the weighted engine does. Repeated atoms of one type
+    // may share an edge, so every head is read under REPEATABLE ELEMENTS,
+    // not the DIFFERENT EDGES default (fgdb-vexfr).
     let prepared: Vec<_> = cases.iter().map(|(head, _, _)| prepare(&format!(
-        "{head} RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS d,MIN(b) AS lo,MAX(b) AS hi GROUP BY a"))).collect();
+        "{} RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS d,MIN(b) AS lo,MAX(b) AS hi GROUP BY a",
+        head.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1)))).collect();
     for mask in 0..256_usize {
         let mut edges: Vec<_> = universe
             .iter()
@@ -180,8 +185,13 @@ fn weighted_counts_and_support_match_independent_multigraph_assignments() {
     }
 }
 
+/// `count` repeated self-loop atoms, counted as homomorphisms (REPEATABLE
+/// ELEMENTS), as the weighted engine counts them (fgdb-vexfr).
 fn repeated(count: usize, tail: &str) -> String {
-    format!("MATCH (a){}{tail}", "-[:R]->(a)".repeat(count))
+    format!(
+        "MATCH REPEATABLE ELEMENTS (a){}{tail}",
+        "-[:R]->(a)".repeat(count)
+    )
 }
 
 #[test]
@@ -281,7 +291,7 @@ fn group_accumulation_overflow_is_checked_after_exact_per_binding_weights() {
 fn property_sources_and_unused_node_scan_edges_keep_the_ordinary_contract() {
     let query = prepare("MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n");
     let edges = [(VId(0), RelationId(1), VId(1)); 2];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let mut calls = 0;
     let result = query.execute_governed(
         2,

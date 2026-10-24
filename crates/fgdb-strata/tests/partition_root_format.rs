@@ -16,11 +16,16 @@
 //! gaps and overlapping lower bounds are both legal.
 
 use fgdb_strata::root::{
-    BlockRef, EdgeBirth, EdgeIdentityConflict, MAX_ENCODED_ROOT_V4_BYTES, PartitionRoot, PatchRef,
-    ROOT_FORMAT_V1, RootError, RootFrame, SegmentCache, assemble_root, decode_root,
-    decode_root_frame, encode_root, encode_root_v4, read_root, resolve_blocks, root_id, span_of,
+    BlockRef, EdgeBirth, EdgeIdentityConflict, MAX_ENCODED_ROOT_V4_BYTES,
+    MAX_ENCODED_ROOT_V5_BYTES, MAX_FLAT_ROOT_BLOCKS, MAX_ROOT_BLOCKS, PartitionRoot, PatchRef,
+    ROOT_FORMAT_V1, RootError, RootFrame, RootFrameV4, RootFrameV5, SegmentCache, assemble_root,
+    decode_root, decode_root_frame, encode_root, encode_root_v4, encode_root_v5, read_root,
+    resolve_blocks, root_id, span_of,
 };
-use fgdb_strata::root_segment::{SEGMENT_REFS, SegmentClass, SegmentError, read_segment};
+use fgdb_strata::root_segment::{
+    INDEX_REFS, SEGMENT_REFS, SegmentClass, SegmentError, decode_index, decode_segment,
+    encode_index, read_index, read_segment,
+};
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
@@ -970,6 +975,15 @@ fn resolve_v4(
     let RootFrame::V4(frame) = decode_root_frame(bytes)? else {
         return Err(RootError::UnsupportedFormat { format: 3 });
     };
+    resolve_segments(frame, published)
+}
+
+/// Read and prove every segment a V4 frame (or a flattened V5 one) names,
+/// then assemble the root.
+fn resolve_segments(
+    frame: RootFrameV4,
+    published: &BTreeMap<ObjectId, Vec<u8>>,
+) -> Result<PartitionRoot, RootError> {
     let coordinate = frame.coordinate();
     let mut lists = [Vec::new(), Vec::new()];
     for ((class, named), list) in [
@@ -1183,4 +1197,435 @@ fn a_v3_root_still_decodes() {
     let root = synthetic(700, 2, 0);
     let v3 = encode_root(&root).unwrap();
     assert_eq!(decode_root_frame(&v3).unwrap(), RootFrame::V3(root));
+}
+
+// ---------------------------------------------------------------------------
+// Format V5: the three-level root (fgdb-5gzaa)
+// ---------------------------------------------------------------------------
+
+/// References one full index segment covers.
+const INDEX_COVERS: usize = SEGMENT_REFS * INDEX_REFS;
+
+/// Prove a V5 frame's index segments from the published set, flatten it, and
+/// resolve its segments exactly as a V4 frame's.
+fn resolve_v5(
+    bytes: &[u8],
+    published: &BTreeMap<ObjectId, Vec<u8>>,
+) -> Result<PartitionRoot, RootError> {
+    let RootFrame::V5(frame) = decode_root_frame(bytes)? else {
+        return Err(RootError::UnsupportedFormat { format: 4 });
+    };
+    let coordinate = frame.coordinate();
+    let mut children = [Vec::new(), Vec::new()];
+    for ((class, named), list) in [
+        (SegmentClass::Blocks, &frame.block_index),
+        (SegmentClass::VertexPatches, &frame.patch_index),
+    ]
+    .into_iter()
+    .zip(&mut children)
+    {
+        for (at, reference) in named.iter().enumerate() {
+            let index = published
+                .get(&reference.segment_id)
+                .ok_or(RootError::NotARoot)?;
+            list.push(
+                read_index(&K_OID, namespace(), index, reference, at, coordinate, class)
+                    .map_err(RootError::Segment)?,
+            );
+        }
+    }
+    let [blocks, patches] = children;
+    resolve_segments(frame.flatten(blocks, patches), published)
+}
+
+/// The V5 frame writers emit.
+fn v5_frame(bytes: &[u8]) -> RootFrameV5 {
+    match decode_root_frame(bytes) {
+        Ok(RootFrame::V5(frame)) => Some(frame),
+        _ => None,
+    }
+    .expect("writers emit V5")
+}
+
+/// Every segment and index segment an encode sealed, by identity.
+fn objects_of(encoded: &fgdb_strata::root::EncodedRoot) -> BTreeMap<ObjectId, Vec<u8>> {
+    encoded
+        .new_segments
+        .iter()
+        .chain(&encoded.new_index_segments)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_v5_root_round_trips_through_its_index_segments_at_every_boundary() {
+    for (blocks, patches) in [
+        (0, 0),
+        (INDEX_COVERS - 1, 3),
+        (INDEX_COVERS, 0),
+        (INDEX_COVERS + 1, INDEX_COVERS - 1),
+        (INDEX_COVERS + SEGMENT_REFS, INDEX_COVERS),
+        (2 * INDEX_COVERS - 1, 257),
+        (2 * INDEX_COVERS + 300, 1),
+    ] {
+        let root = synthetic(blocks, patches, 0);
+        let encoded =
+            encode_root_v5(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+        assert_eq!(
+            encoded.new_segments.len(),
+            blocks / SEGMENT_REFS + patches / SEGMENT_REFS,
+            "only FULL segments exist ({blocks}, {patches})"
+        );
+        assert_eq!(
+            encoded.new_index_segments.len(),
+            blocks / INDEX_COVERS + patches / INDEX_COVERS,
+            "only FULL index segments exist ({blocks}, {patches})"
+        );
+        let frame = v5_frame(&encoded.bytes);
+        assert_eq!(frame.block_index.len(), blocks / INDEX_COVERS);
+        assert_eq!(
+            frame.block_segments.len(),
+            (blocks / SEGMENT_REFS) % INDEX_REFS
+        );
+        assert_eq!(frame.tail_blocks.len(), blocks % SEGMENT_REFS);
+        assert_eq!(
+            resolve_v5(&encoded.bytes, &objects_of(&encoded)).unwrap(),
+            root
+        );
+    }
+}
+
+/// The commit path's cache seals at most one segment and one index segment
+/// per list per commit here, and every encode is byte-identical to a fresh
+/// one: live publication and rebuild cannot diverge. A cache a V4 encode left
+/// (a reopened V4 database) moves to V5 by sealing only its index segments.
+#[test]
+fn an_incremental_v5_encode_equals_a_fresh_one_across_index_boundaries() {
+    let mut cache = SegmentCache::default();
+    let mut published = BTreeMap::new();
+    let start = INDEX_COVERS - 3 * SEGMENT_REFS;
+    let mut root = synthetic(start, 0, 0);
+    published.extend(objects_of(
+        &encode_root_v5(&root, &K_OID, namespace(), &mut cache).unwrap(),
+    ));
+    let mut sealed = (start / SEGMENT_REFS, start / INDEX_COVERS);
+    for blocks in (start..=INDEX_COVERS + 4 * SEGMENT_REFS).step_by(97) {
+        root = synthetic(blocks, 0, 0);
+        let incremental = encode_root_v5(&root, &K_OID, namespace(), &mut cache).unwrap();
+        let now = (blocks / SEGMENT_REFS, blocks / INDEX_COVERS);
+        assert_eq!(incremental.new_segments.len(), now.0 - sealed.0);
+        assert_eq!(incremental.new_index_segments.len(), now.1 - sealed.1);
+        assert!(incremental.new_segments.len() <= 1 && incremental.new_index_segments.len() <= 1);
+        sealed = now;
+        published.extend(objects_of(&incremental));
+        let fresh =
+            encode_root_v5(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+        assert_eq!(incremental.bytes, fresh.bytes, "at {blocks} blocks");
+        assert_eq!(resolve_v5(&incremental.bytes, &published).unwrap(), root);
+    }
+    assert_eq!(sealed.1, 1, "the sweep crossed one index boundary");
+
+    // V4 -> V5: the cache holds every segment and no index segment, so the
+    // first V5 encode seals the index segments and nothing else.
+    let root = synthetic(INDEX_COVERS + 700, 0, 0);
+    let mut from_v4 = SegmentCache::default();
+    encode_root_v4(&root, &K_OID, namespace(), &mut from_v4).unwrap();
+    let upgraded = encode_root_v5(&root, &K_OID, namespace(), &mut from_v4).unwrap();
+    assert!(upgraded.new_segments.is_empty());
+    assert_eq!(upgraded.new_index_segments.len(), 1);
+    let fresh = encode_root_v5(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    assert_eq!(upgraded.bytes, fresh.bytes);
+
+    // A list rewritten below an index boundary (as by compaction) drops the
+    // cached index segments with the segments they chunk.
+    let compacted = synthetic(300, 0, 0);
+    let after = encode_root_v5(&compacted, &K_OID, namespace(), &mut from_v4).unwrap();
+    let fresh = encode_root_v5(
+        &compacted,
+        &K_OID,
+        namespace(),
+        &mut SegmentCache::default(),
+    )
+    .unwrap();
+    assert_eq!(after.bytes, fresh.bytes);
+
+    // Another branch over the same references re-seals every segment and
+    // index segment: each binds the coordinate its reader checks.
+    let mut warm = SegmentCache::default();
+    let trunk = synthetic(INDEX_COVERS + SEGMENT_REFS, 0, 0);
+    encode_root_v5(&trunk, &K_OID, namespace(), &mut warm).unwrap();
+    let forked = PartitionRoot {
+        branch: BranchId(BRANCH.0 + 1),
+        ..trunk
+    };
+    let reused = encode_root_v5(&forked, &K_OID, namespace(), &mut warm).unwrap();
+    assert_eq!(reused.new_segments.len(), INDEX_REFS + 1);
+    assert_eq!(reused.new_index_segments.len(), 1);
+    let fresh = encode_root_v5(&forked, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    assert_eq!(reused.bytes, fresh.bytes);
+    assert_eq!(
+        resolve_v5(&reused.bytes, &objects_of(&reused)).unwrap(),
+        forked
+    );
+}
+
+/// The point of V5: a commit's root is bounded whatever the history. Grown
+/// to 2^20 references (the flat ceiling; the V5 ceiling is 2^24, too large to
+/// materialize here) through one cache, the root peaks just short of each
+/// index boundary (the index references so far, 15 segment references and a
+/// 255-reference tail) and drops to the index references alone at the
+/// boundary. Sampled at the first, a middle and the last index boundaries;
+/// V4 holds 4,096 segment references at its ceiling. The bound is the same
+/// formula at every count: 67,934 bytes for two lists of 2^20 references,
+/// 682,334 at the 2^24 ceiling.
+#[test]
+fn a_v5_root_is_bounded_whatever_the_history() {
+    const _: () = assert!(MAX_ENCODED_ROOT_V5_BYTES == 682_334);
+    const _: () = assert!(MAX_FLAT_ROOT_BLOCKS == 1 << 20 && MAX_ROOT_BLOCKS == 1 << 24);
+    let ceiling = 1 << 20;
+    let mut root = synthetic(0, 0, 0);
+    let all = synthetic(ceiling, 0, 0);
+    let mut cache = SegmentCache::default();
+    let mut largest = 0;
+    let last = ceiling / INDEX_COVERS - 1;
+    for k in [
+        0,
+        1,
+        2,
+        INDEX_REFS - 1,
+        INDEX_REFS,
+        last / 2,
+        last - 1,
+        last,
+    ] {
+        for (blocks, expected) in [
+            (
+                k * INDEX_COVERS + INDEX_COVERS - 1,
+                94 + (k + INDEX_REFS - 1) * 80 + (SEGMENT_REFS - 1) * 48,
+            ),
+            ((k + 1) * INDEX_COVERS, 94 + (k + 1) * 80),
+        ] {
+            root.blocks
+                .extend_from_slice(&all.blocks[root.blocks.len()..blocks]);
+            root.published_at = all.published_at;
+            let encoded = encode_root_v5(&root, &K_OID, namespace(), &mut cache).unwrap();
+            assert_eq!(encoded.bytes.len(), expected, "at {blocks} blocks");
+            largest = largest.max(encoded.bytes.len());
+        }
+    }
+    assert!(largest <= MAX_ENCODED_ROOT_V5_BYTES, "{largest}");
+    assert_eq!(
+        largest,
+        94 + (last + INDEX_REFS - 1) * 80 + (SEGMENT_REFS - 1) * 48
+    );
+    assert_eq!(root.blocks.len(), ceiling);
+    let v4 = encode_root_v4(&root, &K_OID, namespace(), &mut cache).unwrap();
+    assert_eq!(v4.bytes.len(), 94 + 4096 * 80, "V4 at the ceiling");
+}
+
+#[test]
+fn v5_refuses_tampered_and_misbound_index_segments_and_frames() {
+    let root = synthetic(INDEX_COVERS + 600, INDEX_COVERS, 0);
+    let encoded = encode_root_v5(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    let published = objects_of(&encoded);
+    assert_eq!(encoded.new_index_segments.len(), 2, "one per list");
+
+    // A byte flipped inside a stored index segment changes its identity.
+    let mut tampered = published.clone();
+    let (first, bytes) = encoded.new_index_segments[0].clone();
+    let mut flipped = bytes.clone();
+    *flipped.last_mut().unwrap() ^= 1;
+    tampered.insert(first, flipped);
+    assert!(matches!(
+        resolve_v5(&encoded.bytes, &tampered),
+        Err(RootError::Segment(SegmentError::IdentityMismatch { .. }))
+    ));
+    // A leaf segment's bytes are not an index segment's, and vice versa.
+    let (_, leaf) = &encoded.new_segments[0];
+    assert_eq!(decode_index(leaf), Err(SegmentError::NotAnIndexSegment));
+    assert_eq!(decode_segment(&bytes), Err(SegmentError::NotASegment));
+
+    let frame = v5_frame(&encoded.bytes);
+    let named = frame.block_index[0];
+    let read = |bytes: &[u8], named, coordinate, class| {
+        read_index(&K_OID, namespace(), bytes, &named, 0, coordinate, class)
+    };
+    assert_eq!(
+        read(&bytes, named, frame.coordinate(), SegmentClass::Blocks)
+            .unwrap()
+            .len(),
+        INDEX_REFS
+    );
+    // A genuine index segment of another partition, class, digest or span.
+    let other = encode_root_v5(
+        &synthetic(INDEX_COVERS, 0, 7),
+        &K_OID,
+        namespace(),
+        &mut SegmentCache::default(),
+    )
+    .unwrap();
+    let other_frame = v5_frame(&other.bytes);
+    assert_eq!(
+        read(
+            &other.new_index_segments[0].1,
+            other_frame.block_index[0],
+            frame.coordinate(),
+            SegmentClass::Blocks
+        ),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "index partition coordinate"
+        })
+    );
+    assert_eq!(
+        read(
+            &bytes,
+            named,
+            frame.coordinate(),
+            SegmentClass::VertexPatches
+        ),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "index class"
+        })
+    );
+    let mut wrong_digest = named;
+    wrong_digest.digest[0] ^= 1;
+    assert_eq!(
+        read(
+            &bytes,
+            wrong_digest,
+            frame.coordinate(),
+            SegmentClass::Blocks
+        ),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "index digest"
+        })
+    );
+    let mut wrong_span = named;
+    wrong_span.last_seq = CommitSeq(named.last_seq.0 + 1);
+    assert_eq!(
+        read(&bytes, wrong_span, frame.coordinate(), SegmentClass::Blocks),
+        Err(SegmentError::Binding {
+            at: 0,
+            what: "index span"
+        })
+    );
+    assert_eq!(
+        encode_index(
+            GRAPH,
+            BRANCH,
+            0,
+            SegmentClass::Blocks,
+            &frame.block_segments[..1]
+        ),
+        Err(SegmentError::IndexNotFull { segments: 1 })
+    );
+
+    // The root's digest binds each index segment's digest: editing one inside
+    // the frame is refused before any object is read.
+    let mut edited = encoded.bytes.clone();
+    edited[94 + 32] ^= 1;
+    assert!(matches!(
+        decode_root_frame(&edited),
+        Err(RootError::DigestMismatch { .. })
+    ));
+    assert!(matches!(
+        decode_root_frame(&encoded.bytes[..encoded.bytes.len() - 1]),
+        Err(RootError::Truncated { .. })
+    ));
+    let mut longer = encoded.bytes.clone();
+    longer.push(0);
+    assert!(matches!(
+        decode_root_frame(&longer),
+        Err(RootError::TrailingBytes { extra: 1 })
+    ));
+}
+
+/// Additive-minor (§16.6): a V4 root still decodes beside V5, and resolves
+/// through its segments alone.
+#[test]
+fn a_v4_root_still_decodes_beside_v5() {
+    let root = synthetic(INDEX_COVERS + 600, 300, 0);
+    let v4 = encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).unwrap();
+    assert!(v4.new_index_segments.is_empty());
+    assert!(matches!(decode_root_frame(&v4.bytes), Ok(RootFrame::V4(_))));
+    assert_eq!(resolve_v4(&v4.bytes, &objects_of(&v4)).unwrap(), root);
+}
+
+/// fgdb-u9jln: a partition holds a block per (source, relation) family, so a
+/// graph with more than 2^20 sources needs a root past the flat ceiling. A V5
+/// root names one and round-trips; V3 and V4, whose encodings grow with every
+/// reference, refuse the same root by its count.
+#[test]
+fn a_v5_root_past_the_flat_ceiling_round_trips_and_flat_formats_refuse_it() {
+    let blocks = MAX_FLAT_ROOT_BLOCKS as usize + 300;
+    let root = synthetic(blocks, 3, 0);
+    let mut cache = SegmentCache::default();
+    let encoded = encode_root_v5(&root, &K_OID, namespace(), &mut cache).expect("V5 encodes");
+    assert_eq!(
+        resolve_v5(&encoded.bytes, &objects_of(&encoded)).expect("V5 resolves"),
+        root
+    );
+    let declared = u32::try_from(blocks).unwrap();
+    assert_eq!(
+        encode_root(&root),
+        Err(RootError::ImplausibleBlockCount { declared })
+    );
+    assert_eq!(
+        encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).err(),
+        Some(RootError::ImplausibleBlockCount { declared })
+    );
+}
+
+/// Each decoder refuses a count past its own format's ceiling before it reads
+/// a reference: V3 and V4 at the flat ceiling, V5 at its own. A V5 header past
+/// the flat ceiling gets as far as its (here missing) references.
+#[test]
+fn each_root_format_refuses_a_count_past_its_own_ceiling() {
+    // magic(4) + format(2) + graph(16) + branch(16) + partition(8) + published_at(8)
+    const OFF_BLOCK_COUNT: usize = 54;
+    let with_count = |mut bytes: Vec<u8>, count: u32| {
+        bytes[OFF_BLOCK_COUNT..OFF_BLOCK_COUNT + 4].copy_from_slice(&count.to_be_bytes());
+        bytes
+    };
+    let small = synthetic(3, 1, 0);
+    let flat_plus_one = MAX_FLAT_ROOT_BLOCKS + 1;
+    let v3 = with_count(encode_root(&small).unwrap(), flat_plus_one);
+    assert_eq!(
+        decode_root(&v3),
+        Err(RootError::ImplausibleBlockCount {
+            declared: flat_plus_one
+        })
+    );
+    let segmented = |v5: bool| {
+        let mut cache = SegmentCache::default();
+        if v5 {
+            encode_root_v5(&small, &K_OID, namespace(), &mut cache)
+        } else {
+            encode_root_v4(&small, &K_OID, namespace(), &mut cache)
+        }
+        .unwrap()
+        .bytes
+    };
+    assert_eq!(
+        decode_root_frame(&with_count(segmented(false), flat_plus_one)).err(),
+        Some(RootError::ImplausibleBlockCount {
+            declared: flat_plus_one
+        })
+    );
+    // Past the flat ceiling, V5 admits the count and then finds its
+    // references missing.
+    assert!(matches!(
+        decode_root_frame(&with_count(segmented(true), flat_plus_one)),
+        Err(RootError::Truncated { .. })
+    ));
+    let v5_plus_one = MAX_ROOT_BLOCKS + 1;
+    assert_eq!(
+        decode_root_frame(&with_count(segmented(true), v5_plus_one)).err(),
+        Some(RootError::ImplausibleBlockCount {
+            declared: v5_plus_one
+        })
+    );
 }

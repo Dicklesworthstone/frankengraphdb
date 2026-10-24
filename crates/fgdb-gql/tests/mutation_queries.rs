@@ -2,14 +2,19 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationBatch,
-    GraphMutationBuildError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
-    GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationAction,
+    GraphMutationBatch, GraphMutationBuildError, GraphMutationError, GraphMutationIntent,
+    GraphMutationPolicy, GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol,
+    GraphSymbolKind, MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -17,7 +22,8 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 const OLD: PropertyKeyId = PropertyKeyId(3);
 const TEXT: PropertyKeyId = PropertyKeyId(4);
 const UPDATED: LabelId = LabelId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+const SEEN: LabelId = LabelId(2);
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type MutationResult<C = ()> = Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>>;
 
@@ -29,6 +35,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "old") => Some(GraphSymbol::Property(OLD)),
         (GraphSymbolKind::Property, "text") => Some(GraphSymbol::Property(TEXT)),
         (GraphSymbolKind::Label, "Updated") => Some(GraphSymbol::Label(UPDATED)),
+        (GraphSymbolKind::Label, "Seen") => Some(GraphSymbol::Label(SEEN)),
         _ => None,
     }
 }
@@ -77,11 +84,14 @@ fn run(
     )
 }
 fn props() -> Props {
-    BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
-        ((VId(3), P), CanonicalScalar::Int(30)),
-    ])
+    BTreeMap::from(
+        [
+            ((VId(1), P), CanonicalScalar::Int(10)),
+            ((VId(2), P), CanonicalScalar::Int(20)),
+            ((VId(3), P), CanonicalScalar::Int(30)),
+        ]
+        .map(|(key, value)| (key, CanonicalPropertyValue::from(value))),
+    )
 }
 
 #[test]
@@ -99,12 +109,12 @@ fn reciprocal_updates_freeze_rhs_and_collapse_parallel_matches() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Int(20))
+                value: stored(CanonicalScalar::Int(20))
             },
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: P,
-                value: Some(CanonicalScalar::Int(10))
+                value: stored(CanonicalScalar::Int(10))
             },
         ]
     );
@@ -115,6 +125,45 @@ fn reciprocal_updates_freeze_rhs_and_collapse_parallel_matches() {
     );
     let renamed = prepare("MATCH (x)-[:R]->(y) SET x.p=y.p,y.p=x.p");
     assert_eq!(plan.canonical_bytes(), renamed.canonical_bytes());
+}
+
+/// openCypher Set3 and Remove2: `n:A:B` sets or removes each label. It is
+/// the same definition as the comma-separated actions, one apiece, and each
+/// label becomes its own intent.
+#[test]
+fn several_labels_after_one_target_are_one_action_apiece() {
+    for (several, separate) in [
+        (
+            "MATCH (a)-[:R]->(b) SET a:Updated:Seen",
+            "MATCH (a)-[:R]->(b) SET a:Updated, a:Seen",
+        ),
+        (
+            "MATCH (a)-[:R]->(b) REMOVE a:Updated:Seen, b.p",
+            "MATCH (a)-[:R]->(b) REMOVE a:Updated, a:Seen, b.p",
+        ),
+    ] {
+        assert_eq!(
+            prepare(several).canonical_bytes(),
+            prepare(separate).canonical_bytes(),
+            "{several}"
+        );
+    }
+    let result = run(
+        &prepare("MATCH (a)-[:R]->(b) SET b:Updated:Seen"),
+        &[VId(1), VId(2)],
+        &[(VId(1), R, VId(2))],
+        &props(),
+        policy(),
+    )
+    .unwrap();
+    for label in [UPDATED, SEEN] {
+        assert!(result.intents().contains(&GraphMutationIntent::Label {
+            vertex: VId(2),
+            label,
+            present: true,
+        }));
+    }
+    assert_eq!(result.stats().effects, 2);
 }
 
 #[test]
@@ -142,7 +191,7 @@ fn literal_map_updates_share_frozen_values_across_targets_and_other_assignments(
         assert!(result.intents().contains(&GraphMutationIntent::Property {
             vertex: VId(vertex),
             key,
-            value: Some(CanonicalScalar::Int(value)),
+            value: stored(CanonicalScalar::Int(value)),
         }));
     }
     assert!(result.intents().contains(&GraphMutationIntent::Label {
@@ -167,7 +216,7 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
         text,
         R,
         &[("t", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
             symbols(kind, name)
         },
@@ -190,12 +239,12 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Null),
+                value: stored(CanonicalScalar::Null),
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: Q,
-                value: Some(CanonicalScalar::Int(10)),
+                value: stored(CanonicalScalar::Int(10)),
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -205,7 +254,7 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: TEXT,
-                value: Some(CanonicalScalar::ucs_basic_text(payload).unwrap()),
+                value: stored(CanonicalScalar::ucs_basic_text(payload).unwrap()),
             },
         ]
     );
@@ -232,12 +281,23 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
 
 #[test]
 fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() {
+    // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4), and a
+    // list field is a stored List (fgdb-k3nub, TCK Set1 [5]).
+    for text in ["MATCH (a) SET a = {p: 1}", "MATCH (a) SET a += {p: [1, 2]}"] {
+        assert!(
+            PreparedGraphMutationText::prepare(text, R, symbols).is_ok(),
+            "{text}"
+        );
+    }
     for text in [
         "MATCH (a) SET a += {}",
         "MATCH (a) SET a.p=1,a += {}",
         "MATCH (a) SET a += $map",
         "MATCH (a) SET a += a.p",
-        "MATCH (a) SET a = {p: 1}",
+        // SET a = {...} replaces (fgdb-6vm3o); a malformed replace map still
+        // refuses before any catalog access.
+        "MATCH (a) SET a = {p: 1, p: 2}",
+        "MATCH (a) SET a = {p 1}",
         "MATCH (a) REMOVE a += {p: 1}",
         "MATCH (a) SET a + {p: 1}",
         "MATCH (a) SET a += {p 1}",
@@ -248,8 +308,9 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         "MATCH (a) SET a += {p: 1},",
         "MATCH (a) SET a += {p: 1, p: 1}",
         "MATCH (a) SET a += {p: 1, p: 2}",
+        // A map field is refused before catalog access (f0f89eca): a stored
+        // map awaits the owner's ruling.
         "MATCH (a) SET a += {p: {q: 1}}",
-        "MATCH (a) SET a += {p: [1, 2]}",
         "MATCH (a) SET a += {p: 1} RETURN a",
         "MATCH (a) SET a += {p: 1} DETACH DELETE a",
         "MATCH (a) SET missing += {p: 1}",
@@ -258,7 +319,7 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphMutationText::prepare(text, R, |kind, name| {
+            PreparedGraphMutationText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -290,7 +351,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
         "MATCH (a) SET a += {{{}}}",
         fields(MAX_GRAPH_MUTATION_ACTIONS)
     );
-    let plan = PreparedGraphMutationText::prepare(&exact, R, |kind, name| {
+    let plan = PreparedGraphMutationText::prepare(&exact, R, |kind, name: &str| {
         if kind != GraphSymbolKind::Property {
             return None;
         }
@@ -308,7 +369,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
             &GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: PropertyKeyId(index as u64),
-                value: Some(CanonicalScalar::Int(index as i64)),
+                value: stored(CanonicalScalar::Int(index as i64)),
             }
         );
     }
@@ -328,7 +389,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
         ),
     ] {
         let calls = Cell::new(0);
-        let error = PreparedGraphMutationText::prepare(&text, R, |kind, name| {
+        let error = PreparedGraphMutationText::prepare(&text, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })
@@ -440,7 +501,7 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
         &[GraphMutationIntent::Property {
             vertex: VId(2),
             key: Q,
-            value: Some(CanonicalScalar::Int(10)),
+            value: stored(CanonicalScalar::Int(10)),
         }]
     );
     let missing = prepare("MATCH (a) SET a.p=a.q REMOVE a.old");
@@ -451,7 +512,7 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Null)
+                value: stored(CanonicalScalar::Null)
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -476,7 +537,7 @@ fn bounded_walk_targets_keep_occurrences_but_each_delete_is_proposed_once() {
         (VId(1), R, VId(1)),
         (VId(1), R, VId(2)),
     ];
-    let plan = prepare("MATCH WALK (a)-[:R*0..2]->(b) DETACH DELETE b");
+    let plan = prepare("MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) DETACH DELETE b");
     let result = run(&plan, &[VId(1), VId(2)], &edges, &props(), policy()).unwrap();
     assert_eq!(result.stats().selection.result_rows, 11);
     assert_eq!(
@@ -493,6 +554,69 @@ fn bounded_walk_targets_keep_occurrences_but_each_delete_is_proposed_once() {
     );
 }
 
+/// A plain DELETE is its own non-detaching action, never DETACH DELETE: one
+/// intent per distinct vertex however many occurrences name it. The write
+/// host, not this reducer, proves that no incident edge survives.
+#[test]
+fn plain_delete_proposes_one_non_detaching_intent_per_element() {
+    let plan = prepare("MATCH (a)-[:R]->(b) DELETE a, b");
+    assert!(
+        plan.actions()
+            .iter()
+            .all(|action| matches!(action, GraphMutationAction::Delete { .. }))
+    );
+    let edges = [(VId(1), R, VId(2)), (VId(1), R, VId(3))];
+    let result = run(&plan, &[VId(1), VId(2), VId(3)], &edges, &props(), policy()).unwrap();
+    assert_eq!(
+        result.intents(),
+        &[
+            GraphMutationIntent::Delete { vertex: VId(1) },
+            GraphMutationIntent::Delete { vertex: VId(2) },
+            GraphMutationIntent::Delete { vertex: VId(3) },
+        ]
+    );
+    assert_eq!(result.stats().target_vertices, 3);
+    let refused = PreparedGraphMutationText::prepare(
+        "MATCH (a)-[e:R]->(b) DELETE e DETACH DELETE a",
+        R,
+        symbols,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refused.kind,
+        GraphMutationTextErrorKind::Build(GraphMutationBuildError::MixedDeleteModes)
+    ));
+}
+
+/// A leading OPTIONAL MATCH binds as the unit relation left-joined with the
+/// pattern. No witness leaves one NULL row and no intent; a witness is
+/// written exactly as under MATCH.
+#[test]
+fn a_leading_optional_match_is_a_left_joined_write_source() {
+    let plan = prepare("OPTIONAL MATCH (a) WHERE a.p = 20 DELETE a");
+    assert!(plan.input_relation().is_some());
+    let none = run(&plan, &[VId(1)], &[], &props(), policy()).unwrap();
+    assert!(none.intents().is_empty());
+    let one = run(&plan, &[VId(1), VId(2)], &[], &props(), policy()).unwrap();
+    assert_eq!(
+        one.intents(),
+        &[GraphMutationIntent::Delete { vertex: VId(2) }]
+    );
+    // Only OPTIONAL scopes may follow an optional root.
+    assert!(
+        PreparedGraphMutationText::prepare("OPTIONAL MATCH (a) MATCH (b) DELETE b", R, symbols)
+            .is_err()
+    );
+    assert!(
+        PreparedGraphMutationText::prepare(
+            "OPTIONAL MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) SET b.p = 1",
+            R,
+            symbols
+        )
+        .is_ok()
+    );
+}
+
 #[test]
 fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses() {
     let text = "MATCH (a) WHERE a.p >= $n SET a.q=$n,a.text=$t,a:Updated REMOVE a.old";
@@ -503,7 +627,7 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
         text,
         R,
         &[("t", GqlParameterType::Scalar(kind))],
-        |kind, name| {
+        |kind, name: &str| {
             *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
             symbols(kind, name)
         },
@@ -529,7 +653,7 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
     assert!(result.intents().contains(&GraphMutationIntent::Property {
         vertex: VId(1),
         key: TEXT,
-        value: Some(CanonicalScalar::ucs_basic_text(payload).unwrap()),
+        value: stored(CanonicalScalar::ucs_basic_text(payload).unwrap()),
     }));
     assert!(result.intents().contains(&GraphMutationIntent::Label {
         vertex: VId(1),
@@ -564,9 +688,10 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
 #[test]
 fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks() {
     for text in [
-        "MATCH (a) DELETE a",
         "MATCH (a) SET a.p=1 DETACH DELETE a",
         "MATCH (a) DETACH DELETE a SET a.p=1",
+        "MATCH (a) SET a.p=1 DELETE a",
+        "MATCH (a)-[e:R]->(b) DELETE e DETACH DELETE a",
         "MATCH (a) SET a.p=1 RETURN a",
         "MATCH (a) SET a.p=a.p+*1",
         "MATCH (a) SET a.p=1,",
@@ -579,7 +704,7 @@ fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphMutationText::prepare(text, R, |kind, name| {
+            PreparedGraphMutationText::prepare(text, R, |kind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
@@ -593,7 +718,7 @@ fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks
         vec!["a.p=1"; MAX_GRAPH_MUTATION_ACTIONS + 1].join(",")
     );
     let calls = Cell::new(0);
-    let failed = PreparedGraphMutationText::prepare(&text, R, |kind, name| {
+    let failed = PreparedGraphMutationText::prepare(&text, R, |kind, name: &str| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })

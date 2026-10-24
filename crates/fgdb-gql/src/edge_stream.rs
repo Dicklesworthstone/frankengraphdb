@@ -1,13 +1,24 @@
 //! Ordered, pull-driven execution of identified fixed-edge GLA patterns.
 //!
-//! The leading edge identity and source vertex prove whole-row order and
-//! uniqueness, including both orientations of an undirected non-self edge.
+//! The leading edge identity proves whole-row order and uniqueness for a
+//! directed root. Undirected roots additionally require the source vertex to
+//! distinguish both orientations of a non-self edge.
 //! No adjacency/result bag, sorting, DISTINCT set or unread suffix is built.
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
 pub mod aggregate;
+mod asynchronous;
+pub use asynchronous::{
+    AsyncEdgeCandidate, AsyncEdgeScanCursor, AsyncEdgeScanEvent, AsyncEdgeScanOutput,
+    AsyncEdgeScanPlan, AsyncEdgeScanRecord, AsyncEdgeScanSource, AsyncEdgeSpillAggregateCursor,
+    AsyncEdgeSpillAggregatePlan,
+};
 mod join;
 pub(crate) use join::Probe;
+pub use join::{
+    AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
+    AsyncIncidentCandidateResult,
+};
 mod record;
 pub use record::EdgeScanRecord;
 
@@ -21,7 +32,7 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::sync::Arc;
 
 pub use crate::stream::{
@@ -45,12 +56,14 @@ impl core::fmt::Display for EdgeScanBuildError {
 impl core::error::Error for EdgeScanBuildError {}
 
 /// Checked fixed-edge plan. For multiple connected edges, the output prefix
-/// is root edge, root source vertex, then every appended edge in GLA traversal
-/// order. This covers chains, branches and identity-constrained cycle closures;
-/// other output shapes and unsupported operators fail physical preparation.
+/// is root edge, optionally its source vertex, then every appended edge in GLA
+/// traversal order. The source vertex is required for an undirected root.
+/// This covers chains, branches and identity-constrained cycle closures; other
+/// output shapes and unsupported operators fail physical preparation.
 ///
-/// For one edge: The output must begin with the captured edge identity
-/// followed by slot zero's vertex identity. Remaining columns may contain either
+/// For one edge: The output must begin with the captured edge identity,
+/// followed by slot zero's vertex identity when the root is undirected.
+/// Remaining columns may contain either
 /// endpoint, their properties, edge properties or this one-edge path/functions.
 /// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
 /// hidden sort columns, optional/variable-length expansions, and catalog-name output
@@ -59,7 +72,7 @@ impl core::error::Error for EdgeScanBuildError {}
 /// short-circuit probes; nested/optional probe bodies remain unavailable.
 #[derive(Clone)]
 pub struct EdgeScanPlan {
-    relation: RelationId,
+    relation: crate::algebra::EdgeRelation,
     direction: GlaDirection,
     instructions: Arc<[GlaOperator]>,
     projection: Arc<GlaOperator>,
@@ -67,6 +80,16 @@ pub struct EdgeScanPlan {
     count: Option<u64>,
     joined: Option<Arc<join::JoinPlan>>,
 }
+
+// Output admission changes only the terminal proof. The single-edge compiler
+// and evaluator continue to own every binding, filter and path capture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalOutput {
+    OrderedRows,
+    AggregateInput,
+    SortInput,
+}
+
 impl EdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
@@ -76,6 +99,14 @@ impl EdgeScanPlan {
         {
             return join::compile(plan);
         }
+        Self::compile_local(plan, LocalOutput::OrderedRows)
+    }
+
+    fn compile_local(
+        plan: &GlaPlan<GraphValueRow>,
+        output: LocalOutput,
+    ) -> Result<Self, EdgeScanBuildError> {
+        let ops = plan.operators();
         let Some(GlaOperator::ScanEdges {
             relation,
             direction,
@@ -93,7 +124,12 @@ impl EdgeScanPlan {
             };
             match op {
                 GlaOperator::Select { slot, .. } if slot.ordinal() < 2 => {}
-                GlaOperator::VertexIdentity { left, right, .. }
+                GlaOperator::VertexIdentity {
+                    left,
+                    right,
+                    equal: _,
+                } if left.ordinal() < 2 && right.ordinal() < 2 => {}
+                GlaOperator::CompareProperties { left, right, .. }
                     if left.ordinal() < 2 && right.ordinal() < 2 => {}
                 GlaOperator::CapturePath {
                     capture,
@@ -143,13 +179,15 @@ impl EdgeScanPlan {
                         }
                         _ => false,
                     };
-                    if !matches!(
-                        columns.first(),
-                        Some(ValueProjection::Path {
-                            function: GraphPathFunction::Edge,
-                            ..
-                        })
-                    ) || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                    if (output == LocalOutput::OrderedRows
+                        && (!matches!(
+                            columns.first(),
+                            Some(ValueProjection::Path {
+                                function: GraphPathFunction::Edge,
+                                ..
+                            })
+                        ) || (*direction == GlaDirection::Undirected
+                            && !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0))))
                         || !columns.iter().all(column_valid)
                     {
                         return Err(bad());
@@ -164,10 +202,15 @@ impl EdgeScanPlan {
         let projection = Arc::new(ops[at].clone());
         at += 1;
         if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
+            if output == LocalOutput::AggregateInput {
+                return Err(EdgeScanBuildError { operator: at });
+            }
             at += 1;
         }
-        if plan.visible_columns.is_some()
+        if (plan.visible_columns.is_some() && output != LocalOutput::SortInput)
             || !matches!(ops.get(at), Some(GlaOperator::OrderByValues))
+                && !(output == LocalOutput::SortInput
+                    && matches!(ops.get(at), Some(GlaOperator::OrderByValueColumns { .. })))
         {
             return Err(EdgeScanBuildError { operator: at });
         }
@@ -175,6 +218,9 @@ impl EdgeScanPlan {
         let Some(GlaOperator::Limit { offset, count }) = ops.get(at) else {
             return Err(EdgeScanBuildError { operator: at });
         };
+        if output == LocalOutput::AggregateInput && (*offset != 0 || count.is_some()) {
+            return Err(EdgeScanBuildError { operator: at });
+        }
         if at + 1 != ops.len() {
             return Err(EdgeScanBuildError { operator: at + 1 });
         }
@@ -183,8 +229,16 @@ impl EdgeScanPlan {
             direction: *direction,
             instructions: instructions.into(),
             projection,
-            offset: *offset,
-            count: *count,
+            offset: if output == LocalOutput::SortInput {
+                0
+            } else {
+                *offset
+            },
+            count: if output == LocalOutput::SortInput {
+                None
+            } else {
+                *count
+            },
             joined: None,
         })
     }
@@ -202,7 +256,8 @@ pub struct EdgeScanRow<'a> {
     pub source: VId,
     pub target: VId,
     pub relation: RelationId,
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 impl core::fmt::Debug for EdgeScanRow<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -230,10 +285,26 @@ pub trait EdgeScanSource {
     /// endpoint admission. This is not authorization for a raw source.
     fn next_edge_for_relation<C>(
         &mut self,
-        _relation: RelationId,
+        _relation: crate::algebra::EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         self.next_edge(control)
+    }
+
+    /// One root directory examination for a cooperative consumer. Scoped
+    /// sources may return Skipped without charging a hidden candidate. The
+    /// default preserves sources which already return one history per call.
+    fn next_edge_step_for_relation<C>(
+        &mut self,
+        relation: crate::algebra::EdgeRelation,
+        _continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<EId>, EdgeScanSourceError<Self::Error, C>> {
+        self.next_edge_for_relation(relation, control)
+            .map(|next| match next {
+                Some(eid) => crate::scan_stream::SourceStep::Item(eid),
+                None => crate::scan_stream::SourceStep::Exhausted,
+            })
     }
     fn edge<'a, C>(
         &'a self,
@@ -261,7 +332,8 @@ pub trait EdgeScanSource {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.edge(eid, control)? else {
             return Ok(None);
         };
@@ -298,7 +370,8 @@ pub trait EdgeScanSource {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         let Some(row) = self.vertex(vid, control)? else {
             return Ok(None);
         };
@@ -345,12 +418,31 @@ pub trait EdgeScanSource {
     fn next_incident_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        _relation: RelationId,
+        _relation: crate::algebra::EdgeRelation,
         direction: GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
         self.next_incident_edge(endpoint, direction, after, control)
+    }
+
+    /// One indexed successor examination. A skipped identity advances only
+    /// this traversal's position and spends no candidate allowance; it cannot
+    /// enter a binding, projection, predicate or aggregate.
+    fn next_incident_edge_step_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: crate::algebra::EdgeRelation,
+        direction: GlaDirection,
+        after: Option<EId>,
+        _continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.next_incident_edge_for_relation(endpoint, relation, direction, after, control)
+            .map(|next| match next {
+                Some(eid) => crate::scan_stream::SourceStep::Item(eid),
+                None => crate::scan_stream::SourceStep::Exhausted,
+            })
     }
 }
 
@@ -373,6 +465,8 @@ pub enum EdgeScanError<E> {
     Source(E),
     Plan(EdgeScanBuildError),
     NonIncreasingIdentity,
+    /// Candidate admission was omitted, repeated, or did not name the result.
+    InvalidCandidateAdmission,
     /// An admitted visible edge has no visible endpoint; never a null binding.
     DanglingEndpoint,
     CounterExhausted,
@@ -386,6 +480,9 @@ impl<E: core::fmt::Display> core::fmt::Display for EdgeScanError<E> {
             Self::Plan(error) => error.fmt(f),
             Self::NonIncreasingIdentity => {
                 f.write_str("edge stream source is not strictly increasing")
+            }
+            Self::InvalidCandidateAdmission => {
+                f.write_str("edge stream candidate does not match its admission")
             }
             Self::DanglingEndpoint => f.write_str("edge stream source has a dangling endpoint"),
             Self::CounterExhausted => f.write_str("edge stream counter exhausted"),
@@ -424,7 +521,10 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
 }
 impl<F> Meter<F> {
-    fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ScanResult<(), E, C>
+    fn control<C>(
+        &mut self,
+        event: GlaExecutionEvent,
+    ) -> Result<(), GqlQueryError<core::convert::Infallible, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
@@ -432,6 +532,13 @@ impl<F> Meter<F> {
         self.evaluator
             .charge_event(self.policy.evaluator, event)
             .map_err(GqlQueryError::Evaluator)
+    }
+    fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ScanResult<(), E, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        self.control(event)
+            .map_err(|error| error.map_source(|never| match never {}))
     }
     fn increment<E, C>(&self, dimension: GqlBudgetDimension, prior: u64) -> ScanResult<u64, E, C> {
         let next = prior
@@ -466,6 +573,8 @@ pub struct EdgeScanCursor<S, F> {
     skip: u64,
     state: EdgeScanState,
     traversal: Option<join::Traversal>,
+    advancing: bool,
+    source_pending: bool,
 }
 impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     /// No candidate scan or checkpoint occurs during construction.
@@ -488,6 +597,8 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             reverse_pending: None,
             state: EdgeScanState::Open,
             traversal: None,
+            advancing: false,
+            source_pending: false,
         }
     }
     #[must_use]
@@ -513,34 +624,83 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         self.source = None;
         self.reverse_pending = None;
         self.traversal = None;
+        self.advancing = false;
+        self.source_pending = false;
     }
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
     where
         F: FnMut() -> Result<(), C>,
     {
+        loop {
+            let mut remaining = usize::MAX;
+            if let core::task::Poll::Ready(row) = self.advance_bounded(&mut remaining)? {
+                return Ok(row);
+            }
+        }
+    }
+
+    fn advance_bounded<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let result = self.advance_batch(remaining);
+        if !matches!(result, Ok(core::task::Poll::Pending)) {
+            self.advancing = false;
+        }
+        result
+    }
+
+    fn advance_batch<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         if self.plan.joined.is_some() {
-            return join::advance(self);
+            return join::advance(self, remaining);
         }
         let meter = &mut self.meter;
-        meter.event(GlaExecutionEvent::Work)?;
+        if !self.advancing {
+            meter.event(GlaExecutionEvent::Work)?;
+            self.advancing = true;
+        }
         if self.plan.count == Some(0) {
-            return Ok(None);
+            return Ok(core::task::Poll::Ready(None));
         }
         let source = self
             .source
             .as_mut()
             .expect("open edge cursor owns its source");
         loop {
+            if *remaining == 0 {
+                return Ok(core::task::Poll::Pending);
+            }
+            *remaining -= 1;
             let (eid, second) = if let Some(eid) = self.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(
-                    source.next_edge_for_relation(self.plan.relation, &mut |event| {
-                        meter.event(event)
-                    }),
-                )?
-                else {
-                    return Ok(None);
+                let next = flatten(source.next_edge_step_for_relation(
+                    self.plan.relation,
+                    self.source_pending,
+                    &mut |event| meter.event(event),
+                ))?;
+                let eid = match next {
+                    crate::scan_stream::SourceStep::Item(eid) => {
+                        self.source_pending = false;
+                        eid
+                    }
+                    crate::scan_stream::SourceStep::Skipped(_) => {
+                        self.source_pending = true;
+                        continue;
+                    }
+                    crate::scan_stream::SourceStep::Exhausted => {
+                        self.source_pending = false;
+                        return Ok(core::task::Poll::Ready(None));
+                    }
                 };
                 meter.event(GlaExecutionEvent::Work)?;
                 if self.last.is_some_and(|last| eid <= last) {
@@ -559,7 +719,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             };
             let edge = record.as_row();
             meter.event(GlaExecutionEvent::Work)?;
-            if edge.relation != self.plan.relation {
+            if !self.plan.relation.matches(edge.relation) {
                 continue;
             }
             let (from, to) = match self.plan.direction {
@@ -608,7 +768,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 .project(&image, &paths, &mut |event| meter.event(event))?;
             meter.event(GlaExecutionEvent::ResultRow)?;
             meter.rows.result_rows = next;
-            return Ok(Some(row));
+            return Ok(core::task::Poll::Ready(Some(row)));
         }
     }
 }
@@ -663,7 +823,7 @@ struct Binding<'a> {
     eid: EId,
     ids: [VId; 2],
     vertices: [VertexScanRow<'a>; 2],
-    edge: &'a [(PropertyKeyId, CanonicalScalar)],
+    edge: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 fn seek<'a, T, K: Ord, E>(
     values: &'a [T],
@@ -689,7 +849,7 @@ impl<'a> Binding<'a> {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<&'a CanonicalScalar>, E> {
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E> {
         let slot = if vid == self.ids[0] {
             0
         } else {
@@ -709,7 +869,7 @@ impl<'a> Binding<'a> {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<&'a CanonicalScalar>, E> {
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E> {
         debug_assert_eq!(eid, self.eid);
         seek(self.edge, &key, |entry| entry.0, control).map(|entry| entry.map(|(_, v)| v))
     }
@@ -767,7 +927,7 @@ impl EdgeScanPlan {
                         vec![(row.eid, row.ids[1])].into_boxed_slice(),
                     )));
                 }
-                GlaOperator::SelectBoolean { .. } => {
+                GlaOperator::SelectBoolean { .. } | GlaOperator::CompareProperties { .. } => {
                     let meter = std::cell::RefCell::new(&mut *control);
                     if !compare_element_properties(
                         op,
@@ -785,7 +945,7 @@ impl EdgeScanPlan {
         }
         Ok(Some(paths))
     }
-    fn project<E>(
+    fn project<E: From<crate::GraphIntegerError>>(
         &self,
         row: &Binding<'_>,
         paths: &[Option<GraphPath>],
@@ -794,7 +954,7 @@ impl EdgeScanPlan {
         collect_one::<GraphValueRow, E>(&self.projection, row, paths, control)
     }
 }
-fn collect_one<Row: GlaOutput, E>(
+fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     projection: &GlaOperator,
     row: &Binding<'_>,
     paths: &[Option<GraphPath>],

@@ -1,8 +1,9 @@
 //! Governed grouped exact statistics over the existing indexed join cursor.
 //!
 //! The first pull consumes joined bindings once, retaining group keys and the
-//! SAME numeric/DISTINCT cells as vertex aggregation, not an input or result
-//! table. Subsequent pulls move completed groups out in canonical result order.
+//! SAME numeric/DISTINCT cells as vertex aggregation. Collections also retain
+//! any complete source-order keys needed to correlate their arguments.
+//! Subsequent pulls move completed groups out in canonical result order.
 //! HAVING/output expressions are validated on all completed groups before a
 //! selected page can escape. Page selection never suppresses input failures.
 //! Group and DISTINCT support are metered in-memory state, not spill storage.
@@ -13,6 +14,12 @@ use crate::stream::VertexScanEvent;
 use crate::stream::aggregate::{Input, NumericState};
 use crate::{GraphAggregateError, GraphAggregateRow, PreparedGraphAggregate};
 use std::collections::{BTreeMap, btree_map};
+
+mod spill;
+pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
+pub(crate) mod pipeline;
+use pipeline::InputPipeline;
+mod ordered_collection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeAggregateBuildError {
@@ -47,7 +54,7 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// grouping and argument DISTINCT, using the shared projection evaluator.
 /// Every declared column executes, even when no aggregate uses it. Constants
 /// preserve match multiplicity; null and lazy-branch semantics remain native.
-/// Only the current source/projected binding is transient, never an input bag.
+/// Numeric input needs only the current source/projected binding.
 ///
 /// HAVING, hidden/repeated output columns, output expressions, exact ORDER BY
 /// and SKIP/LIMIT are supported. Finite ordered pages retain at most SKIP+LIMIT
@@ -55,12 +62,32 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// Output DISTINCT retains only the best SKIP+LIMIT projected classes and
 /// their best-ranked complete representatives. Both rank and class support
 /// obey this prefix bound; upstream group accumulation is separately resident.
-/// COLLECT and COLLECT DISTINCT require the ordinary edge row-stream order
-/// proof on the complete child: root edge identity, root source identity, then
-/// each joined edge identity. Batch identified inputs sort that child before
-/// aggregation; an unordered private projection cannot be substituted for it.
-/// Row-local input expressions run after this ordered child. Relational input
-/// remains outside this profile. Collection payloads are metered, not spilled.
+/// COLLECT and COLLECT DISTINCT preserve the ordinary edge row-stream order
+/// proof on the complete child: root edge identity, root source identity when
+/// orientation requires it, then each joined edge identity. Row-local input
+/// expressions run after this ordered child.
+///
+/// Plain identified inputs also admit collections of one shared argument when
+/// every preceding input column is a grouping key. Batch execution sorts the
+/// complete child canonically before aggregation. Within each group that
+/// prefix is constant, so sorting the retained collection values reproduces
+/// the child's order; later columns distinguish only equal collected values.
+/// This in-place finalization shares the source's cumulative work allowance
+/// and cancellation checks. It retains no extra input or ordering table.
+/// Other plain identified collection inputs retain one complete canonical
+/// order key per contributing occurrence, shared across their collection
+/// arguments. Their lists are populated in that key order, not by sorting
+/// each argument independently. This resident support is work/scratch governed
+/// and can grow with matched occurrences even under a small result LIMIT.
+/// Single-source WITH chains of ALL column/constant/scalar-VM projections,
+/// scopes and filters execute row by row before numeric grouping. Ordinal-
+/// dependent or additional graph-reading expressions remain outside this path.
+/// Intermediate DISTINCT, ORDER BY, pages,
+/// expansion, multi-source operators and COLLECT consumers are not admitted:
+/// their positional or support semantics cannot be erased by this fusion.
+/// Numeric-only and already ordered paths collect no intermediate match
+/// relation. Collection payloads and any required source-order support remain
+/// metered resident state, not spilled.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -69,6 +96,9 @@ impl core::error::Error for EdgeAggregateBuildError {
 pub struct EdgeAggregatePlan {
     input: EdgeScanPlan,
     aggregate: PreparedGraphAggregate,
+    canonical_collections: bool,
+    ordered_collections: Option<ordered_collection::Layout>,
+    pipeline: Option<InputPipeline>,
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
@@ -77,23 +107,40 @@ impl EdgeAggregatePlan {
         }) {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
         }
-        let aggregate = aggregate
-            .prepare_streamed_output()
-            .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let collects = aggregate
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
-        if collects {
-            // Reuse the full canonical order proof, including every appended
-            // edge and undirected orientation. Numeric reducers may relax the
-            // output prefix because they commute; ordered lists cannot.
-            EdgeScanPlan::compile(aggregate.input_pattern().plan())
-                .map_err(EdgeAggregateBuildError::Scan)?;
-        }
+        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
+            .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
+        let mut ordered_collections = None;
+        let canonical_collections = if collects {
+            // Preserve the complete existing source-order proof and its
+            // finalization path. A shared-argument proof needs only values;
+            // other canonical identified inputs retain complete order keys.
+            match EdgeScanPlan::compile(aggregate.input_pattern().plan()) {
+                Ok(_) => false,
+                Err(_) if canonical_collection_order_proven(&aggregate) => true,
+                Err(error) => {
+                    ordered_collections = ordered_collection::Layout::prepare(&aggregate);
+                    if ordered_collections.is_none() {
+                        return Err(EdgeAggregateBuildError::Scan(error));
+                    }
+                    false
+                }
+            }
+        } else {
+            false
+        };
         let input = join::compile_aggregate(aggregate.input_pattern().plan())
             .map_err(EdgeAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate })
+        Ok(Self {
+            input,
+            aggregate,
+            canonical_collections,
+            ordered_collections,
+            pipeline,
+        })
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -104,6 +151,29 @@ impl EdgeAggregatePlan {
         self.aggregate.key_columns()
     }
 }
+
+fn canonical_collection_order_proven(aggregate: &PreparedGraphAggregate) -> bool {
+    if aggregate.input_projection().is_some()
+        || !aggregate.input_pattern().plan().requires_identified_edges()
+    {
+        return false;
+    }
+    let mut collections = aggregate
+        .aggregates()
+        .iter()
+        .filter(|spec| NumericState::collects(spec.function()));
+    let Some(column) = collections.next().and_then(|spec| spec.argument_column()) else {
+        return false;
+    };
+    // Group equality fixes every earlier column in the child's canonical
+    // lexicographic order. All collections then share this one argument's
+    // value order, including DISTINCT's canonical equality representatives.
+    // The join compiler still validates every child operator, projection and
+    // unpaginated ALL tail; this proof cannot discard an input modifier.
+    collections.all(|spec| spec.argument_column() == Some(column))
+        && (0..column).all(|prior| aggregate.group_key_columns().contains(&prior))
+}
+
 impl core::fmt::Debug for EdgeAggregatePlan {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("EdgeAggregatePlan([REDACTED])")
@@ -111,8 +181,18 @@ impl core::fmt::Debug for EdgeAggregatePlan {
 }
 
 pub type EdgeAggregateError<E, C> = GqlQueryError<GraphAggregateError<EdgeScanError<E>>, C>;
-type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
-type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
+type Groups = BTreeMap<Vec<GraphValue>, Group>;
+type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Group>;
+
+struct Group {
+    states: Vec<NumericState>,
+    collections: ordered_collection::State,
+}
+
+struct Accumulation {
+    groups: Groups,
+    largest_key: usize,
+}
 
 /// Global empty input yields one zero/null row; grouped empty input yields none.
 /// Every match/probe/source examination and group-state operation shares the
@@ -133,18 +213,26 @@ type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 pub struct EdgeAggregateCursor<S, F> {
     input: EdgeScanCursor<S, F>,
     aggregate: PreparedGraphAggregate,
+    canonical_collections: bool,
+    ordered_collections: Option<ordered_collection::Layout>,
+    pipeline: Option<InputPipeline>,
     state: EdgeScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
+    accumulating: Option<Accumulation>,
 }
 impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     pub fn new(source: S, plan: EdgeAggregatePlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
         Self {
             input: EdgeScanCursor::new(source, plan.input, policy, checkpoint),
             aggregate: plan.aggregate,
+            canonical_collections: plan.canonical_collections,
+            ordered_collections: plan.ordered_collections,
+            pipeline: plan.pipeline,
             state: EdgeScanState::Open,
             pending: None,
             completed: None,
+            accumulating: None,
         }
     }
     #[must_use]
@@ -178,41 +266,79 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         self.input.close();
         self.pending = None;
         self.completed = None;
+        self.accumulating = None;
     }
 
-    fn accumulate<C>(&mut self) -> Result<Groups, EdgeAggregateError<S::Error, C>>
+    fn accumulate<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> Result<Option<Groups>, EdgeAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
-        self.input
-            .meter
-            .event(GlaExecutionEvent::Work)
-            .map_err(lift)?;
-        let mut groups = Groups::new();
         let global = self.aggregate.group_key_columns().is_empty();
-        if global {
-            // Preserve global zero-budget refusal before driving any source.
-            if !self.aggregate.has_streamed_output_stage() {
-                self.input
-                    .meter
-                    .increment(GqlBudgetDimension::ResultRows, 0)
-                    .map_err(lift)?;
-            }
+        if self.accumulating.is_none() {
             self.input
                 .meter
-                .event(GlaExecutionEvent::ScratchEntry)
+                .event(GlaExecutionEvent::Work)
                 .map_err(lift)?;
-            groups.insert(Vec::new(), states(&self.aggregate, &mut self.input.meter)?);
+            let mut groups = Groups::new();
+            if global {
+                // Preserve global zero-budget refusal before driving any
+                // source, once across every cooperative suspension.
+                if !self.aggregate.has_streamed_output_stage() {
+                    self.input
+                        .meter
+                        .increment(GqlBudgetDimension::ResultRows, 0)
+                        .map_err(lift)?;
+                }
+                self.input
+                    .meter
+                    .event(GlaExecutionEvent::ScratchEntry)
+                    .map_err(lift)?;
+                groups.insert(
+                    Vec::new(),
+                    Group {
+                        states: states(&self.aggregate, &mut self.input.meter)?,
+                        collections: ordered_collection::State::default(),
+                    },
+                );
+            }
+            self.accumulating = Some(Accumulation {
+                groups,
+                largest_key: 0,
+            });
         }
-        let mut largest_key = 0_usize;
-        while let Some(row) = self.input.advance().map_err(lift)? {
+        let Accumulation {
+            groups,
+            largest_key,
+        } = self
+            .accumulating
+            .as_mut()
+            .expect("initialized accumulation");
+        loop {
+            let row = match self.input.advance_bounded(remaining).map_err(lift)? {
+                core::task::Poll::Ready(Some(row)) => row,
+                core::task::Poll::Ready(None) => break,
+                core::task::Poll::Pending => return Ok(None),
+            };
             let meter = &mut self.input.meter;
             // The graph compiler still owns source matching/projection. This
             // single-row transformation completes before any group is changed;
             // a refusal discards accumulation and releases no partial summary.
-            let row = self
-                .aggregate
-                .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?;
+            let row = if let Some(pipeline) = &self.pipeline {
+                let Some(row) =
+                    pipeline.evaluate(row, &mut |event| meter.event(event).map_err(lift))?
+                else {
+                    // A rejected binding is not source exhaustion. Continue
+                    // within the same cooperative quantum and shared meter.
+                    continue;
+                };
+                row
+            } else {
+                self.aggregate
+                    .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?
+            };
             let state = if global {
                 groups
                     .get_mut(&Vec::<GraphValue>::new())
@@ -231,7 +357,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                         value.copy_with_control(&mut |event| meter.event(event).map_err(lift))?,
                     );
                 }
-                largest_key = largest_key.max(units);
+                *largest_key = (*largest_key).max(units);
                 // Logical B-tree lookup/insertion reservation, including every
                 // variable-sized key. No exact allocator/comparison-count claim.
                 let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
@@ -259,36 +385,116 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                                 .map_err(GqlQueryError::Rows)?;
                         }
                         meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
-                        entry.insert(states(&self.aggregate, meter)?)
+                        entry.insert(Group {
+                            states: states(&self.aggregate, meter)?,
+                            collections: ordered_collection::State::default(),
+                        })
                     }
                 }
             };
-            for (at, (spec, state)) in self.aggregate.aggregates().iter().zip(state).enumerate() {
+            for (at, (spec, cell)) in self
+                .aggregate
+                .aggregates()
+                .iter()
+                .zip(&mut state.states)
+                .enumerate()
+            {
                 meter.event(GlaExecutionEvent::Work).map_err(lift)?;
+                if self.ordered_collections.is_some() && NumericState::collects(spec.function()) {
+                    continue;
+                }
                 let value = spec.argument_column().map_or(Input::Identity, |column| {
                     Input::from_value(&row.values()[column])
                 });
-                state.update_governed(value, at, &mut |event| {
+                cell.update_governed(value, at, &mut |event| {
                     meter.event(value_event(event)).map_err(lift)
                 })?;
+            }
+            if let Some(layout) = &self.ordered_collections {
+                state
+                    .collections
+                    .push(layout, row, &mut |event| meter.event(event).map_err(lift))?;
             }
         }
         self.input
             .meter
             .event(GlaExecutionEvent::Work)
             .map_err(lift)?;
-        Ok(groups)
+        Ok(Some(
+            self.accumulating
+                .take()
+                .expect("completed accumulation")
+                .groups,
+        ))
+    }
+
+    /// Drive at most 64 root/incidence examinations or join transitions before
+    /// yielding Pending. No partial aggregate or private matched row escapes.
+    /// Empty matches and hidden candidates still yield; indexed positions and
+    /// native group/DISTINCT/COLLECT state and any required collection-order
+    /// keys are retained. Numeric input never becomes an intermediate bag.
+    /// Single source callbacks, probes and final group selection are synchronous
+    /// governed sections; the quantum is not a wall-clock duration guarantee.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> crate::stream::aggregate::AggregatePoll<EdgeAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        if self.pending.is_none() && self.completed.is_none() {
+            let mut remaining = 64;
+            match self.accumulate(&mut remaining) {
+                Ok(None) => {
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                Ok(Some(groups)) => {
+                    self.input.close();
+                    if self.aggregate.has_streamed_output_stage() {
+                        match self.select_output(groups) {
+                            Ok(rows) => self.completed = Some(rows.into_iter()),
+                            Err(error) => {
+                                self.state = EdgeScanState::Failed;
+                                self.close();
+                                return core::task::Poll::Ready(Some(Err(error)));
+                            }
+                        }
+                    } else {
+                        self.pending = Some(groups.into_iter());
+                    }
+                }
+                Err(error) => {
+                    self.state = EdgeScanState::Failed;
+                    self.close();
+                    return core::task::Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+        core::task::Poll::Ready(self.next())
     }
 
     fn finalize<C>(
         &mut self,
         keys: Vec<GraphValue>,
-        states: Vec<NumericState>,
+        group: Group,
     ) -> Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
         let meter = &mut self.input.meter;
+        let Group {
+            mut states,
+            collections,
+        } = group;
+        if let Some(layout) = &self.ordered_collections {
+            collections.finish(layout, &mut states, &mut |event| {
+                meter.event(event).map_err(lift)
+            })?;
+        }
         let mut values = Vec::new();
         for state in states {
             meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
@@ -296,6 +502,11 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             // share the vertex reducer's governed ownership/normalization.
             let value = match state {
                 basic @ (NumericState::Count(_) | NumericState::Sum(_)) => basic.finish(),
+                other if self.canonical_collections => {
+                    other.finish_canonical_collection_governed(&mut |event| {
+                        meter.event(value_event(event)).map_err(lift)
+                    })?
+                }
                 other => other
                     .finish_governed(&mut |event| meter.event(value_event(event)).map_err(lift))?,
             };
@@ -315,7 +526,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        if self.aggregate.incremental_output_is_distinct() || !self.aggregate.ordering().is_empty()
+        if self.aggregate.incremental_output_is_distinct() || self.aggregate.has_streamed_ordering()
         {
             return self.select_ordered_output(groups);
         }
@@ -416,13 +627,13 @@ where
     }
     Ok(states)
 }
-fn value_event(event: VertexScanEvent) -> GlaExecutionEvent {
+pub(super) fn value_event(event: VertexScanEvent) -> GlaExecutionEvent {
     match event {
         VertexScanEvent::Work => GlaExecutionEvent::Work,
         VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
     }
 }
-fn lift<E, C>(error: GqlQueryError<EdgeScanError<E>, C>) -> EdgeAggregateError<E, C> {
+pub(super) fn lift<E, C>(error: GqlQueryError<EdgeScanError<E>, C>) -> EdgeAggregateError<E, C> {
     error.map_source(GraphAggregateError::Source)
 }
 impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggregateCursor<S, F> {
@@ -432,7 +643,14 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggrega
             return None;
         }
         if self.pending.is_none() && self.completed.is_none() {
-            let result = self.accumulate();
+            let result = loop {
+                let mut remaining = usize::MAX;
+                match self.accumulate(&mut remaining) {
+                    Ok(Some(groups)) => break Ok(groups),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+            };
             // All retained keys/witnesses/extrema are owned; source release is
             // independent of whether any output has yet been requested.
             self.input.close();
@@ -449,6 +667,7 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggrega
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => {
                     self.state = EdgeScanState::Failed;
+                    self.accumulating = None;
                     return Some(Err(error));
                 }
             }

@@ -44,6 +44,8 @@ pub(crate) enum GraphMatchKind {
     Optional,
     Exists,
     NotExists,
+    /// A pattern comprehension's scope (fgdb-7nwox).
+    Collect,
 }
 
 /// An ordered graph clause. Required MATCH and OPTIONAL export their new
@@ -57,6 +59,9 @@ pub(crate) enum GraphMatchKind {
 pub struct GraphMatchClause<'a> {
     pub(crate) pattern: &'a GraphPatternBuilder,
     pub(crate) kind: GraphMatchKind,
+    /// A Collect clause's element: the local vertex, relationship or path
+    /// each witness contributes, or none (each contributes NULL).
+    pub(crate) element: Option<&'a str>,
 }
 
 impl<'a> GraphMatchClause<'a> {
@@ -68,6 +73,7 @@ impl<'a> GraphMatchClause<'a> {
         Self {
             pattern,
             kind: GraphMatchKind::Required,
+            element: None,
         }
     }
 
@@ -76,6 +82,7 @@ impl<'a> GraphMatchClause<'a> {
         Self {
             pattern,
             kind: GraphMatchKind::Optional,
+            element: None,
         }
     }
     #[must_use]
@@ -83,6 +90,7 @@ impl<'a> GraphMatchClause<'a> {
         Self {
             pattern,
             kind: GraphMatchKind::Exists,
+            element: None,
         }
     }
     #[must_use]
@@ -90,6 +98,19 @@ impl<'a> GraphMatchClause<'a> {
         Self {
             pattern,
             kind: GraphMatchKind::NotExists,
+            element: None,
+        }
+    }
+    /// A pattern comprehension's scope (fgdb-7nwox): once per incoming
+    /// occurrence, the list of `element` over every witness, in enumeration
+    /// order. Its names stay local, like an existential's, and it never
+    /// multiplies or eliminates the incoming row.
+    #[must_use]
+    pub const fn collect(pattern: &'a GraphPatternBuilder, element: Option<&'a str>) -> Self {
+        Self {
+            pattern,
+            kind: GraphMatchKind::Collect,
+            element,
         }
     }
 }

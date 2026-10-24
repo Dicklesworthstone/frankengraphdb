@@ -9,7 +9,7 @@ use fgdb::{
     WriteError, WriteTxnError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
+use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
@@ -246,6 +246,151 @@ fn multipart_authorized_reads_mask_every_source_and_recheck_reused_templates() {
                 result
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn computed_optional_conditions_share_native_snapshot_transaction_and_authorization_boundaries() {
+    let ((), report) = run_async_under_lab(0xa681_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = database(&commit).await;
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.n = a.n + 3 \
+            RETURN a.n AS original,b.n AS matched ORDER BY original NULLS FIRST,matched";
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, &["original", "matched"]);
+            let scalar = |value: &fgdb::QueryValue| match value
+                .as_value()
+                .and_then(|value| value.as_scalar())
+            {
+                Some(CanonicalScalar::Int(n)) => Some(i128::from(*n)),
+                Some(CanonicalScalar::Null) => None,
+                other => panic!("unexpected fixture scalar: {other:?}"),
+            };
+            rows.into_iter()
+                .map(|row| (scalar(&row[0]), scalar(&row[1])))
+                .collect::<Vec<_>>()
+        };
+        let old = vec![
+            (None, None),
+            (None, None),
+            (Some(7), Some(10)),
+            (Some(10), None),
+            (Some(11), None),
+        ];
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            old
+        );
+        let issuer = authority();
+        for (grant, expected) in [
+            (
+                grant(),
+                vec![
+                    (None, None),
+                    (None, None),
+                    (Some(7), Some(10)),
+                    (Some(10), None),
+                ],
+            ),
+            (
+                {
+                    let mut g = grant();
+                    g.properties = Scope::only([]);
+                    g
+                },
+                vec![(None, None); 4],
+            ),
+        ] {
+            let token = issuer.issue_at(&grant, 100).unwrap();
+            assert_eq!(
+                values(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            &params,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut changed = WriteBatch::new(R);
+        changed.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(13)));
+        txn.write(&mut db, changed).unwrap();
+        let new = vec![
+            (None, None),
+            (None, None),
+            (Some(10), Some(13)),
+            (Some(11), None),
+            (Some(13), None),
+        ];
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap()
+            ),
+            new
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            old
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            new
+        );
+        let bound = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&params)
+            .unwrap();
+        let scalars = |rows: Vec<fgdb_gql::algebra::GraphValueRow>| {
+            rows.into_iter()
+                .map(|row| {
+                    let value = |at| match row.get(at).unwrap().as_scalar().unwrap() {
+                        CanonicalScalar::Int(n) => Some(i128::from(*n)),
+                        CanonicalScalar::Null => None,
+                        other => panic!("unexpected fixture scalar: {other:?}"),
+                    };
+                    (value(0), value(1))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            scalars(
+                db.execute_graph_set_governed_at(&cx, &bound, basis, policy())
+                    .unwrap()
+                    .value
+            ),
+            old
+        );
+        assert_eq!(
+            scalars(
+                pinned
+                    .execute_graph_set_governed(&cx, &bound, policy())
+                    .unwrap()
+                    .value
+            ),
+            old
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

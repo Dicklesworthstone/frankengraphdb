@@ -6,7 +6,7 @@ const MAX_EMBEDDED_SAVEPOINTS: usize = 64;
 struct EmbeddedSavepoint {
     name: String,
     staged_len: usize,
-    prepared: Option<PreparedWrite>,
+    prepared: Option<std::sync::Arc<PreparedWrite>>,
 }
 
 impl WriteTxn {
@@ -14,9 +14,10 @@ impl WriteTxn {
     /// Names are case-sensitive and local to this transaction. Reusing a name
     /// shadows its older savepoint until the newer one is released.
     ///
-    /// This bounded embedded API permits 64 live savepoints. Each owns a clone
-    /// of the current prepared template, not another snapshot pin. The count
-    /// bound is not byte-level memory/spill governance. Completion or abort
+    /// This bounded embedded API permits 64 live savepoints. Each shares its
+    /// immutable prepared prefix without copying the template or owning another
+    /// snapshot pin. Distinct prefixes can still retain substantial memory; the
+    /// count bound is not byte-level memory/spill governance. Completion or abort
     /// discards every savepoint; none is durable or usable by another transaction.
     pub fn savepoint<V: Vfs + Clone>(
         &mut self,
@@ -76,9 +77,9 @@ impl WriteTxn {
             // The latest successful preparation includes the whole raw prefix,
             // even observations erased from its canonical net effects. Failed
             // preparations already preserve their own observations in write().
-            prepared
-                .dependencies
-                .retain_observations(self.read_set.get_mut());
+            self.read_set
+                .get_mut()
+                .extend(prepared.dependencies.observations());
         }
         Ok(())
     }
@@ -152,7 +153,7 @@ mod savepoint_tests {
             txn.write(&mut db, edit).unwrap();
             assert_eq!(
                 txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(11)
+                CanonicalScalar::Int(11).into()
             );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_some());
 
@@ -160,7 +161,7 @@ mod savepoint_tests {
             assert_eq!(txn.prepared.as_ref().unwrap().template, saved_template);
             assert_eq!(
                 txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_none());
             assert!(txn.vertex(&db, VId(777)).unwrap().is_some());
@@ -172,7 +173,7 @@ mod savepoint_tests {
             assert!(db.vertex(VId(2)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert!(txn.savepoints.is_empty());
         });

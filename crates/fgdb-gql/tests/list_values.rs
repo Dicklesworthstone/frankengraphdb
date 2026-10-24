@@ -90,6 +90,72 @@ fn list_parameters_retain_type_and_reject_scalar_binding() {
     );
 }
 
+#[test]
+fn map_parameter_templates_keep_map_types_and_nullable_bindings() {
+    use fgdb_gql::{GqlParameterType, GqlParameters, GraphSetColumnType, PreparedGraphSetText};
+    let plain = |kind| {
+        PreparedGraphSetText::prepare_with_parameter_types(
+            "RETURN $m AS value",
+            &[("m", kind)],
+            |_, _| None,
+        )
+        .unwrap()
+    };
+    let map = plain(GqlParameterType::Map);
+    let list = plain(GqlParameterType::List);
+    assert_eq!(
+        map.parameter_schema()[0].parameter_type,
+        GqlParameterType::Map
+    );
+    assert_eq!(map.column_types(), [GraphSetColumnType::Any]);
+    assert_ne!(
+        map.canonical_template_bytes(),
+        list.canonical_template_bytes()
+    );
+    let template = PreparedGraphSetText::prepare_with_parameter_types(
+        "RETURN $m.nested.key AS value, keys($m) AS names",
+        &[("m", GqlParameterType::Map)],
+        |_, _| None,
+    )
+    .unwrap();
+    let before = template.canonical_template_bytes();
+    let first = GqlParameters::new()
+        .with_map(
+            "m",
+            vec![(
+                "nested".into(),
+                GraphValue::map(vec![("key".into(), int(1))]).unwrap(),
+            )],
+        )
+        .unwrap();
+    let second = GqlParameters::new()
+        .with_map(
+            "m",
+            vec![(
+                "nested".into(),
+                GraphValue::map(vec![("key".into(), int(2))]).unwrap(),
+            )],
+        )
+        .unwrap();
+    assert_ne!(
+        template.bind_parameters(&first).unwrap().canonical_bytes(),
+        template.bind_parameters(&second).unwrap().canonical_bytes()
+    );
+    assert!(
+        template
+            .bind_parameters(&GqlParameters::new().with_null("m").unwrap())
+            .is_ok()
+    );
+    for arguments in [
+        GqlParameters::new().with_int64("m", 1).unwrap(),
+        GqlParameters::new().with_text("m", "map").unwrap(),
+        GqlParameters::new().with_list("m", vec![]).unwrap(),
+    ] {
+        assert!(template.bind_parameters(&arguments).is_err());
+    }
+    assert_eq!(template.canonical_template_bytes(), before);
+}
+
 fn execute(
     text: &str,
     policy: fgdb_gql::GqlQueryPolicy,

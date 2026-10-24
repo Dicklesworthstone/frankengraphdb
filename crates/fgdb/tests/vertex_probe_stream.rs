@@ -95,7 +95,7 @@ fn field(db: &Database<MemVfs>, cut: CommitSeq, id: VId) -> CanonicalScalar {
         .props
         .iter()
         .find(|(p, _)| *p == P)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
         .unwrap_or(CanonicalScalar::Null)
 }
 fn orient(a: VId, b: VId, d: GlaDirection) -> Vec<(VId, VId)> {
@@ -118,7 +118,11 @@ fn oracle(
     let relation: Vec<_> = edges
         .iter()
         .filter(|e| e.entry.relation == R)
-        .flat_map(|e| orient(e.entry.src, e.entry.dst, d))
+        .flat_map(|e| {
+            orient(e.entry.src, e.entry.dst, d)
+                .into_iter()
+                .map(|(from, to)| (e.entry.eid, from, to))
+        })
         .collect();
     let mut result = Vec::new();
     for a in IDS {
@@ -126,13 +130,15 @@ fn oracle(
             continue;
         }
         let mut witnesses = 0;
-        for &(from, x) in &relation {
+        for &(out, from, x) in &relation {
             if from != a || !matches!(field(db,cut,x),CanonicalScalar::Int(v) if v > 5) {
                 continue;
             }
             if cycle {
-                for &(via, end) in &relation {
-                    if via == x && end == a {
+                // The EXISTS body is one MATCH: DIFFERENT EDGES keeps the
+                // way back off the way out.
+                for &(back, via, end) in &relation {
+                    if back != out && via == x && end == a {
                         witnesses += 1;
                     }
                 }

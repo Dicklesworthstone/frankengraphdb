@@ -13,7 +13,7 @@ mod mutation;
 mod path;
 
 use super::*;
-use crate::algebra::{GraphMatchClause, GraphWalkSearch};
+use crate::algebra::{EdgeRelation, GraphMatchClause, GraphWalkSearch};
 
 #[derive(Clone, Copy)]
 enum ScopeKind {
@@ -21,6 +21,8 @@ enum ScopeKind {
     Optional,
     Exists,
     NotExists,
+    /// A pattern comprehension's body (fgdb-7nwox).
+    Collect,
 }
 
 impl ScopeKind {
@@ -30,6 +32,7 @@ impl ScopeKind {
 }
 
 struct PatternSyntax<'a> {
+    match_mode: GraphMatchMode,
     variables: Vec<Name<'a>>,
     captures: Vec<Name<'a>>,
     labels: Vec<(Name<'a>, Name<'a>)>,
@@ -40,6 +43,8 @@ struct PatternSyntax<'a> {
 pub(super) struct ScopeSyntax<'a> {
     kind: ScopeKind,
     body: PatternSyntax<'a>,
+    /// A Collect scope's element: the local each witness contributes.
+    element: Option<Name<'a>>,
 }
 
 #[derive(Clone)]
@@ -47,6 +52,7 @@ pub(super) struct BoundScope {
     kind: ScopeKind,
     builder: GraphPatternBuilder,
     filters: Vec<BoundFilter>,
+    element: Option<String>,
 }
 
 impl BoundScope {
@@ -56,17 +62,24 @@ impl BoundScope {
             ScopeKind::Optional => GraphMatchClause::optional(&self.builder),
             ScopeKind::Exists => GraphMatchClause::exists(&self.builder),
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
+            ScopeKind::Collect => GraphMatchClause::collect(&self.builder, self.element.as_deref()),
         }
     }
     /// Facade transcript tag for this scope kind, matching the resolved
-    /// lowering distinction: optional extends nulls, exists/not-exists probe.
+    /// lowering distinction: optional extends nulls, exists/not-exists probe,
+    /// collect gathers a list.
     pub(super) fn kind_tag(&self) -> u8 {
         match self.kind {
             ScopeKind::Required => 0,
             ScopeKind::Optional => 1,
             ScopeKind::Exists => 2,
             ScopeKind::NotExists => 3,
+            ScopeKind::Collect => 4,
         }
+    }
+    /// A Collect scope's element name, for its transcript.
+    pub(super) fn element(&self) -> Option<&str> {
+        self.element.as_deref()
     }
     pub(super) fn builder(&self) -> &GraphPatternBuilder {
         &self.builder
@@ -84,6 +97,7 @@ impl BoundScope {
             kind: self.kind,
             builder: bind_builder(&self.builder, &self.filters, values, at)?,
             filters: Vec::new(),
+            element: self.element.clone(),
         })
     }
 }
@@ -108,6 +122,7 @@ impl<'a> ScopeSyntax<'a> {
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
     ) -> Result<BoundScope, GraphPatternTextError> {
         let (builder, filters) = resolve_pattern_with_captures(
+            self.body.match_mode,
             &self.body.variables,
             &self.body.captures,
             &self.body.labels,
@@ -119,6 +134,7 @@ impl<'a> ScopeSyntax<'a> {
             kind: self.kind,
             builder,
             filters,
+            element: self.element.map(|name| name.text.to_owned()),
         })
     }
 }
@@ -127,16 +143,18 @@ impl<'a> ScopeSyntax<'a> {
 /// predicates retain operands for rebinding instead of entering a second AST
 /// interpreter or re-resolving a catalog on every execution.
 pub(super) fn resolve_pattern<'a>(
+    match_mode: GraphMatchMode,
     variables: &[Name<'a>],
     labels: &[(Name<'a>, Name<'a>)],
     edges: &[Edge<'a>],
     filters: Vec<Filter<'a>>,
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
-    resolve_pattern_with_captures(variables, &[], labels, edges, filters, symbol)
+    resolve_pattern_with_captures(match_mode, variables, &[], labels, edges, filters, symbol)
 }
 
 fn resolve_pattern_with_captures<'a>(
+    match_mode: GraphMatchMode,
     variables: &[Name<'a>],
     captures: &[Name<'a>],
     labels: &[(Name<'a>, Name<'a>)],
@@ -145,6 +163,7 @@ fn resolve_pattern_with_captures<'a>(
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
     let mut builder = GraphPatternBuilder::new();
+    builder.match_mode(match_mode);
     for name in variables {
         let declared = if captures.iter().any(|capture| capture.text == name.text) {
             builder.outer_vertex(name.text)
@@ -163,9 +182,27 @@ fn resolve_pattern_with_captures<'a>(
         )?;
     }
     for (edge_at, edge) in edges.iter().enumerate() {
-        let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
-        else {
-            unreachable!("symbol domain is checked by the shared resolver")
+        let relation = match edge.relation {
+            Some(name) => {
+                let mut relations = Vec::with_capacity(1 + edge.alternatives.len());
+                for name in core::iter::once(name).chain(edge.alternatives.iter().copied()) {
+                    let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, name)?
+                    else {
+                        unreachable!("symbol domain is checked by the shared resolver")
+                    };
+                    relations.push(relation);
+                }
+                // The parser bounded the alternation; duplicates collapse.
+                EdgeRelation::alternation(&relations).ok_or_else(|| {
+                    error(
+                        name.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "at most 8 relationship types in an alternation",
+                        ),
+                    )
+                })?
+            }
+            None => EdgeRelation::Any,
         };
         let result = match edge.walk {
             Some(bounds) if edge.search == GraphWalkSearch::AllShortest => builder.shortest_walk(
@@ -218,7 +255,7 @@ fn resolve_pattern_with_captures<'a>(
                 edge.destination.text,
             ),
         };
-        built(edge.relation.at, result)?;
+        built(edge.relation.map_or(edge.source.at, |name| name.at), result)?;
         if let Some(variable) = edge.variable {
             built(variable.at, builder.capture_edge(variable.text, edge_at))?;
         }
@@ -416,7 +453,7 @@ pub(super) fn bind_builder(
             }
             // List declarations refuse at the typed number parser, matching the
             // scalar property admission invariant; a List value cannot bind.
-            GqlParameterValue::List(_) => {
+            GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
                 unreachable!("property arguments were type-checked at preparation")
             }
         };
@@ -448,7 +485,10 @@ fn predicate_captures<'a>(
         let names = match item {
             Pending::Variable(name) => [Some(name), None],
             Pending::Predicate(filter) => match filter {
-                Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
+                // A clause's named path captures its own pattern; it reads no
+                // containing value.
+                Filter::PathCapture(_) => continue,
+                Filter::PathLength { .. } | Filter::PathNull { .. } => {
                     return Err(error(
                         0,
                         GraphPatternTextErrorKind::Expected("root path predicate"),
@@ -522,6 +562,7 @@ impl<'a> Parser<'a> {
     /// unsupported. A mutation attaches its own typed terminal clause.
     pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
+        self.syntax.match_mode = self.match_mode()?;
         if self.starts_path_binding()? {
             let path = self.name()?;
             self.punct(b'=', "=")?;
@@ -529,13 +570,49 @@ impl<'a> Parser<'a> {
         }
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
+        // openCypher: a named variable-length relationship `[r*m..n]` is the
+        // list of relationships it matched. When it is the pattern's only
+        // edge and no path is named, that list is the edge list of the one
+        // path the pattern matches, so the path is captured under `r`.
+        if self.syntax.path.is_none()
+            && let [edge] = self.syntax.edges.as_mut_slice()
+            && edge.walk.is_some()
+            && let Some(variable) = edge.variable.take()
+        {
+            self.syntax.path = Some(variable);
+            self.syntax.path_edges = true;
+        }
         if let Some(path) = self.syntax.path {
             self.syntax.filters.push(Filter::PathCapture(path));
         }
-        if self.take_word("WHERE")? {
+        if self.is_word("WHERE")
+            && ((self.defer_where && self.where_needs_values()?)
+                || self.deferred_wheres.contains(&self.current.at))
+        {
+            // A predicate over list or path values runs as a row filter after
+            // the match, at an implicit `WITH *` (fgdb-1c29d). So does a
+            // required continuation's WHERE the graph predicate refused. The
+            // composition entry re-reads it from here.
+            self.deferred_where = Some((self.lexer.clone(), self.current));
+            self.skip_where()?;
+        } else if self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
-        loop {
+        // A deferred WHERE filters this clause's rows before any later MATCH
+        // or OPTIONAL MATCH joins them: that clause starts the next part of
+        // a multipart read (deferred_where_continues), never a scope here.
+        while self.deferred_where.is_none() {
+            // An OPTIONAL continuation ends before the next clause; its
+            // caller draws the implicit `WITH *` there.
+            if self.optional_part && (self.is_word("OPTIONAL") || self.is_word("MATCH")) {
+                break;
+            }
+            // So does a clause that reads a name its child scope cannot see
+            // (implicit_withs): it starts the next part at an implicit
+            // `WITH *`.
+            if self.implicit_withs.contains(&self.current.at) {
+                break;
+            }
             if self.take_word("OPTIONAL")? {
                 self.match_scope(ScopeKind::Optional)?;
             } else if self.is_word("MATCH") {
@@ -546,6 +623,231 @@ impl<'a> Parser<'a> {
         }
         self.syntax.return_at = self.current.at;
         Ok(())
+    }
+
+    /// A mutation may begin with OPTIONAL MATCH (openCypher Delete1, Set4,
+    /// Remove1): the unit relation left-joined with the pattern, so the
+    /// writes see its witnesses or exactly one row whose variables are all
+    /// NULL. Only OPTIONAL scopes may follow such a root; a required MATCH
+    /// would have to run against that NULL row, outside the one pattern.
+    pub(super) fn parse_mutation_match_prefix(&mut self) -> Result<bool, GraphPatternTextError> {
+        let optional = self.take_word("OPTIONAL")?;
+        self.parse_match_prefix()?;
+        if optional
+            && self
+                .syntax
+                .scopes
+                .iter()
+                .any(|scope| matches!(scope.kind, ScopeKind::Required))
+        {
+            return Err(error(
+                self.syntax.return_at,
+                GraphPatternTextErrorKind::Expected(
+                    "OPTIONAL MATCH after a leading OPTIONAL MATCH",
+                ),
+            ));
+        }
+        Ok(optional)
+    }
+
+    /// Whether the WHERE at the current token needs the value language
+    /// (fgdb-1c29d): a list quantifier, a list comprehension, a list or path
+    /// function, `type(r)`, or IN over a computed list. Pattern predicates
+    /// accept none of these, so a WHERE without one keeps its exact pattern
+    /// lowering. The boolean filter cannot read a relationship's type
+    /// (fgdb-fj106); the row filter reads it through the hoisted metadata
+    /// column `RETURN type(r)` already uses.
+    /// `nodes(p)` and `edges(p)` at depth zero are path predicates; inside
+    /// parentheses (`size(nodes(p))`) they are list values.
+    ///
+    /// So does a label test (fgdb-qo3jv) the pattern filter cannot read: a
+    /// relationship's `r:T`, and a vertex's `v:L` once the WHERE has OR, NOT
+    /// or parentheses, or any other conjunct the Boolean parser reads as a
+    /// compound expression. There a label test is a Boolean leaf, which the
+    /// row filter reads as `'L' IN labels(v)` (`type(r) = 'T'`), three-valued.
+    /// A flat AND of label tests and comparisons keeps its inline labels,
+    /// and an EXISTS or pattern-predicate conjunct is its own scope, whose
+    /// labels and connectives count for neither.
+    fn where_needs_values(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        let mut braces = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        // A conjunct begins the WHERE and follows each top-level AND.
+        let (mut conjunct, mut existence) = (true, false);
+        let (mut vertex_test, mut edge_test, mut compound) = (false, false, false);
+        loop {
+            let token = lexer.next()?;
+            let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+            let mut ahead = lexer.clone();
+            let next = ahead.next()?.kind;
+            let binds = |ahead: &mut Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+                Ok(matches!(ahead.next()?.kind, TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("IN")))
+            };
+            if core::mem::take(&mut conjunct) {
+                existence = existence_follows(token.kind, &lexer)?;
+            }
+            match token.kind {
+                TokenKind::End => return Ok(edge_test || (vertex_test && compound)),
+                TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
+                    return Ok(edge_test || (vertex_test && compound));
+                }
+                TokenKind::Word(word) if !key && matches!(next, TokenKind::Punct(b'(')) => {
+                    let list_function = [
+                        "relationships",
+                        "labels",
+                        "type",
+                        "keys",
+                        "reduce",
+                        "head",
+                        "last",
+                        "tail",
+                        "reverse",
+                        "range",
+                    ]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name));
+                    let path_list = depth > 0
+                        && (word.eq_ignore_ascii_case("nodes")
+                            || word.eq_ignore_ascii_case("edges"));
+                    let quantifier = ["all", "any", "none", "single"]
+                        .iter()
+                        .any(|name| word.eq_ignore_ascii_case(name))
+                        && {
+                            ahead.next()?;
+                            binds(&mut ahead)?
+                        };
+                    if list_function || path_list || quantifier {
+                        return Ok(true);
+                    }
+                }
+                TokenKind::Punct(b'[')
+                    if matches!(next, TokenKind::Word(_)) && binds(&mut ahead)? =>
+                {
+                    return Ok(true);
+                }
+                TokenKind::Word(word)
+                    if !key
+                        && word.eq_ignore_ascii_case("IN")
+                        && !matches!(next, TokenKind::Punct(b'[') | TokenKind::Parameter(_)) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            if !existence && !key {
+                match token.kind {
+                    TokenKind::Word(word)
+                        if braces == 0 && matches!(next, TokenKind::Punct(b':')) =>
+                    {
+                        if self.syntax.variables.iter().any(|name| name.text == word) {
+                            vertex_test = true;
+                        } else if self.syntax.visible_edge(word).is_some() {
+                            edge_test = true;
+                        }
+                    }
+                    // `IS NOT NULL` is a flat atom; every other NOT, OR,
+                    // list or range membership, text operator and
+                    // parenthesis makes the Boolean parser's expression
+                    // compound.
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+                        compound |= !matches!(previous, Some(TokenKind::Word(is))
+                            if is.eq_ignore_ascii_case("IS"));
+                    }
+                    TokenKind::Word(word) => {
+                        compound |= ["OR", "XOR", "IN", "BETWEEN", "STARTS", "ENDS", "CONTAINS"]
+                            .iter()
+                            .any(|operator| word.eq_ignore_ascii_case(operator));
+                    }
+                    TokenKind::Punct(b'(') => compound = true,
+                    _ => {}
+                }
+            }
+            if depth == 0
+                && !key
+                && matches!(token.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("AND"))
+            {
+                conjunct = true;
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            match token.kind {
+                TokenKind::Punct(b'{') => braces += 1,
+                TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+    }
+
+    /// Whether a root MATCH WHERE the row filter reads (where_needs_values)
+    /// is followed by another MATCH or OPTIONAL MATCH clause (fgdb-qo3jv,
+    /// TCK Match7 [25]). That WHERE filters the first part at its implicit
+    /// `WITH *`, so the statement is a multipart read whose next part starts
+    /// at that clause, exactly as `MATCH ... WITH * WHERE ... OPTIONAL MATCH`
+    /// is. Only a token-level candidate (where_then_match) parses its root
+    /// MATCH a second time, before any catalog access; a parse error is left
+    /// to the read's own parser.
+    pub(super) fn deferred_where_continues(
+        statement: &str,
+        declarations: &[(&str, crate::GqlParameterType)],
+        tokens: &[crate::set_text::TextToken<'_>],
+        zones: Option<&crate::GqlTimeZones>,
+    ) -> bool {
+        if !crate::set_text::multipart::where_then_match(tokens) {
+            return false;
+        }
+        let Ok(parser) = Parser::new_with_parameter_types(statement, declarations) else {
+            return false;
+        };
+        let mut parser = parser.with_zones(zones.cloned());
+        parser.defer_where = true;
+        parser.parse_match_prefix().is_ok()
+            && parser.deferred_where.is_some()
+            && (parser.is_word("MATCH") || parser.is_word("OPTIONAL"))
+    }
+
+    /// Step past a deferred WHERE and its predicate, to the next clause.
+    fn skip_where(&mut self) -> Result<(), GraphPatternTextError> {
+        self.advance()?;
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        loop {
+            let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+            match self.current.kind {
+                TokenKind::End => return Ok(()),
+                TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
+                    return Ok(());
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(self.current.kind);
+            self.advance()?;
+        }
+    }
+
+    /// A clause keyword that ends a root WHERE predicate at depth zero. The
+    /// WITH of `STARTS WITH` or `ENDS WITH` is an operator, not a clause.
+    pub(super) fn ends_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+        if word.eq_ignore_ascii_case("WITH")
+            && matches!(previous, Some(TokenKind::Word(previous))
+                if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"))
+        {
+            return false;
+        }
+        [
+            "RETURN", "WITH", "MATCH", "OPTIONAL", "UNWIND", "ORDER", "SKIP", "LIMIT", "UNION",
+            "CALL", "CREATE", "INSERT", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH",
+        ]
+        .iter()
+        .any(|clause| word.eq_ignore_ascii_case(clause))
     }
 
     fn starts_path_binding(&self) -> Result<bool, GraphPatternTextError> {
@@ -595,7 +897,7 @@ impl<'a> Parser<'a> {
         } else if restricted {
             "one finite quantified ACYCLIC or SIMPLE atom"
         } else {
-            "one bounded atom in shortest WALK"
+            "one quantified atom in shortest WALK"
         };
         let first_edge = self.syntax.edges.len();
         loop {
@@ -616,33 +918,78 @@ impl<'a> Parser<'a> {
                 )?;
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
-                self.punct(b'[', "[")?;
-                let variable = if self.is_punct(b':') {
-                    None
+                let mut alternatives = Vec::new();
+                let (variable, relation, walk) = if self.take(b'[')? {
+                    let variable = if matches!(self.current.kind, TokenKind::Word(_)) {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    let relation = if self.take(b':')? {
+                        Some(self.schema_name()?)
+                    } else {
+                        None
+                    };
+                    // openCypher type alternation `:A|B|:C` (Match2 [6]).
+                    while relation.is_some() && self.take(b'|')? {
+                        if alternatives.len() + 1 == crate::algebra::MAX_EDGE_RELATION_ALTERNATIVES
+                        {
+                            return Err(error(
+                                self.current.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "at most 8 relationship types in an alternation",
+                                ),
+                            ));
+                        }
+                        self.take(b':')?;
+                        alternatives.push(self.schema_name()?);
+                    }
+                    let walk = self.pattern_walk_bounds()?;
+                    // openCypher `-[r:T {k: v}]->` filters that one captured
+                    // relationship. A walk's map would range over a list.
+                    if self.is_punct(b'{') {
+                        match (variable, walk) {
+                            (Some(variable), None) => self.property_map(variable, true)?,
+                            _ => {
+                                return Err(error(
+                                    self.current.at,
+                                    GraphPatternTextErrorKind::Expected(
+                                        "named fixed-length relationship for a property map",
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    self.punct(b']', "]")?;
+                    (variable, relation, walk)
                 } else {
-                    Some(self.name()?)
+                    (None, None, None)
                 };
-                self.punct(b':', ":")?;
-                let relation = self.name()?;
                 let bound_at = self.current.at;
-                let walk = self.pattern_walk_bounds()?;
-                self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
+                // openCypher `<-->` matches either direction, as `--` does.
                 let outgoing = self.take(b'>')?;
-                if incoming && outgoing {
+                let walk = self.relationship_walk_bounds(walk)?;
+                // Shape only, so before any catalog call: an omitted upper
+                // bound needs a repetition rule that ends (the compiler
+                // checks the same rule for every builder).
+                if walk.is_some_and(|bounds| {
+                    !bounds.is_bounded() && !search.ends_unbounded(self.syntax.match_mode)
+                }) {
                     return Err(error(
-                        relation.at,
-                        GraphPatternTextErrorKind::Expected("one edge direction"),
+                        bound_at,
+                        GraphPatternTextErrorKind::Expected(
+                            "an upper hop bound, or TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES for an unbounded quantifier",
+                        ),
                     ));
                 }
-                let walk = self.relationship_walk_bounds(walk)?;
                 if selected && walk.is_none() {
                     return Err(error(
                         bound_at,
                         GraphPatternTextErrorKind::Expected(if restricted {
                             expected_atom
                         } else {
-                            "finite quantified atom in shortest WALK"
+                            "a quantified atom in shortest WALK"
                         }),
                     ));
                 }
@@ -651,13 +998,12 @@ impl<'a> Parser<'a> {
                     variable,
                     source: left,
                     relation,
+                    alternatives,
                     destination: right,
-                    direction: if incoming {
-                        GlaDirection::Reverse
-                    } else if outgoing {
-                        GlaDirection::Forward
-                    } else {
-                        GlaDirection::Undirected
+                    direction: match (incoming, outgoing) {
+                        (true, false) => GlaDirection::Reverse,
+                        (false, true) => GlaDirection::Forward,
+                        _ => GlaDirection::Undirected,
                     },
                     walk,
                     search,
@@ -695,17 +1041,19 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("finite integer WALK hop bound"),
             ));
         };
-        let hops = digits
-            .parse::<u32>()
-            .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
+        let hops = crate::graph_text::integer_magnitude(digits)
+            .and_then(|hops| u32::try_from(hops).ok())
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         self.advance()?;
         Ok(hops)
     }
 
     /// Bound metadata is parsed once, before catalog resolution. This profile
     /// accepts exact *k, inclusive *m..n, and *..n with the conventional minimum
-    /// one. Every upper bound is mandatory and checked, including LIMIT 0.
-    /// No source-text rewriting, guessed bound or implicit truncation occurs.
+    /// one, and the unbounded *, *.., *m.. (openCypher Match5, Match6). A
+    /// written upper bound is checked, including LIMIT 0; an omitted one is
+    /// unbounded, never a guessed bound or an implicit truncation, and the
+    /// pattern compiler admits it only under a repetition rule that ends.
     fn pattern_walk_bounds(
         &mut self,
     ) -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
@@ -713,29 +1061,40 @@ impl<'a> Parser<'a> {
         if !self.take(b'*')? {
             return Ok(None);
         }
-        let (minimum, maximum) = if self.take(b'.')? {
-            self.punct(b'.', "..")?;
-            (1, self.walk_hop_literal()?)
+        let digits = |parser: &Self| matches!(parser.current.kind, TokenKind::Digits(_));
+        let minimum = if digits(self) {
+            Some(self.walk_hop_literal()?)
         } else {
-            let minimum = self.walk_hop_literal()?;
-            let maximum = if self.take(b'.')? {
-                self.punct(b'.', "..")?;
-                self.walk_hop_literal()?
-            } else {
-                minimum
-            };
-            (minimum, maximum)
+            None
         };
-        crate::GraphWalkBounds::new(minimum, maximum)
-            .map(Some)
-            .map_err(|_| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected(
-                        "finite ordered WALK bounds within the hop limit",
-                    ),
-                )
-            })
+        let maximum = if self.take(b'.')? {
+            self.punct(b'.', "..")?;
+            if digits(self) {
+                Some(self.walk_hop_literal()?)
+            } else {
+                None
+            }
+        } else {
+            minimum
+        };
+        let minimum = minimum.unwrap_or(1);
+        match maximum {
+            // openCypher: a reversed interval matches nothing.
+            Some(maximum) if minimum > maximum && minimum <= crate::MAX_GRAPH_WALK_HOPS => {
+                Ok(crate::GraphWalkBounds::empty())
+            }
+            Some(maximum) => crate::GraphWalkBounds::new(minimum, maximum),
+            None => crate::GraphWalkBounds::unbounded(minimum),
+        }
+        .map(Some)
+        .map_err(|_| {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "finite ordered WALK bounds within the hop limit",
+                ),
+            )
+        })
     }
 
     // Look ahead through the SAME lexer, without consuming its token budget.
@@ -744,18 +1103,7 @@ impl<'a> Parser<'a> {
     // predicate `[NOT] (n)-[...]-(...)`, or its `[NOT] exists(<pattern>)`
     // spelling is present.
     pub(super) fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
-        let mut lookahead = self.lexer.clone();
-        if self.is_word("EXISTS") {
-            return exists_introducer_follows(&mut lookahead);
-        }
-        if self.is_word("NOT") {
-            let next = lookahead.next()?;
-            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
-                return exists_introducer_follows(&mut lookahead);
-            }
-            return pattern_predicate_follows(next.kind, &mut lookahead);
-        }
-        pattern_predicate_follows(self.current.kind, &mut lookahead)
+        existence_follows(self.current.kind, &self.lexer)
     }
 
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
@@ -893,7 +1241,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 PatternLimitDimension::Predicates,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             let filter = self.property_filter(left, key)?;
             self.syntax.filters.push(filter);
             self.predicates += 1;
@@ -939,6 +1287,10 @@ impl<'a> Parser<'a> {
 
     fn take_pattern(&mut self) -> PatternSyntax<'a> {
         PatternSyntax {
+            match_mode: core::mem::replace(
+                &mut self.syntax.match_mode,
+                GraphMatchMode::DifferentEdges,
+            ),
             variables: core::mem::take(&mut self.syntax.variables),
             captures: Vec::new(),
             labels: core::mem::take(&mut self.syntax.labels),
@@ -948,6 +1300,7 @@ impl<'a> Parser<'a> {
     }
 
     fn restore_pattern(&mut self, pattern: PatternSyntax<'a>) {
+        self.syntax.match_mode = pattern.match_mode;
         self.syntax.variables = pattern.variables;
         self.syntax.labels = pattern.labels;
         self.syntax.edges = pattern.edges;
@@ -970,24 +1323,90 @@ impl<'a> Parser<'a> {
         )?;
         let outer = self.take_pattern();
         // Leading row aliases are lowered at the root join. They must not
-        // escape an OPTIONAL/EXISTS predicate into a post-join filter.
-        let row_bindings = core::mem::take(&mut self.read_row_bindings);
+        // escape an OPTIONAL/EXISTS predicate into a post-join filter. A
+        // later required MATCH is an inner join, so its equality with a row
+        // value is the same post-join filter as the root's (fgdb-0s2pq:
+        // `UNWIND $rows AS row MATCH (a {id: row.a}) MATCH (b {id: row.b})`).
+        let row_bindings = if matches!(kind, ScopeKind::Required) && form == ScopeForm::Clause {
+            self.read_row_bindings.clone()
+        } else {
+            core::mem::take(&mut self.read_row_bindings)
+        };
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
         let clause = form == ScopeForm::Clause;
+        // A pattern comprehension's body (fgdb-7nwox): a pattern that may
+        // name its path and introduce locals, and a WHERE, all private.
+        let comprehension = form == ScopeForm::Comprehension;
         let parsed = (|| {
             if clause {
-                self.word("MATCH")?;
+                // openCypher `EXISTS { (n)-->() }` leaves out the MATCH of
+                // `EXISTS { MATCH (n)-->() }`; the body is otherwise the same.
+                if kind.exports_bindings() || !self.is_punct(b'(') {
+                    self.word("MATCH")?;
+                }
+                self.syntax.match_mode = self.match_mode()?;
             }
-            if self.starts_path_binding()? {
-                return Err(error(
-                    self.current.at,
-                    GraphPatternTextErrorKind::Expected("path binding in root MATCH only"),
-                ));
-            }
+            // A required or OPTIONAL clause may name its path, exported like
+            // its vertices (openCypher Match7, OPTIONAL MATCH p = ...). An
+            // existential body's locals never escape, so it names none.
+            let path = if (comprehension || (clause && kind.exports_bindings()))
+                && self.starts_path_binding()?
+            {
+                let path = self.name()?;
+                self.punct(b'=', "=")?;
+                Some(path)
+            } else {
+                if self.starts_path_binding()? {
+                    return Err(error(
+                        self.current.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "path binding in a required or OPTIONAL MATCH",
+                        ),
+                    ));
+                }
+                None
+            };
             self.positive_pattern()?;
+            // As at the root, a named variable-length relationship that is a
+            // required or OPTIONAL clause's only edge, with no path named,
+            // captures that edge's path under its name, and a bare name reads
+            // the path's edge list (openCypher Match4, Match9).
+            let mut edges = false;
+            let path = match path {
+                None if clause && kind.exports_bindings() => {
+                    match self.syntax.edges.as_mut_slice() {
+                        [edge] if edge.walk.is_some() => {
+                            edges = edge.variable.is_some();
+                            edge.variable.take()
+                        }
+                        _ => None,
+                    }
+                }
+                path => path,
+            };
+            if let Some(path) = path {
+                self.syntax.filters.push(Filter::PathCapture(path));
+            }
+            if !clause && !comprehension {
+                // An openCypher pattern predicate tests the bindings it names
+                // and cannot introduce one (UndefinedVariable). Only the
+                // EXISTS { MATCH ... } spelling declares existential locals.
+                let vertices = (self.syntax.variables.iter().copied()).filter(|name| {
+                    !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                        && !outer.variables.iter().any(|seen| seen.text == name.text)
+                });
+                let edges =
+                    (self.syntax.edges.iter().filter_map(|edge| edge.variable)).filter(|name| {
+                        !(outer.edges.iter().filter_map(|edge| edge.variable))
+                            .any(|seen| seen.text == name.text)
+                    });
+                if let Some(name) = vertices.chain(edges).min_by_key(|name| name.at) {
+                    return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+                }
+            }
             let matched_variables = self.syntax.variables.len();
-            if clause && self.take_word("WHERE")? {
+            if (clause || comprehension) && self.take_word("WHERE")? {
                 // The positive pattern is complete. Temporarily expose the
                 // containing symbol table to the SAME predicate parser, without
                 // inserting nodes or altering its name/parameter/token grammar.
@@ -1006,22 +1425,74 @@ impl<'a> Parser<'a> {
                 self.scoped_predicates(false)?;
             }
             if clause && !kind.exports_bindings() {
+                // openCypher `EXISTS { MATCH ... RETURN true }`: a RETURN of
+                // literals or `*` keeps every row, so the subquery still asks
+                // only whether a witness exists (ExistentialSubquery2 [1]).
+                if self.take_word("RETURN")? {
+                    loop {
+                        let literal = match self.current.kind {
+                            TokenKind::Word(word) => ["TRUE", "FALSE", "NULL"]
+                                .iter()
+                                .any(|value| word.eq_ignore_ascii_case(value)),
+                            TokenKind::Digits(_) | TokenKind::Quoted(_) => true,
+                            TokenKind::Punct(b'*') => true,
+                            _ => false,
+                        };
+                        if !literal {
+                            return Err(error(
+                                self.current.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "a literal or * in an EXISTS subquery's RETURN",
+                                ),
+                            ));
+                        }
+                        self.advance()?;
+                        if self.take_word("AS")? {
+                            self.name()?;
+                        }
+                        if !self.take(b',')? {
+                            break;
+                        }
+                    }
+                }
                 self.punct(b'}', "}")?;
             }
             let mut body = self.take_pattern();
             body.variables.truncate(matched_variables);
             body.captures = predicate_captures(&mut body.variables, &body.filters, &body.edges)?;
-            Ok::<_, GraphPatternTextError>(body)
+            Ok::<_, GraphPatternTextError>((body, path, edges))
         })();
         self.read_row_bindings = row_bindings;
-        let body = match parsed {
-            Ok(body) => body,
+        let (body, path, edges) = match parsed {
+            Ok(parsed) => parsed,
             Err(error) => {
                 self.restore_pattern(outer);
                 return Err(error);
             }
         };
         self.restore_pattern(outer);
+        if let Some(path) = path {
+            if self
+                .syntax
+                .variables
+                .iter()
+                .any(|seen| seen.text == path.text)
+                || self.syntax.names_path(path.text)
+                || self.syntax.visible_edge(path.text).is_some()
+            {
+                return Err(error(
+                    path.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateVariable),
+                ));
+            }
+            // A comprehension's path is its own local, never exported.
+            if !comprehension {
+                self.syntax.scope_paths.push(path);
+                if edges {
+                    self.syntax.scope_edge_paths.push(path.text);
+                }
+            }
+        }
         // Captures already name visible values. Only actual new matched names
         // are exported; existential locals never enter the containing table.
         if kind.exports_bindings() {
@@ -1041,7 +1512,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.syntax.scopes.push(ScopeSyntax { kind, body });
+        self.syntax.scopes.push(ScopeSyntax {
+            kind,
+            body,
+            element: None,
+        });
         Ok(())
     }
 }
@@ -1050,6 +1525,30 @@ impl<'a> Parser<'a> {
 enum ScopeForm {
     Clause,
     Pattern,
+    /// A pattern comprehension's body (fgdb-7nwox).
+    Comprehension,
+}
+
+/// Whether `first`, with `lexer` just after it, starts an existence
+/// predicate: EXISTS, NOT EXISTS, or a pattern predicate or its anti form.
+fn existence_follows(
+    first: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lookahead = lexer.clone();
+    match first {
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS") => {
+            exists_introducer_follows(&mut lookahead)
+        }
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+            let next = lookahead.next()?;
+            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
+                return exists_introducer_follows(&mut lookahead);
+            }
+            pattern_predicate_follows(next.kind, &mut lookahead)
+        }
+        first => pattern_predicate_follows(first, &mut lookahead),
+    }
 }
 
 /// After an `EXISTS` word: `{` (a subquery), or `(` whose content is a
@@ -1110,7 +1609,7 @@ pub(super) fn pattern_predicate_follows(
 mod capture_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -1125,6 +1624,10 @@ mod capture_tests {
         arguments: &GqlParameters,
         values: &BTreeMap<VId, CanonicalScalar>,
     ) -> Vec<Vec<Option<VId>>> {
+        let values: BTreeMap<VId, CanonicalPropertyValue> = values
+            .iter()
+            .map(|(vid, value)| (*vid, value.clone().into()))
+            .collect();
         let pattern = PreparedGraphText::prepare(text, symbols)
             .unwrap()
             .bind_parameters(arguments)
@@ -1283,7 +1786,11 @@ mod capture_tests {
         let key = Name { text: "n", at: 0 };
         let filter = Filter::Boolean {
             program: vec![boolean::SyntaxItem::Expression {
-                columns: vec![(variables[0], key), (last, key), (last, key)],
+                columns: vec![
+                    (variables[0], Some(key)),
+                    (last, Some(key)),
+                    (last, Some(key)),
+                ],
                 program: Vec::new(),
             }],
             at: 0,
@@ -1299,7 +1806,7 @@ mod capture_tests {
                         text: "overflow",
                         at: 29,
                     },
-                    key,
+                    Some(key),
                 )],
                 program: Vec::new(),
             }],

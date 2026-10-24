@@ -63,6 +63,9 @@ fn scalar(db: &Database<MemVfs>, vertex: VId, key: PropertyKeyId) -> Scalar {
         .find(|(actual, _)| *actual == key)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 fn rows(values: &[(i64, i64)]) -> GqlParameters {
     let values = values
@@ -142,7 +145,9 @@ fn malformed_expression_scopes_and_declared_types_refuse_before_catalog_callback
         "MERGE (n:Person {id:1}) SET n.count=n",
         "MERGE (n:Person {id:1}) SET n.count=n.count.part",
         "MERGE (n:Person {id:1}) SET n.count=coalesce(n.count,)",
-        "MERGE (n:Person {id:1}) SET n.count=[1,2]",
+        // A constant list writes a stored List (fgdb-k3nub); one built from
+        // the MERGE vertex's own fields does not yet.
+        "MERGE (n:Person {id:1}) SET n.count=[n.count]",
         "MERGE (n:Person {id:1}) SET n.count=$s*2",
     ] {
         let mut calls = 0;
@@ -150,7 +155,7 @@ fn malformed_expression_scopes_and_declared_types_refuse_before_catalog_callback
             text,
             R,
             &[("s", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
-            |kind, name| {
+            |kind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             },

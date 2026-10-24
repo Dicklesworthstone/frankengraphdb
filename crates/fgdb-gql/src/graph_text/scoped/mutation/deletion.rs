@@ -85,7 +85,27 @@ impl PreparedGraphDeleteText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphDeleteTextError> {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        Self::prepare_with_parameter_types_and_resolver(
+            statement,
+            relation,
+            declarations,
+            &mut resolve,
+        )
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a host resolver whose
+    /// pinned tzdb the statement's temporal constructors use (fgdb-txbg9).
+    pub(crate) fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphDeleteTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         parser.parse_match_prefix()?;
         let (projections, targets) = parser.plain_delete_targets()?;
         let syntax = parser.syntax;
@@ -97,7 +117,8 @@ impl PreparedGraphDeleteText {
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
             }
-            let value = resolve(kind, name.text)
+            let value = resolve
+                .resolve_symbol(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
                 return Err(error(
@@ -112,6 +133,7 @@ impl PreparedGraphDeleteText {
             Ok(value)
         };
         let (builder, filters) = resolve_pattern(
+            syntax.match_mode,
             &syntax.variables[..syntax.root_variables],
             &syntax.labels,
             &syntax.edges,
@@ -131,6 +153,7 @@ impl PreparedGraphDeleteText {
                 variable: projection.variable.text.to_owned(),
                 key: None,
                 path: projection.path,
+                collect: None,
             })
             .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();

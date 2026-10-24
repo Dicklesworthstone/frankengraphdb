@@ -2,7 +2,7 @@
 //! The graph is query scratch, not storage. Only endpoint identities are
 //! copied; edge properties are irrelevant to unit-hop traversal.
 
-use super::{Cancel, Control, Options, Shared, WriteTxn, WriteTxnError};
+use super::{Cancel, Control, Observer, Options, Shared, WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, PendingRow, Snapshot};
 use asupersync::fs::Vfs;
@@ -15,6 +15,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, btree_map::Entry};
 
 type Incidence = (VId, RelationId, VId);
+
+#[path = "beacon_graph/indexed.rs"]
+mod indexed;
 
 /// Edge history, overlay identities and new edge-read witnesses count against
 /// BOTH the shared source allowance and the graph-specific scratch ceiling.
@@ -74,6 +77,8 @@ impl EdgeWork<'_, '_> {
 impl WriteTxn {
     /// Fuse graph expansion, text and vectors against this transaction's
     /// pinned basis PLUS its canonical prepared writes, without committing.
+    /// `GraphHybridQuery::graph_only` uses this same source with no property
+    /// projection or index construction, including zero-hop seed retrieval.
     ///
     /// All lanes share one selected vertex corpus and allowance. Staged label
     /// changes constrain transit vertices as well as hits. Edges come from the
@@ -104,14 +109,111 @@ impl WriteTxn {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_filtered(database, cx, options, query, expansion, |_| true)
+    }
+
+    /// Restrict endpoints before each lane's candidate limit and final fusion.
+    /// Rejected endpoints remain available for graph transit and ANN routing;
+    /// corpus selection alone constrains those inputs and BM25 statistics.
+    /// Derive data-dependent eligibility from this transaction's pinned basis
+    /// and staged writes. The predicate must be stable, bounded computation
+    /// over IDs, not I/O or a capability check. Reject-all retains source,
+    /// traversal and final-delivery limits, including all conflict witnesses.
+    ///
+    /// The predicate must be deterministic and side-effect-free; its own
+    /// application work is the caller's responsibility. Native eligible lists
+    /// use a governed predicate. Engine work and witnesses follow the same
+    /// contract as [`Self::beacon_search_graph`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn beacon_search_graph_filtered<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_filtered_observed(
+            database,
+            cx,
+            options,
+            query,
+            expansion,
+            None,
+            |_| Ok(()),
+            |id, _| eligible(id),
+            |result| result,
+        )
+    }
+
+    /// One source and meter for public predicates and native eligible lists.
+    /// Native filter preparation runs under the live control before sources;
+    /// its finalizer retains a lookup refusal across the bool predicate ABI.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn beacon_search_graph_filtered_observed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        observer: Option<Observer<'_>>,
+        prepare_filter: impl FnOnce(&RefCell<Control<'_>>) -> Result<(), BeaconError>,
+        eligible: impl Fn(VId, &RefCell<Control<'_>>) -> bool,
+        finish_filter: impl FnOnce(
+            Result<Vec<GraphHybridHit>, BeaconError>,
+        ) -> Result<Vec<GraphHybridHit>, BeaconError>,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_with_access_observed(
+            database,
+            cx,
+            options,
+            query,
+            expansion,
+            false,
+            observer,
+            prepare_filter,
+            eligible,
+            finish_filter,
+        )
+    }
+
+    /// The access choice changes only adjacency production. Corpus selection,
+    /// projection, filtering, fusion and all enclosing admissions stay shared.
+    /// Neither source is a fallback after failure in the other source.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn beacon_search_graph_with_access_observed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        indexed: bool,
+        observer: Option<Observer<'_>>,
+        prepare_filter: impl FnOnce(&RefCell<Control<'_>>) -> Result<(), BeaconError>,
+        eligible: impl Fn(VId, &RefCell<Control<'_>>) -> bool,
+        finish_filter: impl FnOnce(
+            Result<Vec<GraphHybridHit>, BeaconError>,
+        ) -> Result<Vec<GraphHybridHit>, BeaconError>,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
         let graph = RefCell::new(None);
         self.beacon_read(
             database,
             cx,
             options,
+            observer,
             |work| {
-                let config = options.config_for_graph(query)?;
-                Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
+                let config = if query.is_graph_only() {
+                    options.validate_graph_only(query)?;
+                    None
+                } else {
+                    let config = options.config_for_graph(query)?;
+                    Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
+                    Some(config)
+                };
+                prepare_filter(work)?;
                 if query.graph_enabled() {
                     if expansion.seeds.len() > expansion.limits.max_seed_ids {
                         return Err(BeaconError::ResourceLimit {
@@ -130,22 +232,50 @@ impl WriteTxn {
                 Ok(())
             },
             |index, snapshot, work| {
-                let hits = if let Some(mut graph) = graph.borrow_mut().take() {
-                    if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
-                        self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
+                let result = (|| {
+                    let hits = if let Some(mut graph) = graph.borrow_mut().take() {
+                        if indexed {
+                            indexed::expand(
+                                self,
+                                snapshot,
+                                &graph,
+                                expansion,
+                                query.graph_candidates,
+                                work,
+                                |id| eligible(id, work),
+                            )?
+                        } else {
+                            if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
+                                self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
+                            }
+                            graph.expand_filtered(
+                                expansion.seeds,
+                                expansion.max_hops,
+                                expansion.include_seeds,
+                                query.graph_candidates,
+                                |id, _| Ok(eligible(id, work)),
+                                &mut Shared(work),
+                            )?
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    // Every modality counts eligible endpoints before its
+                    // own truncation; rejected transit cannot consume k.
+                    // No-index execution shares the same exact fusion owner.
+                    match index {
+                        Some(index) => index.hybrid_search_graph_filtered(
+                            query,
+                            &hits,
+                            |id| eligible(id, work),
+                            &mut Shared(work),
+                        ),
+                        None => {
+                            query.fuse_graph_only(&hits, |id| eligible(id, work), &mut Shared(work))
+                        }
                     }
-                    graph.expand(
-                        expansion.seeds,
-                        expansion.max_hops,
-                        expansion.include_seeds,
-                        query.graph_candidates,
-                        &mut Shared(work),
-                    )?
-                } else {
-                    Vec::new()
-                };
-                // Do not truncate the two-lane result before graph ranks exist.
-                index.hybrid_search_graph(query, &hits, &mut Shared(work))
+                })();
+                finish_filter(result)
             },
         )
     }
@@ -166,6 +296,54 @@ impl WriteTxn {
             scratch: Cell::new(0),
             limit: expansion.limits.max_source_scratch,
         };
+        let mut changes = self.beacon_graph_changes(&edge_work)?;
+        let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
+            edge_work.source(SourceEvent::Work)?;
+            work.borrow_mut().record()?;
+            let (src, relation, dst) = incidence;
+            if expansion
+                .relation
+                .is_none_or(|requested| requested == relation)
+                && graph.contains(src)
+                && graph.contains(dst)
+            {
+                graph.insert_edge(src, dst, expansion.direction, &mut Shared(work))?;
+            }
+            Ok(())
+        };
+        source::visit_edges(
+            &snapshot.blocks,
+            self.basis,
+            &mut |event| edge_work.source(event),
+            |edge, _| {
+                edge_work.observe(self, ElementId::Edge(edge.eid))?;
+                edge_work.observe(self, ElementId::Vertex(edge.src))?;
+                let after =
+                    changes
+                        .remove(&edge.eid)
+                        .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
+                if let Some(incidence) = after {
+                    emit(incidence)?;
+                }
+                Ok(())
+            },
+        )?;
+        for (_, after) in changes {
+            edge_work.source(SourceEvent::Work)?;
+            if let Some(incidence) = after {
+                emit(incidence)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Canonical prepared incidence, shared by materialized and indexed reads.
+    /// Raw intents supply negative observations only; ENSURE aliases and
+    /// cascade retirements must come from the prepared net, never be replayed.
+    fn beacon_graph_changes(
+        &self,
+        edge_work: &EdgeWork<'_, '_>,
+    ) -> Result<BTreeMap<EId, Option<Incidence>>, BeaconError> {
         // Input spelling supplies negative-read dependencies ONLY. It must
         // never be interpreted as an unconditional insertion or deletion.
         for row in self.staged.iter().flat_map(|batch| &batch.rows) {
@@ -183,9 +361,7 @@ impl WriteTxn {
                 _ => {}
             }
         }
-        // Only changed identities are staged. Native winners stream directly
-        // into the bounded graph, rather than cloning the entire edge table or
-        // reapplying every intent once per edge.
+        // Only changed identities are retained, never the entire edge table.
         let mut changes = BTreeMap::new();
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
@@ -245,43 +421,7 @@ impl WriteTxn {
                 }
             }
         }
-        let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
-            edge_work.source(SourceEvent::Work)?;
-            let (src, relation, dst) = incidence;
-            if expansion
-                .relation
-                .is_none_or(|requested| requested == relation)
-                && graph.contains(src)
-                && graph.contains(dst)
-            {
-                graph.insert_edge(src, dst, expansion.direction, &mut Shared(work))?;
-            }
-            Ok(())
-        };
-        source::visit_edges(
-            &snapshot.blocks,
-            self.basis,
-            &mut |event| edge_work.source(event),
-            |edge, _| {
-                edge_work.observe(self, ElementId::Edge(edge.eid))?;
-                edge_work.observe(self, ElementId::Vertex(edge.src))?;
-                let after =
-                    changes
-                        .remove(&edge.eid)
-                        .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
-                if let Some(incidence) = after {
-                    emit(incidence)?;
-                }
-                Ok(())
-            },
-        )?;
-        for (_, after) in changes {
-            edge_work.source(SourceEvent::Work)?;
-            if let Some(incidence) = after {
-                emit(incidence)?;
-            }
-        }
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -409,6 +549,125 @@ mod tests {
                 txn.beacon_search_graph(&db, &query_cx, &options, query, expansion),
                 Err(ReadError::Read(WriteTxnError::Finished))
             ));
+            assert_eq!(contexts.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn endpoint_filter_precedes_every_lane_limit_without_removing_transit() {
+        let ((), report) = run_async_under_lab(0xbeac_3102, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(
+                &commit,
+                DatabaseKeys::new(
+                    [0xd4; 32],
+                    DatabaseSecurityNamespaceId([0xd5; 32]),
+                    [0xd6; 32],
+                ),
+            )
+            .await
+            .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (
+                            PropertyKeyId(1),
+                            CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                        ),
+                        (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
+                    ],
+                );
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            txn.savepoint(&db, "before-link").unwrap();
+            let mut link = WriteBatch::new(RelationId(1));
+            link.add_edge(EId(2), VId(2), VId(3), vec![]);
+            txn.write(&mut db, link).unwrap();
+            let mut options = Options::text(PropertyKeyId(1));
+            options.projection.vector = vec![PropertyKeyId(2)];
+            options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+            let query = GraphHybridQuery {
+                retrieval: ExactHybridQuery {
+                    vector: &[0.0],
+                    text: "graph",
+                    k: 1,
+                    vector_candidates: 1,
+                    text_candidates: 1,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
+                    profile: ExactRrfProfile::default(),
+                },
+                graph_candidates: 1,
+                graph_weight: 100,
+            };
+            let expansion = ExpansionSpec {
+                seeds: &[VId(1)],
+                relation: Some(RelationId(1)),
+                direction: ExpansionDirection::Outgoing,
+                max_hops: 2,
+                include_seeds: false,
+                limits: ExpansionLimits::default(),
+            };
+            let allowed = |id| id == VId(3);
+            let actual = txn
+                .beacon_search_graph_filtered(&db, &cx, &options, query, expansion, allowed)
+                .unwrap();
+            assert_eq!(actual.len(), 1);
+            let hit = &actual[0];
+            assert_eq!(hit.id, VId(3));
+            assert_eq!(hit.graph_hops, Some(2));
+            assert_eq!(hit.graph_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(hit.vector_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(hit.text_rank.map(|rank| rank.get()), Some(1));
+            assert!(txn.scanned_edges.get());
+            assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(2))));
+            assert!(
+                txn.beacon_search_graph_filtered(&db, &cx, &options, query, expansion, |_| false)
+                    .unwrap()
+                    .is_empty()
+            );
+            let without_graph = GraphHybridQuery {
+                graph_candidates: 0,
+                graph_weight: 0,
+                ..query
+            };
+            let two_lane = txn
+                .beacon_search_graph_filtered(&db, &cx, &options, without_graph, expansion, allowed)
+                .unwrap();
+            assert_eq!(two_lane.len(), 1);
+            assert_eq!(two_lane[0].id, VId(3));
+            assert_eq!(two_lane[0].graph_rank, None);
+            assert_eq!(two_lane[0].vector_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(two_lane[0].text_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(db.frontier().unwrap(), basis);
+            let committed_before = db
+                .beacon_search_graph_filtered(&cx, &options, query, expansion, allowed)
+                .unwrap();
+            assert_eq!(committed_before[0].graph_hops, None);
+            txn.rollback_to_savepoint(&db, "before-link").unwrap();
+            assert_eq!(
+                txn.beacon_search_graph_filtered(&db, &cx, &options, query, expansion, allowed)
+                    .unwrap(),
+                committed_before,
+            );
+            let mut link = WriteBatch::new(RelationId(1));
+            link.add_edge(EId(2), VId(2), VId(3), vec![]);
+            txn.write(&mut db, link).unwrap();
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &options, query, expansion, allowed)
+                    .unwrap(),
+                actual,
+            );
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

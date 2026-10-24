@@ -4,12 +4,16 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
-use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::insertion::{
     GraphInsertBatch, GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats,
     PreparedGraphInsert,
 };
-use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphInsertQueryError, PreparedGraphInsertQuery};
+use fgdb_gql::{
+    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphInsertQueryError,
+    GraphPatternFactorExecution, GraphSetSource, PreparedGraphInsertQuery,
+    PreparedGraphPatternFactors,
+};
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
@@ -31,6 +35,58 @@ fn source(error: WriteTxnError) -> Fault {
 
 fn query_source(error: WriteTxnError) -> QueryFault {
     source(error).map_source(GraphInsertQueryError::Insertion)
+}
+
+// A statement-scoped source borrows the existing control/database cells, never
+// a Ref or RefMut. Each graph call releases its database borrow before the
+// collector starts allocating identities through that same cell.
+struct InsertGraphSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
+    transaction: &'s WriteTxn,
+    database: &'s RefCell<&'db mut Database<V>>,
+    cx: &'s QueryCx,
+    scope: &'s PlannerPredicates,
+    execution: &'s RefCell<&'run mut Execution<'cx, 'permit, Clock>>,
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteTxnError>
+    for InsertGraphSource<'_, '_, '_, '_, '_, V, Clock>
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<WriteTxnError, WriteTxnError>> {
+        selection::select_overlay(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            pattern,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+
+    fn supports_pattern_factors(&self) -> bool {
+        true
+    }
+
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<WriteTxnError, WriteTxnError>>>
+    {
+        Some(selection::select_overlay_factors(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            request,
+            self.scope,
+            policy,
+            self.execution,
+        ))
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -55,13 +111,17 @@ impl<V: Vfs + Clone> Database<V> {
     /// delivers no identity rows and works with max_rows = 0. Stats and the
     /// completion value are control receipts, not graph-query result rows.
     ///
-    /// Allocation uses the existing engine high-water allocator, including
-    /// retired committed identities. Reservations are never reclaimed on this
-    /// handle, even after refusal; uncommitted reservations are not durable ID
-    /// leases. Sequential IDs expose allocation order: this API removes chosen
-    /// collision probes, NOT that metadata channel or timing channels. It does
-    /// not establish the final privacy-preserving allocator, mandatory secure
-    /// view, persistent revocation, durable audit protocol or full SSI.
+    /// Allocation issues the keyed permutation of the engine's per-kind counter
+    /// (fgdb-hxgm1 channel 2). Every engine commit records the counters, so an
+    /// identity issued before the last commit, retired or not, is never issued
+    /// again. Reservations are never reclaimed on this handle, even after
+    /// refusal; uncommitted reservations are not durable ID leases. Without the
+    /// database keys, the gap between two issued identities does not reveal how
+    /// many records, hidden or not, were created between them. The guarantee is
+    /// computational: two databases that differ only in hidden creations still
+    /// issue different identities. Timing channels remain. It does not establish
+    /// the mandatory secure view, persistent revocation, durable audit protocol
+    /// or full SSI.
     ///
     /// The trusted host supplies the issuer, branch routing and monotone clock.
     /// Signature/rights checks precede database access. There is no fallible
@@ -151,7 +211,50 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphInsertQuery,
         policy: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        self.execute_graph_insert_query_authorized_checked(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Create and project through the same native owner, with final host admission.
+    ///
+    /// `admit` receives the final immutable rows exactly once, including empty
+    /// results, after image and signed row admission and BEFORE completion. It
+    /// may encode a private result or refuse an unsupported representation. It
+    /// must not publish tentative rows or perform external effects: completion
+    /// may still fail. It cannot access the database or alter the native result.
+    /// The meter polls cancellation and prices host work on the existing signed
+    /// permit, with live expiry/retirement checks. Hosts must use it before their
+    /// bounded traversal/encoding work. A no-op callback adds no new charges.
+    /// Refusal drops the private effects; no fallible admission follows commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_insert_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphInsertQuery,
+        policy: GraphInsertPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         if authority.namespace() != self.keys.namespace {
             return Err(query_source(WriteTxnError::Authorization(
@@ -187,18 +290,14 @@ impl<V: Vfs + Clone> Database<V> {
                     // borrows end before intent staging or awaiting completion.
                     let controls = RefCell::new(&mut execution);
                     let database = RefCell::new(&mut *self);
-                    query.execute_governed(
+                    query.execute_governed_with_source(
                         policy,
-                        |pattern, allowance| {
-                            selection::select_overlay(
-                                workspace.transaction(),
-                                &database.borrow(),
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                &controls,
-                            )
+                        InsertGraphSource {
+                            transaction: workspace.transaction(),
+                            database: &database,
+                            cx: query_cx,
+                            scope: verified.predicates(),
+                            execution: &controls,
                         },
                         |request| database.borrow_mut().allocate_identity(query_cx, request),
                         || {
@@ -224,8 +323,18 @@ impl<V: Vfs + Clone> Database<V> {
                     creation,
                     &mut execution,
                     false,
+                    None,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(query_source)?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -290,6 +399,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &mut execution,
                     returning,
                 )?;
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -325,18 +435,14 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // masked selection and all computed values are validated.
         let execution = RefCell::new(&mut *execution);
         let database = RefCell::new(&mut *database);
-        insertion.execute_governed(
+        insertion.execute_governed_with_source(
             policy,
-            |pattern, allowance| {
-                selection::select_overlay(
-                    transaction,
-                    &database.borrow(),
-                    query_cx,
-                    pattern,
-                    scope,
-                    allowance,
-                    &execution,
-                )
+            InsertGraphSource {
+                transaction,
+                database: &database,
+                cx: query_cx,
+                scope,
+                execution: &execution,
             },
             |request| database.borrow_mut().allocate_identity(query_cx, request),
             || {
@@ -353,13 +459,14 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         proposal,
         execution,
         returning,
+        None,
     )
 }
 
 // Both insertion result surfaces stage identical original intents. Only the
 // identity-receipt API requests per-identity output charging and ID vectors.
 #[allow(clippy::too_many_arguments)]
-fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
     query_cx: &QueryCx,
@@ -367,55 +474,42 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     proposal: GraphInsertBatch,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
+    mut frozen: Option<&mut crate::write_txn::FrozenCreations>,
 ) -> Result<(GraphInsertStats, Vec<VId>, Vec<EId>), Fault> {
     let stats = proposal.stats();
-    let mut vertices = Vec::new();
-    let mut edges = Vec::new();
-    for intent in proposal.into_intents() {
-        query_cx
-            .checkpoint()
-            .map_err(WriteTxnError::Interrupted)
-            .map_err(source)?;
-        execution.checkpoint().map_err(source)?;
-        // Receipt admission precedes both its allocation and native
-        // publication. The stats-only path allocates no ID vectors.
-        if returning {
-            execution
-                .permit
-                .charge_rows_at((execution.clock)(), 1)
-                .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-        }
-        let batch = match intent {
-            GraphInsertIntent::Vertex {
-                vertex,
-                labels,
-                properties,
-            } => {
-                if returning {
-                    vertices.push(vertex);
-                }
-                let mut batch = WriteBatch::new(insertion.relation());
-                batch.create_vertex(vertex, labels, properties);
-                batch
-            }
-            GraphInsertIntent::Edge {
-                edge,
-                relation,
-                source,
-                destination,
-                properties,
-            } => {
-                if returning {
-                    edges.push(edge);
-                }
-                let mut batch = WriteBatch::new(relation);
-                batch.add_edge(edge, source, destination, properties);
-                batch
-            }
-        };
-        for row in batch.rows {
-            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
-        }
+    // Reserve the complete identity receipt before allocating its vectors.
+    // The stats-only path retains no IDs; either path stages the same native
+    // order: vertices first, then each relation's edges in declaration order.
+    if returning {
+        let count = stats
+            .created_vertices
+            .checked_add(stats.created_edges)
+            .ok_or_else(|| source(WriteTxnError::Authorization(Error::TooLarge)))?;
+        execution
+            .permit
+            .charge_rows_at((execution.clock)(), count)
+            .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+    }
+    let (stats, batches, vertices, edges) = crate::write_txn::graph_insert_batches_with_control(
+        insertion.relation(),
+        proposal,
+        returning,
+        || {
+            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.checkpoint()
+        },
+    )
+    .map_err(source)?;
+    for batch in batches {
+        super::chain::stage_batch(
+            transaction,
+            database,
+            query_cx,
+            batch,
+            frozen.as_deref_mut(),
+            execution,
+        )
+        .map_err(source)?;
     }
     Ok((stats, vertices, edges))
 }
@@ -504,7 +598,6 @@ impl<V: Vfs + Clone> Database<V> {
                 ));
                 let proposal = query_cx.with_restriction(|| {
                     // All RefCell borrows end before staging or the first await.
-                    // The permit is shared, not reissued for the creation arm.
                     let execution = RefCell::new(&mut execution);
                     let database = RefCell::new(&mut *self);
                     super::super::collect_vertex_merge(
@@ -542,7 +635,7 @@ impl<V: Vfs + Clone> Database<V> {
                             unreachable!("validated vertex MERGE contains no edge creation")
                         };
                         let mut batch = WriteBatch::new(merge.relation());
-                        batch.create_vertex(vertex, labels, properties);
+                        batch.create_vertex_values(vertex, labels, properties);
                         for row in batch.rows {
                             stage(
                                 workspace.transaction(),
@@ -555,6 +648,7 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                     }
                 }
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {

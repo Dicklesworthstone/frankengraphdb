@@ -10,18 +10,6 @@ mod ranking;
 use super::*;
 use core::convert::Infallible;
 
-fn result_cell(value: &GraphAggregateValue) -> Cell<'_> {
-    match value {
-        GraphAggregateValue::Count(value) => Cell::Count(*value),
-        GraphAggregateValue::Integer(value) => Cell::Integer(*value),
-        GraphAggregateValue::Average(value) => Cell::Average {
-            sum: value.numerator(),
-            count: value.denominator(),
-        },
-        GraphAggregateValue::Value(value) => Cell::Value(value_ref(value)),
-    }
-}
-
 impl PreparedGraphAggregate {
     /// Whether the final result differs from the complete evaluation groups.
     /// HAVING is upstream of this transformation, not an output projection.
@@ -44,6 +32,9 @@ impl PreparedGraphAggregate {
     /// projection, DISTINCT, ordering and window execute there, never on source
     /// bindings or incomplete groups. Source, input expressions, aggregates and
     /// HAVING are unchanged. No runtime source is read by this split.
+    /// Both ordering domains are removed from the source. The output owner
+    /// retains projected_ordering() and compares its stored projected cells;
+    /// ordering() alone does not describe a computed result's rank.
     #[must_use]
     pub fn incremental_source_definition(&self) -> Option<Self> {
         if !self.supports_incremental_input() {
@@ -56,6 +47,7 @@ impl PreparedGraphAggregate {
         source.output_names.clear();
         source.output_distinct = false;
         source.ordering.clear();
+        source.projected_ordering.clear();
         source.offset = 0;
         source.count = None;
         source
@@ -66,7 +58,9 @@ impl PreparedGraphAggregate {
     /// Project one already HAVING-qualified, complete evaluation group. All
     /// referenced columns address the full keys followed by the full summaries.
     /// This does not execute HAVING again, deduplicate, rank or publish rows.
-    /// The caller must apply the original ordering/window AFTER projection.
+    /// The caller must apply the original ordering/window AFTER projection,
+    /// retaining these cells when projected_ordering() is nonempty. Never
+    /// re-evaluate expressions inside the rank comparator or discard that order.
     /// None denotes unsupported definition/schema, never SQL NULL. Exact count,
     /// sum and average cells remain exact, including inside scalar expressions.
     /// Every output expression executes, and errors retain their column/cause.
@@ -100,12 +94,27 @@ impl PreparedGraphAggregate {
     // Both consumers validate their own complete-group source contract before
     // entering this single projection/ownership path. No maintenance admission
     // is widened to admit graph-stream edge or path input schemas.
-    fn project_complete_output<E, C>(
+    pub(crate) fn project_complete_output<E, C>(
         &self,
         row: &GraphAggregateRow,
         govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<GraphAggregateRow, QueryError<E, C>> {
-        let input = |column: usize| {
+        self.project_complete_output_with_elements(
+            row,
+            &mut crate::set_ops::no_element_reads,
+            govern,
+        )
+    }
+
+    pub(crate) fn project_complete_output_with_elements<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<GraphAggregateRow, QueryError<E, C>> {
+        let mut govern: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> = govern;
+        let govern = &mut govern;
+        let columns = |column: usize| {
             if column < row.keys.len() {
                 Ok(Cell::Value(value_ref(&row.keys[column])))
             } else {
@@ -115,13 +124,21 @@ impl PreparedGraphAggregate {
                     .ok_or(GraphIntegerErrorKind::MissingColumn)
             }
         };
+        let mut input = ExpressionInput {
+            columns,
+            width: row.keys.len() + row.values.len(),
+            locals: Vec::new(),
+            read,
+        };
         govern(GlaExecutionEvent::ScratchEntry)?;
         let mut keys = Vec::new();
         let mut values = Vec::new();
         if let Some(projection) = &self.output_projection {
             for (column, output) in projection.iter().enumerate() {
                 govern(GlaExecutionEvent::ScratchEntry)?;
-                values.push(expression(output.value(), input, column, govern)?.into_owned(govern)?);
+                values.push(
+                    expression(output.value(), &mut input, column, govern)?.into_owned(govern)?,
+                );
             }
         } else {
             if let Some(projection) = &self.key_output {
@@ -149,6 +166,54 @@ impl PreparedGraphAggregate {
 }
 
 impl GraphAggregateRow {
+    /// Compare final visible tuples for post-aggregate DISTINCT with the same
+    /// exact cell comparison as snapshot results. Complete grouping keys and
+    /// hidden sort cells do not belong in these projected rows. The owning
+    /// operator separately chooses the first ranked complete representative.
+    ///
+    /// Top-level numeric summaries share the native exact rational domain;
+    /// Count(2), Integer(2), scalar Int(2), and Average(2/1) compare equal.
+    /// Nested GraphValue equality and ordinary grouping-key equality remain
+    /// unchanged. Rows and payloads are borrowed, so this does not allocate a
+    /// normalized copy. None refuses unequal schemas before any early exit.
+    pub fn compare_incremental_distinct<E>(
+        &self,
+        other: &Self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<Ordering>, E> {
+        control(GlaExecutionEvent::Work)?;
+        if self.keys.len() != other.keys.len() || self.values.len() != other.values.len() {
+            return Ok(None);
+        }
+        for (left, right) in self.keys.iter().zip(&other.keys) {
+            control(GlaExecutionEvent::Work)?;
+            for _ in 0..value_ref(left)
+                .payload_units()
+                .max(value_ref(right).payload_units())
+            {
+                control(GlaExecutionEvent::Work)?;
+            }
+            let order = left.cmp(right);
+            if order != Ordering::Equal {
+                return Ok(Some(order));
+            }
+        }
+        for (left, right) in self.values.iter().zip(&other.values) {
+            let order = compare_cell(
+                result_cell(left),
+                result_cell(right),
+                false,
+                GraphNullPlacement::First,
+                false,
+                control,
+            )?;
+            if order != Ordering::Equal {
+                return Ok(Some(order));
+            }
+        }
+        Ok(Some(Ordering::Equal))
+    }
+
     /// An equality key for post-aggregate DISTINCT, NOT a row to release or a
     /// canonical result encoding. Top-level numeric cells share the exact
     /// rational domain used by the snapshot result comparator. In particular,
@@ -327,6 +392,22 @@ mod tests {
             GraphAggregateValue::Integer(i128::MAX),
             GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
             GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                fgdb_types::CanonicalF64::new(2.0),
+            ))),
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                fgdb_types::CanonicalF64::new(f64::NAN),
+            ))),
+            GraphAggregateValue::Value(GraphValue::List(
+                vec![GraphValue::Scalar(CanonicalScalar::Int(2))].into_boxed_slice(),
+            )),
+            GraphAggregateValue::Value(
+                GraphValue::map(vec![(
+                    "payload".into(),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"z".repeat(512)).unwrap()),
+                )])
+                .unwrap(),
+            ),
         ];
         for a in &choices {
             for b in &choices {
@@ -341,6 +422,7 @@ mod tests {
                     result_cell(b),
                     false,
                     GraphNullPlacement::First,
+                    false,
                     &mut |_| Ok::<_, ()>(()),
                 )
                 .unwrap()
@@ -353,9 +435,74 @@ mod tests {
                             .unwrap(),
                     expected
                 );
+                let mut calls = 0;
+                let observed = left
+                    .compare_incremental_distinct(&right, &mut |event| {
+                        assert_eq!(event, GlaExecutionEvent::Work, "comparison only borrows");
+                        calls += 1;
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(observed == Ordering::Equal, expected);
+                assert_eq!(
+                    right
+                        .compare_incremental_distinct(&left, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    Some(observed.reverse())
+                );
+                for stop in 1..=calls {
+                    let mut count = 0;
+                    assert_eq!(
+                        left.compare_incremental_distinct(&right, &mut |_| {
+                            count += 1;
+                            if count == stop { Err(stop) } else { Ok(()) }
+                        }),
+                        Err(stop)
+                    );
+                    assert_eq!(count, stop);
+                }
                 assert_eq!(left.values(), std::slice::from_ref(a));
             }
         }
+    }
+
+    #[test]
+    fn borrowed_distinct_checks_full_schema_and_preserves_nested_numeric_domains() {
+        let integer = GraphValue::Scalar(CanonicalScalar::Int(2));
+        let float = GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(2.0)));
+        let row = |key: GraphValue, value: GraphValue| {
+            GraphAggregateRow::from_group_values(vec![key], vec![GraphAggregateValue::Value(value)])
+        };
+        let left = row(
+            integer.clone(),
+            GraphValue::List(vec![integer.clone()].into_boxed_slice()),
+        );
+        let right = row(
+            integer.clone(),
+            GraphValue::List(vec![float.clone()].into_boxed_slice()),
+        );
+        assert_ne!(
+            left.compare_incremental_distinct(&right, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(Ordering::Equal)
+        );
+        let other_key = row(float, GraphValue::List(vec![integer].into_boxed_slice()));
+        assert_ne!(
+            left.compare_incremental_distinct(&other_key, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(Ordering::Equal)
+        );
+        let wrong_width = GraphAggregateRow::from_group_values(
+            vec![GraphValue::Scalar(CanonicalScalar::Int(-100))],
+            vec![],
+        );
+        assert_eq!(
+            left.compare_incremental_distinct(&wrong_width, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            None,
+            "a decisive key must not hide a missing later value"
+        );
     }
 
     #[test]

@@ -139,6 +139,8 @@ fn run() -> Result<(), Error> {
         // identities, exact frontier and recursive view without saved state.
         drop(db);
         let mut db = Database::open(commit_cx, &path, keys).await?;
+        db.ensure_delta_window(commit_cx, fgdb_types::CommitSeq::ORIGIN)
+            .await?;
         let mut rebuilt = new_view();
         let mut rebuilt_sink = ZSet::new();
         assert_eq!(catch_up(&db, query_cx, &mut rebuilt, &mut rebuilt_sink)?, 5);

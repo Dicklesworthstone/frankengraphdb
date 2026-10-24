@@ -127,7 +127,7 @@ fn parameterized_script_commits_once_rebinds_without_allocation_and_survives_reo
         );
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(200))]
+            vec![(Q, CanonicalScalar::Int(200).into())]
         );
 
         let (receipt, completion) = db
@@ -168,7 +168,7 @@ fn parameterized_script_commits_once_rebinds_without_allocation_and_survives_reo
         assert_eq!(db.edges().unwrap().len(), 1);
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(101))]
+            vec![(Q, CanonicalScalar::Int(101).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -479,8 +479,8 @@ fn unwind_list_occurrences_create_fresh_rows_visible_to_the_script_and_durable_a
             assert_eq!(
                 vertex.props,
                 vec![
-                    (P, CanonicalScalar::Int(value)),
-                    (Q, CanonicalScalar::Int(value * 2))
+                    (P, CanonicalScalar::Int(value).into()),
+                    (Q, CanonicalScalar::Int(value * 2).into())
                 ]
             );
         }
@@ -495,8 +495,8 @@ fn unwind_list_occurrences_create_fresh_rows_visible_to_the_script_and_durable_a
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(value)),
-                    (Q, CanonicalScalar::Int(value * 2))
+                    (P, CanonicalScalar::Int(value).into()),
+                    (Q, CanonicalScalar::Int(value * 2).into())
                 ]
             );
         }
@@ -610,7 +610,7 @@ fn multiple_unwinds_create_every_cross_product_edge_chain_in_one_commit() {
                         .unwrap()
                         .unwrap()
                         .props,
-                    vec![(P, CanonicalScalar::Int(value))]
+                    vec![(P, CanonicalScalar::Int(value).into())]
                 );
             }
             for (offset, value) in [y, x].into_iter().enumerate() {
@@ -620,7 +620,7 @@ fn multiple_unwinds_create_every_cross_product_edge_chain_in_one_commit() {
                     .unwrap();
                 assert_eq!(edge.entry.src, VId(base + offset as u128));
                 assert_eq!(edge.entry.dst, VId(base + offset as u128 + 1));
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value))]);
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value).into())]);
             }
         }
         assert_eq!(db.vertices().unwrap().len(), 12);
@@ -679,12 +679,16 @@ fn late_invalid_unwind_row_refuses_before_any_identity_or_staged_effect() {
         let cases = [
             (
                 "UNWIND $values AS x CREATE (:Person {p:x})",
+                // A List is a storable property since fgdb-k3nub; a Map is
+                // still refused (stored maps await their language ruling).
                 vec![
                     GraphValue::Scalar(CanonicalScalar::Int(4)),
                     GraphValue::Scalar(CanonicalScalar::Int(2)),
-                    GraphValue::List(
-                        vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice(),
-                    ),
+                    GraphValue::map(vec![(
+                        "x".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    )])
+                    .unwrap(),
                 ],
             ),
             (
@@ -790,7 +794,7 @@ fn failed_script_tail_rolls_back_unwind_creations_and_preserves_outer_work() {
         }
         assert_eq!(
             transaction.vertex(&db, VId(99)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99))]
+            vec![(P, CanonicalScalar::Int(99).into())]
         );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert!(db.vertices().unwrap().is_empty());

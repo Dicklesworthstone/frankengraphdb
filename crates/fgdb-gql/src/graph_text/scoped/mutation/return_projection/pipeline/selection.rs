@@ -32,7 +32,7 @@ fn scalar_program(
         ReadValueTemplate::Literal(value) => vec![MutationIntegerTemplateOp::Bound(
             GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
         )],
-        ReadValueTemplate::Parameter { index, at } => {
+        ReadValueTemplate::Parameter { index, at, .. } => {
             vec![MutationIntegerTemplateOp::Parameter { index, at }]
         }
         ReadValueTemplate::Integer { program, .. } => program,
@@ -69,6 +69,10 @@ impl<'a> Parser<'a> {
                     if spec.parameter_type == GqlParameterType::List {
                         GqlParameterValue::List(
                             GqlListParameter::new(Vec::new()).expect("empty list is bounded"),
+                        )
+                    } else if spec.parameter_type == GqlParameterType::Map {
+                        GqlParameterValue::Map(
+                            crate::GqlMapParameter::new(Vec::new()).expect("empty map is bounded"),
                         )
                     } else {
                         GqlParameterValue::Scalar(null.clone())
@@ -187,6 +191,24 @@ impl<'a> Parser<'a> {
         if depth > MAX_FILTER_NESTING {
             return Err(expected(at, "bounded row predicate nesting"));
         }
+        // An existence predicate its head hoisted is that hidden Boolean
+        // column (hoist_existence_reads), never a parenthesized expression.
+        if let Some(column) = self.existence_read(schema.len())? {
+            let test = ReadFilterOp::Compare {
+                left: self.selection_cell(
+                    schema,
+                    selection,
+                    ReadValueTemplate::Column(column),
+                    at,
+                )?,
+                comparison: IntegerComparison::Equal,
+                right: ReadFilterOperand::Literal(
+                    GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                        .expect("canonical true is a bounded scalar"),
+                ),
+            };
+            return emit(&mut selection.code, test, at);
+        }
         let alias = matches!(self.current.kind, TokenKind::Word(word)
             if schema.iter().any(|(name, _)| name.text == word));
         if self.is_word("NOT") && !alias {
@@ -264,10 +286,30 @@ impl<'a> Parser<'a> {
                     // Double NOT checks the Boolean domain without changing
                     // TRUE/FALSE/UNKNOWN. Comparing an unchecked cell to TRUE
                     // would silently turn non-Boolean inputs into false.
-                    let mut program = scalar_program(value, at)?;
-                    program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
-                    program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
-                    let value = ReadValueTemplate::Integer { program, at };
+                    let not = MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not);
+                    let value = match value {
+                        value @ (ReadValueTemplate::Column(_)
+                        | ReadValueTemplate::Parameter { .. }
+                        | ReadValueTemplate::Integer { .. }) => {
+                            let mut program = scalar_program(value, at)?;
+                            program.extend([not.clone(), not]);
+                            ReadValueTemplate::Integer { program, at }
+                        }
+                        // A composite Boolean (a quantifier, a list CASE) has
+                        // no scalar program: it is the one let slot of the
+                        // check, in the same private cell (TCK Quantifier11 [3]).
+                        composite => ReadValueTemplate::Let {
+                            values: vec![composite],
+                            body: Box::new(ReadValueTemplate::Integer {
+                                program: vec![
+                                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(0)),
+                                    not.clone(),
+                                    not,
+                                ],
+                                at,
+                            }),
+                        },
+                    };
                     ReadFilterOp::Compare {
                         left: self.selection_cell(schema, selection, value, at)?,
                         comparison: IntegerComparison::Equal,
@@ -332,6 +374,30 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether the `[` after the current IN opens a computed list rather than
+    /// a literal of members: a list comprehension (`[x IN labels(b) |
+    /// toLower(x)]`, TCK List12 [6]) or a pattern comprehension, read as one
+    /// list value (selection_list_membership). Only lexical lookahead.
+    fn computed_in_list(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'[')) {
+            return Ok(false);
+        }
+        let mut first = lexer.next()?;
+        if matches!(first.kind, TokenKind::Word(_)) {
+            match lexer.clone().next()?.kind {
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => return Ok(true),
+                // `[p = (n)-->() | p]`: a named pattern comprehension.
+                TokenKind::Punct(b'=') => {
+                    lexer.next()?;
+                    first = lexer.next()?;
+                }
+                _ => return Ok(false),
+            }
+        }
+        crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)
+    }
+
     fn selection_membership(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
@@ -340,7 +406,9 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphSetTextError> {
         let negate = self.take_word("NOT")?;
-        if self.is_word("IN") && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+        if self.is_word("IN")
+            && (!matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+                || self.computed_in_list()?)
         {
             self.advance()?;
             return self.selection_list_membership(schema, selection, left, negate, at);
@@ -416,13 +484,20 @@ impl<'a> Parser<'a> {
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         // The shared resolved-expression entry point stops before comparisons
         // and Boolean connectors. Parentheses and CASE retain their own inner
-        // expressions. This callback resolves ONLY the current WITH aliases.
-        // Hidden boundary reads resolve only as `alias.property`, never by
-        // their private names.
+        // expressions. This callback resolves ONLY the current WITH aliases,
+        // then a DISTINCT WITH's own item expression repeated token for
+        // token (`WITH DISTINCT a.name AS name WHERE a.name = 'B'`, TCK
+        // WithWhere1 [2]), whose value is that item's on every row. A
+        // grouping WITH's WHERE reads its projected names only. Hidden
+        // boundary reads resolve only as `alias.property`, never by their
+        // private names.
         let visible = self.visible_width(schema);
         self.read_resolved_value(
             &mut |parser| {
                 if let Some(column) = parser.boundary_read(schema.len())? {
+                    return Ok(Some(column));
+                }
+                if let Some(column) = parser.comprehension_read(schema.len())? {
                     return Ok(Some(column));
                 }
                 if let TokenKind::Word(word) = parser.current.kind
@@ -432,6 +507,9 @@ impl<'a> Parser<'a> {
                 {
                     parser.advance()?;
                     return Ok(Some(column));
+                }
+                if parser.syntax.distinct {
+                    return parser.projected_source(schema.len());
                 }
                 Ok(None)
             },
@@ -449,8 +527,11 @@ impl<'a> Parser<'a> {
         Ok(match value {
             ReadValueTemplate::Column(column) => ReadFilterOperand::Column(column),
             ReadValueTemplate::Literal(value) => ReadFilterOperand::Literal(value),
-            ReadValueTemplate::Parameter { index, at }
-                if self.syntax.parameters[index].parameter_type != GqlParameterType::List =>
+            ReadValueTemplate::Parameter { index, at, .. }
+                if !matches!(
+                    self.syntax.parameters[index].parameter_type,
+                    GqlParameterType::List | GqlParameterType::Map
+                ) =>
             {
                 ReadFilterOperand::Parameter { index, at }
             }
@@ -493,7 +574,7 @@ impl<'a> Parser<'a> {
         }
         Ok(match lexer.next()?.kind {
             TokenKind::Punct(
-                b'+' | b'-' | b'*' | b'/' | b'%' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
             ) => true,
             TokenKind::Word(word) => ["IS", "IN", "BETWEEN", "NOT", "STARTS", "ENDS", "CONTAINS"]
                 .iter()
@@ -637,9 +718,12 @@ mod tests {
             error.kind,
             GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownVariable)
         ));
+        // A plain WITH's own WHERE may read `n.p` of a binding it drops
+        // (openCypher), but the RETURN after it may not: refused before any
+        // catalog access.
         let mut calls = 0;
         let result = PreparedGraphSetText::prepare(
-            "MATCH (n) WITH n.p AS value WHERE n.p + 1 > 1 RETURN value",
+            "MATCH (n) WITH n.p AS value WHERE n.p + 1 > 1 RETURN n.p",
             |_, _| {
                 calls += 1;
                 None

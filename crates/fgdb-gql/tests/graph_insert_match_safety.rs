@@ -11,7 +11,7 @@ use fgdb_gql::{
     GraphInsertQueryError, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -20,7 +20,7 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const COPY: LabelId = LabelId(9);
 type ResultOf = Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<(), ()>, ()>>;
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -118,8 +118,8 @@ fn null_matched_endpoints_refuse_before_any_identity_is_allocated() {
 fn matched_late_return_failure_and_cancellation_never_return_a_partial_proposal() {
     let vertices = [VId(1), VId(2)];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(2)),
-        ((VId(2), P), CanonicalScalar::Int(1)),
+        ((VId(1), P), CanonicalScalar::Int(2).into()),
+        ((VId(2), P), CanonicalScalar::Int(1).into()),
     ]);
     let query = prepare("MATCH (a) CREATE (n) RETURN 1/(a.p-1) AS value LIMIT 0");
     let allocations = Cell::new(0);
@@ -221,13 +221,14 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
         query.column_types(),
         &[
             GraphSetColumnType::Edge,
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
             GraphSetColumnType::Vertex,
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
         ]
     );
     let value = CanonicalScalar::Int(2003);
-    let wrong_domain = CanonicalScalar::Int(99);
+    let stored = CanonicalPropertyValue::from(value.clone());
+    let wrong_domain = CanonicalPropertyValue::from(CanonicalScalar::Int(99));
     let batch = query
         .execute_governed(
             matched_policy(),
@@ -238,7 +239,7 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
                     [(EId(1), VId(1), R, VId(2)), (EId(2), VId(1), R, VId(3))],
                     |_, _| Ok::<_, ()>(true),
                     |_, _| Ok(Some(&wrong_domain)),
-                    |edge, _| Ok((edge == EId(1)).then_some(&value)),
+                    |edge, _| Ok((edge == EId(1)).then_some(&stored)),
                     allowance,
                     || Ok::<_, ()>(()),
                 )
@@ -263,7 +264,7 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
                 .contains(&GraphInsertIntent::Vertex {
                     vertex: *created,
                     labels: vec![],
-                    properties: vec![(P, property)],
+                    properties: vec![(P, property.into())],
                 })
         );
     }

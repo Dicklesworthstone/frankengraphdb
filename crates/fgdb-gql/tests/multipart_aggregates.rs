@@ -2,7 +2,7 @@
 //! Small independent edge-bag enumeration supplies the result oracle; actual
 //! source callbacks execute the governed GLA plans, never precomputed answers.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregateBuildError,
@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphPipelineAggregateTextErrorKind, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
     PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,9 +47,9 @@ fn run(
     policy: GqlQueryPolicy,
     checkpoint: &mut impl FnMut() -> Result<(), usize>,
 ) -> Result<GqlQueryExecution<GraphAggregateRow>, Fault> {
-    let values = SCORES.map(CanonicalScalar::Int);
+    let values = SCORES.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
-    query.execute_governed(
+    query.execute_governed_with_elements(
         policy,
         |pattern, remaining| {
             pattern.plan().execute_governed_with_properties(
@@ -67,6 +67,13 @@ fn run(
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )
+        },
+        |_, _, _| panic!("this fixture has no CALL source"),
+        |element, key| {
+            Ok(match element {
+                ElementId::Vertex(vid) if key == P => Some(values[vid.0 as usize - 1].clone()),
+                _ => None,
+            })
         },
         || (checkpoint.borrow_mut())(),
     )
@@ -92,6 +99,28 @@ fn assert_list(value: &GraphAggregateValue, expected: &[i64]) {
         list,
         expected.iter().copied().map(scalar).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn carried_properties_group_after_optional_matching_and_nullable_required_carries() {
+    let rows = execute(
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE a.p < b.p \
+                        RETURN a.p AS score,COUNT(*) AS rows,COUNT(b) AS present ORDER BY score",
+    );
+    assert_eq!(rows.len(), 3);
+    for (row, (score, occurrences, present)) in rows.iter().zip([(1, 3, 3), (2, 2, 2), (3, 1, 0)]) {
+        assert_eq!(row.keys(), &[scalar(score)]);
+        assert_eq!(row.values()[0].as_count(), Some(occurrences));
+        assert_eq!(row.values()[1].as_count(), Some(present));
+    }
+    let rows = execute(
+        "MATCH (n) WHERE n.p=3 OPTIONAL MATCH (n)-[:R]->(a) WITH a \
+                        MATCH (b) RETURN a.p AS score,COUNT(*) AS rows,COUNT(a.p) AS present",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].keys(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
+    assert_eq!(rows[0].values()[0].as_count(), Some(4));
+    assert_eq!(rows[0].values()[1].as_count(), Some(0));
 }
 
 #[test]
@@ -234,6 +263,62 @@ fn candidate_input_counts_only_real_graph_sources_and_preserves_occurrences() {
     let result = run(&query, wide(), &mut || Ok(())).unwrap();
     assert_eq!(result.value[0].values()[0].as_count(), Some(4));
     assert_eq!(result.rows.snapshot_records, 18);
+}
+
+/// A required continuation's WHERE that the graph predicate refuses, here a
+/// computed graph operand against an imported column, filters after an
+/// implicit `WITH *` before an aggregate RETURN too (fgdb-c6hvm): the same
+/// template and rows as the explicit `WITH *` spelling. An OPTIONAL
+/// continuation's WHERE belongs to its left join and still refuses before
+/// any catalog call.
+#[test]
+fn an_aggregate_reads_a_refused_continuation_where_after_the_join() {
+    let template = |text: &str| {
+        PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap()
+            .canonical_template_bytes()
+    };
+    // SCORES are 1, 2, 2, 3: e = 2 meets two b rows from each of two a rows.
+    for (implicit, explicit, expected) in [
+        (
+            "MATCH (a) WITH a.p AS e MATCH (b) WHERE b.p * 1 = e \
+             RETURN e, COUNT(*) AS rows ORDER BY e",
+            "MATCH (a) WITH a.p AS e MATCH (b) WITH * WHERE b.p * 1 = e \
+             RETURN e, COUNT(*) AS rows ORDER BY e",
+            &[(1, 1), (2, 4), (3, 1)][..],
+        ),
+        (
+            "UNWIND [1, 3] AS w MATCH (b) WHERE b.p * 1 = w RETURN w, COUNT(*) AS rows ORDER BY w",
+            "UNWIND [1, 3] AS w MATCH (b) WITH * WHERE b.p * 1 = w \
+             RETURN w, COUNT(*) AS rows ORDER BY w",
+            &[(1, 1), (3, 1)][..],
+        ),
+    ] {
+        assert_eq!(template(implicit), template(explicit), "{implicit}");
+        let rows = execute(implicit);
+        assert_eq!(rows, execute(explicit), "{implicit}");
+        let observed: Vec<_> = rows
+            .iter()
+            .map(|row| (row.keys().to_vec(), row.values()[0].as_count()))
+            .collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|&(key, count)| (vec![scalar(key)], Some(count)))
+            .collect();
+        assert_eq!(observed, expected, "{implicit}");
+    }
+    let mut calls = 0;
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(
+            "MATCH (a) WITH a.p AS e OPTIONAL MATCH (b) WHERE b.p * 1 = e RETURN COUNT(*) AS rows",
+            |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 0);
 }
 
 #[test]
@@ -451,6 +536,62 @@ fn exact_cumulative_quotas_and_every_cancellation_checkpoint_span_join_and_group
     }
 }
 
+/// openCypher: RETURN after a MATCH reads every visible binding. A
+/// continuation's aggregate RETURN therefore aggregates exactly what the same
+/// RETURN after `WITH *` does; the first part still needs its WITH.
+#[test]
+fn a_continuation_aggregate_return_reads_its_bindings_through_the_implied_with_star() {
+    for (implied, star) in [
+        (
+            "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
+            "MATCH (n) WITH n MATCH (n) WITH * RETURN COUNT(*) AS rows",
+        ),
+        (
+            "MATCH (a) WITH a MATCH (b) WHERE a = b RETURN COUNT(b) AS c",
+            "MATCH (a) WITH a MATCH (b) WHERE a = b WITH * RETURN COUNT(b) AS c",
+        ),
+        (
+            "MATCH (n) WITH n MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+            "MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH * RETURN n, COUNT(m) AS out ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH * RETURN n, COUNT(m) AS out ORDER BY n",
+        ),
+    ] {
+        assert_eq!(execute(implied), execute(star), "{implied}");
+    }
+    for text in [
+        "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
+        "MATCH (a) WITH a MATCH (b) WHERE a = b RETURN COUNT(b) AS c",
+    ] {
+        let rows = execute(text);
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0].values()[0].as_count(), Some(4), "{text}");
+    }
+    // Out-degree per vertex from the independent edge bag; vertex 4 has none
+    // and keeps its group through the OPTIONAL null extension.
+    let degrees = execute(
+        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+    );
+    assert_eq!(degrees.len(), 4);
+    for (row, vid) in degrees.iter().zip(1..=4) {
+        let out = EDGES
+            .iter()
+            .filter(|(start, _, _)| *start == VId(vid))
+            .count();
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(vid))]);
+        assert_eq!(row.values()[0].as_count(), Some(out as u64));
+    }
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(
+            "MATCH (n) RETURN COUNT(*) AS rows MATCH (m) RETURN COUNT(*) AS more",
+            symbols
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
     // An aggregate WITH stage is legal since fgdb-ezgeq. It drops `n`, so the
@@ -460,12 +601,14 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
         execute("MATCH (n) WITH COUNT(*) AS count MATCH (n) WITH n RETURN COUNT(*) AS rows");
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].values()[0].as_count(), Some(4));
+    let carried =
+        execute("MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS kept RETURN SUM(kept)");
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].values()[0].as_integer(), Some(10));
     for text in [
-        "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(n) AS bad",
         "MATCH (n) WITH n MATCH (n) WITH n AS kept RETURN n,COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows HAVING missing>0",
-        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS bad RETURN SUM(bad)",
     ] {
         let mut calls = 0;
         assert!(
@@ -491,4 +634,78 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
         .is_err()
     );
     assert_eq!(calls, 0);
+}
+
+/// UNWIND range() streams its members (fgdb-85aal). Past the 65,536-member
+/// list bound the materialized list refuses with Overflow, so these counts
+/// can only come from the streamed range: the counting fold and the row
+/// executor both read it. Below the bound it equals the materialized list,
+/// and a materialized range is still bounded.
+#[test]
+fn unwind_range_streams_past_the_list_value_bound() {
+    let rows = execute("UNWIND range(1, 70000) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(rows[0].values()[0].as_count(), Some(70_000));
+    let rows = execute("UNWIND range(1, 70000) AS i RETURN COUNT(*) AS rows, SUM(i) AS total");
+    assert_eq!(rows[0].values()[0].as_count(), Some(70_000));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(70_000 * 70_001 / 2));
+    // Every third member of a descending range, then a filter stage:
+    // 100000, 99997, ..., 1 is 33,334 members, the even ones at even steps.
+    let rows = execute(
+        "UNWIND range(100000, 1, -3) AS i WITH i WHERE i % 2 = 0 \
+         RETURN COUNT(*) AS rows, MIN(i) AS low, MAX(i) AS high",
+    );
+    assert_eq!(rows[0].values()[0].as_count(), Some(16_667));
+    assert_eq!(rows[0].values()[1].as_value(), Some(&scalar(4)));
+    assert_eq!(rows[0].values()[2].as_value(), Some(&scalar(100_000)));
+    // range() bounds are row values: each source row unwinds its own range.
+    let rows = execute("MATCH (n) UNWIND range(1, n.p * 30000) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(
+        rows[0].values()[0].as_count(),
+        Some(SCORES.iter().map(|p| *p as u64 * 30_000).sum())
+    );
+    for (streamed, listed) in [
+        (
+            "UNWIND range(-7, 60000, 13) AS i RETURN COUNT(*) AS rows, SUM(i) AS total, MIN(i) AS low",
+            "UNWIND [x IN range(-7, 60000, 13) | x] AS i \
+             RETURN COUNT(*) AS rows, SUM(i) AS total, MIN(i) AS low",
+        ),
+        (
+            "UNWIND range(5, 1) AS i RETURN COUNT(*) AS rows, SUM(i) AS total",
+            "UNWIND [] AS i RETURN COUNT(*) AS rows, SUM(i) AS total",
+        ),
+    ] {
+        assert_eq!(execute(streamed), execute(listed), "{streamed}");
+    }
+    // A NULL bound makes range() NULL, which unwinds nothing.
+    let rows = execute("UNWIND range(1, NULL) AS i RETURN COUNT(*) AS rows");
+    assert_eq!(rows[0].values()[0].as_count(), Some(0));
+    for text in [
+        "UNWIND range(1, 70000, 0) AS i RETURN COUNT(*) AS rows",
+        "UNWIND range(1, 70000, 0) AS i RETURN SUM(i) AS total",
+    ] {
+        let result = run(&prepare(text), wide(), &mut || Ok(()));
+        assert!(
+            matches!(
+                &result,
+                Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                    GraphSetExecutionError::Projection { error, .. }
+                ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::InvalidRangeStep
+            ),
+            "{text}: {result:?}"
+        );
+    }
+    let result = run(
+        &prepare("UNWIND [range(1, 70000)] AS l RETURN COUNT(*) AS rows"),
+        wide(),
+        &mut || Ok(()),
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                GraphSetExecutionError::Projection { error, .. }
+            ))) if error.kind == fgdb_gql::GraphIntegerErrorKind::Overflow
+        ),
+        "the list bound still caps a materialized range: {result:?}"
+    );
 }

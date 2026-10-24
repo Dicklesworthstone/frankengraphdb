@@ -28,6 +28,14 @@ pub enum GraphAggregateColumn {
     GroupKey(usize),
     Aggregate(usize),
 }
+impl core::fmt::Display for GraphAggregateColumn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::GroupKey(column) => write!(f, "group key {column}"),
+            Self::Aggregate(column) => write!(f, "aggregate {column}"),
+        }
+    }
+}
 
 /// Integer thresholds compare integer and exact-average cells without
 /// subtraction, truncation or floating conversion. Null yields UNKNOWN
@@ -104,7 +112,13 @@ struct Group<'g, 'a> {
 enum Cell<'a> {
     Count(u64),
     Integer(i128),
-    Average { sum: i128, count: u64 },
+    Average {
+        sum: i128,
+        count: u64,
+    },
+    /// A binary64 SUM/AVG, rounded from its exact state when read. It orders
+    /// and copies exactly as the equal float scalar value.
+    Float(fgdb_types::CanonicalF64),
     Value(ValueRef<'a>),
 }
 impl<'a> Cell<'a> {
@@ -125,11 +139,18 @@ impl<'a> Cell<'a> {
                 numeric::NumericResult::Empty => Self::Value(ValueRef::Scalar(&NULL)),
                 numeric::NumericResult::Sum(value) => Self::Integer(value),
                 numeric::NumericResult::Average { sum, count } => Self::Average { sum, count },
+                numeric::NumericResult::Float(value) => Self::Float(value),
             },
         }
     }
     fn is_null(self) -> bool {
         matches!(self, Self::Value(value) if value.is_null())
+    }
+    /// A present value that is not a number (Int, Float or Decimal): of
+    /// another domain than every number (fgdb-v6ku6).
+    fn not_a_number(self) -> bool {
+        matches!(self, Self::Value(value)
+            if !matches!(value, ValueRef::Scalar(scalar) if crate::algebra::numeric_domain(scalar)))
     }
     fn integer(self) -> Option<i128> {
         match self {
@@ -146,13 +167,87 @@ impl<'a> Cell<'a> {
         }
     }
 
+    fn float(self) -> Option<fgdb_types::CanonicalF64> {
+        match self {
+            Self::Float(value) => Some(value),
+            Self::Value(ValueRef::Scalar(CanonicalScalar::Float(value))) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Predicate comparison shares exact numeric semantics with scalar WHERE.
+    /// Canonical ordering and DISTINCT identity keep their separate contracts.
+    fn numeric_comparison(self, other: Self) -> Option<Ordering> {
+        match (self.numeric(), other.numeric(), self.float(), other.float()) {
+            (Some(left), Some(right), _, _) => Some(numeric::compare_ratios(left, right)),
+            (Some((numerator, denominator)), _, _, Some(right)) => Some(
+                right
+                    .compare_rational(
+                        numerator,
+                        core::num::NonZeroU64::new(denominator)
+                            .expect("aggregate fractions have positive denominators"),
+                    )
+                    .reverse(),
+            ),
+            (_, Some((numerator, denominator)), Some(left), _) => Some(
+                left.compare_rational(
+                    numerator,
+                    core::num::NonZeroU64::new(denominator)
+                        .expect("aggregate fractions have positive denominators"),
+                ),
+            ),
+            (_, _, Some(left), Some(right)) => Some(left.cmp(&right)),
+            _ => None,
+        }
+    }
+
     fn payload_units(self) -> usize {
         match self {
             Self::Value(value) => value.payload_units(),
             _ => 0,
         }
     }
+
+    fn orderable_number(self) -> Option<crate::algebra::OrderableNumber> {
+        use crate::algebra::OrderableNumber as Number;
+        match self {
+            Self::Value(ValueRef::Scalar(value)) => Number::scalar(value),
+            Self::Float(value) => Some(Number::Float(value)),
+            _ => self.numeric().map(|(value, denominator)| {
+                Number::Rational(
+                    value,
+                    core::num::NonZeroU64::new(denominator).expect("nonnull exact average"),
+                )
+            }),
+        }
+    }
+
+    fn compare_orderability(self, other: Self) -> Ordering {
+        match (self.orderable_number(), other.orderable_number()) {
+            (Some(a), Some(b)) => a.cmp(b),
+            _ => match (self, other) {
+                (Self::Value(a), Self::Value(b)) => a
+                    .orderability_value()
+                    .cmp_orderability(b.orderability_value()),
+                (Self::Value(a), _) => a
+                    .orderability_value()
+                    .cmp_orderability(crate::algebra::ValueRef::Scalar(&CanonicalScalar::Int(0))),
+                (_, Self::Value(b)) => crate::algebra::ValueRef::Scalar(&CanonicalScalar::Int(0))
+                    .cmp_orderability(b.orderability_value()),
+                _ => unreachable!("exact numeric cells are compared above"),
+            },
+        }
+    }
+
     fn compare(self, other: Self) -> Ordering {
+        if let Self::Float(value) = self {
+            let scalar = CanonicalScalar::Float(value);
+            return Cell::Value(ValueRef::Scalar(&scalar)).compare(other);
+        }
+        if let Self::Float(value) = other {
+            let scalar = CanonicalScalar::Float(value);
+            return self.compare(Cell::Value(ValueRef::Scalar(&scalar)));
+        }
         match (self, other) {
             (Self::Count(left), Self::Count(right)) => left.cmp(&right),
             (Self::Integer(left), Self::Integer(right)) => left.cmp(&right),
@@ -206,6 +301,9 @@ impl<'g, 'a: 'g> Group<'g, 'a> {
                     GraphExactAverage::new(sum, count)
                         .expect("a nonnull average has a positive admitted count"),
                 ),
+                Cell::Float(value) => {
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(value)))
+                }
                 Cell::Value(value) if value.is_null() => {
                     GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
                 }
@@ -245,7 +343,7 @@ impl PreparedGraphAggregate {
         let source_types = if let Some(relation) = &self.relational_input {
             relation.column_types().to_vec()
         } else {
-            let source = crate::PreparedGraphSet::from(self.input.clone());
+            let source = crate::PreparedGraphSet::from(self.input_pattern().clone());
             if let Some(input) = &self.computed_input {
                 input
                     .iter()
@@ -285,6 +383,9 @@ impl PreparedGraphAggregate {
             }
             Projection::admit_output(value.value(), &types, column).map_err(failure)?;
         }
+        // Replacing a projection must not leave previously admitted sort
+        // indices dangling. The builder remains valid in either call order.
+        Self::validate_projected_ordering(&self.projected_ordering, projection.len())?;
         self.output_names = projection
             .iter()
             .map(|value| value.name().to_owned())
@@ -298,10 +399,70 @@ impl PreparedGraphAggregate {
         self.output_projection.as_deref()
     }
 
+    /// Rank by the already computed output tuple, after HAVING and before
+    /// output pagination. Indices address output_projection(), not grouping
+    /// keys or evaluation summaries. Exact COUNT/SUM/AVG cells are compared
+    /// without narrowing; all explicit ties use the complete ascending group
+    /// key. DISTINCT still operates on the visible tuple, never sort metadata.
+    ///
+    /// Nonempty ordering requires an output projection. An empty slice clears
+    /// ordering. This replaces evaluation-column ordering but leaves HAVING,
+    /// projection, DISTINCT and pagination unchanged. The bounded batch result
+    /// owner executes this profile; incremental and physical pull admission
+    /// refuse it until they can preserve projected ranking as well.
+    pub fn with_projected_order_by(
+        mut self,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        let width = match &self.output_projection {
+            Some(projection) => projection.len(),
+            None if ordering.is_empty() => 0,
+            None => return Err(GraphAggregateBuildError::RequiresOutputProjection),
+        };
+        Self::validate_projected_ordering(ordering, width)?;
+        self.projected_ordering = ordering.to_vec();
+        self.ordering.clear();
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn projected_ordering(&self) -> &[crate::algebra::GraphValueOrder] {
+        &self.projected_ordering
+    }
+
+    fn validate_projected_ordering(
+        ordering: &[crate::algebra::GraphValueOrder],
+        width: usize,
+    ) -> Result<(), GraphAggregateBuildError> {
+        if ordering.len() > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: ordering.len(),
+            });
+        }
+        for (at, order) in ordering.iter().enumerate() {
+            if order.column >= width {
+                return Err(GraphAggregateBuildError::UnknownProjectedOrderColumn {
+                    column: order.column,
+                });
+            }
+            if ordering[..at]
+                .iter()
+                .any(|prior| prior.column == order.column)
+            {
+                return Err(GraphAggregateBuildError::DuplicateProjectedOrder {
+                    column: order.column,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Replace post-aggregate clauses after validating every referenced output.
     /// All filters are AND-conjoined; ORDER BY is lexicographic. The child,
     /// grouping, output schema and existing pagination remain unchanged.
-    /// This replaces any earlier Boolean HAVING expression as well.
+    /// This replaces any earlier Boolean HAVING expression and any projected
+    /// ordering as well; the most recent ordering setter owns the whole order.
     pub fn with_result_clauses(
         mut self,
         having: &[GraphAggregateFilter],
@@ -347,6 +508,7 @@ impl PreparedGraphAggregate {
         self.having = having.to_vec();
         self.having_expression = None;
         self.ordering = ordering.to_vec();
+        self.projected_ordering.clear();
         Ok(self)
     }
     #[must_use]
@@ -364,7 +526,12 @@ impl PreparedGraphAggregate {
         }
         // Preserve the original no-clause transcript exactly. The old prefix is
         // self-delimiting; this versioned suffix has an unambiguous structure.
-        bytes.extend_from_slice(b"fgdb:aggregate-result-clauses:v1\0");
+        bytes.extend_from_slice(if self.ordering.is_empty() {
+            b"fgdb:aggregate-result-clauses:v1\0"
+        } else {
+            // Explicit result ordering uses the shared language comparator.
+            b"fgdb:aggregate-result-clauses:v2\0"
+        });
         let column = |bytes: &mut Vec<u8>, column| {
             let (tag, at) = match column {
                 GraphAggregateColumn::GroupKey(at) => (0, at),
@@ -421,11 +588,16 @@ impl PreparedGraphAggregate {
                 GraphAggregateTest::IsNull => cell.is_null(),
                 GraphAggregateTest::IsNotNull => !cell.is_null(),
                 GraphAggregateTest::Integer { .. } if cell.is_null() => false,
+                // A number is unequal to a value of another domain.
+                GraphAggregateTest::Integer {
+                    comparison:
+                        comparison @ (IntegerComparison::Equal | IntegerComparison::NotEqual),
+                    ..
+                } if cell.not_a_number() => comparison == IntegerComparison::NotEqual,
                 GraphAggregateTest::Integer { comparison, value } => {
-                    let actual = cell.numeric().ok_or(GqlQueryError::Source(
-                        GraphAggregateError::NonIntegerHaving { predicate },
-                    ))?;
-                    let order = numeric::compare_ratios(actual, (value, 1));
+                    let order = cell.numeric_comparison(Cell::Integer(value)).ok_or(
+                        GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate }),
+                    )?;
                     match comparison {
                         IntegerComparison::Equal => order == Ordering::Equal,
                         IntegerComparison::NotEqual => order != Ordering::Equal,
@@ -471,7 +643,7 @@ impl PreparedGraphAggregate {
                     for _ in 0..a.payload_units().max(b.payload_units()) {
                         control(GlaExecutionEvent::Work)?;
                     }
-                    let result = a.compare(b);
+                    let result = a.compare_orderability(b);
                     if order.descending {
                         result.reverse()
                     } else {
@@ -521,6 +693,7 @@ impl PreparedGraphAggregate {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn finish_groups<'a, E, C>(
         &self,
         groups: &BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>>,
@@ -528,8 +701,19 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.finish_groups_with_elements(groups, &mut crate::set_ops::no_element_reads, control)
+    }
+
+    pub(super) fn finish_groups_with_elements<'a, E, C>(
+        &self,
+        groups: &BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>>,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         if let Some(projection) = &self.output_projection {
-            return self.finish_projected_groups(groups, projection, control);
+            return self.finish_projected_groups(groups, projection, read, control);
         }
         if self.needs_output_distinct() {
             return self.finish_distinct_groups(groups, control);
@@ -1146,9 +1330,10 @@ mod tests {
                             IntegerComparison::Greater,
                             0,
                         ),
+                        // An ordering: equality across domains is decided.
                         numeric(
                             GraphAggregateColumn::GroupKey(0),
-                            IntegerComparison::Equal,
+                            IntegerComparison::GreaterOrEqual,
                             1,
                         ),
                     ],
@@ -1166,6 +1351,29 @@ mod tests {
                     GraphAggregateError::NonIntegerHaving { predicate: 1 }
                 ))
             ));
+        }
+        // fgdb-v6ku6: TRUE is of another domain than 1, so `= 1` rejects the
+        // group and `<> 1` keeps it, with no domain refusal.
+        for (comparison, kept) in [
+            (IntegerComparison::Equal, 0),
+            (IntegerComparison::NotEqual, 1),
+        ] {
+            let query = definition(0, None)
+                .with_result_clauses(
+                    &[numeric(GraphAggregateColumn::GroupKey(0), comparison, 1)],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                query
+                    .finish_groups(&input, &mut |_| Ok::<
+                        _,
+                        GqlQueryError<GraphAggregateError<()>, ()>,
+                    >(()))
+                    .unwrap()
+                    .len(),
+                kept
+            );
         }
     }
 

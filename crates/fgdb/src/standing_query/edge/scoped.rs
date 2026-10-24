@@ -16,7 +16,7 @@ enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Shape {
     mode: Mode,
-    pub(super) relation: RelationId,
+    pub(super) relation: EdgeRelation,
     pub(super) direction: GlaDirection,
     start: usize,
     end: usize,
@@ -118,6 +118,12 @@ impl Shape {
                         return None;
                     }
                 }
+                GlaOperator::DifferentEdges { segments }
+                    if !segments.is_empty()
+                        && segments.len() <= MAX_PATTERN_EDGES
+                        && segments
+                            .iter()
+                            .all(|slot| slot.ordinal() >= 2 && slot.ordinal() < width) => {}
                 op if predicate(op, width) => {}
                 _ => return None,
             }
@@ -213,6 +219,7 @@ impl Shape {
                     .map(Some)
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
+            None,
             sign,
             output,
             meter,
@@ -288,6 +295,7 @@ impl Shape {
                 slot if self.mode == Mode::Optional && slot < self.width => Ok(None),
                 _ => Err(StandingQueryFailure::InvalidDelta),
             },
+            None,
             sign,
             output,
             meter,

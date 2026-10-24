@@ -1,15 +1,24 @@
 //! Embedded CLI. Every graph operation uses the public native engine;
 //! symbol IDs remain explicit until the library supplies a durable catalog.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 
+mod buffered;
 mod diff;
 mod fnx;
 mod import;
 mod load;
+mod query_write;
+mod refusal;
+mod remote;
 mod scrub;
 mod search;
+mod spill;
 mod stream;
 mod transaction;
+mod weighted_path;
 mod write_returning;
 
 use asupersync::Budget;
@@ -32,37 +41,81 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"diff_columns":["v","event","before","after","semantics","columns"],"change":["v","event","weight","cells"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream","before","after","changed_rows","inserted","retracted","snapshot_records","work_units","scratch_entries","records","objects","repaired","block_objects"],"error":["v","event","class","diagnostics"],"scrub":["v","event","object","kind","state","reason"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming","diff","analytics","search"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed. On Unix the file must be a regular file with no group or other permission bits (mode 0600), at most 65536 bytes.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","map","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back","diff","compacted","imported_csv","scrubbed","searched"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"},"diff":{"command":"diff --before <seq> --after <seq> <gql>; both endpoints required, reverse/equal/zero legal","semantics":"after_minus_before_bag: complete native result net changes in one admitted history; positive weight adds occurrences, negative retracts; not write events, ordering changes, cross-branch comparison or DIFF syntax","encoding":"diff_columns then canonical change records then result kind=diff; revisions, weights and all diff counters are decimal strings; cells retain native types","delivery":"both queries and consolidation finish before diff_columns; each change is flushed; only final result plus successful exit and no error establishes complete delivery; a write/flush error may leave a partial final frame","limits":"--max-snapshot-records, --max-result-rows, --max-work-units, --max-scratch-entries, also accepted by query (eager, --stream and --certify-to) and replay; decimal u64 including zero; defaults 100000/100000/10000000/10000000; cumulative across both queries and consolidation; result rows count changed tuples","output_bytes":"--max-output-bytes is a diff-only decimal u64 transport cap, default 16777216; counts UTF-8 diff frames including newlines and final result, excludes invocation/error records; each whole frame is admitted before writing; a refused frame may follow complete changes but never implies successful completion","memory":"endpoint and consolidated results are in memory; one encoded change at a time; neither output byte cap nor execution limits are spill or an allocator-byte bound","refusals":"explicit temporal selectors, writes, --stream, --certify-to and --certificate are not supported"},"analytics":{"command":"query 'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...' runs a registered Prism procedure over an explicit projection of one committed sequence","procedures":["pagerank","single_source_shortest_path_length","single_source_dijkstra_path_length","connected_components","weakly_connected_components","strongly_connected_components","triangles","clustering_coefficient","degree_centrality","closeness_centrality","harmonic_centrality","betweenness_centrality","eigenvector_centrality","core_number"],"projection":"--graph-label <label> and --graph-relation <relation> select induced vertices and edges (default all); --weight <property> reads edge weights (default unit) with --missing-weight reject|unit|zero (default reject); --direction directed|reversed|undirected (default directed); --parallel-edges reject|collapse|min|max|sum (default reject); --self-loops keep|drop|reject (default keep); --as-of <seq> selects a committed sequence (default frontier)","parameters":"--param name=vertex:<id>|int:<i64>|float:<f64>|bool:true|bool:false|null binds $name; literal arguments need no parameter","output":"columns, row and result kind=rows records; result seq is the analysed sequence; vertex and component cells are vertex identities, hop distances, triangle counts and core numbers are int, scores and weighted distances are float","refusals":"a projection that violates the procedure's graph laws, a parallel edge under reject, an unknown procedure or argument, and an unbound symbol are refused, never reshaped; --stream and --certify-to are not supported; projection flags without a standalone CALL fnx statement are usage errors","composed":"a CALL followed by WHERE, WITH, MATCH, UNWIND or RETURN is an ordinary query whose YIELD columns feed that pipeline (MATCH (n) on a yielded vertex name is that vertex; n.p on a yielded vertex reads its property with no MATCH; YIELD node names the vertex output; a non-vertex output used as a vertex is refused at its YIELD position), over the whole graph read in the procedure's direction with parallel edges refused; it takes query --param values and no projection flags"},"search":{"command":"search --text <query> --text-property <property> and/or --vector <x,y,...> with one --vector-property <property> per coordinate, over one committed sequence","lanes":"text only: BM25 over the text property (--text-match any|all|phrase|fuzzy1|fuzzy2|fuzzy1-all|fuzzy2-all, default any; a fuzzy mode matches within that edit distance and expands to at most --max-expansions vocabulary terms, default 64, refusing beyond the bound); vector only: nearest neighbours over the numeric properties in order (--metric l2|cosine|dot, default l2; exact unless --ann <ef_search>); both: exact reciprocal-rank fusion of --candidates hits per lane (default --k), a fusion of two candidate sets, not an exhaustive hybrid answer; graph: --expand-from <vid,...> with an explicit --max-hops <n> expands from those seeds (--expand-relation <relation>, default every relation; --expand-direction out|in|both, default out; --include-seeds true|false, default false) and fuses as a third reciprocal-rank lane (--graph-candidates, default --candidates; --graph-weight, default 1) with the text and/or vector lanes it needs","corpus":"--k bounds the hits (default 10); --vertex-label <label> restricts the corpus; --as-of <seq> selects a committed sequence (default frontier); the index is built for the one call from that sequence","output":"columns, row and result kind=searched records; result seq is the searched sequence; text columns vertex,score; vector columns vertex,distance; both vertex,score,vector_rank,text_rank,vector_distance,text_score where score is an exact decimal, ranks are int and an absent lane value is null; with the graph lane: vertex,score,vector_rank,text_rank,graph_rank,vector_distance,text_score,graph_hops","refusals":"no lane, a lane flag without its lane, a vector whose length differs from its --vector-property count, non-finite coordinates, --candidates without a fused search (both lanes or the graph lane), --max-expansions without a fuzzy mode, graph lane flags without --expand-from, --expand-from without --max-hops or without a text or vector lane, and unbound symbols are usage errors; --param and --write-relation are not accepted"}}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"diff_columns":["v","event","before","after","semantics","columns"],"change":["v","event","weight","cells"],"statement":["v","event","index","kind","view","basis","count","statements","name"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream","before","after","changed_rows","inserted","retracted","snapshot_records","work_units","scratch_entries","records","objects","repaired","block_objects","files","directories","metadata_objects"],"error":["v","event","class","code","offset","diagnostics"],"scrub":["v","event","object","kind","state","reason"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming","remote","spilling","buffered","diff","analytics","weighted_paths","search","errors"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed. On Unix the file must be a regular file with no group or other permission bits (mode 0600), at most 65536 bytes.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","map","count","wideint","average","decimal","float","timestamp","bytes","date","localtime","time","localdatetime","duration","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back","diff","compacted","imported_csv","scrubbed","searched","adopted"],"transaction":{"steps":"Ordered --write/--query/--savepoint/--rollback-to/--release; each --param belongs to its preceding --write or --query step. Savepoint names are case-sensitive, a reused name shadows the older one until released, and an unknown name is a usage error; --rollback-to discards later steps' effects and their buffered records and rows, --release keeps effects. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count on query statements and write statements with RETURN, statements only on write statements, name only on savepoint, rollback_to and release statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --buffered, --spill-dir and --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"},"remote":{"flag":"remote query --read-mode buffered|source|ordered; query-only; default buffered","modes":"buffered collects the server eager answer; source uses native flow-driven row or admitted aggregate cursors; ordered uses the server operator-owned bounded external order, DISTINCT and window profile before its first result row; unsupported modes or missing server scratch refuse without retry","delivery":"source and ordered flush columns with stream=true, then flush each row before another callback; seq is absent on columns because FGP supplies the effective query cut only in END; the final rows result carries stream=true, exact seq and the fully flushed count; a schema or row output failure cancels and drains the stream; a late refusal or EOF emits no successful result and leaves any earlier rows incomplete","memory":"the CLI retains only schema width and a delivery counter between callbacks; one decoded FGP frame and one encoded row can be resident; server source storage and its private scratch have separate ownership and limits","parameters":"uint:<decimal-u64> carries a full-width top-level unsigned operand, including temporal cut and SKIP/LIMIT; int and uint retain distinct types; clients supply no scratch paths or physical limits","prepared":"remote query --rows-file <file> prepares one read template on one connection, then binds each argument set and delivers its complete columns/row/result block in file order; all three --read-mode choices are supported, including callback delivery in buffered mode; each answer has its own current or explicitly selected sequence, not a transaction-wide snapshot; the first set supplies structural parameter types, and every set supplies all actual values; any refusal, invalidated handle, EOF or output failure stops the remaining sets without retry or reprepare; earlier completed answers remain complete","prepared_limits":"a typed JSON array of argument objects, or CSV with explicit --csv-types name=type,...; 1..=1024 sets, at most 1048576 input bytes and one conservative client frame envelope, fully decoded and admitted before credentials are read; --param cannot be combined with --rows-file; arguments remain resident but answers are delivered one frame and encoded row at a time; server execution and authority limits apply independently to each read"},"spilling":{"flag":"query --spill-dir <existing-directory>; incompatible with --stream, --certify-to and standalone CALL fnx; combine with --buffered for the authenticated cold vertex/single-edge source and native unary relational stages","profile":"native vertex and fixed-edge scans with direct local field, identity and path projections and local predicates, query-owned external ORDER BY, complete-row DISTINCT then SKIP/LIMIT; projected or hidden order keys and temporal cuts; numeric COUNT/SUM/AVG/MIN/MAX grouping with native computed keys/arguments, COUNT/SUM/AVG DISTINCT arguments, complete-group HAVING, computed scalar/list/map outputs, output RETURN DISTINCT, exact typed ORDER BY including hidden aggregates and pagination; with --buffered, native computed RETURN/WITH and filter/scope stages preserve each intermediate canonicalization, DISTINCT, order and page over one vertex or single-edge source; COLLECT, relational aggregate inputs, UNWIND, set operations, optional/variable-length joins and unsupported native instructions refuse without eager retry","limits":"--spill-memory-bytes defaults to 67108864 for one shared scratch pool; --spill-disk-bytes defaults to 1073741824 split equally across two append-only files for ordering/stages or three for grouping, including every intermediate and metadata write; --max-spill-rows defaults to 1000000 input/intermediate occurrences independent of final --max-result-rows; --max-sort-work defaults to 1000000000 cumulative additional decode, encoding, partition, reduction, distinct-argument, sort and copy work, separate from cumulative native --max-work-units; decimal u64 including zero, exhaustion refuses","delivery":"complete source and every relational stage, input expressions, group reduction, HAVING, qualified output expressions, output DISTINCT and sorting precede columns, including LIMIT 0; each child stage finishes before parent expressions and preserves its own selected page; canonical full grouping keys order aggregate output evaluation and break ordering ties; computed outputs run once and travel in scratch beside complete ranking cells; output DISTINCT keeps the first fully ranked complete group per visible equality class, then ranks representatives before pagination; argument DISTINCT uses typed membership, ignores null, distinguishes integer 1 from floating 1.0 and does not alter ordinary bag aggregates; hidden cells are removed before delivery; stream=true and exact seq reuse row-wise delivery; scratch retirement precedes final result; error or EOF without successful result is incomplete","memory":"encoded evaluation rows and private aggregate frames are capped at 1 MiB, including complete/projected aggregate output frames; resident groups, decoded aggregate and relational-stage rows, expression workspaces, projection copies and DISTINCT comparison frames use the shared scratch pool; argument DISTINCT externally sorts each required argument column within an accepted partition and retains one previous frame rather than a membership set; final result frames are decoded/rendered one at a time; without --buffered, decoded graph storage and one native source/computed input row may remain outside scratch; --buffered separately bounds graph admission, cache and source workspaces; final sorted-row decoding and output encoding remain outside the pools; native expressions continue the source work/scratch-entry budgets","scratch":"private query-owned files only, never fsynced or adopted as database state; success, refusal and drop retire only owned names; process death may leave a private directory that later invocations never reuse or sweep"},"buffered":{"flag":"query --buffered [--spill-dir <existing-directory>] for native reads, or query --buffered with standalone CALL fnx; incompatible with --stream, --certify-to and --sealed; standalone CALL fnx cannot use --spill-dir","profile":"Native profile: without --spill-dir: native single-vertex scan with leading vertex identity or single-edge scan with leading edge/source identities, local filters, one-edge captures, canonical order, DISTINCT/ALL and SKIP/LIMIT; with --spill-dir: local field/identity/path output, visible or hidden ordering keys, computed RETURN/WITH projection/filter/scope stages with scalar/list/map expressions and every inner DISTINCT/order/page, or numeric grouping with computed inputs, COUNT/SUM/AVG DISTINCT arguments, computed outputs, HAVING and output DISTINCT; all profiles retain temporal cuts; with --spill-dir, fixed-hop joins are sources too; probes, other joins, UNWIND, set operations, relational aggregate inputs, COLLECT and unsupported instructions refuse before storage opens, including LIMIT 0; standalone CALL fnx uses the separate analytics.buffered profile","limits":"--buffer-memory-bytes defaults to 67108864; --buffer-source-bytes defaults to 1073741824, including birth-patch refaults; root-byte ceiling min(1048576,memory/64), metadata reserves 16 times that ceiling plus bounded cache bookkeeping; --max-work-units separately bounds initial admission and cumulative source/native stage evaluation; with --spill-dir, graph and scratch pools keep separate allowances whose sum bounds combined accounted bytes; intermediate occurrences use --max-spill-rows and only final selected rows spend --max-result-rows; all append-only disk and cumulative external-work limits retain their scopes; decimal u64 including zero","delivery":"Native delivery: same stream=true/exact-seq row-flush contract; without spill, returned native rows stay charged through encoding and flush and later failures may follow rows; with spill, source and stage guards survive encoding and scratch writes, each child completes before parent expressions, and all stages, reduction, expressions, DISTINCT, ordering and final row admission finish before columns, including LIMIT 0; scratch retirement precedes final success; opening failures emit no columns; output failure or missing terminal result is incomplete","memory":"graph admission metadata, extent cache, scan heads, decoded source/evaluation workspaces and native source copies share the graph memory pool; history metadata scales with distinct versions, properties refault; external operators share the separately bounded scratch pool; source encoding and stage decoding/evaluation/encoding reserve before allocation, with exact frame-size admission before encoding; decoding, encoding, sorting, copying and pagination continue one --max-sort-work allowance across all passes; Chronicle recovery, native preparation/parameters and final CLI row decoding/transport workspace remain outside; no resident read-view fallback","checkpoint":"requires a current authenticated checkpoint; RecoveryRequired refuses, no automatic writable recovery; immutable object directory must remain available, no cross-process retention lease"},"diff":{"command":"diff --before <seq> --after <seq> <gql>; both endpoints required, reverse/equal/zero legal","semantics":"after_minus_before_bag: complete native result net changes in one admitted history; positive weight adds occurrences, negative retracts; not write events, ordering changes, cross-branch comparison or DIFF syntax","encoding":"diff_columns then canonical change records then result kind=diff; revisions, weights and all diff counters are decimal strings; cells retain native types","delivery":"both queries and consolidation finish before diff_columns; each change is flushed; only final result plus successful exit and no error establishes complete delivery; a write/flush error may leave a partial final frame","limits":"--max-snapshot-records, --max-result-rows, --max-work-units, --max-scratch-entries, also accepted by query (eager, --stream and --certify-to) and replay; decimal u64 including zero; defaults 100000/100000/10000000/10000000; cumulative across both queries and consolidation; result rows count changed tuples","output_bytes":"--max-output-bytes is a diff-only decimal u64 transport cap, default 16777216; counts UTF-8 diff frames including newlines and final result, excludes invocation/error records; each whole frame is admitted before writing; a refused frame may follow complete changes but never implies successful completion","memory":"endpoint and consolidated results are in memory; one encoded change at a time; neither output byte cap nor execution limits are spill or an allocator-byte bound","refusals":"explicit temporal selectors, writes, --stream, --certify-to and --certificate are not supported"},"analytics":{"command":"query 'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...' runs a registered Prism procedure over an explicit projection of one committed sequence","procedures":["pagerank","single_source_shortest_path_length","single_source_dijkstra_path_length","connected_components","weakly_connected_components","strongly_connected_components","triangles","clustering_coefficient","degree_centrality","closeness_centrality","harmonic_centrality","betweenness_centrality","eigenvector_centrality","core_number","cdlp","directed_clustering_coefficient"],"projection":"--graph-label <label> and --graph-relation <relation> select induced vertices and edges (default all); --weight <property> reads edge weights (default unit) with --missing-weight reject|unit|zero (default reject); --direction directed|reversed|undirected (default directed); --parallel-edges reject|collapse|min|max|sum (default reject); --self-loops keep|drop|reject (default keep); --as-of <seq> selects a committed sequence (default frontier)","parameters":"--param name=vertex:<id>|int:<i64>|float:<f64>|bool:true|bool:false|null binds $name; literal arguments need no parameter","output":"columns, row and result kind=rows records; result seq is the analysed sequence; vertex and component cells are vertex identities, hop distances, triangle counts and core numbers are int, scores and weighted distances are float","refusals":"a projection that violates the procedure's graph laws, a parallel edge under reject, an unknown procedure or argument, and an unbound symbol are refused, never reshaped; --stream and --certify-to are not supported; projection flags without a standalone CALL fnx statement are usage errors","composed":"a CALL followed by WHERE, WITH, MATCH, UNWIND or RETURN is an ordinary query whose YIELD columns feed that pipeline (MATCH (n) on a yielded vertex name is that vertex; n.p on a yielded vertex reads its property with no MATCH; YIELD node names the vertex output; a non-vertex output used as a vertex is refused at its YIELD position), over its query-local projection or the whole admitted graph by default; a first literal map accepts labels and relations (empty or singleton schema-name lists), weight, missing, direction, parallel and self_loops before ordinary algorithm arguments; schema names bind at preparation and the projection applies to the pinned snapshot or effective transaction overlay; it takes query --param values and no projection flags","sealed":"query --sealed explicitly runs pagerank, single_source_shortest_path_length, single_source_dijkstra_path_length, connected_components, weakly_connected_components, strongly_connected_components, triangles, clustering_coefficient, degree_centrality, core_number, eigenvector_centrality, closeness_centrality and harmonic_centrality through compressed cursors; degree, core, eigenvector, closeness and harmonic require an undirected loop-free projection; eigenvector keeps two score vectors with the registered 100-round, 1e-6 convergence law; closeness and harmonic retain one FIFO, one distance vector and one score vector for exact repeated hop-distance traversals, with retained-history work admitted for every pass; --graph-relation is required; unsupported procedures and graph kinds refuse before read-only open, with no decoded fallback; one current authenticated checkpoint is sealed in a single source pass without a writer lease or graph publication; missing or lagging checkpoints require writer publication or explicit writable recovery","sealed_limits":"--sealed-kernel-bytes and --sealed-result-bytes default to 67108864 each; --sealed-image-bytes defaults to 268435456; --sealed-property-bytes defaults to 67108864; --sealed-max-rows and --sealed-max-incidences default to 1000000 each; decimal platform-size integers including zero, each once and only with --sealed; these independently bound kernel/result backing, image size and canonical properties, not allocator/RSS or CLI encoding; source preparation may retain decoded storage, with separate Prism source and projection admissions, so this is not a larger-than-memory seal pipeline; native --max-snapshot-records, --max-result-rows, --max-work-units and --max-scratch-entries flags refuse with --sealed; all engine refusals precede columns","projection_limits":"--graph-staging-bytes defaults to 1073741824 for selected source identities and edges; --graph-workspace-bytes defaults to 4294967296 for projection construction; decimal platform-size integers including zero, each once, only with standalone CALL fnx; physical buffered graph storage, source work and algorithm execution have separate admissions","buffered":"query --buffered with standalone CALL fnx reads authenticated checkpoint cursors and builds only the selected decoded CSR before running the registered procedure; no resident snapshot or whole-database edge-property winner map is required; labels, relations and both selected endpoints precede weight lookup, retaining selected isolates, temporal cuts and explicit graph laws; missing or lagging checkpoints refuse without resident retry; --sealed and --spill-dir are incompatible","buffered_limits":"graph admission, cache and scan storage use --buffer-memory-bytes; --buffer-source-bytes bounds authenticated source admission; --max-work-units separately bounds admission and each scan; Prism cumulative source work/scratch, --graph-staging-bytes, --graph-workspace-bytes and kernel/result admissions retain separate scopes; the selected CSR and complete analytics answer remain resident, so the graph pool is not an overall memory/RSS cap or an external-memory kernel; explicit native --max-snapshot-records, --max-result-rows and --max-scratch-entries flags refuse","delivery":"analytics finish before columns; one row is encoded at a time, with a separate width pass for human tables; ordinary columns/row/result framing is unchanged and only the final result completes delivery; output failure emits no successful result"},"weighted_paths":{"flag":"query --path-source <vertex-id> --path-target <vertex-id> [--as-of <seq>]; both full decimal 128-bit identities are required, bound in endpoint declaration order","profile":"native finite MATCH p = ANY CHEAPEST or CHEAPEST k with WALK/TRAIL/ACYCLIC/SIMPLE, relation and signed Int64 COST property; default MATCH DIFFERENT EDGES, explicit REPEATABLE ELEMENTS where the mode permits; K and hop bounds accept int:/uint: parameters","output":"RETURN path name or alias, followed by <alias>_cost; path cells retain every vertex/edge identity and cost cells are exact signed wideint; ascending cost then canonical path order; unreachable targets and K=0 return zero rows, with source validation retained for K=0","execution":"read-only local host; complete syntax and parameter binding before graph open; topology and costs use the same selected sequence; native snapshot/result/work/scratch limits apply; complete evaluation before columns; native paths/results remain resident, one row is encoded at a time","refusals":"no CALL fnx, projection flags, --sealed, --stream, --buffered, --spill-dir or --certify-to; no remote grammar change; unknown identities do not create vertices"},"search":{"command":"search --text <query> --text-property <property> and/or --vector <x,y,...> with one --vector-property <property> per coordinate (or --vector-encoding packed with one --vector-property holding packed little-endian f32 bytes, as --param e=vector:<x,y,...> writes), over one committed sequence","lanes":"text only: BM25 over the text property (--text-match any|all|phrase|fuzzy1|fuzzy2|fuzzy1-all|fuzzy2-all, default any; a fuzzy mode matches within that edit distance and expands to at most --max-expansions vocabulary terms, default 64, refusing beyond the bound); vector only: nearest neighbours over the numeric properties in order or one packed little-endian f32 byte property (--vector-encoding coordinates-rounded|coordinates|packed, default coordinates-rounded: stored numbers round once to the nearest f32, coordinates refuses any value f32 cannot hold exactly; --metric l2|cosine|dot, default l2; exact unless --ann <ef_search>); both: exact reciprocal-rank fusion of --candidates hits per lane (default --k), a fusion of two candidate sets, not an exhaustive hybrid answer; graph: --expand-from <vid,...> with an explicit --max-hops <n> expands from those seeds (--expand-relation <relation>, default every relation; --expand-direction out|in|both, default out; --include-seeds true|false, default false) and fuses as a third reciprocal-rank lane (--graph-candidates, default --candidates; --graph-weight, default 1) with any requested text/vector lanes; with neither, it is graph-only retrieval over topology at the same cut, with no property projection or index build","corpus":"--k bounds the hits (default 10); --vertex-label <label> restricts the corpus; --eligible <vid,...> restricts result endpoints before each candidate limit, preserving corpus statistics, ANN routing and graph transit (unsigned u128 IDs; at most 100000 input occurrences before deduplication; omission allows every endpoint, an empty value allows none); --as-of <seq> selects a committed sequence (default frontier); the index is built for the one call from that sequence","output":"columns, row and result kind=searched records; result seq is the searched sequence; text columns vertex,score; vector columns vertex,distance; both vertex,score,vector_rank,text_rank,vector_distance,text_score where score is an exact decimal, ranks are int and an absent lane value is null; with the graph lane: vertex,score,vector_rank,text_rank,graph_rank,vector_distance,text_score,graph_hops","refusals":"no lane, a lane flag without its lane, a vector whose length differs from its --vector-property count (or, packed, from the stored coordinate count), non-finite coordinates, --candidates without a fused search (both lanes or the graph lane), --max-expansions without a fuzzy mode, graph lane flags without --expand-from, --expand-from without --max-hops, and unbound symbols are usage errors; --param and --write-relation are not accepted"},"errors":{"codes":{"usage":"exit 2: the command line is wrong","syntax":"the statement does not parse; offset is the byte to fix","unsupported":"a recognized construct that is not supported yet","not_found":"a label, relation or property name in the statement has no binding","invalid_value":"a parameter or value is missing, unexpected, mistyped or out of range","statement":"the statement parses but its definition is refused; also every remote statement refusal","budget":"an execution limit was exceeded; a larger limit may succeed","permission":"the command or capability may not do this, such as a write given to read-only query","conflict":"a concurrent commit won; nothing was committed and a retry may succeed","execution":"refused while executing or delivering output","open":"exit 4: the database or key could not be opened","io":"exit 5: storage or the operating system failed"},"class":"code refines class: usage, open and io are their own codes; every other code has class query and exit 3","offset":"UTF-8 byte offset into the statement text, the whole script for a multi-statement write, or the step's own text in a transaction","optional_fields":"offset on error, only when the refusal names a byte; code is always present","diagnostics":"human-readable messages; their wording may change, codes do not"}}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
 Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
+  adopt --db <dir>
   compact --db <dir> --key-file <file>
   scrub --db <dir> --key-file <file>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... [--rows json:<objects>] <gql>
-  query --db <dir> --key-file <file> [bindings] [--param name=value]... [limits] [--stream] <gql>
+  query --db <dir> --key-file <file> [bindings] [--param name=value]... [limits] [--sealed | --stream | --buffered [--spill-dir <dir>] | --spill-dir <dir>] <gql>
   query --db <dir> --key-file <file> [bindings] [projection] [--param name=value]...
         'CALL fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...'
   import-csv --db <dir> --key-file <file> [bindings] --input <file.csv|-> [--types-file <file>]
              [--max-input-bytes N] [--max-changes N] (--query-file <file.gql|-> | <gql>)
   diff --db <dir> --key-file <file> [bindings] [--param name=value]... --before <seq> --after <seq> <gql>
   transaction --db <dir> --key-file <file> [bindings] --write <gql> --query <gql> ... [--rollback]
+    (steps may include --savepoint <name>, --rollback-to <name>, --release <name>)
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... [limits] --certificate <file>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
+       [--max-source-rows N] [--max-total-key-bytes N]
   search --db <dir> --key-file <file> [bindings] [text lane] [vector lane] [--k N]
          [--candidates N] [--vertex-label <label>] [--as-of <seq>]
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]...
+         [--read-mode buffered|source|ordered] query <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> --rows-file <file>
+         [--csv-types name=type,...] [--read-mode buffered|source|ordered] query <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... write <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]...
+         [--max-batches N] subscribe <read>
   robot schema
   help
-Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
+remote runs one statement on an fgdbd server over FGP, authenticated by the hex
+capability token in --token-file (owner-only; minted by `fgdbd token`). Output and
+exit codes are query/write's; the server's own name bindings apply. Remote
+parameters: int:, uint:, float:, text:, bool:true|false, null, json:<array|object>.
+remote query --read-mode buffered (default) collects the completed eager answer.
+--read-mode source uses a native cursor; ordered uses operator-configured server
+scratch to complete native ordering, DISTINCT and pagination before the first row.
+Both stream and flush columns and each row; no collected client result or eager retry.
+The query cut is available only in the final result; columns never substitute the
+SELECT frontier. Only a successful terminal result completes a delivered prefix.
+A failed columns or row flush cancels the server query and drains its terminal.
+Read modes apply only to query; remote clients cannot set scratch paths or limits.
+remote query --rows-file <file> prepares once and reuses one connection for every
+argument set. Use a JSON array of objects whose values have the typed --param
+spellings, or CSV with explicit --csv-types name=type,... (int64, uint64, int,
+text, bool, null, float, decimal, bytes). The first set supplies structural types;
+every execution binds its actual values. --param cannot combine with --rows-file.
+Files allow 1..=1024 sets and at most 1048576 bytes, with a separate wire-size cap.
+Every answer is flushed as a complete columns/row/result block in file order,
+including buffered mode. Each block reports its own selected sequence; these
+reads do not share a transaction snapshot. A refusal or output failure stops
+the remaining sets without retry or reprepare; earlier complete answers remain valid.
+remote subscribe streams a live changefeed (SUBSCRIBE TO <read>): columns, then
+per batch one change record per row (signed weight; the first batch is the
+baseline) and a progress record with the frontier. It needs a capability with
+unrestricted scope; --max-batches N cancels after N batches with a final result.
+For encrypted FGP, add --tls-server-name <certificate-name> --tls-ca-file <ca.pem>.
+Both flags are required together; the peer certificate and name are verified,
+TLS 1.3 and fgp/1 are required, and a TLS failure never retries in plaintext.
+Parameters: int:42, uint:42, float:1.5e-3, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
-json:<array> (a list: objects are maps, integers int, other numbers float).
+json:<array|object> (a list or map; integers int, other numbers float).
 write --rows json:[{...},...] binds the statement's parameters once per object
 and commits every row as ONE atomic program (MERGE sees earlier rows).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
+--bindings-file <file> adds bindings written once, one per line:
+`label <name>=<u32>`, `relation <name>=<u32>` or `property <name>=<u32>`
+(# comments and blank lines ignored, at most 1 MiB); fgdbd serve accepts the
+same file per database. Flags and file must not repeat a name or an ID.
 query --certify-to <file> saves a portable result certificate after emitting rows.
+An existing <file> is refused (exit 2) before the query runs unless --overwrite is given.
 query and replay take the same four limits as diff; a refusal names the limit it hit.
 query --stream pulls and flushes one native row at a time. Use a single-vertex
 scan with leading vertex identity, or a one-edge scan with leading edge/source identities.
@@ -70,6 +123,67 @@ Both use canonical order, supported filters and SKIP/LIMIT, including temporal c
 Unsupported plans refuse; no eager fallback. --stream cannot use --certify-to.
 An error can follow delivered rows; only the terminal result marks a complete stream.
 The stream pins decoded source state, not out-of-core storage or a resumable cursor.
+query --buffered on its own streams the native single-vertex or one-edge profile
+directly
+from authenticated checkpoint objects through the extent cache. Identity-leading
+output, local filters, canonical order, SKIP/LIMIT and temporal cuts are supported;
+probes, joins, aggregates and alternate ordering refuse before opening storage.
+--buffer-memory-bytes (default 67108864) bounds graph admission, cache, scan,
+evaluation and retained native rows; --buffer-source-bytes (default 1073741824)
+bounds admission reads including birth-patch refaults. The root byte ceiling is
+min(1048576, memory/64); root metadata reserves 16 times that ceiling plus cache
+bookkeeping. --max-work-units separately bounds initial admission, cumulative
+source pulls and native evaluation. Opening failures emit no columns; later
+read/evaluation failures can follow delivered rows.
+Chronicle recovery, query preparation/parameters and CLI row encoding are
+outside the graph-memory cap. A missing/currently lagging checkpoint refuses
+without resident fallback. --buffered cannot combine with --stream or
+--certify-to; only a final result completes delivery. Standalone CALL fnx
+uses the separately bounded analytics profile described below.
+Add --spill-dir to --buffered for external ORDER BY and DISTINCT on local
+field, identity and path projections, including hidden sort keys. Computed
+RETURN/WITH projections, arithmetic, lists, maps and filters run in native
+stages, preserving every inner order, DISTINCT and SKIP/LIMIT boundary. Numeric
+grouping supports computed inputs, COUNT/SUM/AVG(DISTINCT argument), HAVING,
+computed outputs (including lists and maps) and output DISTINCT. Vertex and
+single-edge inputs, and fixed-hop join inputs with --spill-dir, support
+temporal cuts; probes, other joins, UNWIND, set operations, relational
+aggregate inputs and COLLECT refuse before opening storage, even under LIMIT 0.
+Complete stage evaluation, grouping and sorting precede columns.
+The graph and spill pools have separate allowances; their accounted total is
+bounded by --buffer-memory-bytes plus --spill-memory-bytes. Source row guards
+survive encoding and scratch writes. Input rows, final rows, native work and
+additional external work retain their respective limits. Buffered input encoding
+reserves scratch memory before allocation and checks the frame cap first; that
+encoding work shares --max-sort-work with all stage decoding, encoding, sorting,
+copying and pagination. Stage rows and expression workspaces use the scratch
+pool; native expression work continues the source allowance without resets.
+Ordinary sorted-row decoding and transport encoding remain outside both pools.
+Scratch is retired on success and failure before the final success result.
+query --spill-dir <existing-dir> externally orders native vertex/fixed-edge scans,
+including property-only output, hidden ORDER BY keys, DISTINCT, SKIP/LIMIT and
+temporal cuts. DISTINCT requires projected sort keys. Numeric grouping
+uses partitioned scratch for count/sum/avg/min/max over vertex/fixed-edge inputs;
+computed keys and arguments run through the native expression evaluator first.
+HAVING and computed output expressions run on every qualified complete group
+before typed ORDER BY and SKIP/LIMIT. Counts, wide sums and exact averages keep
+their native types. Post-aggregate RETURN DISTINCT removes equal visible rows
+before pagination. COUNT/SUM/AVG(DISTINCT argument) use external typed membership
+sorting; NULL is ignored and ordinary aggregates still count all occurrences.
+COLLECT and relational aggregate inputs currently refuse, as do
+optional/variable-length joins and unsupported native instructions; no eager retry.
+This flag cannot combine
+with --stream, --certify-to or a standalone CALL fnx. Sorting completes before output.
+--spill-memory-bytes (default 67108864) bounds the shared scratch pool;
+--spill-disk-bytes (default 1073741824) is split across two append-only files for
+ordering or three for grouping. Every intermediate pass spends the allowance.
+--max-spill-rows (default 1000000) bounds intermediate rows independently of final
+--max-result-rows; --max-sort-work (default 1000000000) bounds additional partition,
+reduction and sort work. Completed results are canonically ordered before output.
+All are decimal u64. Scratch files are private and retired before final success.
+Each encoded row is at most 1 MiB; delivery decodes/encodes one row at a time.
+Decoded graph storage, one native row and its encoding remain outside the pool.
+An error or EOF without a successful terminal result means incomplete delivery.
 diff compares complete results of the same native query at two committed revisions.
 Positive weights add occurrences; negative weights retract them. This is a NET bag
 difference, not a write log, order-change report, cross-branch diff or DIFF syntax.
@@ -79,6 +193,15 @@ Optional limits for diff and query: --max-snapshot-records, --max-result-rows,
 --max-work-units, --max-scratch-entries (decimal u64, including zero).
 Defaults: 100000 source records, 100000 changed tuples, 10000000 work/scratch units.
 One budget covers both endpoint queries and consolidation; results are in memory.
+write, import-csv and transaction also accept --max-snapshot-records,
+--max-result-rows, --max-work-units and --max-scratch-entries with the same defaults.
+One allowance covers the WHOLE write --rows or CSV program, not each input record.
+In a plain write program, --max-result-rows bounds cumulative selected rows even
+when the program has no RETURN. It is not merely a printed-row limit.
+Transaction execution allowances are per native read/write program; a RETURN or
+query step is also capped by the remaining transaction-wide 100000-row buffer.
+These flags do not raise effect/creation caps, input limits, the 64-statement
+transaction limit or the 16 MiB output bound. Zero is a real limit, not unlimited.
 --max-output-bytes bounds UTF-8 diff frames, including the terminal result (default 16 MiB).
 It excludes invocation/error records and does not bound encoding scratch or source memory.
 Robot diff output uses diff_columns, signed change records, then result kind=diff.
@@ -94,27 +217,101 @@ declare every text or bool column. --max-input-bytes bounds the CSV (default 16 
 load commits the NDJSON input in chunks of --rows-per-chunk rows (at most 65536).
 By default it takes the largest power of two whose every chunk carries at most 4 MiB
 of source transcript, chosen from the input itself, so a resume chooses the same.
+--max-source-rows (default 1000000) bounds the rows of the whole input and
+--max-total-key-bytes (default 67108864) the bytes of all its distinct keys,
+counting a resumed prefix; both are decimal and a resume must repeat them.
 compact rewrites the storage layout durably; query results are unchanged.
-scrub verifies every capsule, repairs damaged redundancy in place, and re-reads every
-block; each damaged object is reported, and any loss exits 5 after the reports.
+adopt needs no keys. Run it once after copying a database without syncing its files,
+before the first write; it syncs all regular files, directories and the parent.
+scrub verifies every capsule, repairs damaged redundancy in place, and re-reads the
+current generation's blocks, vertex patches, manifest, root and root segments;
+each damaged object is reported, and any loss exits 5 after the reports.
 CALL fnx.* runs a registered Prism procedure (pagerank, single_source_shortest_path_length,
 single_source_dijkstra_path_length, connected_components, weakly_connected_components,
-strongly_connected_components, triangles, clustering_coefficient; and, run by the
-franken_networkx catalog itself over an undirected copy with self-loops refused:
+strongly_connected_components, triangles, clustering_coefficient,
+directed_clustering_coefficient, cdlp; and native undirected CSR centralities with self-loops refused:
 degree_centrality, closeness_centrality, harmonic_centrality, betweenness_centrality,
 eigenvector_centrality, core_number) over an EXPLICIT projection of one committed
 sequence; nothing is silently reshaped:
+  directed_clustering_coefficient counts directed arcs among the union of each
+  vertex's incoming/outgoing neighbors, divided by d*(d-1); self-loops are ignored.
   --graph-label <label>, --graph-relation <relation>: induced selection (default all)
   --weight <property> [--missing-weight reject|unit|zero]: edge weights (default unit)
   --direction directed|reversed|undirected (default directed)
   --parallel-edges reject|collapse|min|max|sum (default reject)
   --self-loops keep|drop|reject (default keep); --as-of <seq> (default frontier)
-Analytics parameters: vertex:<id>, int:<i64>, float:<f64>, bool:true|false, null.
+  --graph-staging-bytes (default 1073741824): selected source identities and edges
+  --graph-workspace-bytes (default 4294967296): projection construction workspace
+Analytics parameters: vertex:<id>, int:<i64>, float:<f64>, bool:true|bool:false|null.
 A projection that breaks a procedure's graph laws is refused, never converted.
+Weighted paths use explicit endpoint identities on the local read-only query host:
+  query --path-source <vertex-id> --path-target <vertex-id> [--as-of <seq>] \
+    'MATCH p = ANY CHEAPEST WALK (s)-[e:ROAD*1..8]->(t) COST e.distance RETURN p AS route'
+Both endpoint flags are required, each a full decimal 128-bit vertex identity in
+pattern declaration order. Bind ROAD and distance with --relation/--property.
+The existing finite weighted profile supports ANY CHEAPEST or CHEAPEST <k>,
+WALK/TRAIL/ACYCLIC/SIMPLE and explicit MATCH REPEATABLE ELEMENTS; otherwise MATCH
+uses DIFFERENT EDGES. Bounds and K accept ordinary int:/uint: --param arguments.
+Costs are exact sums of signed Int64 edge properties, including negative weights;
+missing or noninteger costs refuse. Ranking is by cost then canonical path order.
+Output columns are the RETURN path name/alias and <alias>_cost, a signed wideint
+cell without rounding. An unreachable target or K=0 produces zero rows; K=0 still
+validates the source. --as-of selects both topology and costs from that sequence.
+Native --max-snapshot-records/--max-result-rows/--max-work-units/--max-scratch-entries
+limits apply. Execution finishes before columns; paths and results stay in memory.
+Endpoint flags cannot combine with CALL fnx, projection, --sealed, --stream,
+--buffered, --spill-dir or --certify-to. They do not extend the remote grammar.
+query --buffered runs standalone CALL fnx through authenticated checkpoint cursors,
+then builds the selected decoded CSR and executes the registered procedure. It
+does not require a resident snapshot or a whole-database edge-property winner map.
+Labels, relations and both selected endpoints are checked before reading weights;
+selected isolates, temporal cuts and explicit graph laws retain their meaning.
+Graph admission, cache and scan storage use --buffer-memory-bytes;
+--buffer-source-bytes bounds authenticated source admission, and --max-work-units
+separately bounds admission and each scan. Prism's cumulative source work/scratch
+allowances, --graph-staging-bytes, --graph-workspace-bytes and kernel/result
+admissions are separate. The selected CSR and analytics answer remain resident;
+the graph pool is not an overall memory/RSS cap or an external-memory kernel.
+All analytics finish before columns; output encoding retains one row at a time
+(human output makes a width pass first). A final result completes delivery.
+The native --max-snapshot-records, --max-result-rows and --max-scratch-entries flags
+are refused for buffered analytics. --sealed and --spill-dir cannot be combined
+with this profile; missing or lagging checkpoints refuse without resident retry.
+query --sealed runs pagerank, both single-source distance procedures, connected,
+weak and strong components, triangles, clustering_coefficient, degree_centrality,
+core_number, eigenvector_centrality, closeness_centrality and harmonic_centrality
+through compressed cursors. Degree, core, eigenvector, closeness and harmonic
+require an undirected loop-free projection. Core peeling keeps four integer
+vectors and opens each row once. Eigenvector iteration keeps two score vectors
+with the registered 100-round, 1e-6 convergence law. Closeness and harmonic reuse
+one FIFO, one distance vector and one score vector for exact repeated hop-distance
+traversals; each pass admits retained history and yields in cooperative execution.
+These kernels retain no decoded adjacency. --graph-relation is required; unsupported procedures
+refuse before storage opens.
+This mode reads the current authenticated checkpoint without a writer lease and
+builds its temporary image and vertex directory in one source pass. A missing or
+lagging checkpoint requires writer publication or explicit writable recovery.
+It does not publish the image or commit a graph mutation.
+  --sealed-kernel-bytes and --sealed-result-bytes default to 67108864 each.
+  --sealed-image-bytes defaults to 268435456; --sealed-property-bytes to 67108864.
+  --sealed-max-rows and --sealed-max-incidences default to 1000000 each.
+All are decimal platform-size integers, including zero; exhaustion refuses before
+columns. These separate bounds account kernel/result backing, image bytes and
+canonical property bytes, not allocator/RSS or CLI output encoding. Source
+preparation may retain decoded storage; source staging and the projection directory
+keep their separate Prism admissions. This is not a larger-than-memory seal pipeline.
+The native --max-snapshot-records, --max-result-rows, --max-work-units and
+--max-scratch-entries flags are refused with --sealed; use its explicit limits.
 A CALL followed by WHERE, WITH, MATCH, UNWIND or RETURN is an ordinary query: its YIELD
 columns feed the pipeline (MATCH (n) on a yielded vertex name is that vertex), over the
-whole graph read in the procedure's direction, parallel edges refused; it takes query
---param values and no projection flags. YIELD node names the vertex output, and n.p on
+whole graph by default. A first literal map selects its graph, before ordinary arguments:
+  {labels:['Person'], relations:['KNOWS'], weight:'weight', missing:'reject',
+   direction:'directed', parallel:'sum', self_loops:'drop'}
+labels/relations accept [] or one bound schema name. Defaults: procedure direction,
+unit weights, parallel reject, self_loops keep. The map narrows the admitted snapshot
+or staged transaction graph; algorithm parameters retain their ordinary meanings.
+Composed calls take query --param values and no projection flags. YIELD node names
+the vertex output, and n.p on
 a yielded vertex reads its property with no MATCH; a non-vertex output used as a
 vertex is refused at its YIELD position.
 search runs Beacon retrieval over an EXPLICIT projection of one committed sequence:
@@ -122,13 +319,21 @@ search runs Beacon retrieval over an EXPLICIT projection of one committed sequen
     or --text-match fuzzy1|fuzzy2|fuzzy1-all|fuzzy2-all within that edit distance,
     expanding to at most --max-expansions vocabulary terms (default 64; beyond refuses)
   vector lane: --vector <x,y,...> with one --vector-property <property> per coordinate,
-    in order [--metric l2|cosine|dot] [--ann <ef_search>] (default exact)
+    in order [--metric l2|cosine|dot] [--ann <ef_search>] (default exact). Stored numbers
+    round once to the nearest f32 (--vector-encoding coordinates-rounded, the default);
+    --vector-encoding coordinates refuses any value f32 cannot hold exactly; or
+    --vector-encoding packed with ONE --vector-property holding packed f32 bytes
+    (as --param e=vector:<x,y,...> writes; the vector length must match)
   both lanes: exact reciprocal-rank fusion of --candidates hits per lane (default --k);
     a fusion of the two candidate sets, not an exhaustive hybrid answer
-  graph lane: --expand-from <vid,...> --max-hops <n> [--expand-relation <relation>]
-    [--expand-direction out|in|both] [--include-seeds true|false] [--graph-candidates N]
+  graph lane: --expand-from <vid,...> with an explicit --max-hops <n> expands from those seeds
+    [--expand-relation <relation>] [--expand-direction out|in|both]
+    [--include-seeds true|false] [--graph-candidates N]
     [--graph-weight N], fused as a third lane with the text and/or vector lanes
   --k bounds the hits (default 10); --vertex-label restricts the corpus.
+  --eligible <vid,...> restricts endpoints before every candidate limit; omitted means all,
+    an empty string means none. Up to 100000 IDs, including duplicates; unsigned u128.
+    Excluded endpoints still contribute corpus statistics and may carry graph/ANN paths.
 The index is built for the one call from that sequence. Columns: text vertex,score;
 vector vertex,distance; both vertex,score,vector_rank,text_rank,vector_distance,text_score;
 with the graph lane also graph_rank and graph_hops.
@@ -136,30 +341,74 @@ transaction executes ordered --write/--query steps in one native transaction.
 Each --param belongs to the preceding step; parameter maps do not leak between steps.
 Success commits once; --rollback discards all effects and results. Errors abort before commit.
 Query rows describe each transaction-local workspace, not a durable historical snapshot.
+CALL hybrid.search accepts eligible => [vertex, ...] or a list parameter in transaction
+queries as well as ordinary reads; filtering observes the same staged graph and properties.
 Output is buffered until completion: at most 64 native statements, 100000 query rows,
 and 16 MiB encoded output. Execution budgets remain per statement/program, not byte-memory bounds.
 --write-relation u32 selects the native mutation coordinate (default 1).
-write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN. It buffers
-the complete result before committing, then emits typed columns and rows followed
-by result kind=written at the committed sequence. DISTINCT and LIMIT affect only
-returned rows, not the number of creations. Encoded output is bounded to 16 MiB.
+write accepts standalone or UNWIND-driven CREATE/INSERT ... RETURN and
+MATCH ... SET/REMOVE/DETACH DELETE ... RETURN (one row per matched occurrence;
+a property read sees the statement's own assignment) and MERGE ... RETURN (the
+one chosen vertex after every ON/SET clause). It buffers the complete
+result before committing, then emits typed columns and rows followed by result
+kind=written at the committed sequence. DISTINCT and LIMIT affect only returned
+rows, not the writes. Encoded output is bounded to 16 MiB.
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
 On Unix the key file must be a regular file with mode 0600 (no group/other bits).
-Robot stdout: versioned NDJSON; errors include message strings in diagnostics.
+write --from-query '<read RETURN ...>' '<write script>' evaluates the source
+once and binds each projected row by name to the script's parameters. --param
+binds the SOURCE only; project a global value to pass it into the script.
+--feed-type name=type declares a SCRIPT parameter: int64, uint64, int, text,
+bool, null, float, decimal, bytes, list or map. Undeclared script parameters retain
+native inference (usually int64); no value-based inference or scalar coercion occurs.
+Collections retain native bounds; a NULL collection stays NULL, not an empty value.
+--max-batch-statements bounds the TOTAL expanded statements, not each row,
+and cannot exceed the native batch ceiling. Zero permits only empty input.
+One transaction and one source/work/scratch/selection allowance cover the read,
+binding and all script instances. Duplicate rows remain separate invocations;
+later MERGEs see earlier creates, but the source is never rerun. Empty input
+closes read-only without a marker. --rows and script RETURN are not supported
+in this profile; query and remote reject these flags.
+Only after standalone completion does kind=written report seq, records and statements.
+transaction --write '<script>' --from-query '<read>' uses the preceding write step.
+Its --param values bind that step's source; --feed-type declarations do not leak.
+Sources read the current staged graph, and savepoints rewind effects and output.
+One source statement plus every expanded script statement counts toward the
+existing 64-statement invocation cap, even after savepoint rollback. Batch limits
+are intersected with remaining capacity; an oversized source refuses, not truncates.
+Source text and feed flags count toward the transaction's 1 MiB input allowance.
+Only the final transaction result completes delivery; source rows are not output.
+This is bounded in-memory composition, not streaming input or a byte-memory cap.
+Robot stdout: versioned NDJSON; an error carries a stable code (robot schema
+errors.codes), the statement byte offset when one is known, and messages.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
 ";
 
+#[derive(Debug)]
 struct Failure {
     code: u8,
     class: &'static str,
+    /// The robot `code`. A query failure the CLI cannot classify is an
+    /// execution refusal; the other classes are their own code.
+    refusal: refusal::Code,
+    /// The statement byte the refusal points at, when it names one.
+    offset: Option<usize>,
     message: String,
 }
 impl Failure {
     fn new(code: u8, class: &'static str, message: impl ToString) -> Self {
+        let refusal = match class {
+            "usage" => refusal::Code::Usage,
+            "open" => refusal::Code::Open,
+            "io" => refusal::Code::Io,
+            _ => refusal::Code::Execution,
+        };
         Self {
             code,
             class,
+            refusal,
+            offset: None,
             message: message.to_string(),
         }
     }
@@ -168,6 +417,40 @@ impl Failure {
     }
     fn query(message: impl ToString) -> Self {
         Self::new(3, "query", message)
+    }
+    /// A query refusal with a known code and no statement byte.
+    fn coded(refusal: refusal::Code, message: impl ToString) -> Self {
+        Self {
+            refusal,
+            ..Self::query(message)
+        }
+    }
+    /// A parameter value its type cannot hold.
+    fn invalid_value(error: impl ToString) -> Self {
+        Self::coded(refusal::Code::InvalidValue, error)
+    }
+    /// A typed refusal of a statement before execution: its code and byte
+    /// come from its source chain, or it is a refused statement definition.
+    fn statement(error: impl std::error::Error + 'static) -> Self {
+        let (refusal, offset) =
+            refusal::classify(&error).unwrap_or((refusal::Code::Statement, None));
+        Self {
+            refusal,
+            offset,
+            ..Self::query(error)
+        }
+    }
+    /// Name the flag that raises an execution-limit refusal. Only for a
+    /// command that accepts those flags (`query`, `replay`, `diff`): the
+    /// others run under fixed limits, and a `remote` refusal may be the
+    /// server's limit or the capability's, neither a client flag.
+    fn with_budget_hint(mut self) -> Self {
+        if self.class == "query"
+            && let Some(flag) = budget_flag(&self.message)
+        {
+            self.message.push_str(&format!(" (raise with {flag})"));
+        }
+        self
     }
     fn open(message: impl ToString) -> Self {
         Self::new(4, "open", message)
@@ -201,15 +484,19 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("fgdb: {}", error.message);
+            eprintln!("fgdb: error[{}]: {}", error.refusal.name(), error.message);
             if robot {
                 // Robot error events carry the message too; diagnostics never
                 // include key material because messages never format keys.
+                let offset = error
+                    .offset
+                    .map_or_else(String::new, |offset| format!(r#","offset":{offset}"#));
                 let _ = emit(
                     &mut out,
                     &format!(
-                        r#"{{"v":1,"event":"error","class":"{}","diagnostics":[{}]}}"#,
+                        r#"{{"v":1,"event":"error","class":"{}","code":"{}"{offset},"diagnostics":[{}]}}"#,
                         error.class,
+                        error.refusal.name(),
                         quoted(&error.message)
                     ),
                 );
@@ -228,26 +515,42 @@ struct Options {
     raw_params: Vec<(String, String)>,
     /// `write --rows json:[...]`: one parameter set per object.
     rows: Option<String>,
+    /// `write --from-query`: a frozen read feeds one atomic native batch.
+    query_write: query_write::QueryWriteOptions,
     tzdb_file: Option<PathBuf>,
+    /// The `--tzdb-file` artifact as the statement's named-zone capability,
+    /// once it is read (fgdb-txbg9).
+    zones: Option<fgdb_gql::GqlTimeZones>,
     labels: BTreeMap<String, u32>,
     relations: BTreeMap<String, u32>,
     properties: BTreeMap<String, u32>,
+    /// `--bindings-file`: more bindings, merged in before any name resolves.
+    bindings_file: Option<PathBuf>,
     coordinate: RelationId,
     certify_to: Option<PathBuf>,
+    /// `--overwrite`: `--certify-to` may replace an existing certificate.
+    overwrite: bool,
     certificate: Option<PathBuf>,
     input: Option<PathBuf>,
     rows_per_chunk: Option<usize>,
+    /// `load` whole-source bounds; absent ones keep the engine defaults.
+    max_source_rows: Option<usize>,
+    max_total_key_bytes: Option<usize>,
     checkpoint: Option<PathBuf>,
     steps: Vec<transaction::Step>,
     rollback: bool,
     stream: bool,
-    /// `query`/`replay` execution limits; absent ones keep the CLI defaults.
+    buffered: buffered::BufferedOptions,
+    spill: spill::SpillOptions,
+    /// Native read/write execution limits; absent ones keep the CLI defaults.
     budget: QueryBudget,
     diff: diff::DiffOptions,
     csv: import::CsvOptions,
     /// `query` text is a `CALL fnx.*` Prism call, answered by `fnx::run`.
     fnx_call: bool,
     fnx: fnx::ProjectionFlags,
+    /// Explicit typed endpoints for the native weighted-path text profile.
+    weighted_path: weighted_path::PathFlags,
     /// `search` lanes and corpus, answered by `search::run`.
     search: search::SearchFlags,
 }
@@ -283,6 +586,9 @@ impl GraphSymbolResolver for Options {
         for (name, &id) in &self.relations {
             catalog.insert_relation(RelationId(u64::from(id)), name.clone());
         }
+        for (name, &id) in &self.properties {
+            catalog.insert_property(PropertyKeyId(u64::from(id)), name.clone());
+        }
         Some(catalog)
     }
 
@@ -296,6 +602,10 @@ impl GraphSymbolResolver for Options {
         self.relations
             .iter()
             .find_map(|(name, &raw)| (u64::from(raw) == id.0).then(|| name.clone()))
+    }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.zones.clone()
     }
 }
 
@@ -315,7 +625,87 @@ impl GraphSymbolResolver for &Options {
     fn reverse_relation(&self, id: RelationId) -> Option<String> {
         (*self).reverse_relation(id)
     }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        (*self).time_zones()
+    }
 }
+/// The flag that raises the execution limit a refusal names, read from the
+/// typed refusals' Display spelling (`GqlBudgetExceeded`, `GlaLimitExceeded`).
+fn budget_flag(message: &str) -> Option<&'static str> {
+    [
+        (
+            "GQL SnapshotRecords budget exceeded",
+            "--max-snapshot-records",
+        ),
+        ("GQL ResultRows budget exceeded", "--max-result-rows"),
+        ("GLA WorkUnits limit exceeded", "--max-work-units"),
+        ("GLA ScratchEntries limit exceeded", "--max-scratch-entries"),
+    ]
+    .into_iter()
+    .find_map(|(refusal, flag)| message.contains(refusal).then_some(flag))
+}
+
+/// One binding, from a flag or a bindings file: names and IDs are unique per kind.
+fn bind_symbol(map: &mut BTreeMap<String, u32>, name: &str, id: u32) -> Result<(), Failure> {
+    if name.is_empty() || map.contains_key(name) || map.values().any(|old| *old == id) {
+        return Err(Failure::usage(
+            "bindings must have unique names and IDs per kind",
+        ));
+    }
+    map.insert(name.to_owned(), id);
+    Ok(())
+}
+
+/// A bindings file's bytes, at most one past the parser's ceiling, so a
+/// mistaken path to a huge file is refused without reading it whole. A FIFO
+/// or device is refused BEFORE it is opened: opening a FIFO blocks until a
+/// writer appears, so the handle check below would never run.
+async fn read_bindings_bytes(path: &std::path::Path) -> Result<Vec<u8>, Failure> {
+    use asupersync::io::AsyncReadExt as _;
+    let named = asupersync::fs::metadata(path).await.map_err(Failure::io)?;
+    if !named.is_file() {
+        return Err(Failure::usage("bindings file must be a regular file"));
+    }
+    let file = asupersync::fs::File::open(path)
+        .await
+        .map_err(Failure::io)?;
+    let mut bytes = Vec::new();
+    file.take(fgdb_gql::symbol_bindings::MAX_SYMBOL_BINDINGS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(Failure::io)?;
+    Ok(bytes)
+}
+
+/// Merge `--bindings-file` into the flag bindings under the same uniqueness rule.
+async fn read_bindings_file(
+    options: &mut Options,
+    cx: &fgdb_types::QueryCx,
+) -> Result<(), Failure> {
+    let Some(path) = options.bindings_file.clone() else {
+        return Ok(());
+    };
+    cx.checkpoint().map_err(Failure::io)?;
+    let bytes = read_bindings_bytes(&path).await?;
+    let bindings = fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes)
+        .map_err(|error| Failure::usage(error.to_string()))?;
+    for binding in bindings {
+        let map = match binding.kind {
+            GraphSymbolKind::Label => &mut options.labels,
+            GraphSymbolKind::Relation => &mut options.relations,
+            GraphSymbolKind::Property => &mut options.properties,
+        };
+        bind_symbol(map, &binding.name, binding.id).map_err(|_| {
+            Failure::usage(format!(
+                "bindings file line {}: bindings must have unique names and IDs per kind",
+                binding.line
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let create = command == "create";
     let mut db = None;
@@ -324,23 +714,32 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let params = GqlParameters::new();
     let mut raw_params = Vec::new();
     let mut rows = None;
+    let mut query_write = query_write::QueryWriteOptions::default();
     let mut tzdb_file = None;
     let mut labels = BTreeMap::new();
     let mut relations = BTreeMap::new();
     let mut properties = BTreeMap::new();
+    let mut bindings_file = None;
     let mut coordinate = RelationId(1);
     let mut certify_to = None;
     let mut certificate = None;
     let mut input = None;
     let mut rows_per_chunk = None;
+    let mut max_source_rows = None;
+    let mut max_total_key_bytes = None;
     let mut checkpoint = None;
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
     let mut stream = false;
+    let mut overwrite = false;
+    let mut buffered = buffered::BufferedOptions::default();
+    let mut spill = spill::SpillOptions::default();
     let mut budget = QueryBudget::default();
     let mut diff = diff::DiffOptions::default();
     let mut csv = import::CsvOptions::default();
     let mut fnx = fnx::ProjectionFlags::default();
+    let mut weighted_path = weighted_path::PathFlags::default();
+    let mut as_of = None;
     let mut search_flags = search::SearchFlags::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -349,6 +748,29 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 return Err(Failure::usage("--stream is allowed once, only on query"));
             }
             stream = true;
+            continue;
+        }
+        if arg == "--overwrite" {
+            if command != "query" || overwrite {
+                return Err(Failure::usage(
+                    "--overwrite is allowed once, only on query --certify-to",
+                ));
+            }
+            overwrite = true;
+            continue;
+        }
+        if arg == "--sealed" {
+            if command != "query" {
+                return Err(Failure::usage("--sealed is allowed only on query"));
+            }
+            fnx.enable_sealed()?;
+            continue;
+        }
+        if arg == "--buffered" {
+            if command != "query" {
+                return Err(Failure::usage("--buffered is allowed only on query"));
+            }
+            buffered.enable()?;
             continue;
         }
         if command == "transaction" && arg == "--rollback" && !rollback {
@@ -367,9 +789,18 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 | "--max-result-rows"
                 | "--max-work-units"
                 | "--max-scratch-entries"
-                    if matches!(command, "query" | "replay") =>
+                    if matches!(
+                        command,
+                        "query" | "replay" | "write" | "import-csv" | "transaction"
+                    ) =>
                 {
                     budget.set(arg, value)?;
+                }
+                flag if command == "query" && spill::SpillOptions::FLAGS.contains(&flag) => {
+                    spill.set(flag, value)?;
+                }
+                flag if command == "query" && buffered::BufferedOptions::FLAGS.contains(&flag) => {
+                    buffered.set(flag, value)?;
                 }
                 "--before"
                 | "--after"
@@ -402,8 +833,28 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     }
                     rows_per_chunk = Some(rows);
                 }
+                "--max-source-rows" if command == "load" && max_source_rows.is_none() => {
+                    max_source_rows = Some(decimal_usize(arg, value)?);
+                }
+                "--max-total-key-bytes" if command == "load" && max_total_key_bytes.is_none() => {
+                    max_total_key_bytes = Some(decimal_usize(arg, value)?);
+                }
                 "--rows" if command == "write" && rows.is_none() => {
                     rows = Some(value.clone());
+                }
+                flag if matches!(command, "write" | "transaction")
+                    && query_write::QueryWriteOptions::FLAGS.contains(&flag) =>
+                {
+                    if command == "transaction" {
+                        steps
+                            .last_mut()
+                            .ok_or_else(|| {
+                                Failure::usage("transaction query-fed flags must follow --write")
+                            })?
+                            .set_query_write_flag(flag, value)?;
+                    } else {
+                        query_write.set(flag, value)?;
+                    }
                 }
                 "--certify-to" if command == "query" && certify_to.is_none() => {
                     certify_to = Some(PathBuf::from(value));
@@ -424,6 +875,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     let target = if command == "transaction" {
                         &mut steps
                             .last_mut()
+                            .filter(|step| step.takes_params())
                             .ok_or_else(|| {
                                 Failure::usage("transaction --param must follow --query or --write")
                             })?
@@ -433,11 +885,15 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     };
                     target.push((name.to_owned(), raw.to_owned()));
                 }
-                "--write" | "--query" if command == "transaction" => {
+                flag if command == "transaction"
+                    && transaction::StepKind::of_flag(flag).is_some() =>
+                {
                     if steps.len() == transaction::MAX_STATEMENTS {
                         return Err(Failure::usage("transaction statement limit exceeded"));
                     }
-                    steps.push(transaction::Step::new(arg == "--write", value.clone()));
+                    let kind = transaction::StepKind::of_flag(flag)
+                        .ok_or_else(|| Failure::usage("unknown transaction step"))?;
+                    steps.push(transaction::Step::new(kind, value.clone()));
                 }
                 "--label" | "--relation" | "--property" => {
                     let (name, raw) = value
@@ -451,15 +907,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                         "--relation" => &mut relations,
                         _ => &mut properties,
                     };
-                    if name.is_empty()
-                        || map.contains_key(name)
-                        || map.values().any(|old| *old == id)
-                    {
-                        return Err(Failure::usage(
-                            "bindings must have unique names and IDs per kind",
-                        ));
-                    }
-                    map.insert(name.to_owned(), id);
+                    bind_symbol(map, name, id)?;
+                }
+                "--bindings-file" if bindings_file.is_none() => {
+                    bindings_file = Some(PathBuf::from(value));
                 }
                 "--write-relation"
                     if !matches!(command, "diff" | "compact" | "scrub" | "search") =>
@@ -469,13 +920,25 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                         .map_err(|_| Failure::usage("write relation must be u32"))?;
                     coordinate = RelationId(u64::from(id));
                 }
+                "--as-of" if command == "query" => {
+                    if as_of.replace(value.clone()).is_some() {
+                        return Err(Failure::usage("--as-of must be supplied only once"));
+                    }
+                }
+                flag if command == "query" && weighted_path::PathFlags::FLAGS.contains(&flag) => {
+                    weighted_path.set(flag, value)?;
+                }
                 flag if command == "query" && fnx::ProjectionFlags::FLAGS.contains(&flag) => {
                     fnx.set(flag, value)?;
                 }
                 flag if command == "search" && search::SearchFlags::FLAGS.contains(&flag) => {
                     search_flags.set(flag, value)?;
                 }
-                _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
+                _ => {
+                    return Err(Failure::usage(format!(
+                        "unknown, duplicate, or inapplicable flag {arg} for {command}"
+                    )));
+                }
             }
         } else if create
             || matches!(command, "compact" | "scrub" | "search")
@@ -489,6 +952,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             ));
         }
     }
+    query_write.validate(rows.is_some())?;
     if command == "replay" && certificate.is_none() {
         return Err(Failure::usage("--certificate required"));
     }
@@ -511,7 +975,71 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             "--stream cannot be combined with --certify-to",
         ));
     }
-    let fnx_call = command == "query" && text.as_deref().is_some_and(fnx::is_call);
+    if overwrite && certify_to.is_none() {
+        return Err(Failure::usage(
+            "--overwrite only applies to query --certify-to",
+        ));
+    }
+    let mut fnx_call = command == "query"
+        && text
+            .as_deref()
+            .is_some_and(|text| fnx::is_call(text, &raw_params));
+    weighted_path.validate()?;
+    // Classify the shared sequence flag after every endpoint has been read;
+    // --as-of has identical meaning regardless of its position on the line.
+    if let Some(value) = as_of {
+        if weighted_path.enabled() {
+            weighted_path.set("--as-of", &value)?;
+        } else {
+            fnx.set("--as-of", &value)?;
+        }
+    }
+    if weighted_path.enabled()
+        && (fnx_call
+            || !fnx.is_empty()
+            || stream
+            || buffered.enabled()
+            || spill.enabled()
+            || certify_to.is_some())
+    {
+        return Err(Failure::usage(
+            "weighted paths cannot combine endpoint flags with CALL fnx, projection, \
+             --sealed, --stream, --buffered, --spill-dir or --certify-to",
+        ));
+    }
+    fnx.validate()?;
+    if fnx_call
+        && !buffered.enabled()
+        && budget != QueryBudget::default()
+        && text
+            .as_deref()
+            .is_some_and(fgdb_gql::starts_fnx_graph_projection)
+    {
+        // These named calls previously used the native query host, whose
+        // limits have different domains from Prism's projection/kernel caps.
+        // Keep that host when requested, or refuse an incompatible flag mix.
+        // Buffered analytics instead checks its supported limits in prepare:
+        // work bounds physical source admission/scans; other native caps refuse.
+        if !fnx.is_empty() {
+            return Err(Failure::usage(
+                "native query limits cannot be combined with projection or --sealed flags \
+                 on a named CALL fnx; remove those flags to retain native limit enforcement",
+            ));
+        }
+        fnx_call = false;
+    }
+    buffered.validate()?;
+    if buffered.enabled() && (stream || certify_to.is_some()) {
+        return Err(Failure::usage(
+            "--buffered cannot be combined with --stream or --certify-to",
+        ));
+    }
+    spill.validate()?;
+    if spill.enabled() && (stream || certify_to.is_some() || fnx_call) {
+        return Err(Failure::usage(
+            "--spill-dir cannot be combined with --stream, --certify-to or standalone CALL fnx",
+        ));
+    }
     if fnx_call && (stream || certify_to.is_some()) {
         return Err(Failure::usage(
             "CALL fnx.* supports neither --stream nor --certify-to",
@@ -519,8 +1047,8 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     }
     if !fnx_call && !fnx.is_empty() {
         return Err(Failure::usage(
-            "projection flags apply only to a standalone CALL fnx.* query; \
-             a CALL that continues into a read runs over the whole graph",
+            "projection and --sealed flags apply only to a standalone CALL fnx.* query; \
+             use a query-local projection map for a CALL that continues into a read",
         ));
     }
     Ok(Options {
@@ -541,29 +1069,38 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         raw_params,
         rows,
         tzdb_file,
+        zones: None,
         labels,
         relations,
         properties,
+        bindings_file,
         coordinate,
         certify_to,
+        overwrite,
         certificate,
         input,
         rows_per_chunk,
+        max_source_rows,
+        max_total_key_bytes,
         checkpoint,
         steps,
         rollback,
         stream,
+        buffered,
+        spill,
         budget,
+        query_write,
         diff,
         csv,
         fnx_call,
         fnx,
+        weighted_path,
         search: search_flags,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
     if let Some(value) = raw.strip_prefix("json:") {
-        return json_list(value);
+        return json_parameter(value);
     }
     if let Some(value) = raw.strip_prefix("int:") {
         return value
@@ -578,7 +1115,20 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
             .map_err(|_| Failure::usage("invalid uint parameter"));
     }
     let scalar = if let Some(value) = raw.strip_prefix("text:") {
-        CanonicalScalar::ucs_basic_text(value).map_err(Failure::query)?
+        CanonicalScalar::ucs_basic_text(value).map_err(Failure::invalid_value)?
+    } else if let Some(value) = raw.strip_prefix("float:") {
+        let value: f64 = value
+            .parse()
+            .map_err(|_| Failure::usage("invalid float parameter"))?;
+        if !value.is_finite() {
+            return Err(Failure::usage("a float parameter must be finite"));
+        }
+        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value))
+    } else if let Some(value) = raw.strip_prefix("bytes:") {
+        let bytes = fgdb_protocol::json::bytes_from_hex(value).map_err(Failure::usage)?;
+        CanonicalScalar::bytes(bytes).map_err(Failure::invalid_value)?
+    } else if let Some(value) = raw.strip_prefix("vector:") {
+        CanonicalScalar::bytes(remote::packed_vector(value)?).map_err(Failure::invalid_value)?
     } else if let Some(value) = raw.strip_prefix("timestamp:") {
         let fields: Vec<_> = value.split(',').collect();
         if fields.len() != 4 {
@@ -612,7 +1162,7 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
                 fgdb_types::ObjectId(bytes),
                 resolver,
             )
-            .map_err(Failure::query)?,
+            .map_err(Failure::invalid_value)?,
         )
     } else {
         match raw {
@@ -624,36 +1174,37 @@ fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParame
     };
     GqlScalarParameter::new(scalar)
         .map(GqlParameterValue::Scalar)
-        .map_err(Failure::query)
+        .map_err(Failure::invalid_value)
 }
-/// Bounds on one `json:` parameter document, before the list parameter's own
+/// Bounds on one `json:` parameter document, before the collection parameter's own
 /// canonical-size cap.
 const MAX_JSON_PARAMETER_VALUES: usize = 65_536;
 const MAX_JSON_PARAMETER_TOKEN_BYTES: usize = 65_536;
 
-/// `json:<array>` binds a list parameter, e.g. the rows of
+/// `json:<array|object>` binds a collection parameter, e.g. the rows of
 /// `UNWIND $rows AS row CREATE (:Person {name: row.name})`. Objects are maps,
 /// strings text, integers int, other finite numbers float, true/false bool,
-/// null null. Anything else, including a top-level non-array, is a usage error.
-fn json_list(text: &str) -> Result<GqlParameterValue, Failure> {
+/// null null. A top-level scalar uses the CLI's explicit scalar spellings.
+fn json_parameter(text: &str) -> Result<GqlParameterValue, Failure> {
     let json = load::parse_json(
         text,
         MAX_JSON_PARAMETER_VALUES,
         MAX_JSON_PARAMETER_TOKEN_BYTES,
     )
     .map_err(|error| Failure::usage(format!("invalid json parameter: {error}")))?;
-    let load::Json::Array(items) = json else {
-        return Err(Failure::usage(
-            "invalid json parameter: expected a JSON array",
-        ));
-    };
-    let values = items
-        .iter()
-        .map(json_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    fgdb_gql::GqlListParameter::new(values)
-        .map(GqlParameterValue::List)
-        .map_err(Failure::usage)
+    match json_value(&json)? {
+        GraphValue::List(values) => fgdb_gql::GqlListParameter::new(values.into_vec())
+            .map(GqlParameterValue::List)
+            .map_err(Failure::usage),
+        GraphValue::Map { keys, values } => {
+            fgdb_gql::GqlMapParameter::new(keys.into_vec().into_iter().zip(values).collect())
+                .map(GqlParameterValue::Map)
+                .map_err(Failure::usage)
+        }
+        _ => Err(Failure::usage(
+            "invalid json parameter: expected a JSON array or object",
+        )),
+    }
 }
 fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
     let bad = |detail: &str| Failure::usage(format!("invalid json parameter: {detail}"));
@@ -729,9 +1280,6 @@ fn prepare_rows(
             }
             let value = match value {
                 load::Json::Null => None,
-                load::Json::Object(_) => {
-                    return Err(bad(format!("row {at} key {key}: a map is not a parameter")));
-                }
                 load::Json::Number(text)
                     if !text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) =>
                 {
@@ -743,6 +1291,12 @@ fn prepare_rows(
                     GraphValue::List(values) => GqlParameterValue::List(
                         fgdb_gql::GqlListParameter::new(values.into_vec())
                             .map_err(Failure::usage)?,
+                    ),
+                    GraphValue::Map { keys, values } => GqlParameterValue::Map(
+                        fgdb_gql::GqlMapParameter::new(
+                            keys.into_vec().into_iter().zip(values).collect(),
+                        )
+                        .map_err(Failure::usage)?,
                     ),
                     GraphValue::Scalar(scalar) => GqlParameterValue::Scalar(
                         GqlScalarParameter::new(scalar).map_err(Failure::usage)?,
@@ -793,17 +1347,26 @@ fn prepare_rows(
             }
         }
     }
-    // The write path's convention: scalar kinds are declared; integers and
-    // lists keep the statement's own parameter types.
+    // Numeric roles retain inference; collection/scalar kinds are explicit.
     let mut declarations: Vec<(&str, GqlParameterType)> = options
         .params
         .parameter_types()
-        .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+        .filter(|(_, kind)| {
+            matches!(
+                kind,
+                GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+            )
+        })
         .collect();
     declarations.extend(
         kinds
             .iter()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+                )
+            })
             .map(|(key, kind)| (key.as_str(), *kind)),
     );
     let script = PreparedGraphWriteScript::prepare_with_parameter_types(
@@ -832,7 +1395,7 @@ fn prepare_rows(
         for (key, kind) in &kinds {
             let value = match (row.get(key), kind) {
                 (Some(Some(value)), _) => value.clone(),
-                (_, GqlParameterType::Scalar(_)) => null.clone(),
+                (_, GqlParameterType::Scalar(_) | GqlParameterType::Map) => null.clone(),
                 _ => {
                     return Err(bad(format!(
                         "row {at} key {key} is null or absent; a list parameter cannot be NULL"
@@ -941,9 +1504,35 @@ fn open_failure(error: fgdb::OpenError) -> Failure {
         | E::ForeignSlot { .. }
         | E::WrongDek { .. }
         | E::SlotDisagreesWithStream { .. }
+        | E::UnsupportedManifestFormat { .. }
         | E::SlotUnrecoverable { .. }
         | E::NotEmpty { .. } => Failure::open(error),
-        _ => Failure::io(error),
+        other => {
+            let mut source = std::error::Error::source(&other);
+            while let Some(current) = source {
+                if current
+                    .downcast_ref::<fgdb_types::ScalarDecodeError>()
+                    .is_some_and(|decode| {
+                        matches!(
+                            decode,
+                            fgdb_types::ScalarDecodeError::Timestamp(
+                                fgdb_types::TimestampDecodeError::TzdbResolverRequired
+                                    | fgdb_types::TimestampDecodeError::InvalidValue(
+                                        fgdb_types::TimestampConstructionError::Tzdb(_),
+                                    ),
+                            ) | fgdb_types::ScalarDecodeError::Text(
+                                fgdb_types::CanonicalTextError::ResolverRequired
+                                    | fgdb_types::CanonicalTextError::MissingArtifact { .. }
+                            )
+                        )
+                    })
+                {
+                    return Failure::open(other);
+                }
+                source = current.source();
+            }
+            Failure::io(other)
+        }
     }
 }
 fn execution_failure(error: impl std::error::Error + 'static) -> Failure {
@@ -963,16 +1552,59 @@ fn execution_failure(error: impl std::error::Error + 'static) -> Failure {
         {
             return Failure::io(error);
         }
-        source = current.source();
+        // BufferedReadError predates error-chain exposure. Follow its two
+        // storage wrappers explicitly so an extent or nested store I/O error
+        // retains exit 5 even when wrapped by a Prism or native read error.
+        source = match current.downcast_ref::<fgdb::BufferedReadError>() {
+            Some(fgdb::BufferedReadError::Store(error)) => Some(error.as_ref()),
+            Some(fgdb::BufferedReadError::Buffer(error)) => Some(error),
+            _ => current.source(),
+        };
     }
-    Failure::query(error)
+    let (refusal, offset) = refusal::classify(&error).unwrap_or((refusal::Code::Execution, None));
+    Failure {
+        refusal,
+        offset,
+        ..Failure::query(error)
+    }
+}
+/// `query` opens a read view, which cannot express a write. A statement no
+/// read parser accepts but the write binder does is named as a write, not
+/// reported as a read parser's error at its first write keyword. Binding only
+/// classifies the text; nothing executes.
+fn read_failure(options: &Options, error: fgdb::QueryError) -> Failure {
+    let failure = execution_failure(error);
+    let parse = matches!(
+        failure.refusal,
+        refusal::Code::Syntax | refusal::Code::Statement
+    );
+    let write = || {
+        matches!(
+            write_returning::prepare_statement(&options.text, &options.params, options),
+            Ok(Some(_))
+        ) || BoundNativeGraphWrite::bind_with_resolver(
+            &options.text,
+            &options.params,
+            options.coordinate,
+            options,
+        )
+        .is_ok()
+    };
+    if parse && write() {
+        Failure::coded(
+            refusal::Code::Permission,
+            "query is read-only: run this write statement with fgdb write",
+        )
+    } else {
+        failure
+    }
 }
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
 }
 
-/// The four execution limits `query` and `diff` accept, each a decimal u64
-/// given at most once; an absent limit keeps [`policy`]'s default.
+/// Native execution limits, each a decimal u64 given at most once.
+/// An absent limit keeps [`policy`]'s default; zero is never an omission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QueryBudget {
     records: Option<u64>,
@@ -1004,7 +1636,28 @@ impl QueryBudget {
                 .unwrap_or(defaults.evaluator.max_scratch_entries),
         )
     }
+
+    /// Intersect the per-operation result limit with a separate delivery cap.
+    /// Do not reset snapshot/work/scratch limits or widen an explicit row limit.
+    /// The transaction driver owns the remaining buffer count and savepoints.
+    fn policy_with_result_cap(&self, remaining_rows: u64) -> GqlQueryPolicy {
+        let allowance = self.policy();
+        GqlQueryPolicy {
+            rows: fgdb_gql::GqlExecutionBudget::new(
+                allowance.rows.max_snapshot_records().unwrap_or(u64::MAX),
+                allowance
+                    .rows
+                    .max_result_rows()
+                    .unwrap_or(u64::MAX)
+                    .min(remaining_rows),
+            ),
+            ..allowance
+        }
+    }
 }
+
+#[cfg(test)]
+mod write_budget_tests;
 
 /// Store one decimal u64 flag value, refusing a repeat, signs, whitespace,
 /// fractions and overflow without echoing the value.
@@ -1020,6 +1673,14 @@ fn set_decimal(target: &mut Option<u64>, flag: &str, raw: &str) -> Result<(), Fa
             .map_err(|_| Failure::usage(format!("{flag} exceeds u64")))?,
     );
     Ok(())
+}
+/// A decimal `usize` bound: ASCII digits only, as every decimal flag.
+fn decimal_usize(flag: &str, raw: &str) -> Result<usize, Failure> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Failure::usage(format!("{flag} requires a decimal integer")));
+    }
+    raw.parse()
+        .map_err(|_| Failure::usage(format!("{flag} exceeds this platform's usize")))
 }
 fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Failure> {
     match args.first().map(String::as_str) {
@@ -1038,6 +1699,8 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
+        Some("remote") => remote::run(&args[1..], robot, out),
+        Some("adopt") => adopt(&args[1..], robot, out),
         Some(
             command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"
             | "compact" | "scrub" | "import-csv" | "search"),
@@ -1046,13 +1709,16 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
-            runtime.block_on(async {
+            let tunable = matches!(command, "query" | "replay" | "diff");
+            let outcome = runtime.block_on(async {
+                read_bindings_file(&mut options, &contexts.query()).await?;
                 let mut keys = read_keys(&contexts.query(), &options.key).await?;
                 let artifact = if let Some(path) = &options.tzdb_file {
                     contexts.query().checkpoint().map_err(Failure::io)?;
                     let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
                     let artifact = std::sync::Arc::new(fgdb::PinnedTzdb::decode(&bytes).map_err(Failure::open)?);
                     keys = keys.with_scalar_resolver(artifact.clone());
+                    options.zones = fgdb_gql::GqlTimeZones::new(artifact.clone(), artifact.object_id());
                     Some(artifact)
                 } else { None };
                 // A Prism call types its own arguments (vertex:<id> among them).
@@ -1061,13 +1727,22 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                         options.params.insert(name, parameter(raw, artifact.as_deref())?).map_err(Failure::query)?;
                     }
                 }
+                if matches!(command, "query" | "write" | "diff" | "import-csv") {
+                    refusal::unsupported_construct(&options.text)?;
+                }
                 // Every CSV record is read and bound before storage is opened,
                 // so a refused input cannot leave any trace in the database.
                 let import = if command == "import-csv" { Some(import::prepare(&options, &contexts.query())?) } else { None };
                 // Likewise a Prism call's arguments and projection.
                 let analytics = if options.fnx_call { Some(fnx::prepare(&options)?) } else { None };
+                // Endpoint identities and all weighted-path arguments bind before graph open.
+                let weighted = if options.weighted_path.enabled() { Some(weighted_path::prepare(&options)?) } else { None };
                 // And a search's lanes, symbols and corpus.
                 let retrieval = if command == "search" { Some(search::prepare(&options)?) } else { None };
+                // Query-fed writes prepare both definitions before writable open.
+                // Their actual input is read/bound later under the SAME transaction
+                // as the dependent writes, never in a separate read invocation.
+                let query_fed = if command == "write" { query_write::prepare(&options)? } else { None };
                 // A --rows batch is parsed, typed and bound before storage opens,
                 // like CSV, so a refused row leaves no trace in the database.
                 let batch = if command == "write" && options.rows.is_some() {
@@ -1075,20 +1750,52 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 } else {
                     None
                 };
-                let returning = if command == "write" && batch.is_none() { write_returning::prepare(&options)? } else { None };
+                let returning = if command == "write" && batch.is_none() && query_fed.is_none() { write_returning::prepare(&options)? } else { None };
                 // Native UNWIND mutations and ordinary scripts bind completely
                 // before opening storage. Keep the bound record map through
                 // completion instead of discarding it into a bare program.
-                let native = if command == "write" && batch.is_none() && returning.is_none() {
-                    Some(BoundNativeGraphWrite::bind(
+                let native = if command == "write" && batch.is_none() && returning.is_none() && query_fed.is_none() {
+                    Some(BoundNativeGraphWrite::bind_with_resolver(
                         &options.text,
                         &options.params,
                         options.coordinate,
-                        |kind, name| options.resolve(kind, name),
-                    ).map_err(Failure::query)?)
+                        &options,
+                    ).map_err(Failure::statement)?)
                 } else {
                     None
                 };
+                // The buffered profile binds and compiles before graph open,
+                // then admits checkpoint objects through the extent cache.
+                // It never constructs the resident read view below.
+                if let Some(prepared) = analytics.as_ref().filter(|_| options.buffered.enabled()) {
+                    let (pool, limits) = options.buffered.admission(options.budget.policy())?;
+                    let mut view = Database::open_buffered_read_view(
+                        &contexts.commit(), &options.db, keys, pool, limits,
+                    ).await.map_err(buffered::open_failure)?;
+                    return fnx::run_buffered(
+                        &mut view, &contexts.query(), prepared, robot, out,
+                    ).await;
+                }
+                if options.buffered.enabled() {
+                    let prepared = buffered::prepare_query(&options)?;
+                    let (pool, limits) = options.buffered.admission(options.budget.policy())?;
+                    let mut view = Database::open_buffered_read_view(
+                        &contexts.commit(), &options.db, keys, pool, limits,
+                    ).await.map_err(buffered::open_failure)?;
+                    return buffered::run_query(
+                        &mut view, &contexts.query(), &options, &prepared,
+                        artifact.as_deref().map(|artifact| artifact as &(dyn fgdb_types::CanonicalScalarResolver + Send + Sync)),
+                        robot, out,
+                    ).await;
+                }
+                // Binding and graph-kind checks already completed. Prepare the
+                // compressed projection directly from the authenticated current
+                // checkpoint, without a resident database or writer lease.
+                if let Some(prepared) = analytics.as_ref().filter(|call| call.is_sealed()) {
+                    return fnx::run_sealed(
+                        &contexts.commit(), &contexts.query(), &options, keys, prepared, robot, out,
+                    ).await;
+                }
                 // Reads need no writer: open only the published generation,
                 // without the fold, version heads and delta history that writes
                 // and certified execution use. Each read runs on that view, as
@@ -1098,16 +1805,26 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     let cx = contexts.query();
                     let outcome = if command == "diff" {
                         diff::run(&view, &cx, &options, robot, out)
-                    } else if let Some(prepared) = analytics {
-                        fnx::run(&view, &cx, &options.text, prepared, robot, out)
+                    } else if let Some(prepared) = &weighted {
+                        weighted_path::run(&view, &cx, prepared, robot, out)
+                    } else if let Some(prepared) = &analytics {
+                        fnx::run(&view, &cx, prepared, robot, out)
                     } else if let Some(prepared) = &retrieval {
                         search::run(&view, &cx, prepared, robot, out)
+                    } else if options.spill.enabled() {
+                        spill::run(
+                            &view, &cx, &options,
+                            artifact.as_deref().map(|artifact| artifact as &(dyn fgdb_types::CanonicalScalarResolver + Send + Sync)),
+                            robot, out,
+                        ).await
                     } else if options.stream {
                         stream::run(&view, &cx, &options, robot, out)
                     } else {
-                        view.query(&cx, &options.text, &options.params, &options, options.budget.policy())
-                            .map_err(execution_failure)
-                            .and_then(|result| render(result, view.frontier().0, "rows", robot, out))
+                        // The result names the snapshot that answered: a
+                        // temporal read's bound AS OF cut, not the frontier.
+                        view.query_with_snapshot(&cx, &options.text, &options.params, &options, options.budget.policy())
+                            .map_err(|error| read_failure(&options, error))
+                            .and_then(|(result, seq)| render(result, seq.0, "rows", robot, out))
                     };
                     // The process exits next. A view owns only memory (no lease,
                     // file or writer), and freeing a large generation cell by cell
@@ -1138,8 +1855,13 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return transaction::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
                 }
                 if command == "write" {
+                    if let Some(prepared) = query_fed {
+                        return query_write::run(&mut db, &contexts, prepared, robot, out).await;
+                    }
                     if let Some(prepared) = returning {
-                        return write_returning::run(&mut db, &contexts, prepared, robot, out).await;
+                        return write_returning::run(
+                            &mut db, &contexts, prepared, options.budget.policy(), robot, out,
+                        ).await;
                     }
                     let (program, records) = match batch.as_ref() {
                         Some((program, records)) => (program, Some(*records)),
@@ -1148,7 +1870,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                             (prepared.program(), prepared.input_records())
                         }
                     };
-                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), program, GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.map_err(|error| {
+                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), program, GraphWriteProgramPolicy::new(options.budget.policy(), 100_000, 100_000, 100_000)).await.map_err(|error| {
                         match &native {
                             Some(prepared) => execution_failure(prepared.execution_error(error)),
                             None => execution_failure(error),
@@ -1176,16 +1898,73 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let Some(path) = &options.certify_to else {
                     return Err(Failure::usage("unknown or missing subcommand; use fgdb help"));
                 };
+                // A certificate is an audit artifact: replacing one is an
+                // explicit choice (fgdb-vuyw5). Refuse before executing, and
+                // create the file new, so one appearing meanwhile still wins.
+                let exists = || Failure::usage(format!("certificate {} already exists; pass --overwrite to replace it", path.display()));
+                if !options.overwrite && asupersync::fs::try_exists(path).await.map_err(Failure::io)? {
+                    return Err(exists());
+                }
                 let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
                 render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
                 out.flush().map_err(Failure::io)?;
                 contexts.query().checkpoint().map_err(Failure::io)?;
-                asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io)
+                if options.overwrite {
+                    return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
+                }
+                let mut file = match asupersync::fs::File::create_new(path).await {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists()),
+                    Err(error) => return Err(Failure::io(error)),
+                };
+                asupersync::io::AsyncWriteExt::write_all(&mut file, &certificate.canonical_bytes()).await.map_err(Failure::io)?;
+                asupersync::io::AsyncWriteExt::flush(&mut file).await.map_err(Failure::io)
+            });
+            outcome.map_err(|failure| {
+                if tunable {
+                    failure.with_budget_hint()
+                } else {
+                    failure
+                }
             })
         }
         _ => Err(Failure::usage(
             "unknown or missing subcommand; use fgdb help",
         )),
+    }
+}
+
+/// Establish the durability premise for a copied directory without opening a
+/// writer, reading keys, or publishing a new commit. Validate the complete
+/// invocation before the first filesystem effect.
+fn adopt(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Failure> {
+    let [flag, directory] = args else {
+        return Err(Failure::usage("adopt requires exactly --db <dir>"));
+    };
+    if flag != "--db" || directory.is_empty() {
+        return Err(Failure::usage("adopt requires exactly --db <dir>"));
+    }
+    let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let adopted = runtime
+        .block_on(Database::adopt(&contexts.commit(), directory))
+        .map_err(open_failure)?;
+    if robot {
+        emit(
+            out,
+            &format!(
+                r#"{{"v":1,"event":"result","kind":"adopted","files":{},"directories":{}}}"#,
+                adopted.files, adopted.directories
+            ),
+        )
+    } else {
+        writeln!(
+            out,
+            "adopted {directory}: {} file(s), {} director(ies) synced",
+            adopted.files, adopted.directories
+        )
+        .map_err(Failure::io)
     }
 }
 fn quoted(value: &str) -> String {
@@ -1232,6 +2011,30 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
             format!(
                 r#"{{"type":"bytes","value":{}}}"#,
                 quoted(&hex(v.as_slice()))
+            )
+        }
+        GraphValue::Scalar(CanonicalScalar::Date(v)) => {
+            format!(r#"{{"type":"date","value":{}}}"#, quoted(&v.to_string()))
+        }
+        GraphValue::Scalar(CanonicalScalar::LocalTime(v)) => {
+            format!(
+                r#"{{"type":"localtime","value":{}}}"#,
+                quoted(&v.to_string())
+            )
+        }
+        GraphValue::Scalar(CanonicalScalar::Time(v)) => {
+            format!(r#"{{"type":"time","value":{}}}"#, quoted(&v.to_string()))
+        }
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(v)) => {
+            format!(
+                r#"{{"type":"localdatetime","value":{}}}"#,
+                quoted(&v.to_string())
+            )
+        }
+        GraphValue::Scalar(CanonicalScalar::Duration(v)) => {
+            format!(
+                r#"{{"type":"duration","value":{}}}"#,
+                quoted(&v.to_string())
             )
         }
         GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#, v.0),
@@ -1365,6 +2168,11 @@ fn human_value(value: &GraphValue) -> Result<String, Failure> {
         GraphValue::Scalar(CanonicalScalar::Float(v)) => float_text(v.get()),
         GraphValue::Scalar(CanonicalScalar::Timestamp(v)) => timestamp_cell(v),
         GraphValue::Scalar(CanonicalScalar::Bytes(v)) => format!("0x{}", hex(v.as_slice())),
+        GraphValue::Scalar(CanonicalScalar::Date(v)) => v.to_string(),
+        GraphValue::Scalar(CanonicalScalar::LocalTime(v)) => v.to_string(),
+        GraphValue::Scalar(CanonicalScalar::Time(v)) => v.to_string(),
+        GraphValue::Scalar(CanonicalScalar::LocalDateTime(v)) => v.to_string(),
+        GraphValue::Scalar(CanonicalScalar::Duration(v)) => v.to_string(),
         GraphValue::Vertex(v) => format!("vertex {}", v.0),
         GraphValue::Edge(v) => format!("edge {}", v.0),
         GraphValue::Path(v) => format!("path({})", path_cell(v)),
@@ -1426,17 +2234,28 @@ fn render_rows(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    render_row_body(columns, &rendered, robot, out)?;
+    render_rows_iter(columns, rendered.iter(), seq, kind, robot, out)
+}
+
+/// Encode a completed answer without retaining a second, rendered row set.
+/// Human tables replay the iterator for widths; robot rows are encoded once.
+fn render_rows_iter<Row: AsRef<[String]>>(
+    columns: &[String],
+    rendered: impl ExactSizeIterator<Item = Row> + Clone,
+    seq: u64,
+    kind: &str,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let count = rendered.len();
+    render_row_body_iter(columns, rendered, robot, out)?;
     if robot {
         emit(
             out,
-            &format!(
-                r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{}}}"#,
-                rendered.len()
-            ),
+            &format!(r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{count}}}"#,),
         )
     } else {
-        emit(out, &format!("{} row(s)", rendered.len()))
+        emit(out, &format!("{count} row(s)"))
     }
 }
 
@@ -1445,6 +2264,15 @@ fn render_rows(
 fn render_row_body(
     columns: &[String],
     rendered: &[Vec<String>],
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    render_row_body_iter(columns, rendered.iter(), robot, out)
+}
+
+fn render_row_body_iter<Row: AsRef<[String]>>(
+    columns: &[String],
+    rendered: impl Iterator<Item = Row> + Clone,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
@@ -1463,14 +2291,17 @@ fn render_row_body(
         for row in rendered {
             emit(
                 out,
-                &format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, row.join(",")),
+                &format!(
+                    r#"{{"v":1,"event":"row","cells":[{}]}}"#,
+                    row.as_ref().join(",")
+                ),
             )?;
         }
         Ok(())
     } else {
         let mut widths: Vec<_> = columns.iter().map(|c| c.chars().count()).collect();
-        for row in rendered {
-            for (width, value) in widths.iter_mut().zip(row) {
+        for row in rendered.clone() {
+            for (width, value) in widths.iter_mut().zip(row.as_ref()) {
                 *width = (*width).max(value.chars().count());
             }
         }
@@ -1484,8 +2315,229 @@ fn render_row_body(
         emit(out, &line(columns))?;
         emit(out, &"-".repeat(line(columns).chars().count()))?;
         for row in rendered {
-            emit(out, &line(row))?;
+            emit(out, &line(row.as_ref()))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod buffered_error_tests {
+    use super::execution_failure;
+    use fgdb::BufferedReadError;
+    use fgdb_prism::FnxReadError;
+    use fgdb_strata::store::StoreError;
+    use fgdb_strata::tiered::buffer::BufferError;
+    use fgdb_types::CommitSeq;
+
+    #[test]
+    fn buffered_analytics_retains_storage_io_and_query_refusal_exit_classes() {
+        type Error = FnxReadError<BufferedReadError, std::io::Error>;
+        for source in [
+            BufferedReadError::Store(Box::new(StoreError::Io(
+                std::io::ErrorKind::NotFound.into(),
+            ))),
+            BufferedReadError::Store(Box::new(StoreError::RootPatchLoad {
+                at: 2,
+                error: Box::new(StoreError::Io(std::io::ErrorKind::UnexpectedEof.into())),
+            })),
+            BufferedReadError::Buffer(BufferError::Load(std::io::ErrorKind::Interrupted.into())),
+        ] {
+            let error = Error::Read(source);
+            let diagnostic = error.to_string();
+            let failure = execution_failure(error);
+            assert_eq!(failure.class, "io");
+            assert_eq!(failure.code, 5);
+            assert_eq!(failure.message, diagnostic);
+        }
+        for source in [
+            BufferedReadError::Limit {
+                resource: "work units",
+                requested: 2,
+                limit: 1,
+            },
+            BufferedReadError::BeyondPublication {
+                requested: CommitSeq(2),
+                publication: CommitSeq(1),
+            },
+            BufferedReadError::Buffer(BufferError::CacheSlotsExhausted { limit: 0 }),
+        ] {
+            let failure = execution_failure(Error::Read(source));
+            assert_eq!(failure.class, "query");
+            assert_eq!(failure.code, 3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod completed_row_encoding_tests {
+    use super::render_rows_iter;
+    use std::cell::Cell;
+    use std::io::{self, Write};
+
+    #[test]
+    fn robot_answer_encodes_each_row_once_and_preserves_complete_framing() {
+        let encoded = Cell::new(0);
+        let rows = [3, 9].iter().map(|value| {
+            encoded.set(encoded.get() + 1);
+            vec![format!(r#"{{"type":"int","value":"{value}"}}"#)]
+        });
+        let mut out = Vec::new();
+        render_rows_iter(&["n".into()], rows, 17, "rows", true, &mut out).unwrap();
+        assert_eq!(encoded.get(), 2);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            concat!(
+                "{\"v\":1,\"event\":\"columns\",\"columns\":[\"n\"]}\n",
+                "{\"v\":1,\"event\":\"row\",\"cells\":[{\"type\":\"int\",\"value\":\"3\"}]}\n",
+                "{\"v\":1,\"event\":\"row\",\"cells\":[{\"type\":\"int\",\"value\":\"9\"}]}\n",
+                "{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":17,\"count\":2}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn human_answer_replays_widths_without_retaining_rendered_rows() {
+        let encoded = Cell::new(0);
+        let rows = [("é", "1"), ("long", "20")].iter().map(|(name, value)| {
+            encoded.set(encoded.get() + 1);
+            vec![(*name).to_owned(), (*value).to_owned()]
+        });
+        let mut out = Vec::new();
+        render_rows_iter(
+            &["n".into(), "value".into()],
+            rows,
+            17,
+            "rows",
+            false,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(encoded.get(), 4);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            concat!(
+                "n    | value\n",
+                "------------\n",
+                "é    | 1    \n",
+                "long | 20   \n",
+                "2 row(s)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn failed_robot_output_stops_encoding_and_emits_no_completion() {
+        struct FailSecondRow {
+            bytes: Vec<u8>,
+            rows: usize,
+        }
+        impl Write for FailSecondRow {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes
+                    .windows(b"\"event\":\"row\"".len())
+                    .any(|part| part == b"\"event\":\"row\"")
+                {
+                    self.rows += 1;
+                    if self.rows == 2 {
+                        return Err(io::ErrorKind::BrokenPipe.into());
+                    }
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let encoded = Cell::new(0);
+        let rows = (0..10).map(|value| {
+            encoded.set(encoded.get() + 1);
+            vec![format!(r#"{{"type":"int","value":"{value}"}}"#)]
+        });
+        let mut out = FailSecondRow {
+            bytes: Vec::new(),
+            rows: 0,
+        };
+        let error = render_rows_iter(&["n".into()], rows, 17, "rows", true, &mut out).unwrap_err();
+        assert_eq!(error.class, "io");
+        assert_eq!(encoded.get(), 2);
+        let delivered = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(delivered.lines().count(), 2);
+        assert!(!delivered.contains("\"event\":\"result\""));
+    }
+}
+
+#[cfg(test)]
+mod budget_hint_tests {
+    use super::budget_flag;
+    use fgdb_gql::{GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlBudgetExceeded};
+
+    /// Each typed refusal's own Display text maps to the flag that raises it,
+    /// so a renamed dimension or reworded refusal fails here, not in a user's
+    /// terminal; an unrelated message gets no hint.
+    #[test]
+    fn every_execution_limit_refusal_names_its_flag() {
+        let refusals = [
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::SnapshotRecords,
+                    limit: 100_000,
+                    observed: 100_001,
+                }
+                .to_string(),
+                "--max-snapshot-records",
+            ),
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::ResultRows,
+                    limit: 1,
+                    observed: 2,
+                }
+                .to_string(),
+                "--max-result-rows",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit: 10,
+                    observed: 11,
+                }
+                .to_string(),
+                "--max-work-units",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::ScratchEntries,
+                    limit: 10,
+                    observed: 11,
+                }
+                .to_string(),
+                "--max-scratch-entries",
+            ),
+        ];
+        for (message, flag) in refusals {
+            assert_eq!(budget_flag(&message), Some(flag), "{message}");
+            let rendered = super::Failure::query(&message).with_budget_hint().message;
+            assert!(
+                rendered.ends_with(&format!(" (raise with {flag})")),
+                "{rendered}"
+            );
+            // A command without the flag (write, remote, ...) is not told to
+            // raise it.
+            assert_eq!(super::Failure::query(&message).message, message);
+            // Nor is a failure that is not a query refusal.
+            assert_eq!(
+                super::Failure::io(&message).with_budget_hint().message,
+                message
+            );
+        }
+        assert_eq!(budget_flag("unknown label Person"), None);
+        assert_eq!(
+            super::Failure::query("unknown label Person")
+                .with_budget_hint()
+                .message,
+            "unknown label Person"
+        );
     }
 }

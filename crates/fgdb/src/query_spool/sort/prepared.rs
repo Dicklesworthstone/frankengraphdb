@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "native_order.rs"]
 mod native_order;
+pub use native_order::PreparedBufferedOrder;
+pub(crate) use native_order::ordered_input;
 
 impl PreparedNativeRead {
     /// Evaluate a native pull query and externally order its selected result.
@@ -56,8 +58,8 @@ impl PreparedNativeRead {
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, V, A, B>
     where
         V: Vfs + Clone,
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = self.stream(database, cx, params, policy);
         async move {
@@ -100,8 +102,8 @@ impl PreparedNativeRead {
         max_work_units: u64,
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, A, B>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = self.stream_in_view(view, cx, params, policy);
         async move {
@@ -139,12 +141,12 @@ async fn drain_sorted<VS, VF, ES, EF, A, B>(
     max_work_units: u64,
 ) -> Result<(NativeResultSpool, u64)>
 where
-    VS: VertexScanSource<Error = ReadError>,
-    ES: EdgeScanSource<Error = ReadError>,
-    VF: FnMut() -> core::result::Result<(), Cancel>,
-    EF: FnMut() -> core::result::Result<(), Cancel>,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    VS: VertexScanSource<Error = ReadError> + Send,
+    ES: EdgeScanSource<Error = ReadError> + Send,
+    VF: FnMut() -> core::result::Result<(), Cancel> + Send,
+    EF: FnMut() -> core::result::Result<(), Cancel> + Send,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
@@ -164,7 +166,18 @@ where
             limit: 0,
         });
     }
-    let spool = drain(cx, columns, cursor, source, page_bytes, max_row_bytes).await?;
+    let encoded_columns = columns.len();
+    let spool = drain(
+        cx,
+        columns,
+        encoded_columns,
+        cursor,
+        source,
+        page_bytes,
+        max_row_bytes,
+        None,
+    )
+    .await?;
     spool
         .sort_into(
             cx,

@@ -30,7 +30,11 @@ fn change_vertex(id: u128, value: i64) -> WriteBatch {
 }
 
 fn value(db: &Database<MemVfs>, id: u128) -> CanonicalScalar {
-    db.vertex(VId(id)).unwrap().unwrap().props[0].1.clone()
+    db.vertex(VId(id)).unwrap().unwrap().props[0]
+        .1
+        .as_scalar()
+        .unwrap()
+        .clone()
 }
 
 fn expect_conflict(result: Result<CommitSeq, WriteError>) {
@@ -70,7 +74,7 @@ fn historical_preparation_keeps_exact_effects_and_commits_beside_disjoint_writes
         assert_eq!(value(&db, 3), CanonicalScalar::Int(99));
         assert_eq!(
             pinned.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(10)
+            CanonicalScalar::Int(10).into()
         );
         drop(snapshot_before);
         drop(db);
@@ -80,6 +84,92 @@ fn historical_preparation_keeps_exact_effects_and_commits_beside_disjoint_writes
         assert_eq!(value(&reopened, 1), CanonicalScalar::Int(20));
         assert_eq!(value(&reopened, 3), CanonicalScalar::Int(99));
         assert_eq!(reopened.frontier().unwrap(), committed);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn reopened_preparation_anchors_and_basis_folds_share_every_sealed_payload() {
+    fn shared(original: &BlockWriter, retained: &BlockWriter) {
+        assert_eq!(original.sealed().len(), retained.sealed().len());
+        assert_eq!(
+            original.sealed_patches().len(),
+            retained.sealed_patches().len()
+        );
+        assert!(!original.sealed().is_empty());
+        assert!(!original.sealed_patches().is_empty());
+        let mut properties = 0;
+        for (old, copy) in original.sealed().iter().zip(retained.sealed()) {
+            assert_eq!(old.reference(), copy.reference());
+            assert!(Arc::ptr_eq(&old.bytes, &copy.bytes));
+            if let Some(old_patch) = &old.property_patch {
+                let copy_patch = copy.property_patch.as_ref().unwrap();
+                assert_eq!(old_patch.patch_id, copy_patch.patch_id);
+                assert!(Arc::ptr_eq(&old_patch.bytes, &copy_patch.bytes));
+                properties += 1;
+            }
+        }
+        assert!(properties > 0);
+        for (old, copy) in original
+            .sealed_patches()
+            .iter()
+            .zip(retained.sealed_patches())
+        {
+            assert_eq!(old.reference(), copy.reference());
+            assert!(Arc::ptr_eq(&old.bytes, &copy.bytes));
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x6261_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.write(&cx, seed()).await.unwrap();
+        drop(db);
+        let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.delta_materialized_after, basis);
+        assert!(db.preparation_anchor.is_none());
+        let original = db.writer.clone();
+        let expected = db.prepare_write(change_vertex(1, 20)).unwrap().template;
+
+        // The first post-open write retains the old native writer for later
+        // historical staging. Both that anchor and each selected basis must
+        // borrow its encoded history while owning their mutable fold state.
+        db.write(&cx, change_vertex(3, 99)).await.unwrap();
+        let anchor = db.preparation_anchor.as_ref().unwrap();
+        shared(&original, &anchor.writer);
+        {
+            let mut selected = db.preparation_basis(basis).unwrap();
+            shared(&original, &selected.database.writer);
+            assert_eq!(
+                selected
+                    .prepare_write(change_vertex(1, 20))
+                    .unwrap()
+                    .template,
+                expected
+            );
+        }
+        assert_eq!(value(&db, 1), CanonicalScalar::Int(10));
+        assert_eq!(value(&db, 3), CanonicalScalar::Int(99));
+        let prepared = db.prepare_write_at(basis, change_vertex(1, 20)).unwrap();
+        db.commit_prepared(&cx, prepared).await.unwrap();
+        db.compact(&cx).await.unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(value(&reopened, 1), CanonicalScalar::Int(20));
+        assert_eq!(value(&reopened, 3), CanonicalScalar::Int(99));
+        assert_eq!(
+            reopened.edge(EId(10)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(10).into())]
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

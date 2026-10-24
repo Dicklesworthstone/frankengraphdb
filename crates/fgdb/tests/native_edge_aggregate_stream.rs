@@ -79,26 +79,30 @@ fn sum(value: Option<i128>) -> GraphAggregateValue {
 // not use GLA, storage readers or the production join/probe/aggregate machine.
 fn oracle(direction: usize, hops: usize) -> Vec<GraphAggregateValue> {
     let mut oriented = Vec::new();
-    for (from, to, score) in EDGES {
+    for (edge, (from, to, score)) in EDGES.into_iter().enumerate() {
         if direction == 1 {
-            oriented.push((to, from, score));
+            oriented.push((edge, to, from, score));
         } else {
-            oriented.push((from, to, score));
+            oriented.push((edge, from, to, score));
             if direction == 2 && from != to {
-                oriented.push((to, from, score));
+                oriented.push((edge, to, from, score));
             }
         }
     }
+    // One MATCH binds its edges under DIFFERENT EDGES. Both orientations of an
+    // undirected edge share its index, so no match uses a stored edge twice.
     let mut matches = Vec::new();
-    for &(from, to, score) in &oriented {
-        matches.push((from, to, score));
+    for &(edge, _, to, score) in &oriented {
+        matches.push((vec![edge], to, score));
     }
     for _ in 1..hops {
         let mut extended = Vec::new();
-        for &(root, end, score) in &matches {
-            for &(from, to, _) in &oriented {
-                if end == from {
-                    extended.push((root, to, score));
+        for (used, end, score) in &matches {
+            for &(edge, from, to, _) in &oriented {
+                if *end == from && !used.contains(&edge) {
+                    let mut used = used.clone();
+                    used.push(edge);
+                    extended.push((used, to, *score));
                 }
             }
         }
@@ -369,27 +373,35 @@ fn native_edge_aggregate_quotas_late_errors_and_close_keep_one_cumulative_cursor
 }
 
 #[test]
-fn unsupported_edge_shapes_and_bad_arguments_never_switch_to_vertex_or_eager_execution() {
+fn edge_collections_stream_natively_and_bad_arguments_never_switch_to_vertex_or_eager_execution() {
     let ((), report) = run_async_under_lab(0xa66e_3004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
         let db = Database::open_memory(&commit, keys()).await.unwrap();
+        // A distinct edge-property collection streams natively now (it was
+        // refused before the native edge collection cursors; fgdb-4wrnd):
+        // the stream is the eager answer, not an eager retry behind it.
+        let mut seeded = Database::open_memory(&commit, keys()).await.unwrap();
+        seeded.write(&commit, seed()).await.unwrap();
         let text = "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.score) AS total";
-        let prepared = PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-        let error = prepared
-            .stream_aggregate(
-                &db,
-                &cx,
-                &GqlParameters::new(),
-                GqlQueryPolicy::new(0, 0, 0, 0),
-            )
-            .unwrap_err();
-        assert!(
-            matches!(&error, QueryError::EdgeAggregateStreamPlan(_)),
-            "{text}: {error}"
-        );
-        assert!(std::error::Error::source(&error).is_some());
+        let args = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+        let QueryResult::Rows { columns, rows } =
+            prepared.execute(&seeded, &cx, &args, wide()).unwrap()
+        else {
+            panic!("{text}: not rows")
+        };
+        let mut cursor = prepared
+            .stream_aggregate(&seeded, &cx, &args, wide())
+            .unwrap();
+        assert_eq!(cursor.kind(), ScanKind::Edge);
+        assert_eq!(cursor.columns(), columns);
+        let streamed: Vec<_> = cursor
+            .by_ref()
+            .map(|row| row.unwrap().values().to_vec())
+            .collect();
+        assert_eq!(streamed, rows);
         let text = "MATCH (a)-[r:R]->(b) WHERE b.score >= $floor RETURN COUNT(*) AS total";
         let params = GqlParameters::new().with_int64("floor", 0).unwrap();
         let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();

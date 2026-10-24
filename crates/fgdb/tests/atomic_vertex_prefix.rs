@@ -133,7 +133,7 @@ fn shared_creations_publish_once_before_dependent_coordinates_with_unique_births
         assert_eq!(born[&7], ElementId::Edge(EId(20)));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(db.vertex(HIGH).unwrap().unwrap().birth_ordinal, 3);
     });
@@ -185,7 +185,7 @@ fn ensure_prefixes_are_idempotent_and_preserve_existing_vertex_contents() {
         fresh.write_atomic(&cx, groups).await.unwrap();
         assert_eq!(
             fresh.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(fresh.vertex(VId(2)).unwrap().unwrap().birth_ordinal, 3);
         assert_eq!(fresh.execute_prepared_query(&query()).unwrap(), vec![HIGH]);
@@ -314,7 +314,7 @@ fn prepared_prefix_negative_reads_survive_intervening_commits_and_foreign_handle
                 assert!(db.edges().unwrap().is_empty());
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(99))]
+                    vec![(P, CanonicalScalar::Int(99).into())]
                 );
             } else {
                 assert_eq!(result.unwrap(), CommitSeq(before.0 + 1));
@@ -472,7 +472,11 @@ fn new_endpoints_and_all_relations_recover_together_across_marker_boundaries() {
             }
             // Surviving unflushed bytes are one crash outcome, not a guarantee
             // of persistence before D2. A torn trailer must recover neither.
-            let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            let mut reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            reopened
+                .ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
             assert_eq!(
                 reopened.frontier().unwrap(),
                 CommitSeq(u64::from(committed)),

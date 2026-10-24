@@ -7,7 +7,9 @@
 //!   `encode(a) == encode(b)`,
 //! - `Ord` is total and transitive over all scalars (cross-type order is the
 //!   fixed profile type rank: Null < Bool < Int < Decimal < Float < Text <
-//!   Timestamp < Bytes),
+//!   Timestamp < Bytes < Date < LocalTime < Time < LocalDateTime <
+//!   Duration; the temporal tags follow the property-value List and Map tags,
+//!   so they rank last),
 //! - `a.cmp(b) == encode(a).cmp(encode(b))`, so byte-keyed maps and `LexMin`
 //!   use exactly the semantic scalar order,
 //! - `decode(encode(v)) == v` for every value, and decode rejects malformed
@@ -56,9 +58,10 @@ use crate::{
     decimal::{CanonicalDecimal, DecimalDecodeError},
     ids::ObjectId,
     temporal::{
-        CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
-        MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, TimestampDecodeError, TzdbResolver,
-        validate_zone_identifier,
+        CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime,
+        CanonicalTime, CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS,
+        MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY, TimestampDecodeError,
+        TzdbResolver, calendar, validate_zone_identifier,
     },
     text::{
         CanonicalText, CanonicalTextError, CollationResolver, MAX_CANONICAL_SORT_KEY_BYTES,
@@ -81,6 +84,12 @@ const TAG_FLOAT: u8 = 0x04;
 const TAG_TEXT: u8 = 0x05;
 const TAG_TIMESTAMP: u8 = 0x06;
 const TAG_BYTES: u8 = 0x07;
+// 0x08 and 0x09 are the property-value List and Map tags.
+const TAG_DATE: u8 = 0x0A;
+const TAG_LOCAL_TIME: u8 = 0x0B;
+const TAG_TIME: u8 = 0x0C;
+const TAG_LOCAL_DATETIME: u8 = 0x0D;
+const TAG_DURATION: u8 = 0x0E;
 
 const BOOL_FALSE_BYTE: u8 = 0;
 const BOOL_TRUE_BYTE: u8 = 1;
@@ -135,24 +144,113 @@ const SCALAR_DESCRIPTOR_RULE_BYTES: &[u8] = &[
     COMPARABLE_TERMINAL_MARKER,
 ];
 
-pub(crate) const STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN: usize =
-    STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN.len()
-        + 2
-        + SCALAR_DESCRIPTOR_RULE_BYTES.len()
-        + 8
-        + 4 * 8
-        + 2 * 16
-        + 4
-        + 8;
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2: &[u8] =
+    b"fgdb:strict-portable-scalar-semantics:v2\0";
+const STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION_V2: u16 = 2;
+const DATE_ORDER_EPOCH_DAY_SIGN_FLIP_BIG_ENDIAN: u8 = 1;
+const DATE_CALENDAR_PROLEPTIC_GREGORIAN: u8 = 1;
+const LOCAL_TIME_ORDER_NANOS_OF_DAY_BIG_ENDIAN: u8 = 1;
+const TIME_ORDER_UTC_NANOS_SIGN_FLIP_THEN_LOCAL: u8 = 1;
+const TIME_NO_LEAP_SECOND: u8 = 1;
+const LOCAL_DATETIME_ORDER_DATE_THEN_TIME: u8 = 1;
+const DURATION_ORDER_MONTHS_DAYS_NANOS_SIGN_FLIP: u8 = 1;
+/// The rules version 2 adds after every version 1 rule.
+const SCALAR_DESCRIPTOR_V2_RULE_BYTES: &[u8] = &[
+    TAG_DATE,
+    DATE_ORDER_EPOCH_DAY_SIGN_FLIP_BIG_ENDIAN,
+    DATE_CALENDAR_PROLEPTIC_GREGORIAN,
+    TAG_LOCAL_TIME,
+    LOCAL_TIME_ORDER_NANOS_OF_DAY_BIG_ENDIAN,
+    TAG_TIME,
+    TIME_ORDER_UTC_NANOS_SIGN_FLIP_THEN_LOCAL,
+    TIME_NO_LEAP_SECOND,
+    TAG_LOCAL_DATETIME,
+    LOCAL_DATETIME_ORDER_DATE_THEN_TIME,
+    TAG_DURATION,
+    DURATION_ORDER_MONTHS_DAYS_NANOS_SIGN_FLIP,
+];
+
+/// The scalar semantics a profile binds (fgdb-txbg9). Versions are ordered
+/// and closed: each admits every value of the one before it with the same
+/// encoding, so a value needs the lowest version that admits its kind, and a
+/// version 1 descriptor stays byte-identical.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ScalarProfileVersion {
+    /// Null, Bool, Int, Decimal, Float, Text, Timestamp and Bytes.
+    V1 = 1,
+    /// Version 1 plus Date, LocalTime, Time, LocalDateTime and Duration.
+    V2 = 2,
+}
+
+impl ScalarProfileVersion {
+    /// The lowest version that admits `value`.
+    #[must_use]
+    pub const fn required_for(value: &CanonicalScalar) -> Self {
+        match value {
+            CanonicalScalar::Date(_)
+            | CanonicalScalar::LocalTime(_)
+            | CanonicalScalar::Time(_)
+            | CanonicalScalar::LocalDateTime(_)
+            | CanonicalScalar::Duration(_) => Self::V2,
+            _ => Self::V1,
+        }
+    }
+
+    /// The lowest version that admits every value in `values`: what a
+    /// durable container holding exactly these values must declare.
+    #[must_use]
+    pub fn required_for_all<'a>(values: impl IntoIterator<Item = &'a CanonicalScalar>) -> Self {
+        values
+            .into_iter()
+            .map(Self::required_for)
+            .max()
+            .unwrap_or(Self::V1)
+    }
+}
+
+/// Byte length of the scalar contract [`append_strict_portable_scalar_descriptor`]
+/// appends for `version`.
+pub(crate) const fn strict_portable_scalar_descriptor_len(version: ScalarProfileVersion) -> usize {
+    let common = 2 + SCALAR_DESCRIPTOR_RULE_BYTES.len() + 8 + 4 * 8 + 2 * 16 + 4 + 8;
+    match version {
+        ScalarProfileVersion::V1 => STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN.len() + common,
+        ScalarProfileVersion::V2 => {
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2.len()
+                + common
+                + SCALAR_DESCRIPTOR_V2_RULE_BYTES.len()
+                + 3 * 8
+        }
+    }
+}
 
 /// Appends the artifact-independent atomic scalar contract bound by a
-/// `CanonicalScalarProfile` descriptor. The caller pre-reserves the exact
-/// [`STRICT_PORTABLE_SCALAR_DESCRIPTOR_LEN`] bytes, so this performs no
-/// allocation of its own.
-pub(crate) fn append_strict_portable_scalar_descriptor(out: &mut Vec<u8>) {
-    out.extend_from_slice(STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN);
-    out.extend_from_slice(&STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION.to_le_bytes());
+/// `CanonicalScalarProfile` descriptor of `version`. The caller pre-reserves
+/// the exact [`strict_portable_scalar_descriptor_len`] bytes, so this
+/// performs no allocation of its own. Version 1 bytes never change; version 2
+/// has its own domain, the version 1 rules followed by the Date, LocalTime,
+/// Time and LocalDateTime rules, and the Date range and the day length in
+/// nanoseconds after every version 1 bound.
+pub(crate) fn append_strict_portable_scalar_descriptor(
+    out: &mut Vec<u8>,
+    version: ScalarProfileVersion,
+) {
+    let (domain, number) = match version {
+        ScalarProfileVersion::V1 => (
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN,
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION,
+        ),
+        ScalarProfileVersion::V2 => (
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_DOMAIN_V2,
+            STRICT_PORTABLE_SCALAR_DESCRIPTOR_VERSION_V2,
+        ),
+    };
+    out.extend_from_slice(domain);
+    out.extend_from_slice(&number.to_le_bytes());
     out.extend_from_slice(SCALAR_DESCRIPTOR_RULE_BYTES);
+    if version >= ScalarProfileVersion::V2 {
+        out.extend_from_slice(SCALAR_DESCRIPTOR_V2_RULE_BYTES);
+    }
     out.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
     for bound in [
         MAX_SCALAR_PAYLOAD,
@@ -166,6 +264,11 @@ pub(crate) fn append_strict_portable_scalar_descriptor(out: &mut Vec<u8>) {
     out.extend_from_slice(&MAX_TIMESTAMP_UTC_NANOS.to_le_bytes());
     out.extend_from_slice(&MAX_UTC_OFFSET_SECONDS.to_le_bytes());
     out.extend_from_slice(&(MAX_ZONE_IDENTIFIER_BYTES as u64).to_le_bytes());
+    if version >= ScalarProfileVersion::V2 {
+        out.extend_from_slice(&calendar::MIN_EPOCH_DAY.to_le_bytes());
+        out.extend_from_slice(&calendar::MAX_EPOCH_DAY.to_le_bytes());
+        out.extend_from_slice(&NANOS_PER_DAY.to_le_bytes());
+    }
 }
 
 /// Maximum complete encoded payload (excluding the scalar tag) accepted by
@@ -261,6 +364,16 @@ pub enum CanonicalScalar {
     Text(CanonicalText),
     Timestamp(CanonicalTimestamp),
     Bytes(CanonicalBytes),
+    /// A calendar date (fgdb-txbg9); admitted by [`ScalarProfileVersion::V2`].
+    Date(CanonicalDate),
+    /// A time of day without an offset; admitted by version 2.
+    LocalTime(CanonicalLocalTime),
+    /// A time of day at a UTC offset; admitted by version 2.
+    Time(CanonicalTime),
+    /// A date and time of day without an offset; admitted by version 2.
+    LocalDateTime(CanonicalLocalDateTime),
+    /// Months, days and nanoseconds; admitted by version 2.
+    Duration(CanonicalDuration),
 }
 
 impl CanonicalScalar {
@@ -275,8 +388,36 @@ impl CanonicalScalar {
         CanonicalBytes::new(value).map(Self::Bytes)
     }
 
-    /// Fixed cross-type rank of the `STRICT_PORTABLE` profile.
-    fn type_rank(&self) -> u8 {
+    /// Bytes of owned heap storage retained by this scalar, without allocating.
+    ///
+    /// Text counts its `String` capacity, boxed binding and optional sort-key
+    /// capacity; bytes count their `Vec` capacity, including unused space. A
+    /// timestamp counts both the boxed zone metadata and its separately boxed
+    /// identifier. Inline scalar data and allocator bookkeeping are excluded.
+    /// Returns `None` on size overflow.
+    pub fn owned_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Text(value) => value.owned_heap_bytes(),
+            Self::Bytes(value) => Some(value.owned_heap_bytes()),
+            Self::Timestamp(value) => value.zone().map_or(Some(0), |zone| {
+                std::mem::size_of_val(zone).checked_add(zone.identifier().len())
+            }),
+            Self::Null
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Decimal(_)
+            | Self::Float(_)
+            | Self::Date(_)
+            | Self::LocalTime(_)
+            | Self::Time(_)
+            | Self::LocalDateTime(_)
+            | Self::Duration(_) => Some(0),
+        }
+    }
+
+    /// Fixed cross-type rank of the `STRICT_PORTABLE` profile, which is also
+    /// the leading byte of the canonical encoding.
+    pub(crate) fn type_rank(&self) -> u8 {
         match self {
             CanonicalScalar::Null => TAG_NULL,
             CanonicalScalar::Bool(_) => TAG_BOOL,
@@ -286,6 +427,11 @@ impl CanonicalScalar {
             CanonicalScalar::Text(_) => TAG_TEXT,
             CanonicalScalar::Timestamp(_) => TAG_TIMESTAMP,
             CanonicalScalar::Bytes(_) => TAG_BYTES,
+            CanonicalScalar::Date(_) => TAG_DATE,
+            CanonicalScalar::LocalTime(_) => TAG_LOCAL_TIME,
+            CanonicalScalar::Time(_) => TAG_TIME,
+            CanonicalScalar::LocalDateTime(_) => TAG_LOCAL_DATETIME,
+            CanonicalScalar::Duration(_) => TAG_DURATION,
         }
     }
 
@@ -308,8 +454,9 @@ impl CanonicalScalar {
         let payload_len = match self {
             Self::Null => 0,
             Self::Bool(_) => 1,
-            Self::Int(_) | Self::Float(_) => 8,
-            Self::Decimal(_) => 16,
+            Self::Int(_) | Self::Float(_) | Self::Date(_) | Self::LocalTime(_) => 8,
+            Self::Decimal(_) | Self::Time(_) | Self::LocalDateTime(_) => 16,
+            Self::Duration(_) => 32,
             Self::Text(value) => text_scalar_payload_len(value)?,
             Self::Timestamp(value) => timestamp_scalar_payload_len(value)?,
             Self::Bytes(value) => comparable_encoded_len(value.as_slice())?,
@@ -360,6 +507,31 @@ impl CanonicalScalar {
                 out.push(TAG_BYTES);
                 append_comparable(value.as_slice(), out);
             }
+            CanonicalScalar::Date(value) => {
+                out.push(TAG_DATE);
+                out.extend_from_slice(&ordered_i64(value.epoch_day()).to_be_bytes());
+            }
+            CanonicalScalar::LocalTime(value) => {
+                out.push(TAG_LOCAL_TIME);
+                out.extend_from_slice(&value.nanos_of_day().to_be_bytes());
+            }
+            CanonicalScalar::Time(value) => {
+                // The UTC time of day, then the local one: Ord's two keys.
+                out.push(TAG_TIME);
+                out.extend_from_slice(&ordered_i64(value.utc_nanos_of_day()).to_be_bytes());
+                out.extend_from_slice(&value.local().nanos_of_day().to_be_bytes());
+            }
+            CanonicalScalar::LocalDateTime(value) => {
+                out.push(TAG_LOCAL_DATETIME);
+                out.extend_from_slice(&ordered_i64(value.date().epoch_day()).to_be_bytes());
+                out.extend_from_slice(&value.time().nanos_of_day().to_be_bytes());
+            }
+            CanonicalScalar::Duration(value) => {
+                out.push(TAG_DURATION);
+                out.extend_from_slice(&ordered_i64(value.months()).to_be_bytes());
+                out.extend_from_slice(&ordered_i64(value.days()).to_be_bytes());
+                out.extend_from_slice(&ordered_i128(value.nanos()).to_be_bytes());
+            }
         }
         if out.len() != requested {
             return Err(ScalarEncodeError::EncodedSizeInvariantMismatch {
@@ -374,7 +546,15 @@ impl CanonicalScalar {
     /// is a typed rejection; declared lengths are validated against both the
     /// profile bound and the actually-present input before any allocation.
     pub fn decode(bytes: &[u8]) -> Result<Self, ScalarDecodeError> {
-        Self::decode_inner(bytes, None)
+        Self::decode_inner_mode(bytes, None, false)
+    }
+
+    /// Decodes one stored scalar from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving committed zoned timestamp
+    /// metadata `(instant, offset, zone_identifier, tzdb_oid)` after validating
+    /// range and syntax invariants.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, ScalarDecodeError> {
+        Self::decode_inner_mode(bytes, None, true)
     }
 
     /// Decodes one scalar against an explicit content-addressed artifact
@@ -384,12 +564,20 @@ impl CanonicalScalar {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, ScalarDecodeError> {
-        Self::decode_inner(bytes, Some(resolver))
+        Self::decode_inner_mode(bytes, Some(resolver), false)
     }
 
-    fn decode_inner(
+    pub(crate) fn decode_inner(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
+    ) -> Result<Self, ScalarDecodeError> {
+        Self::decode_inner_mode(bytes, resolver, false)
+    }
+
+    pub(crate) fn decode_inner_mode(
+        bytes: &[u8],
+        resolver: Option<&dyn CanonicalScalarResolver>,
+        allow_stored_zoned: bool,
     ) -> Result<Self, ScalarDecodeError> {
         let (&tag, rest) = bytes.split_first().ok_or(ScalarDecodeError::Empty)?;
         let exact = |want: usize| -> Result<&[u8], ScalarDecodeError> {
@@ -433,11 +621,79 @@ impl CanonicalScalar {
                     .ok_or(ScalarDecodeError::NonCanonicalFloat { bits })
             }
             TAG_TEXT => decode_text_scalar(rest, resolver),
-            TAG_TIMESTAMP => decode_timestamp_scalar(rest, resolver),
+            TAG_TIMESTAMP => decode_timestamp_scalar(rest, resolver, allow_stored_zoned),
             TAG_BYTES => decode_bytes_scalar(rest),
+            TAG_DATE => {
+                let raw = array_from_exact::<8>(exact(8)?, tag)?;
+                let epoch_day = decode_ordered_i64(u64::from_be_bytes(raw));
+                CanonicalDate::from_epoch_day(epoch_day)
+                    .map(CanonicalScalar::Date)
+                    .map_err(|_| ScalarDecodeError::DateOutOfRange { epoch_day })
+            }
+            TAG_LOCAL_TIME => {
+                let raw = array_from_exact::<8>(exact(8)?, tag)?;
+                decode_time_of_day(raw).map(CanonicalScalar::LocalTime)
+            }
+            TAG_TIME => {
+                let raw = array_from_exact::<16>(exact(16)?, tag)?;
+                let (utc, local) = split_halves(raw);
+                let utc_nanos_of_day = decode_ordered_i64(u64::from_be_bytes(utc));
+                let local = decode_time_of_day(local)?;
+                CanonicalTime::from_utc_nanos_of_day(utc_nanos_of_day, local)
+                    .map(CanonicalScalar::Time)
+                    .map_err(|_| ScalarDecodeError::TimeOffsetInvalid {
+                        utc_nanos_of_day,
+                        nanos_of_day: local.nanos_of_day(),
+                    })
+            }
+            TAG_LOCAL_DATETIME => {
+                let raw = array_from_exact::<16>(exact(16)?, tag)?;
+                let (day, time) = split_halves(raw);
+                let epoch_day = decode_ordered_i64(u64::from_be_bytes(day));
+                let date = CanonicalDate::from_epoch_day(epoch_day)
+                    .map_err(|_| ScalarDecodeError::DateOutOfRange { epoch_day })?;
+                let time = decode_time_of_day(time)?;
+                Ok(CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(
+                    date, time,
+                )))
+            }
+            TAG_DURATION => {
+                let raw = array_from_exact::<32>(exact(32)?, tag)?;
+                let field = |at: usize| {
+                    let mut bytes = [0; 8];
+                    bytes.copy_from_slice(&raw[at..at + 8]);
+                    decode_ordered_i64(u64::from_be_bytes(bytes))
+                };
+                let mut nanos = [0; 16];
+                nanos.copy_from_slice(&raw[16..]);
+                let nanos = decode_ordered_i128(u128::from_be_bytes(nanos));
+                CanonicalDuration::new(field(0), field(8), nanos)
+                    .map(CanonicalScalar::Duration)
+                    .map_err(|_| ScalarDecodeError::DurationOutOfRange { nanos })
+            }
             other => Err(ScalarDecodeError::UnknownTag(other)),
         }
     }
+}
+
+fn split_halves(raw: [u8; 16]) -> ([u8; 8], [u8; 8]) {
+    let mut high = [0; 8];
+    let mut low = [0; 8];
+    high.copy_from_slice(&raw[..8]);
+    low.copy_from_slice(&raw[8..]);
+    (high, low)
+}
+
+fn decode_time_of_day(raw: [u8; 8]) -> Result<CanonicalLocalTime, ScalarDecodeError> {
+    let nanos_of_day = u64::from_be_bytes(raw);
+    CanonicalLocalTime::from_nanos_of_day(nanos_of_day)
+        .map_err(|_| ScalarDecodeError::TimeOfDayOutOfRange { nanos_of_day })
+}
+
+/// Whether `tag` leads a canonical scalar encoding (the property-value List
+/// and Map tags sit between Bytes and the temporal tags).
+pub(crate) const fn is_scalar_tag(tag: u8) -> bool {
+    matches!(tag, TAG_NULL..=TAG_BYTES | TAG_DATE..=TAG_DURATION)
 }
 
 /// Returns the complete scalar encoding length for a borrowed Map key.
@@ -679,6 +935,7 @@ fn decode_text_scalar(
 fn decode_timestamp_scalar(
     payload: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
+    allow_stored_zoned: bool,
 ) -> Result<CanonicalScalar, ScalarDecodeError> {
     let mut cursor = ScalarCursor::new(TAG_TIMESTAMP, payload)?;
     let instant = decode_ordered_i128(u128::from_be_bytes(
@@ -707,12 +964,25 @@ fn decode_timestamp_scalar(
             validate_zone_identifier(&zone).map_err(|error| {
                 ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
             })?;
-            let resolver = resolver.ok_or(ScalarDecodeError::Timestamp(
-                TimestampDecodeError::TzdbResolverRequired,
-            ))?;
-            CanonicalTimestamp::zoned(instant, offset, &zone, tzdb_oid, resolver).map_err(
-                |error| ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error)),
-            )?
+            match resolver {
+                Some(resolver) => CanonicalTimestamp::zoned(
+                    instant, offset, &zone, tzdb_oid, resolver,
+                )
+                .map_err(|error| {
+                    ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
+                })?,
+                None if allow_stored_zoned => {
+                    CanonicalTimestamp::from_stored_zoned(instant, offset, &zone, tzdb_oid)
+                        .map_err(|error| {
+                            ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
+                        })?
+                }
+                None => {
+                    return Err(ScalarDecodeError::Timestamp(
+                        TimestampDecodeError::TzdbResolverRequired,
+                    ));
+                }
+            }
         }
         other => {
             return Err(ScalarDecodeError::Timestamp(
@@ -912,6 +1182,11 @@ impl Ord for CanonicalScalar {
             (S::Text(a), S::Text(b)) => a.cmp(b),
             (S::Timestamp(a), S::Timestamp(b)) => a.cmp(b),
             (S::Bytes(a), S::Bytes(b)) => a.cmp(b),
+            (S::Date(a), S::Date(b)) => a.cmp(b),
+            (S::LocalTime(a), S::LocalTime(b)) => a.cmp(b),
+            (S::Time(a), S::Time(b)) => a.cmp(b),
+            (S::LocalDateTime(a), S::LocalDateTime(b)) => a.cmp(b),
+            (S::Duration(a), S::Duration(b)) => a.cmp(b),
             _ => self.type_rank().cmp(&other.type_rank()),
         }
     }
@@ -1036,6 +1311,24 @@ pub enum ScalarDecodeError {
     NonCanonicalFloat {
         bits: u64,
     },
+    /// A date tag whose day number lies outside the supported range.
+    DateOutOfRange {
+        epoch_day: i64,
+    },
+    /// A time tag whose time of day is a day or more.
+    TimeOfDayOutOfRange {
+        nanos_of_day: u64,
+    },
+    /// A time-at-offset tag whose UTC and local times of day differ by
+    /// anything but whole seconds within ±18:00.
+    TimeOffsetInvalid {
+        utc_nanos_of_day: i64,
+        nanos_of_day: u64,
+    },
+    /// A duration tag whose time part exceeds an `i64` of whole seconds.
+    DurationOutOfRange {
+        nanos: i128,
+    },
     Decimal(DecimalDecodeError),
     Bytes(BoundedBytesError),
     Text(CanonicalTextError),
@@ -1100,6 +1393,29 @@ impl std::fmt::Display for ScalarDecodeError {
                     "tag {tag:#04x}: canonical scalar has {count} trailing bytes"
                 )
             }
+            ScalarDecodeError::DateOutOfRange { epoch_day } => {
+                write!(
+                    f,
+                    "date day number {epoch_day} is outside the supported range"
+                )
+            }
+            ScalarDecodeError::TimeOfDayOutOfRange { nanos_of_day } => {
+                write!(f, "time of day {nanos_of_day} ns is a day or more")
+            }
+            ScalarDecodeError::DurationOutOfRange { nanos } => {
+                write!(
+                    f,
+                    "duration time part {nanos} ns exceeds the supported range"
+                )
+            }
+            ScalarDecodeError::TimeOffsetInvalid {
+                utc_nanos_of_day,
+                nanos_of_day,
+            } => write!(
+                f,
+                "UTC time of day {utc_nanos_of_day} ns and local {nanos_of_day} ns name no \
+                 offset within ±18:00"
+            ),
             ScalarDecodeError::NonCanonicalFloat { bits } => {
                 write!(
                     f,
@@ -1135,6 +1451,19 @@ mod tests {
         temporal::{TimestampArtifactError, TimestampConstructionError},
         text::{CollationResolverError, NonBinaryTextBinding, TextArtifactRole},
     };
+
+    /// Every stored property, delta row and query value carries one scalar,
+    /// so its width multiplies through the whole resident graph. The rare
+    /// non-binary text profile and timestamp zone are boxed; an inline arm
+    /// that widens the enum again (it was 192 bytes) fails here.
+    #[test]
+    fn a_canonical_scalar_stays_at_most_sixty_four_bytes() {
+        assert!(
+            core::mem::size_of::<CanonicalScalar>() <= 64,
+            "CanonicalScalar is {} bytes",
+            core::mem::size_of::<CanonicalScalar>()
+        );
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1237,8 +1566,17 @@ mod tests {
             z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
             z ^ (z >> 31)
         }
+        fn date(&mut self) -> CanonicalDate {
+            let days = (calendar::MAX_EPOCH_DAY - calendar::MIN_EPOCH_DAY + 1) as u64;
+            CanonicalDate::from_epoch_day(calendar::MIN_EPOCH_DAY + (self.next() % days) as i64)
+                .unwrap_or_else(|error| panic!("seeded date rejected: {error}"))
+        }
+        fn local_time(&mut self) -> CanonicalLocalTime {
+            CanonicalLocalTime::from_nanos_of_day(self.next() % NANOS_PER_DAY)
+                .unwrap_or_else(|error| panic!("seeded time rejected: {error}"))
+        }
         fn scalar(&mut self) -> CanonicalScalar {
-            match self.next() % 10 {
+            match self.next() % 15 {
                 0 => CanonicalScalar::Null,
                 1 => CanonicalScalar::Bool(self.next() % 2 == 1),
                 2 => CanonicalScalar::Int(self.next() as i64),
@@ -1287,7 +1625,29 @@ mod tests {
                 )
                 .map(CanonicalScalar::Timestamp)
                 .unwrap_or_else(|error| panic!("seeded zoned timestamp rejected: {error}")),
-                _ => unreachable!("modulo ten is within the scalar arm table"),
+                10 => CanonicalScalar::Date(self.date()),
+                11 => CanonicalScalar::LocalTime(self.local_time()),
+                12 => {
+                    let span = 2 * MAX_UTC_OFFSET_SECONDS.unsigned_abs() + 1;
+                    let offset = (self.next() % u64::from(span)) as i32 - MAX_UTC_OFFSET_SECONDS;
+                    CanonicalTime::new(self.local_time(), offset)
+                        .map(CanonicalScalar::Time)
+                        .unwrap_or_else(|error| panic!("seeded time rejected: {error}"))
+                }
+                13 => CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(
+                    self.date(),
+                    self.local_time(),
+                )),
+                14 => CanonicalScalar::Duration(
+                    CanonicalDuration::new(
+                        self.next() as i64,
+                        self.next() as i64,
+                        i128::from(self.next() as i64 / 2) * 1_000_000_000
+                            + i128::from(self.next() % 1_000_000_000),
+                    )
+                    .unwrap_or_else(|error| panic!("seeded duration rejected: {error}")),
+                ),
+                _ => unreachable!("modulo fifteen is within the scalar arm table"),
             }
         }
     }
@@ -1296,6 +1656,58 @@ mod tests {
         let mut h = DefaultHasher::new();
         v.hash(&mut h);
         h.finish()
+    }
+
+    #[test]
+    fn owned_heap_bytes_counts_spare_byte_and_text_capacity() {
+        for payload in [b"".as_slice(), b"abc".as_slice()] {
+            let mut bytes = Vec::with_capacity(4096);
+            bytes.extend_from_slice(payload);
+            let capacity = bytes.capacity();
+            assert!(capacity > payload.len());
+            let scalar = CanonicalScalar::bytes(bytes).unwrap();
+            assert_eq!(scalar.owned_heap_bytes(), Some(capacity));
+            assert_eq!(
+                scalar.encode().unwrap(),
+                CanonicalScalar::bytes(payload.to_vec())
+                    .unwrap()
+                    .encode()
+                    .unwrap()
+            );
+        }
+
+        let mut text = String::with_capacity(1024);
+        text.push_str("abc");
+        let capacity = text.capacity();
+        let scalar = CanonicalScalar::Text(CanonicalText::from_owned_ucs_basic(text).unwrap());
+        assert_eq!(scalar.owned_heap_bytes(), Some(capacity));
+        assert_eq!(scalar, CanonicalScalar::ucs_basic_text("abc").unwrap());
+    }
+
+    #[test]
+    fn owned_heap_bytes_counts_only_boxed_timestamp_metadata() {
+        for scalar in [
+            CanonicalScalar::Null,
+            CanonicalScalar::Bool(true),
+            CanonicalScalar::Int(42),
+            CanonicalScalar::Timestamp(CanonicalTimestamp::offset_only(0, 0).unwrap()),
+        ] {
+            assert_eq!(scalar.owned_heap_bytes(), Some(0));
+        }
+        let scalar = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -5 * 60 * 60,
+                "America/New_York",
+                ObjectId([9; 32]),
+                &AVAILABLE_RESOLVER,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            scalar.owned_heap_bytes(),
+            Some(std::mem::size_of::<crate::temporal::TimestampZone>() + "America/New_York".len())
+        );
     }
 
     #[test]
@@ -1591,6 +2003,55 @@ mod tests {
             Err(E::Decimal(DecimalDecodeError::CoefficientOutOfRange {
                 coefficient: i128::MAX,
             }))
+        );
+
+        // Temporal payloads: a day number out of range, a time of day of a
+        // whole day or more, and a time at an offset whose two times of day
+        // differ by a fraction of a second or by more than 18 hours.
+        let mut far_day = vec![TAG_LOCAL_DATETIME];
+        far_day.extend_from_slice(&ordered_i64(calendar::MAX_EPOCH_DAY + 1).to_be_bytes());
+        far_day.extend_from_slice(&0_u64.to_be_bytes());
+        assert_eq!(
+            CanonicalScalar::decode(&far_day),
+            Err(E::DateOutOfRange {
+                epoch_day: calendar::MAX_EPOCH_DAY + 1
+            })
+        );
+        let mut whole_day = vec![TAG_LOCAL_TIME];
+        whole_day.extend_from_slice(&NANOS_PER_DAY.to_be_bytes());
+        assert_eq!(
+            CanonicalScalar::decode(&whole_day),
+            Err(E::TimeOfDayOutOfRange {
+                nanos_of_day: NANOS_PER_DAY
+            })
+        );
+        for utc_nanos_of_day in [1_i64, -18 * 3_600 * 1_000_000_000 - 1_000_000_000] {
+            let mut offset = vec![TAG_TIME];
+            offset.extend_from_slice(&ordered_i64(utc_nanos_of_day).to_be_bytes());
+            offset.extend_from_slice(&0_u64.to_be_bytes());
+            assert_eq!(
+                CanonicalScalar::decode(&offset),
+                Err(E::TimeOffsetInvalid {
+                    utc_nanos_of_day,
+                    nanos_of_day: 0
+                })
+            );
+        }
+        let mut long_duration = vec![TAG_DURATION];
+        long_duration.extend_from_slice(&ordered_i64(0).to_be_bytes());
+        long_duration.extend_from_slice(&ordered_i64(0).to_be_bytes());
+        long_duration.extend_from_slice(&ordered_i128(i128::MAX).to_be_bytes());
+        assert_eq!(
+            CanonicalScalar::decode(&long_duration),
+            Err(E::DurationOutOfRange { nanos: i128::MAX })
+        );
+        assert_eq!(
+            CanonicalScalar::decode(&[TAG_TIME, 0, 0]),
+            Err(E::WrongPayloadLength {
+                tag: TAG_TIME,
+                expected: 16,
+                got: 2
+            })
         );
 
         let mut bounded_payload = Vec::new();

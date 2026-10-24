@@ -7,14 +7,14 @@ use fgdb_gql::{
     GraphMutationPolicy, GraphMutationTextErrorKind, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, PreparedGraphMutation, PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type MutationResult<C = ()> = Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>>;
 
@@ -74,7 +74,9 @@ fn property(vertex: u128, key: PropertyKeyId, value: Option<i64>) -> GraphMutati
     GraphMutationIntent::Property {
         vertex: VId(vertex),
         key,
-        value: Some(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+        value: Some(CanonicalPropertyValue::Scalar(
+            value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+        )),
     }
 }
 
@@ -115,7 +117,7 @@ fn precedence_associativity_signs_and_nullable_functions_have_explicit_results()
         let plan = prepare(&format!(
             "MATCH ({variable}) SET {variable}.q=ABS({variable}.p)+1"
         ));
-        let props = Props::from([((VId(1), P), CanonicalScalar::Int(-7))]);
+        let props = Props::from([((VId(1), P), CanonicalScalar::Int(-7).into())]);
         assert_eq!(
             run(&plan, &[VId(1)], &[], &props, policy())
                 .unwrap()
@@ -139,8 +141,8 @@ fn precedence_associativity_signs_and_nullable_functions_have_explicit_results()
 #[test]
 fn reciprocal_arithmetic_and_duplicate_counters_use_the_frozen_pre_statement_values() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
     ]);
     let edges = [
         (VId(1), R, VId(2)),
@@ -164,9 +166,9 @@ fn reciprocal_arithmetic_and_duplicate_counters_use_the_frozen_pre_statement_val
         &[property(1, P, Some(11)), property(2, P, Some(21))]
     );
     let changed = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
-        ((VId(3), P), CanonicalScalar::Int(30)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+        ((VId(3), P), CanonicalScalar::Int(30).into()),
     ]);
     assert!(matches!(
         run(
@@ -204,7 +206,7 @@ fn arithmetic_errors_are_typed_and_no_successful_prefix_is_returned() {
             GraphIntegerErrorKind::NonInteger,
         ),
     ] {
-        let props = Props::from([((VId(1), P), first), ((VId(2), P), second)]);
+        let props = Props::from([((VId(1), P), first.into()), ((VId(2), P), second.into())]);
         let plan = prepare(&format!("MATCH (n) SET n.q={expression}"));
         let failed = run(&plan, &[VId(1), VId(2)], &[], &props, policy()).unwrap_err();
         assert!(
@@ -265,7 +267,7 @@ fn nullable_targets_and_lazy_arithmetic_do_not_hide_property_source_failures() {
                 |_, _| Ok::<_, &str>(true),
                 |_, _| {
                     reads.set(reads.get() + 1);
-                    Err::<Option<&CanonicalScalar>, _>("property unavailable")
+                    Err::<Option<&CanonicalPropertyValue>, _>("property unavailable")
                 },
                 budget,
                 || Ok::<_, ()>(()),
@@ -316,7 +318,7 @@ fn typed_rhs_parameters_reuse_the_statement_schema_catalog_and_original_offsets(
         text,
         R,
         &[("base", GqlParameterType::Scalar(integer))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -337,7 +339,7 @@ fn typed_rhs_parameters_reuse_the_statement_schema_catalog_and_original_offsets(
         frozen
     );
     assert_eq!(calls.get(), 2);
-    let props = Props::from([((VId(1), P), CanonicalScalar::Int(10))]);
+    let props = Props::from([((VId(1), P), CanonicalScalar::Int(10).into())]);
     assert_eq!(
         run(&plan, &[VId(1)], &[], &props, policy())
             .unwrap()
@@ -370,7 +372,7 @@ fn typed_rhs_parameters_reuse_the_statement_schema_catalog_and_original_offsets(
         text,
         R,
         &[("base", GqlParameterType::Scalar(textual))],
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -395,7 +397,8 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
         "COALESCE(1,)",
         "n.p+TRUE",
         "'7'+1",
-        "n.p^2",
+        "n.p@2",
+        "n.p^",
         "unknown.p+1",
         "((1+2)",
         "9223372036854775808+1",
@@ -405,7 +408,7 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
             PreparedGraphMutationText::prepare(
                 &format!("MATCH (n) SET n.q={expression}"),
                 R,
-                |kind, name| {
+                |kind, name: &str| {
                     calls.set(calls.get() + 1);
                     symbols(kind, name)
                 }
@@ -426,7 +429,7 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
     let failed = PreparedGraphMutationText::prepare(
         &format!("MATCH (n) SET n.q={}", vec!["1"; 513].join("+")),
         R,
-        |kind, name| {
+        |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -459,7 +462,7 @@ fn malformed_and_excessive_expression_definitions_fail_before_catalog_access() {
 fn exact_limits_and_every_interruption_cover_selection_bytecode_and_proposals() {
     let plan =
         prepare("MATCH (a)-[:R]->(b) SET a.q=COALESCE(a.p,0)+ABS(-2)*3,b.q=COALESCE(b.p,0)+6");
-    let props = Props::from([((VId(2), P), CanonicalScalar::Int(20))]);
+    let props = Props::from([((VId(2), P), CanonicalScalar::Int(20).into())]);
     let edges = [
         (VId(1), R, VId(2)),
         (VId(1), R, VId(2)),

@@ -10,7 +10,7 @@ use fgdb_beacon::expansion::ExpansionSpec;
 use fgdb_beacon::read::{ReadError as BeaconReadError, Rows, Search};
 use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery};
 use fgdb_delta_types::RelationId;
-use fgdb_types::QueryCx;
+use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, Error as WardenError, LimitDimension};
 use std::cell::RefCell;
 
@@ -67,6 +67,37 @@ impl<V: Vfs + Clone> Database<V> {
         query: Search<'_>,
         clock: impl FnMut() -> u64,
     ) -> Result<Rows, BeaconReadError<ReadError, QueryError>> {
+        self.beacon_search_filtered_authorized(
+            cx,
+            authority,
+            token,
+            branch,
+            options,
+            query,
+            |_| true,
+            clock,
+        )
+    }
+
+    /// Apply a stable result predicate inside the already capability-admitted
+    /// corpus, before source candidate limits and final top-k. It receives no
+    /// hidden IDs and cannot grant authority, unmask properties, or alter the
+    /// corpus statistics. Rejected visible objects still consume source/node
+    /// admission and can route ANN. This host callback must be bounded, pure
+    /// computation over IDs; data-dependent sets must use the same selected cut.
+    /// All existing signed/native ceilings and final live checks remain active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn beacon_search_filtered_authorized(
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        options: &Options,
+        query: Search<'_>,
+        eligible: impl Fn(VId) -> bool,
+        clock: impl FnMut() -> u64,
+    ) -> Result<Rows, BeaconReadError<ReadError, QueryError>> {
         // Unwrap only the selected native lane so the shared delivery gate
         // charges actual hit rows, not one enum wrapper or a duplicated copy.
         match query {
@@ -78,6 +109,7 @@ impl<V: Vfs + Clone> Database<V> {
                 branch,
                 options,
                 query,
+                eligible,
                 clock,
                 |rows| match rows {
                     Rows::Text(rows) => Ok(rows),
@@ -93,6 +125,7 @@ impl<V: Vfs + Clone> Database<V> {
                 branch,
                 options,
                 query,
+                eligible,
                 clock,
                 |rows| match rows {
                     Rows::Vector(rows) => Ok(rows),
@@ -110,6 +143,7 @@ impl<V: Vfs + Clone> Database<V> {
                 branch,
                 options,
                 query,
+                eligible,
                 clock,
                 |rows| match rows {
                     Rows::Hybrid(rows) => Ok(rows),
@@ -155,6 +189,38 @@ impl<V: Vfs + Clone> Database<V> {
         expansion: ExpansionSpec<'_, RelationId>,
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphHybridHit>, BeaconReadError<ReadError, QueryError>> {
+        self.beacon_search_graph_filtered_authorized(
+            cx,
+            authority,
+            token,
+            branch,
+            options,
+            query,
+            expansion,
+            |_| true,
+            clock,
+        )
+    }
+
+    /// Governed endpoint filtering before graph, vector and text candidate
+    /// limits. Rejected visible endpoints remain traversable; hidden vertices
+    /// and forbidden relations never enter the graph or the predicate. Result
+    /// filtering cannot weaken original-label predicates, property masks, node
+    /// charges, or the single live permit's final-delivery check. The host must
+    /// supply a stable bounded ID predicate, not a second authorization layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn beacon_search_graph_filtered_authorized(
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: impl Fn(VId) -> bool,
+        clock: impl FnMut() -> u64,
+    ) -> Result<Vec<GraphHybridHit>, BeaconReadError<ReadError, QueryError>> {
         authorized_with_errors(
             self,
             cx,
@@ -177,6 +243,7 @@ impl<V: Vfs + Clone> Database<V> {
                     live.checkpoint()?;
                     let units =
                         u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+                    live.settle()?;
                     let now = (live.clock)();
                     let charged = live.permit.charge_work_at(now, units);
                     charged.map_err(|error| live.refusal(error))
@@ -188,7 +255,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let polled = execution.borrow_mut().poll();
                     polled.map_err(|error| work.borrow_mut().refuse(error))
                 };
-                let result = beacon::graph::evaluate(
+                let result = beacon::graph::evaluate_filtered(
                     snapshot,
                     at,
                     options,
@@ -209,11 +276,95 @@ impl<V: Vfs + Clone> Database<V> {
                     |label| scope.allows_label(label),
                     |key| scope.allows_property(key),
                     |relation| scope.allows_relation(relation),
+                    || Ok(()),
+                    eligible,
                 );
                 work.into_inner().finish::<ReadError, _>(result)
             },
         )
     }
+}
+
+/// A `CALL hybrid.search` stage under the capability: exactly the corpus of
+/// [`Database::beacon_search_graph_authorized`]. Original-label predicates
+/// admit vertices before projection, property masks precede BM25 statistics
+/// and vector validation, and only allowed relations between admitted
+/// vertices carry the graph lane (FG-INV-20: security applies before
+/// expansion, never as a post-filter). Work and node admission spend this
+/// read's own live permit; hidden history is polled without signed charges.
+/// The rows are intermediate: only the statement's final rows are delivered.
+pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
+    snapshot: &crate::Snapshot,
+    at: fgdb_types::CommitSeq,
+    call: &fgdb_gql::PreparedProcedureCall,
+    arguments: &[fgdb_gql::algebra::GraphValue],
+    scope: &super::PlannerPredicates,
+    execution: &RefCell<super::Execution<'_, '_, Clock>>,
+    remaining: fgdb_gql::GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    fgdb_gql::GqlQueryError<crate::GqlError, QueryError>,
+> {
+    use beacon::procedure::{HybridSearch, failure, refuse};
+    let (search, eligible) =
+        HybridSearch::bind_snapshot_filtered(call, arguments, at, remaining).map_err(refuse)?;
+    let spent = core::cell::Cell::new(0_u64);
+    let admitted = core::cell::Cell::new(0_u64);
+    let work = RefCell::new(Meter::new(
+        search.options().policy.max_work_units,
+        |units| {
+            spent.set(spent.get().saturating_add(units as u64));
+            let mut live = execution.borrow_mut();
+            live.checkpoint()?;
+            let units = u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+            live.settle()?;
+            let now = (live.clock)();
+            let charged = live.permit.charge_work_at(now, units);
+            charged.map_err(|error| live.refusal(error))
+        },
+    ));
+    let mut poll = || {
+        let polled = execution.borrow_mut().poll();
+        polled.map_err(|error| work.borrow_mut().refuse(error))
+    };
+    let result = search.execute_filtered(
+        eligible,
+        remaining,
+        snapshot,
+        at,
+        &work,
+        beacon::Scan::Unmetered(&mut poll),
+        |row| {
+            if !scope.allows_vertex(&row.labels) {
+                return Ok(false);
+            }
+            execution
+                .borrow_mut()
+                .node()
+                .map_err(|error| work.borrow_mut().refuse(error))?;
+            admitted.set(admitted.get() + 1);
+            Ok(true)
+        },
+        |label| scope.allows_label(label),
+        |key| scope.allows_property(key),
+        |relation| scope.allows_relation(relation),
+    );
+    let (hits, filter_entries) = work
+        .into_inner()
+        .finish::<ReadError, _>(result)
+        .map_err(failure)?;
+    let value = search.rows(hits);
+    Ok(fgdb_gql::GqlQueryExecution {
+        rows: fgdb_gql::GqlExecutionStats {
+            snapshot_records: admitted.get(),
+            result_rows: value.len() as u64,
+        },
+        evaluator: fgdb_gql::GlaExecutionStats {
+            work_units: spent.get(),
+            scratch_entries: filter_entries + value.len() as u64,
+        },
+        value,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -225,6 +376,7 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     branch: &str,
     options: &Options,
     query: Search<'_>,
+    eligible: impl Fn(VId) -> bool,
     clock: Clock,
     unpack: fn(Rows) -> Result<Vec<Row>, BeaconError>,
 ) -> Result<Vec<Row>, Error> {
@@ -250,6 +402,7 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 live.checkpoint()?;
                 let units =
                     u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+                live.settle()?;
                 let now = (live.clock)();
                 let charged = live.permit.charge_work_at(now, units);
                 charged.map_err(|error| live.refusal(error))
@@ -260,7 +413,7 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 let polled = execution.borrow_mut().poll();
                 polled.map_err(|error| work.borrow_mut().refuse(error))
             };
-            let result = beacon::evaluate(
+            let result = beacon::evaluate_filtered(
                 snapshot,
                 at,
                 options,
@@ -279,6 +432,7 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 },
                 |label| scope.allows_label(label),
                 |key| scope.allows_property(key),
+                eligible,
             );
             let rows = work.into_inner().finish::<ReadError, _>(result)?;
             unpack(rows).map_err(Error::Index)
@@ -438,6 +592,249 @@ mod graph_tests {
                     .unwrap(),
                 "the hidden graph must change an unscoped query, not be an inert fixture",
             );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    fn filtered_options() -> Options {
+        let mut options = Options::text(PropertyKeyId(1));
+        options.projection.vector = vec![PropertyKeyId(2)];
+        options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+        options
+    }
+
+    fn filtered_query() -> GraphHybridQuery<'static> {
+        GraphHybridQuery {
+            retrieval: ExactHybridQuery {
+                vector: &[0.0],
+                text: "graph",
+                k: 1,
+                vector_candidates: 1,
+                text_candidates: 1,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            },
+            graph_candidates: 1,
+            graph_weight: 100,
+        }
+    }
+
+    fn filtered_expansion() -> ExpansionSpec<'static, RelationId> {
+        ExpansionSpec {
+            seeds: &[VId(1)],
+            relation: None,
+            direction: ExpansionDirection::Outgoing,
+            max_hops: 2,
+            include_seeds: false,
+            limits: ExpansionLimits::default(),
+        }
+    }
+
+    fn grant() -> Grant {
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 3,
+                max_work: 1_000_000,
+                max_rows: 1,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([RelationId(1)]);
+        grant.properties = Scope::only([PropertyKeyId(1), PropertyKeyId(2)]);
+        grant
+    }
+
+    #[test]
+    fn filtered_authorized_lanes_and_graph_match_the_physically_visible_corpus() {
+        let ((), report) = run_async_under_lab(0xbeac_3301, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut full = graph(&c.commit(), true).await;
+            let mut clean = graph(&c.commit(), false).await;
+            for db in [&mut full, &mut clean] {
+                let mut edge = WriteBatch::new(RelationId(1));
+                edge.add_edge(EId(5), VId(2), VId(3), vec![]);
+                db.write(&c.commit(), edge).await.unwrap();
+            }
+            let authority = Authority::new(
+                AuthKey::from_seed(3301),
+                NS,
+                "filtered-host",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
+            let token = authority.issue_at(&grant(), 100).unwrap();
+            let eligible = |id| {
+                assert_ne!(id, VId(90), "a result predicate must never see hidden IDs");
+                id == VId(3)
+            };
+            let options = filtered_options();
+            for query in [
+                Search::Text {
+                    query: "graph",
+                    k: 1,
+                    mode: TextMatch::Any,
+                },
+                Search::Vector {
+                    query: &[0.0],
+                    k: 1,
+                    mode: VectorSearch::Exact,
+                },
+                Search::Hybrid(filtered_query().retrieval),
+            ] {
+                let actual = full
+                    .beacon_search_filtered_authorized(
+                        &c.query(),
+                        &authority,
+                        &token,
+                        "main",
+                        &options,
+                        query,
+                        eligible,
+                        || 100,
+                    )
+                    .unwrap();
+                let expected = clean
+                    .beacon_search_filtered(&c.query(), &options, query, eligible)
+                    .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), 1);
+            }
+            let actual = full
+                .beacon_search_graph_filtered_authorized(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                    || 100,
+                )
+                .unwrap();
+            let expected = clean
+                .beacon_search_graph_filtered(
+                    &c.query(),
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual[0].id, VId(3));
+            assert_eq!(actual[0].graph_hops, Some(2));
+            assert_eq!(actual[0].graph_rank.unwrap().get(), 1);
+            assert_eq!(actual[0].vector_rank.unwrap().get(), 1);
+            assert_eq!(actual[0].text_rank.unwrap().get(), 1);
+            assert_eq!(actual[0].score.numerator(), 102);
+            assert_eq!(actual[0].score.denominator(), 61);
+
+            let mut masked_grant = grant();
+            masked_grant.properties = Scope::only([PropertyKeyId(1)]);
+            let masked = authority.issue_at(&masked_grant, 100).unwrap();
+            let hits = full
+                .beacon_search_graph_filtered_authorized(
+                    &c.query(),
+                    &authority,
+                    &masked,
+                    "main",
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(hits[0].vector_rank, None);
+            assert_eq!(hits[0].vector_distance, None);
+            assert_eq!(hits[0].text_rank.unwrap().get(), 1);
+            assert_eq!(hits[0].graph_hops, Some(2));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn filtering_cannot_bypass_scope_node_admission_or_final_expiry() {
+        let ((), report) = run_async_under_lab(0xbeac_3302, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let full = graph(&c.commit(), true).await;
+            let authority = Authority::new(
+                AuthKey::from_seed(3302),
+                NS,
+                "filtered-host",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
+            let token = authority.issue_at(&grant(), 100).unwrap();
+            let observed = std::cell::Cell::new(false);
+            let result = full.beacon_search_graph_filtered_authorized(
+                &c.query(),
+                &authority,
+                &token,
+                "wrong-branch",
+                &filtered_options(),
+                filtered_query(),
+                filtered_expansion(),
+                |_| {
+                    observed.set(true);
+                    true
+                },
+                || 100,
+            );
+            assert!(matches!(
+                result,
+                Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))
+            ));
+            assert!(!observed.get());
+
+            let mut limited_grant = grant();
+            limited_grant.limits.max_nodes = 2;
+            let limited = authority.issue_at(&limited_grant, 100).unwrap();
+            let result = full.beacon_search_filtered_authorized(
+                &c.query(),
+                &authority,
+                &limited,
+                "main",
+                &filtered_options(),
+                Search::Hybrid(filtered_query().retrieval),
+                |_| false,
+                || 100,
+            );
+            assert!(matches!(
+                result,
+                Err(BeaconReadError::Interrupted(QueryError::Authorization(
+                    WardenError::LimitExceeded(LimitDimension::Nodes)
+                )))
+            ));
+
+            for accept in [false, true] {
+                let now = std::cell::Cell::new(100_u64);
+                let result = full.beacon_search_graph_filtered_authorized(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &filtered_options(),
+                    filtered_query(),
+                    filtered_expansion(),
+                    |_| {
+                        now.set(1001);
+                        accept
+                    },
+                    || now.get(),
+                );
+                assert_eq!(now.get(), 1001, "expiry must happen during retrieval");
+                assert!(matches!(
+                    result,
+                    Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))
+                ));
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

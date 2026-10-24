@@ -8,6 +8,18 @@ use fgdb_gql::scan_stream::ScanSortTail;
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
 use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 
+#[path = "buffered_order.rs"]
+mod buffered;
+pub use buffered::PreparedBufferedOrder;
+#[path = "binary.rs"]
+mod binary;
+#[path = "cross.rs"]
+mod cross;
+#[path = "relational_join.rs"]
+mod relational_join;
+#[path = "staged.rs"]
+mod staged;
+
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {
         // These are PRIVATE input occurrences. The original output allowance
@@ -18,6 +30,32 @@ fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
         },
         evaluator: policy.evaluator,
     }
+}
+
+// All sources, including the native singleton, enter the same physical
+// execution contract before reserving a scratch writer or evaluating a row.
+fn validate_spill_limits(
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_sort_work: u64,
+) -> Result<()> {
+    if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
+        return Err(SpillError::InvalidLimits.into());
+    }
+    if max_runs == 0 {
+        return Err(NativeSpoolError::SortRunLimit {
+            required: 1,
+            limit: 0,
+        });
+    }
+    if max_sort_work == 0 {
+        return Err(NativeSpoolError::SortWorkLimit {
+            attempted: 1,
+            limit: 0,
+        });
+    }
+    Ok(())
 }
 
 fn open<'q>(
@@ -63,12 +101,12 @@ fn open<'q>(
         cx.with_restriction(|| cx.checkpoint())
             .map_err(|e| QueryError::EdgeStream(GqlQueryError::Interrupted(e)))?;
         (
-            ScanCursor::Edge(EdgeScanCursor::new(
+            ScanCursor::Edge(Box::new(EdgeScanCursor::new(
                 source,
                 plan,
                 input_policy(policy, max_input_rows),
                 move || cx.with_restriction(|| cx.checkpoint()),
-            )),
+            ))),
             tail,
         )
     } else {
@@ -100,17 +138,21 @@ impl PreparedNativeRead {
     /// property-first projections, explicit direction/null placement, implicit
     /// canonical whole-row ordering, predicates and supported EXISTS probes use
     /// the ordinary collectors and pinned sources. No synthetic identity column
-    /// changes DISTINCT, ties or the public schema. DISTINCT compares complete
-    /// canonical rows after sorting and BEFORE pagination; it retains only the
-    /// previous unique frame, not an input-sized seen-set. Equal ORDER BY keys
+    /// changes DISTINCT, ties or the public schema. Compiler-owned hidden
+    /// ORDER BY cells remain in the evaluation row through sorting and paging,
+    /// then the final writer retains the visible prefix without re-encoding its
+    /// values. Hidden cells are never admitted under DISTINCT.
+    /// DISTINCT compares complete canonical rows after sorting and BEFORE
+    /// pagination; it retains only the previous unique frame, not an input-sized
+    /// seen-set. Equal ORDER BY keys
     /// alone never collapse rows. Edge-rooted fixed-hop chains, branches and
     /// identity closures retain the native indexed join traversal, edge/path
     /// values and property predicates. Parallel edges and both undirected
     /// orientations remain distinct input occurrences; only explicit DISTINCT
     /// can collapse equal complete output rows. Traversal state is proportional
     /// to the admitted fixed hop count, not the number of matches.
-    /// Relational/aggregate plans, optional/variable-length joins, hidden sort
-    /// columns and unsupported physical instructions refuse. There is no fallback.
+    /// Relational/aggregate plans, optional/variable-length joins and
+    /// unsupported physical instructions refuse. There is no fallback.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
     /// future borrows ONLY cx and the two scratch files; writer/template/params
@@ -136,6 +178,9 @@ impl PreparedNativeRead {
     /// sort_into documents run_rows/max_runs/page_bytes and minimum headroom.
     /// DISTINCT additionally retains one pool-charged maximum-row frame; its
     /// byte comparisons checkpoint in at most 4 KiB chunks under max_sort_work.
+    /// Hidden-prefix framing and writes spend that same allowance, borrowing the
+    /// already charged input frame and existing output page instead of copying
+    /// another maximum-size row. The complete hidden tail is validated first.
     /// One native row plus its canonical encoding and the decoded source remain
     /// outside the spill pool. This is not a Warden grant, durable result, or a
     /// claim that every GQL operator or the underlying database is out-of-core.
@@ -157,8 +202,8 @@ impl PreparedNativeRead {
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, V, A, B>
     where
         V: Vfs + Clone,
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = database
             .read_session()
@@ -167,7 +212,7 @@ impl PreparedNativeRead {
         async move {
             let (columns, cursor, tail) =
                 opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(
+            ordered_input(
                 cx,
                 columns,
                 cursor,
@@ -204,14 +249,14 @@ impl PreparedNativeRead {
         max_sort_work: u64,
     ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, A, B>
     where
-        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
-        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'q,
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = open(self, view, cx, params, policy, max_input_rows);
         async move {
             let (columns, cursor, tail) =
                 opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            evaluate(
+            ordered_input(
                 cx,
                 columns,
                 cursor,
@@ -231,7 +276,9 @@ impl PreparedNativeRead {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn evaluate<I, A, B>(
+// Scoped sources enter this same pipeline after the host has reserved their
+// signed physical allowance. They retain their native statistics and errors.
+pub(crate) async fn ordered_input<I, A, B>(
     cx: &QueryCx,
     columns: Vec<String>,
     cursor: I,
@@ -247,45 +294,50 @@ async fn evaluate<I, A, B>(
 ) -> Result<(NativeResultSpool, u64)>
 where
     I: SpoolInput,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     cx.with_restriction(|| cx.checkpoint())
         .map_err(SpillError::Interrupted)?;
-    validate_order(tail.order(), columns.len())?;
-    if run_rows == 0 || page_bytes == 0 || page_bytes > 64 * 1024 {
-        return Err(SpillError::InvalidLimits.into());
+    if columns.len() != tail.visible_width() {
+        return Err(SpillError::InvalidRun.into());
     }
-    if max_runs == 0 {
-        return Err(NativeSpoolError::SortRunLimit {
-            required: 1,
-            limit: 0,
-        });
-    }
-    if max_sort_work == 0 {
-        return Err(NativeSpoolError::SortWorkLimit {
-            attempted: 1,
-            limit: 0,
-        });
-    }
-    let input = drain(cx, columns, cursor, destination, page_bytes, max_row_bytes).await?;
+    validate_order(tail.order(), tail.evaluation_width())?;
+    validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
+    let mut work = Work {
+        cx,
+        used: 0,
+        limit: max_sort_work,
+    };
+    let input = drain(
+        cx,
+        columns,
+        tail.evaluation_width(),
+        cursor,
+        destination,
+        page_bytes,
+        max_row_bytes,
+        Some(&mut work),
+    )
+    .await?;
+    // The bound terminal operator owns its comparison law. A synthesized
+    // canonical key vector can equal an explicit ASC NULLS FIRST vector;
+    // never infer language ordering from that vector or from observed rows.
     let (sorted, used) = input
-        .sort_into(
+        .sort_query_continuing(
             cx,
             destination,
             scratch,
             tail.order(),
+            tail.has_explicit_order(),
             run_rows,
             max_runs,
             page_bytes,
             max_sort_work,
+            work.used,
         )
         .await?;
-    let mut work = Work {
-        cx,
-        used,
-        limit: max_sort_work,
-    };
+    work.used = used;
     let result = window(
         &sorted,
         scratch,
@@ -299,11 +351,55 @@ where
     Ok((result, work.used))
 }
 
+trait Window: Sync {
+    fn evaluation_width(&self) -> usize;
+    fn visible_width(&self) -> usize;
+    fn distinct(&self) -> bool;
+    fn offset(&self) -> u64;
+    fn count(&self) -> Option<u64>;
+}
+
+impl Window for ScanSortTail {
+    fn evaluation_width(&self) -> usize {
+        ScanSortTail::evaluation_width(self)
+    }
+    fn visible_width(&self) -> usize {
+        ScanSortTail::visible_width(self)
+    }
+    fn distinct(&self) -> bool {
+        ScanSortTail::distinct(self)
+    }
+    fn offset(&self) -> u64 {
+        ScanSortTail::offset(self)
+    }
+    fn count(&self) -> Option<u64> {
+        ScanSortTail::count(self)
+    }
+}
+
+impl Window for fgdb_gql::spill_set::SpillSetStage {
+    fn evaluation_width(&self) -> usize {
+        self.columns().len()
+    }
+    fn visible_width(&self) -> usize {
+        self.columns().len()
+    }
+    fn distinct(&self) -> bool {
+        fgdb_gql::spill_set::SpillSetStage::distinct(self)
+    }
+    fn offset(&self) -> u64 {
+        fgdb_gql::spill_set::SpillSetStage::offset(self)
+    }
+    fn count(&self) -> Option<u64> {
+        fgdb_gql::spill_set::SpillSetStage::count(self)
+    }
+}
+
 async fn window<A, B>(
     sorted: &NativeResultSpool,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
-    tail: &ScanSortTail,
+    tail: &impl Window,
     budget: GqlExecutionBudget,
     page_bytes: usize,
     work: &mut Work<'_>,
@@ -312,6 +408,12 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
 {
+    if sorted.encoded_columns != tail.evaluation_width()
+        || sorted.columns.len() != tail.visible_width()
+        || (tail.distinct() && tail.visible_width() != tail.evaluation_width())
+    {
+        return Err(SpillError::InvalidRun.into());
+    }
     let mut reader = sorted.reader(scratch);
     let mut writer = destination.paged_writer(work.cx, page_bytes)?;
     let mut skip = tail.offset();
@@ -335,8 +437,13 @@ where
             budget
                 .check(GqlBudgetDimension::ResultRows, next)
                 .map_err(|e| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(e))))?;
-            write_row(&mut writer, row.as_ref(), work).await?;
-            largest = largest.max(row.len());
+            let bytes = if tail.visible_width() == tail.evaluation_width() {
+                write_row(&mut writer, row.as_ref(), work).await?;
+                row.len()
+            } else {
+                write_visible_row(&mut writer, row.as_ref(), tail, work).await?
+            };
+            largest = largest.max(bytes);
             selected = next;
         }
         if tail.distinct() {
@@ -356,6 +463,7 @@ where
     let run = writer.finish(work.cx).await?;
     Ok(NativeResultSpool {
         columns: Arc::clone(&sorted.columns),
+        encoded_columns: tail.visible_width(),
         snapshot: sorted.snapshot,
         kind: sorted.kind,
         rows: GqlExecutionStats {
@@ -366,6 +474,34 @@ where
         max_row_bytes: largest,
         run,
     })
+}
+
+// The complete row has already participated in order and window selection.
+// Reframe the original visible cells directly into the charged page writer;
+// no typed decoding, scalar conversion or second row allocation is involved.
+async fn write_visible_row<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+    writer: &mut PagedSpillWriter<'_, F>,
+    row: &[u8],
+    tail: &impl Window,
+    work: &mut Work<'_>,
+) -> Result<usize> {
+    let frames =
+        canonical::visible_prefix(row, tail.evaluation_width(), tail.visible_width(), work)?;
+    let header = canonical::ROW.len() + 8;
+    let bytes = header
+        .checked_add(frames.len())
+        .ok_or(SpillError::SizeOverflow)?;
+    let len = u64::try_from(bytes).map_err(|_| SpillError::SizeOverflow)?;
+    let width = u64::try_from(tail.visible_width()).map_err(|_| SpillError::SizeOverflow)?;
+    work.charge(header)?;
+    writer.write(work.cx, &len.to_be_bytes()).await?;
+    writer.write(work.cx, canonical::ROW).await?;
+    writer.write(work.cx, &width.to_be_bytes()).await?;
+    for chunk in frames.chunks(4096) {
+        work.charge(chunk.len())?;
+        writer.write(work.cx, chunk).await?;
+    }
+    Ok(bytes)
 }
 
 // Inputs have authenticated and passed the native structural frame validator.

@@ -5,8 +5,11 @@
 #[path = "native/session.rs"]
 mod session;
 pub use session::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 use super::*;
@@ -34,17 +37,54 @@ fn rows_of(
     }
 }
 
+// Engine identities are not masked, so a capability cannot observe them
+// through id()/elementId() (fgdb-j687q, owner ruling 2026-09-30). Checked on
+// the selected statement text before preparation calls the catalog.
+fn refuse_element_identity(statement: &str) -> Result<(), QueryError> {
+    if fgdb_gql::reads_element_identity(statement) {
+        return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
+    }
+    Ok(())
+}
+
+// EXPLAIN on an authorized surface (fgdb-ooiik). The listing derives from the
+// statement text, its parameters and the caller's catalog, never from records,
+// so nothing hidden from the capability can change it. The certificate form
+// binds the snapshot sequence, which hidden commits advance, so it refuses.
+// Invalidation is checked after preparation even when preparation fails.
+fn explain_authorized(
+    explain: Result<(&str, bool), QueryError>,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    checkpoint: impl FnOnce() -> Result<(), QueryError>,
+) -> Result<QueryResult, QueryError> {
+    let (statement, certificate) = explain?;
+    if certificate {
+        return Err(QueryError::Unsupported {
+            diagnostics: vec![
+                "EXPLAIN (CERTIFICATE) is not available under a capability".to_owned(),
+            ],
+        });
+    }
+    let prepared = PreparedNativeRead::prepare(statement, params, resolver);
+    checkpoint()?;
+    let listing = crate::query::explain::explain_rows(&prepared?);
+    crate::query::explain::explain_result(listing, None)
+}
+
 fn native_at<Clock: FnMut() -> u64>(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<QueryResult, QueryError> {
     execution.borrow_mut().checkpoint()?;
-    let result = (|| match prepared {
+    // Privileged preparation grants no exception to the text ingress rule.
+    // Keep refusal inside the completion check and before binding or reads.
+    let result = refuse_element_identity(prepared.statement()).and_then(|()| match prepared {
         PreparedNativeRead::Pattern(prepared) => {
             let query = prepared
                 .bind_parameters(params)
@@ -149,7 +189,7 @@ fn native_at<Clock: FnMut() -> u64>(
             )?;
             Ok(values(prepared.columns().to_vec(), rows))
         }
-    })();
+    });
     // Binding and result-shaping are inside the live boundary too. A late
     // credential invalidation wins before returning even a binding error.
     execution.borrow_mut().checkpoint()?;
@@ -176,9 +216,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// consumed there, while all other arguments retain native validation.
     ///
     /// Keep the issuer, raw Database, catalog mapping and monotone clock in the
-    /// trusted host. Ordinary Database methods are still privileged. Writes,
-    /// EXPLAIN/certified replay and unsupported classes refuse; this adds no
-    /// server session, streaming delivery, spill or physical noninterference.
+    /// trusted host. Ordinary Database methods are still privileged. EXPLAIN
+    /// lists the text-derived plan; writes, EXPLAIN (CERTIFICATE), certified
+    /// replay and unsupported classes refuse. This adds no server session,
+    /// streaming delivery, spill or physical noninterference.
     #[allow(clippy::too_many_arguments)]
     pub fn query_authorized(
         &self,
@@ -211,7 +252,16 @@ impl<V: Vfs + Clone> Database<V> {
                 if selected.branch().is_some_and(|name| name != branch) {
                     return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
                 }
+                refuse_element_identity(selected.statement())?;
                 execution.borrow_mut().checkpoint()?;
+                if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
+                    return rows_of(
+                        explain_authorized(explain, selected.parameters(), resolver, || {
+                            execution.borrow_mut().checkpoint()
+                        })?,
+                        &mut columns,
+                    );
+                }
                 let prepared = PreparedNativeRead::prepare(
                     selected.statement(),
                     selected.parameters(),
@@ -280,5 +330,188 @@ impl PreparedNativeRead {
             },
         )?;
         Ok(QueryResult::Rows { columns, rows })
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::{LabelId, SchemaEpoch};
+    use fgdb_gql::{GraphSymbol, GraphSymbolKind};
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    use fgdb_warden::{Error as AuthorizationError, Grant, QueryLimits, Scope};
+
+    const BRANCH: &str = "prepared-identity";
+    const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x6d; 32]);
+
+    fn grant(nodes: u64) -> Grant {
+        let mut grant = Grant::read_only(
+            BRANCH,
+            1000,
+            QueryLimits {
+                max_nodes: nodes,
+                max_work: 1_000_000,
+                max_rows: nodes,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.properties = Scope::only([PropertyKeyId(1)]);
+        grant
+    }
+    fn policy() -> GqlQueryPolicy {
+        GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000)
+    }
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, "p" | "id") => {
+                Some(GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            _ => None,
+        }
+    }
+    async fn database(cx: &fgdb_types::CommitCx) -> Database<crate::MemVfs> {
+        let mut db =
+            Database::open_memory(cx, crate::DatabaseKeys::new([0x37; 32], NS, [0x95; 32]))
+                .await
+                .unwrap();
+        let mut batch = crate::WriteBatch::new(RelationId(1));
+        for (id, label, value) in [(1, 1, 10), (2, 99, 20), (3, 1, 30)] {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(label)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        db.write(cx, batch).await.unwrap();
+        db
+    }
+
+    #[test]
+    fn privileged_templates_cannot_bypass_identity_admission_even_without_source_budget() {
+        let ((), report) = run_async_under_lab(0x5ec0_6901, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let authority =
+                Authority::new(AuthKey::from_seed(901), NS, "graph", SchemaEpoch(0), 1).unwrap();
+            let token = authority.issue_at(&grant(0), 100).unwrap();
+            let params = GqlParameters::new();
+            let invalid = GqlParameters::new().with_int64("unexpected", 1).unwrap();
+            for text in [
+                "MATCH (n:L) RETURN id(n) AS key",
+                "MATCH (n:L) RETURN elementId(n) AS key",
+                "MATCH (n:L) RETURN id /* comment */ (n) AS key LIMIT 0",
+                "MATCH (n:L) WITH elementId(n) AS key RETURN key",
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN id(n) AS key",
+                "MATCH (n:L) RETURN id(n) AS key UNION ALL MATCH (m:L) RETURN id(m) AS key",
+            ] {
+                // Ordinary preparation is privileged and must remain legal.
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                for arguments in [&params, &invalid] {
+                    let result = prepared.execute_authorized(
+                        &db,
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        arguments,
+                        policy(),
+                        || 100,
+                    );
+                    assert!(
+                        matches!(
+                            result,
+                            Err(QueryError::Authorization(AuthorizationError::ScopeDenied))
+                        ),
+                        "identity template reached binding/source admission: {text}: {result:?}"
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn ordinary_aliases_properties_literals_and_live_credential_precedence_are_preserved() {
+        let ((), report) = run_async_under_lab(0x5ec0_6902, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let authority =
+                Authority::new(AuthKey::from_seed(902), NS, "graph", SchemaEpoch(0), 1).unwrap();
+            let token = authority.issue_at(&grant(1000), 100).unwrap();
+            let params = GqlParameters::new();
+            for text in [
+                "MATCH (n:L) RETURN n.p AS id",
+                "MATCH (n:L) RETURN n.id AS elementId",
+                "RETURN 'id(n)' AS text",
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                let expected = db
+                    .query_authorized(
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            &params,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap(),
+                    expected
+                );
+            }
+            let prepared =
+                PreparedNativeRead::prepare("MATCH (n:L) RETURN id(n) AS key", &params, symbols)
+                    .unwrap();
+            assert!(matches!(
+                prepared.execute_authorized(
+                    &db,
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    &params,
+                    policy(),
+                    || 1000,
+                ),
+                Err(QueryError::Authorization(AuthorizationError::Expired))
+            ));
+            assert!(authority.retire());
+            assert!(matches!(
+                prepared.execute_authorized(
+                    &db,
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    &params,
+                    policy(),
+                    || 100,
+                ),
+                Err(QueryError::Authorization(
+                    AuthorizationError::AuthorityRetired
+                ))
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

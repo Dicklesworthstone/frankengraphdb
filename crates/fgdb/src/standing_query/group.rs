@@ -11,7 +11,9 @@ use fgdb_gql::row_aggregate::definition::GroupDefinition;
 use fgdb_gql::row_aggregate::definition::operator::{
     GroupBuildError, GroupError, IncrementalGroupAggregate,
 };
-use fgdb_gql::{GraphAggregateTextSlot, PreparedGraphSetAggregate};
+use fgdb_gql::{GraphAggregateTextSlot, GraphSetColumnType, PreparedGraphSetAggregate};
+
+mod rows;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
@@ -19,6 +21,9 @@ pub(crate) struct State {
     pub(super) input: usize,
     operator: IncrementalGroupAggregate<PreparedGraphSetAggregate>,
     output: output::State<PreparedGraphSetAggregate>,
+    // Present only for an untransformed intermediate relational group. Exact
+    // terminal groups keep their existing unrestricted result representation.
+    row_output: Option<rows::State>,
     last_delta: Option<ZSet<GraphAggregateRow>>,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
@@ -65,6 +70,15 @@ impl State {
     pub(super) fn ordered_rows(&self) -> Option<&[Arc<GraphAggregateRow>]> {
         self.output.ordered_rows()
     }
+    pub(super) fn row_schema(&self) -> Option<(&[String], &[GraphSetColumnType])> {
+        self.row_output.as_ref().map(rows::State::schema)
+    }
+    pub(super) fn value_rows(&self) -> Option<&ZSet<GraphValueRow>> {
+        self.row_output.as_ref().map(rows::State::rows)
+    }
+    pub(super) fn value_delta(&self) -> Option<&ZSet<GraphValueRow>> {
+        self.row_output.as_ref().and_then(rows::State::delta)
+    }
     fn apply(
         &mut self,
         delta: &ZSet<GraphValueRow>,
@@ -76,12 +90,24 @@ impl State {
             .operator
             .prepare(delta, LIMBS, None, &mut |event| meter.charge(event))
             .map_err(group_error)?;
+        // A relational group node has no output transformation: its outer
+        // projection, filter and window are separate circuit nodes. Admission
+        // below proves that condition before allowing this row-domain sink.
+        // Convert the complete changed groups BEFORE any downstream selection.
+        let row_output = self
+            .row_output
+            .as_mut()
+            .map(|rows| rows.prepare(groups.delta(), meter))
+            .transpose()?;
         let output = self.output.prepare(groups.delta(), meter)?;
         (meter.checkpoint)()?;
-        // Raw inputs, group support, output classes/page and derivative remain
+        // Raw inputs, group support, exact output and row conversion remain
         // tentative until here. Nothing recoverably fallible follows.
         let _ = groups.commit();
         self.last_delta = Some(output.commit());
+        if let Some(row_output) = row_output {
+            row_output.commit();
+        }
         Ok(())
     }
     pub(super) fn maintain(
@@ -167,8 +193,56 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
         before: usize,
     ) -> Result<State, StandingQueryError> {
+        self.prepare_standing_group_with_rows(cx, input, definition, policy, before, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_standing_group_rows(
+        &self,
+        cx: &QueryCx,
+        input: usize,
+        definition: PreparedGraphSetAggregate,
+        policy: GqlQueryPolicy,
+        before: usize,
+        columns: &[String],
+        types: &[GraphSetColumnType],
+    ) -> Result<State, StandingQueryError> {
+        self.prepare_standing_group_with_rows(
+            cx,
+            input,
+            definition,
+            policy,
+            before,
+            Some((columns, types)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_standing_group_with_rows(
+        &self,
+        cx: &QueryCx,
+        input: usize,
+        definition: PreparedGraphSetAggregate,
+        policy: GqlQueryPolicy,
+        before: usize,
+        row_schema: Option<(&[String], &[GraphSetColumnType])>,
+    ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
+        if let Some((columns, types)) = row_schema {
+            // This is the native group_by node, not an exact terminal result
+            // recast as a row bag. Result modifiers must remain outside it.
+            if definition.has_incremental_output_transform()
+                || columns.len() != types.len()
+                || !definition
+                    .key_columns()
+                    .iter()
+                    .chain(definition.aggregate_columns())
+                    .eq(columns.iter())
+            {
+                return Err(StandingQueryError::Unsupported);
+            }
+        }
         let sources = self
             .standing_queries
             .get(..before)
@@ -221,10 +295,23 @@ impl<V: Vfs + Clone> Database<V> {
             meter
                 .charge(ZSetEvent::ScratchEntry)
                 .map_err(StandingQueryError::Maintenance)?;
+            let row_output = row_schema
+                .map(|(columns, types)| {
+                    rows::State::new(
+                        columns,
+                        types,
+                        definition.key_columns().len(),
+                        definition.aggregate_columns().len(),
+                        &mut meter,
+                    )
+                })
+                .transpose()
+                .map_err(StandingQueryError::Maintenance)?;
             let mut state = State {
                 input,
                 operator,
                 output: output::State::new(definition),
+                row_output,
                 last_delta: None,
                 policy,
                 frontier: at,
@@ -235,6 +322,9 @@ impl<V: Vfs + Clone> Database<V> {
                 .apply(rows, &mut meter)
                 .map_err(StandingQueryError::Maintenance)?;
             state.last_delta = None; // A baseline is not a committed successor.
+            if let Some(rows) = &mut state.row_output {
+                rows.clear_baseline_delta();
+            }
             state.stats = meter.stats;
             Ok(state)
         })

@@ -51,24 +51,25 @@ fn expected(
     take: u64,
 ) -> Vec<Vec<GraphAggregateValue>> {
     let mut arcs = Vec::new();
-    for (_, from, to, quantity, price) in edges(cut) {
+    for (id, from, to, quantity, price) in edges(cut) {
         let value = quantity.map(|q| i128::from(q) * i128::from(price) * i128::from(scale));
         if direction == 1 {
-            arcs.push((to, from, value));
+            arcs.push((id, to, from, value));
         } else {
-            arcs.push((from, to, value));
+            arcs.push((id, from, to, value));
             if direction == 2 && from != to {
-                arcs.push((to, from, value));
+                arcs.push((id, to, from, value));
             }
         }
     }
+    // One MATCH binds both hops under DIFFERENT EDGES.
     let mut groups = BTreeMap::<VId, Vec<Option<i128>>>::new();
-    for &(_, end, value) in &arcs {
+    for &(rid, _, end, value) in &arcs {
         if hops == 1 {
             groups.entry(end).or_default().push(value);
         } else {
-            for &(from, to, _) in &arcs {
-                if from == end {
+            for &(sid, from, to, _) in &arcs {
+                if from == end && sid != rid {
                     groups.entry(to).or_default().push(value);
                 }
             }

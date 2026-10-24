@@ -91,6 +91,7 @@ fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker 
         resource_effect_digest: digest(6),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 

@@ -48,7 +48,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let mut results = Vec::new();
             for &(text, params) in statements {
                 execution.borrow_mut().checkpoint()?;
-                let (result, rows) = text_at(
+                let ((result, _), rows) = text_at(
                     view, branch, scope, resolver, policy, execution, text, params,
                 )?;
                 // Reservation and fresh validity checks precede retention.
@@ -93,7 +93,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let mut results = Vec::new();
             for &(prepared, params) in statements {
                 execution.borrow_mut().checkpoint()?;
-                let (result, rows) = prepared_at(
+                let ((result, _), rows) = prepared_at(
                     view, branch, scope, policy, execution, &owner, prepared, params,
                 )?;
                 execution.borrow_mut().deliver(rows)?;

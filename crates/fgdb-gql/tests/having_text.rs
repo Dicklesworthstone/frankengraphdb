@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_AGGREGATE_FILTERS,
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::collections::BTreeMap;
 
 type Edge = (VId, RelationId, VId);
@@ -133,7 +133,9 @@ fn compound_filter_precedence_matches_independent_multigraph_group_and_page_orac
             for left in [None, Some(-3), Some(4)] {
                 for right in [None, Some(-3), Some(4)] {
                     let raw = [left, right];
-                    let values = raw.map(|value| value.map(CanonicalScalar::Int));
+                    let values = raw.map(|value| {
+                        value.map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)))
+                    });
                     let mut groups: BTreeMap<VId, Vec<Option<i64>>> = BTreeMap::new();
                     for &(s, _, d) in &edges {
                         let oriented = if direction == 1 {
@@ -264,6 +266,7 @@ fn scalar_and_unsigned_arguments_rebind_without_reparsing_or_catalog_reads() {
         CanonicalScalar::ucs_basic_text("other").unwrap(),
         CanonicalScalar::Null,
     ];
+    let stored = values.clone().map(CanonicalPropertyValue::from);
     let run = |query: &PreparedGraphAggregate| {
         query
             .execute_governed(
@@ -271,7 +274,7 @@ fn scalar_and_unsigned_arguments_rebind_without_reparsing_or_catalog_reads() {
                 [VId(0), VId(1), VId(2)],
                 [],
                 |_, _| Ok::<_, ()>(true),
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 wide(),
                 || Ok::<_, ()>(()),
             )
@@ -475,7 +478,8 @@ fn having_uses_exact_shared_limits_and_every_interruption_checkpoint() {
         CanonicalScalar::Int(2),
         CanonicalScalar::Null,
         CanonicalScalar::Int(-1),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let run = |policy| {
         query.execute_governed(
             4,
@@ -548,7 +552,7 @@ fn decisive_having_never_masks_input_errors_or_numeric_domain_refusals() {
         let query = prepare(&format!(
             "MATCH (a) RETURN MIN(a.p) AS least {suffix} LIMIT 0"
         ));
-        let bad = CanonicalScalar::Bool(true);
+        let bad = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
         let result = query.execute_governed(
             1,
             [VId(1)],
@@ -569,7 +573,7 @@ fn decisive_having_never_masks_input_errors_or_numeric_domain_refusals() {
             [VId(1)],
             [],
             |_, _| Ok(true),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("unreadable input"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("unreadable input"),
             wide(),
             || Ok::<_, ()>(()),
         );
@@ -584,7 +588,9 @@ fn decisive_having_never_masks_input_errors_or_numeric_domain_refusals() {
 
 #[test]
 fn full_width_counts_and_sums_reach_having_without_narrowing_or_child_bags() {
-    let mut text = "MATCH (a)".to_owned();
+    // 63 self-loop atoms over two parallel edges: 2^63 homomorphisms, which
+    // REPEATABLE ELEMENTS counts (DIFFERENT EDGES would admit none; fgdb-vexfr).
+    let mut text = "MATCH REPEATABLE ELEMENTS (a)".to_owned();
     for _ in 0..63 {
         text.push_str("-[:R]->(a)");
     }
@@ -608,7 +614,7 @@ fn full_width_counts_and_sums_reach_having_without_narrowing_or_child_bags() {
     let query = prepare(
         "MATCH (a)-[:R]->(b) RETURN SUM(b.p) AS total,COUNT(*) AS n HAVING total>n AND total>9223372036854775807",
     );
-    let value = CanonicalScalar::Int(i64::MAX);
+    let value = CanonicalPropertyValue::from(CanonicalScalar::Int(i64::MAX));
     let result = query
         .execute_governed(
             2,

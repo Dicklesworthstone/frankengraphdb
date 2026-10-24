@@ -14,7 +14,8 @@ use fgdb_gql::{
     GraphWriteProgramPolicy,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
+    CanonicalTime, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId,
     PurposeContexts, QueryCx, VId,
 };
 use std::fmt::Debug;
@@ -147,7 +148,7 @@ fn inspect(
                 (Some(row), Some(value)) => {
                     row.vid == target
                         && row.labels == [TIMESTAMP]
-                        && row.props == [(P, value.clone())]
+                        && row.props == [(P, value.clone().into())]
                 }
                 _ => false,
             },
@@ -162,7 +163,7 @@ fn inspect(
             &baseline,
             |row| {
                 row.as_ref().is_some_and(|row| {
-                    row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99))]
+                    row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99).into())]
                 })
             },
             failures,
@@ -464,11 +465,11 @@ fn native_preparation_refuses_every_zoned_scalar_before_noops_and_netfold() {
             let original_edges = db.edges().unwrap();
             assert_eq!(
                 db.vertex(TARGET_ID).unwrap().unwrap().props,
-                [(P, offset.clone())]
+                [(P, offset.clone().into())]
             );
             assert_eq!(
                 db.edge(EId(1)).unwrap().unwrap().props,
-                [(P, offset.clone())]
+                [(P, offset.clone().into())]
             );
             for &(name, build) in cases {
                 let phase = format!("prepare/{mode}/{name}");
@@ -654,6 +655,190 @@ fn native_preparation_rejects_unknown_oid_with_other_valid_resolver() {
                 &mut failures,
             );
             assert!(failures.is_empty(), "{failures:?}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// One value of each kind that needs scalar profile version 2.
+fn version_2_values() -> [CanonicalScalar; 5] {
+    let date = CanonicalDate::from_civil(2015, 7, 21).unwrap();
+    let time = CanonicalLocalTime::from_hms_nano(21, 40, 32, 142_000_000).unwrap();
+    [
+        CanonicalScalar::Date(date),
+        CanonicalScalar::LocalTime(time),
+        CanonicalScalar::Time(CanonicalTime::new(time, 3_600).unwrap()),
+        CanonicalScalar::LocalDateTime(CanonicalLocalDateTime::new(date, time)),
+        CanonicalScalar::Duration(CanonicalDuration::new(14, -3, 5).unwrap()),
+    ]
+}
+
+fn counted(db: &Database, cx: &QueryCx, text: &str, value: &CanonicalScalar) -> QueryResult {
+    let params = GqlParameters::new()
+        .with_scalar("v", value.clone())
+        .unwrap();
+    db.query(cx, text, &params, symbols, policy()).unwrap()
+}
+
+fn count(value: u64) -> QueryResult {
+    QueryResult::Rows {
+        columns: vec!["c".into()],
+        rows: vec![vec![GraphAggregateValue::Count(value)]],
+    }
+}
+
+/// What the version-2 law wrote, read back: each value natively on its
+/// vertex and edge and through GQL equality, the update's history, and `<`
+/// between durations UNKNOWN even for a stored duration that is smaller in
+/// the canonical (storage) order.
+fn check_version_2(
+    db: &Database,
+    cx: &QueryCx,
+    updated: CommitSeq,
+    frontier: CommitSeq,
+    phase: &str,
+) {
+    let values = version_2_values();
+    assert_eq!(db.frontier().unwrap(), frontier, "{phase}");
+    for (at, value) in (0u128..).zip(&values) {
+        let expected = Some(vec![(P, value.clone().into())]);
+        let vertex = db.vertex(VId(10 + at)).unwrap();
+        assert_eq!(vertex.map(|row| row.props), expected, "{phase}");
+        let edge = db.edge(EId(20 + at)).unwrap();
+        assert_eq!(edge.map(|edge| edge.props), expected, "{phase}");
+        assert_eq!(
+            counted(
+                db,
+                cx,
+                "MATCH (n:Timestamp) WHERE n.p = $v RETURN count(*) AS c",
+                value
+            ),
+            count(1),
+            "{phase}"
+        );
+    }
+    let [.., local_date_time, duration] = values;
+    let current = db.vertex(BASELINE_ID).unwrap();
+    assert_eq!(
+        current.map(|row| row.props),
+        Some(vec![(P, local_date_time.into())]),
+        "{phase}"
+    );
+    let historical = db.vertex_at(BASELINE_ID, updated).unwrap();
+    assert_eq!(
+        historical.map(|row| row.props),
+        Some(vec![(P, duration.into())]),
+        "{phase}"
+    );
+    // A parameter operand compiles to a scalar predicate, not the expression
+    // VM (whose `<` the fgdb-gql duration law covers); both share one
+    // comparator.
+    let longer = CanonicalScalar::Duration(CanonicalDuration::new(15, 0, 0).unwrap());
+    assert_eq!(
+        counted(
+            db,
+            cx,
+            "MATCH (n:Timestamp) WHERE n.p < $v RETURN count(*) AS c",
+            &longer
+        ),
+        count(0),
+        "{phase}"
+    );
+}
+
+/// fgdb-hbi8s: the temporal kinds of scalar profile version 2 are storable
+/// properties. Each commits as a vertex property and an edge property, a
+/// duration commits as a property update whose before image a later GQL SET
+/// retires, and every value reads back unchanged live, after an open or a
+/// forced rebuild, after compaction and a second open, and through a read
+/// view. The durable containers record the format their content needs; the
+/// format laws are in fgdb-delta-types canonical_encoding and the
+/// fgdb-strata patch format suites.
+#[test]
+fn version_2_temporal_properties_persist_through_recovery_and_compaction() {
+    let ((), report) = run_async_under_lab(0x209e_00da, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        for rebuilding in [false, true] {
+            let phase = if rebuilding { "rebuilding" } else { "fast" };
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-temporal-properties-{}-{phase}",
+                std::process::id()
+            ));
+            let mut db = Database::create(&commit, &dir, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(R);
+            batch.create_vertex(
+                BASELINE_ID,
+                vec![BASELINE],
+                vec![(P, CanonicalScalar::Int(99))],
+            );
+            for (at, value) in (0u128..).zip(version_2_values()) {
+                let vid = VId(10 + at);
+                batch.create_vertex(vid, vec![TIMESTAMP], vec![(P, value.clone())]);
+                batch.add_edge(EId(20 + at), vid, BASELINE_ID, vec![(P, value)]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            let [.., local_date_time, duration] = version_2_values();
+            let mut update = WriteBatch::new(R);
+            update.set_vertex_property(BASELINE_ID, P, Some(duration));
+            let updated = db.write(&commit, update).await.unwrap();
+            let params = GqlParameters::new()
+                .with_scalar("stamp", local_date_time)
+                .unwrap();
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                "MATCH (n:Baseline) SET n.p = $stamp",
+                &params,
+                symbols,
+                R,
+                GraphWriteProgramPolicy::new(policy(), 100, 100, 100),
+                |_| Err::<ElementId, _>("unexpected identity request"),
+            )
+            .await
+            .unwrap();
+            let frontier = db.frontier().unwrap();
+            check_version_2(&db, &query, updated, frontier, &format!("{phase}/live"));
+            drop(db);
+            let mut db = if rebuilding {
+                Database::open_rebuilding(&commit, &dir, keys()).await
+            } else {
+                Database::open(&commit, &dir, keys()).await
+            }
+            .unwrap();
+            check_version_2(&db, &query, updated, frontier, &format!("{phase}/reopened"));
+            db.compact(&commit).await.unwrap();
+            check_version_2(
+                &db,
+                &query,
+                updated,
+                frontier,
+                &format!("{phase}/compacted"),
+            );
+            drop(db);
+            let db = Database::open(&commit, &dir, keys()).await.unwrap();
+            check_version_2(
+                &db,
+                &query,
+                updated,
+                frontier,
+                &format!("{phase}/compacted/reopened"),
+            );
+            drop(db);
+            let view = Database::open_read_view(&commit, &dir, keys())
+                .await
+                .unwrap();
+            assert_eq!(view.frontier(), frontier, "{phase}/view");
+            for (at, value) in (0u128..).zip(version_2_values()) {
+                let expected = Some(vec![(P, value.into())]);
+                let vertex = view.vertex(VId(10 + at)).unwrap();
+                assert_eq!(vertex.map(|row| row.props), expected, "{phase}/view");
+                let edge = view.edge(EId(20 + at)).unwrap();
+                assert_eq!(edge.map(|edge| edge.props), expected, "{phase}/view");
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

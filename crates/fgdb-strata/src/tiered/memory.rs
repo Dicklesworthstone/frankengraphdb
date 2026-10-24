@@ -310,6 +310,46 @@ impl MemoryCharge {
     pub const fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// Transfer already-admitted bytes into an independent affine charge.
+    /// This neither acquires nor refunds bytes in this pool or any ancestor,
+    /// and requires no allocation. An oversized request leaves this charge
+    /// unchanged and returns None; zero and full transfers are valid.
+    ///
+    /// Each charge must outlive the allocation it owns. An operator may split
+    /// its retained output from a temporary workspace reservation, then drop
+    /// the remainder only after the temporary allocations have been freed.
+    pub fn split_off(&mut self, bytes: usize) -> Option<Self> {
+        let remaining = self.bytes.checked_sub(bytes)?;
+        let charge = Self {
+            pool: self.pool.clone(),
+            bytes,
+        };
+        self.bytes = remaining;
+        Some(charge)
+    }
+
+    /// Extend this affine reservation before growing its owned workspace.
+    /// Every ancestor is admitted through the same rollback-safe path as a
+    /// fresh reservation. Failure preserves the original charge exactly; no
+    /// allocation or reservation-list growth is needed to track the extension.
+    pub fn grow(
+        &mut self,
+        cx: &impl StorageReadCx,
+        additional_bytes: usize,
+    ) -> Result<(), MemoryError> {
+        cx.with_restriction(|| self.grow_inner(additional_bytes))
+    }
+
+    fn grow_inner(&mut self, additional_bytes: usize) -> Result<(), MemoryError> {
+        let total = self
+            .bytes
+            .checked_add(additional_bytes)
+            .ok_or(MemoryError::SizeOverflow)?;
+        self.pool.acquire(additional_bytes)?;
+        self.bytes = total;
+        Ok(())
+    }
 }
 
 impl Drop for MemoryCharge {
@@ -524,6 +564,160 @@ mod tests {
         drop(charge);
         assert_eq!(left.available(), 10);
         assert_eq!(right.available(), 10);
+    }
+
+    #[test]
+    fn growing_charges_preserve_ancestor_limits_and_refund_once() {
+        let root = MemoryPool::new(100, 10).unwrap();
+        let parent = root.child(80, 10).unwrap();
+        let leaf = parent.child(60, 0).unwrap();
+        let sibling = parent.child(60, 0).unwrap();
+        let sibling_charge = sibling.reserve_inner(20).unwrap();
+        let mut charge = leaf.reserve_inner(10).unwrap();
+        charge.grow_inner(40).unwrap();
+        assert_eq!(charge.bytes(), 50);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (70, 70, 50));
+        assert!(matches!(
+            charge.grow_inner(1),
+            Err(MemoryError::ResourceExhausted { limit: 70, .. })
+        ));
+        assert_eq!(charge.bytes(), 50);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (70, 70, 50));
+        drop(sibling_charge);
+        assert!(matches!(
+            charge.grow_inner(11),
+            Err(MemoryError::ResourceExhausted { limit: 60, .. })
+        ));
+        assert_eq!((root.used(), parent.used(), leaf.used()), (50, 50, 50));
+        charge.grow_inner(10).unwrap();
+        assert_eq!(charge.bytes(), 60);
+        drop(charge);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (0, 0, 0));
+
+        let huge = MemoryPool::new(usize::MAX, 0).unwrap();
+        let mut charge = huge.reserve_inner(1).unwrap();
+        assert_eq!(
+            charge.grow_inner(usize::MAX),
+            Err(MemoryError::SizeOverflow)
+        );
+        assert_eq!((charge.bytes(), huge.used()), (1, 1));
+        drop(charge);
+        assert_eq!(huge.used(), 0);
+    }
+
+    #[test]
+    fn split_charges_preserve_admission_and_refund_in_either_order() {
+        for transferred_first in [false, true] {
+            let root = MemoryPool::new(100, 10).unwrap();
+            let parent = root.child(80, 10).unwrap();
+            let leaf = parent.child(60, 0).unwrap();
+            let sibling = parent.child(60, 0).unwrap();
+            let sibling_charge = sibling.reserve_inner(20).unwrap();
+            let mut charge = leaf.reserve_inner(50).unwrap();
+            let transferred = charge.split_off(30).unwrap();
+            assert_eq!((charge.bytes(), transferred.bytes()), (20, 30));
+            assert_eq!(
+                (root.used(), parent.used(), leaf.used(), sibling.used()),
+                (70, 70, 50, 20)
+            );
+            assert!(matches!(
+                leaf.reserve_inner(1),
+                Err(MemoryError::ResourceExhausted { limit: 70, .. })
+            ));
+
+            let [first, second] = if transferred_first {
+                [transferred, charge]
+            } else {
+                [charge, transferred]
+            };
+            let refunded = first.bytes();
+            drop(first);
+            assert_eq!(
+                (root.used(), parent.used(), leaf.used(), sibling.used()),
+                (70 - refunded, 70 - refunded, 50 - refunded, 20)
+            );
+            let reused = sibling.reserve_inner(refunded).unwrap();
+            assert_eq!(parent.available(), 0);
+            assert!(matches!(
+                leaf.reserve_inner(1),
+                Err(MemoryError::ResourceExhausted { limit: 70, .. })
+            ));
+            drop(second);
+            assert_eq!(
+                (root.used(), parent.used(), leaf.used(), sibling.used()),
+                (20 + refunded, 20 + refunded, 0, 20 + refunded)
+            );
+            drop(reused);
+            drop(sibling_charge);
+            assert_eq!(
+                (root.used(), parent.used(), leaf.used(), sibling.used()),
+                (0, 0, 0, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn split_boundaries_preserve_the_original_or_transfer_its_whole_charge() {
+        let root = MemoryPool::new(16, 4).unwrap();
+        let leaf = root.child(12, 0).unwrap();
+        let mut charge = leaf.reserve_inner(12).unwrap();
+        for bytes in [13, usize::MAX] {
+            assert!(charge.split_off(bytes).is_none());
+            assert_eq!((charge.bytes(), root.used(), leaf.used()), (12, 12, 12));
+        }
+        let empty = charge.split_off(0).unwrap();
+        assert_eq!(empty.bytes(), 0);
+        drop(empty);
+        assert_eq!((charge.bytes(), root.used(), leaf.used()), (12, 12, 12));
+
+        let whole = charge.split_off(12).unwrap();
+        assert_eq!((charge.bytes(), whole.bytes()), (0, 12));
+        assert!(charge.split_off(1).is_none());
+        drop(charge);
+        assert_eq!((root.used(), leaf.used()), (12, 12));
+        assert!(matches!(
+            leaf.reserve_inner(1),
+            Err(MemoryError::ResourceExhausted { limit: 12, .. })
+        ));
+        drop(whole);
+        assert_eq!((root.used(), leaf.used()), (0, 0));
+        assert_eq!(root.available(), 12);
+        assert_eq!(root.emergency_reserve(), 4);
+    }
+
+    #[test]
+    fn split_charges_grow_independently_under_the_same_ancestor_ceilings() {
+        let root = MemoryPool::new(100, 10).unwrap();
+        let parent = root.child(80, 10).unwrap();
+        let leaf = parent.child(60, 0).unwrap();
+        let sibling = parent.child(60, 0).unwrap();
+        let sibling_charge = sibling.reserve_inner(20).unwrap();
+        let mut charge = leaf.reserve_inner(10).unwrap();
+        let mut transferred = charge.split_off(4).unwrap();
+        charge.grow_inner(40).unwrap();
+        assert_eq!((charge.bytes(), transferred.bytes()), (46, 4));
+        assert!(matches!(
+            transferred.grow_inner(1),
+            Err(MemoryError::ResourceExhausted { limit: 70, .. })
+        ));
+        assert_eq!((charge.bytes(), transferred.bytes()), (46, 4));
+        assert_eq!((root.used(), parent.used(), leaf.used()), (70, 70, 50));
+
+        drop(sibling_charge);
+        assert!(matches!(
+            transferred.grow_inner(11),
+            Err(MemoryError::ResourceExhausted { limit: 60, .. })
+        ));
+        assert_eq!((charge.bytes(), transferred.bytes()), (46, 4));
+        assert_eq!((root.used(), parent.used(), leaf.used()), (50, 50, 50));
+        transferred.grow_inner(10).unwrap();
+        assert_eq!((charge.bytes(), transferred.bytes()), (46, 14));
+        drop(charge);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (14, 14, 14));
+        transferred.grow_inner(46).unwrap();
+        assert_eq!((root.used(), parent.used(), leaf.used()), (60, 60, 60));
+        drop(transferred);
+        assert_eq!((root.used(), parent.used(), leaf.used()), (0, 0, 0));
     }
 
     #[test]

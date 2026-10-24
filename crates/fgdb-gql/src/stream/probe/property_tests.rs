@@ -25,7 +25,7 @@ enum Field {
 struct Source {
     after: Option<VId>,
     field: Field,
-    values: [CanonicalScalar; 3],
+    values: [CanonicalPropertyValue; 3],
     reads: Rc<Cell<usize>>,
     drops: Rc<Cell<usize>>,
 }
@@ -35,9 +35,9 @@ impl Source {
             after: None,
             field,
             values: [
-                CanonicalScalar::Int(0),
-                CanonicalScalar::Int(9),
-                CanonicalScalar::Null,
+                CanonicalScalar::Int(0).into(),
+                CanonicalScalar::Int(9).into(),
+                CanonicalScalar::Null.into(),
             ],
             reads: Rc::new(Cell::new(0)),
             drops: Rc::new(Cell::new(0)),
@@ -119,7 +119,8 @@ impl VertexScanSource for Source {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeExpansionSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeExpansionSourceError<Self::Error, C>>
+    {
         control(GlaExecutionEvent::Work)
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         self.reads.set(self.reads.get() + 1);
@@ -339,7 +340,7 @@ fn every_control_cut_fuses_and_all_dimensions_remain_cumulative() {
     }
 }
 
-struct FullRecord(Vec<(PropertyKeyId, CanonicalScalar)>);
+struct FullRecord(Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 impl VertexScanSource for FullRecord {
     type Error = &'static str;
     fn snapshot_seq(&self) -> CommitSeq {
@@ -376,9 +377,9 @@ impl VertexScanSource for FullRecord {
 #[test]
 fn default_field_reader_keeps_borrowed_records_and_controlled_binary_search() {
     let source = FullRecord(vec![
-        (PropertyKeyId(1), CanonicalScalar::Int(1)),
-        (KEY, CanonicalScalar::Int(7)),
-        (PropertyKeyId(9), CanonicalScalar::Int(9)),
+        (PropertyKeyId(1), CanonicalScalar::Int(1).into()),
+        (KEY, CanonicalScalar::Int(7).into()),
+        (PropertyKeyId(9), CanonicalScalar::Int(9).into()),
     ]);
     let lookup = Lookup(&source);
     let mut calls = 0;

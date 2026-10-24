@@ -8,7 +8,7 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cmp::Ordering;
 
 const R: RelationId = RelationId(1);
@@ -117,8 +117,10 @@ fn anonymous_intermediate_nodes_match_independent_reference() {
     assert!(report.lab_test_passed(), "report={report:?}");
 }
 
-/// Plain bounded MATCH is a WALK: parallel edges, revisited vertices and
-/// reused edges each contribute their full occurrence count. The reference
+/// Under REPEATABLE ELEMENTS a bounded MATCH is a WALK: parallel edges,
+/// revisited vertices and reused edges each contribute their full occurrence
+/// count. Under the DIFFERENT EDGES default (fgdb-vexfr) no edge is bound
+/// twice, so plain MATCH and MATCH WALK both equal TRAIL. The reference
 /// expands only public storage scans, without invoking any GQL evaluator.
 #[test]
 fn bounded_plain_match_walks_match_storage_scan_oracle() {
@@ -171,7 +173,14 @@ fn bounded_plain_match_walks_match_storage_scan_oracle() {
                 let edges = db.edges_at(as_of).expect("visible edges");
                 for (min, max) in [(0, 0), (0, 4), (2, 4)] {
                     let mut mode_outputs = Vec::new();
-                    for mode in ["", " WALK", " TRAIL"] {
+                    for mode in [
+                        "",
+                        " WALK",
+                        " TRAIL",
+                        " REPEATABLE ELEMENTS",
+                        " REPEATABLE ELEMENTS WALK",
+                    ] {
+                        let repeatable = mode.starts_with(" REPEATABLE");
                         let mut pairs = Vec::new();
                         for source in vertices.iter().filter(|v| v.labels.contains(&PERSON)) {
                             let mut layer = vec![(source.vid, Vec::<EId>::new())];
@@ -190,7 +199,7 @@ fn bounded_plain_match_walks_match_storage_scan_oracle() {
                                         edge.entry.relation == R && edge.entry.src == at
                                     }) {
                                         if vertices.iter().any(|v| v.vid == edge.entry.dst)
-                                            && (mode != " TRAIL" || !used.contains(&edge.entry.eid))
+                                            && (repeatable || !used.contains(&edge.entry.eid))
                                         {
                                             let mut path = used.clone();
                                             path.push(edge.entry.eid);
@@ -218,7 +227,7 @@ fn bounded_plain_match_walks_match_storage_scan_oracle() {
                                     pairs.contains(&(VId(3), VId(3))),
                                     "zero-hop isolated root"
                                 );
-                                if mode.is_empty() {
+                                if mode == " REPEATABLE ELEMENTS" {
                                     snapshot_outputs.push(pairs.clone());
                                 }
                             } else {
@@ -261,8 +270,16 @@ fn bounded_plain_match_walks_match_storage_scan_oracle() {
                         assert_eq!(actual, expected, "seed={seed} query={text}");
                     }
                     assert_eq!(mode_outputs[0], mode_outputs[1], "plain MATCH is WALK");
+                    assert_eq!(
+                        mode_outputs[1], mode_outputs[2],
+                        "DIFFERENT EDGES makes a WALK a TRAIL"
+                    );
+                    assert_eq!(
+                        mode_outputs[3], mode_outputs[4],
+                        "REPEATABLE plain MATCH is WALK"
+                    );
                     if max > 0 {
-                        assert_ne!(mode_outputs[0], mode_outputs[2], "TRAIL forbids edge reuse");
+                        assert_ne!(mode_outputs[3], mode_outputs[2], "TRAIL forbids edge reuse");
                     }
                 }
             }
@@ -436,11 +453,11 @@ fn hidden_order_properties_match_storage_scan_oracle() {
                     .map(|vertex| {
                         let cells = [NAME, AGE, CITY].map(|key| {
                             HiddenOrderCell::from_scalar(
-                                vertex
-                                    .props
-                                    .iter()
-                                    .find(|(found, _)| *found == key)
-                                    .map(|(_, value)| value),
+                                vertex.props.iter().find(|(found, _)| *found == key).map(
+                                    |(_, value)| {
+                                        value.as_scalar().expect("unexpected fixture value")
+                                    },
+                                ),
                             )
                         });
                         (vertex.vid, cells)
@@ -456,9 +473,8 @@ fn hidden_order_properties_match_storage_scan_oracle() {
                     let null = vertices.iter().find(|v| v.vid == explicit).unwrap();
                     assert!(!absent.props.iter().any(|(found, _)| *found == key));
                     assert!(
-                        null.props
-                            .iter()
-                            .any(|(found, value)| *found == key && *value == CanonicalScalar::Null)
+                        null.props.iter().any(|(found, value)| *found == key
+                            && *value == CanonicalScalar::Null.into())
                     );
                 }
                 for edge_pattern in [false, true] {
@@ -679,7 +695,9 @@ fn existential_subqueries_match_storage_scan_oracle() {
                                                         *key == AGE
                                                             && matches!(
                                                                 value,
-                                                                CanonicalScalar::Int(n) if *n > 0
+                                                                CanonicalPropertyValue::Scalar(
+                                                                    CanonicalScalar::Int(n)
+                                                                ) if *n > 0
                                                             )
                                                     }))
                                         })

@@ -81,3 +81,44 @@ fn bare_floor_and_malformed_boundaries_cannot_mint_retired_evidence() {
     ));
     assert_eq!(malformed, before);
 }
+
+#[test]
+fn authenticated_empty_boundary_matches_retirement_without_fabricating_rows() {
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+
+    let ((), report) = run_async_under_lab(0xa670, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let anchor = batch(7);
+        let mut recovered = LocalDeltaBatchIndex::empty_at_committed(
+            crate::CommittedMarker::attest(anchor.commit_marker_identity(), &cx),
+            *anchor.source_template_digest(),
+        )
+        .unwrap();
+        assert_eq!(recovered.frontier(), CommitSeq(7));
+        assert_eq!(recovered.retained_after_commit_seq(), CommitSeq(7));
+        assert_eq!(
+            recovered.retired_boundary_identity(),
+            Some((anchor.format(), anchor.commit_marker_identity(), [7; 32]))
+        );
+        assert!(recovered.get(CommitSeq(7)).is_none());
+        assert!(recovered.is_empty());
+        assert_eq!(recovered.since(CommitSeq(7)).unwrap().count(), 0);
+        assert!(matches!(
+            recovered.since(CommitSeq(6)),
+            Err(IndexError::CursorRetired { .. })
+        ));
+        recovered.insert(batch(8)).unwrap();
+        recovered.verify().unwrap();
+        assert_eq!(recovered.since(CommitSeq(7)).unwrap().count(), 1);
+        assert!(matches!(
+            LocalDeltaBatchIndex::empty_at_committed(
+                crate::CommittedMarker::attest(batch(0).commit_marker_identity(), &cx),
+                [0; 32],
+            ),
+            Err(IndexError::OriginAnchor)
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

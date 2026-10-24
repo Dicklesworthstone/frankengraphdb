@@ -11,6 +11,7 @@ use std::future::Future;
 
 mod download;
 pub mod proposal;
+mod read_probe;
 pub mod write;
 
 use fgdb_chronicle::seed::SeedPlan;

@@ -3,7 +3,7 @@
 //! graph leaf joined BEFORE its projection/filter/page, never an AST evaluator.
 //! OPTIONAL continuations use the same left-join kernel: correlation is part
 //! of matching, and only new bindings are null-extended. Carried values stay
-//! on the left. Project their properties before entering an optional part.
+//! on the left, including property reads through their pinned identities.
 
 use super::*;
 use crate::row_join::{RowJoinKind, RowJoinSpec};
@@ -37,6 +37,7 @@ impl UnresolvedReadInput<'_> {
                 .iter()
                 .map(|part| {
                     1 + usize::from(part.input.projection.is_some())
+                        + 2 * usize::from(!part.input.row_fields.is_empty())
                         + part
                             .input
                             .pipeline
@@ -59,15 +60,21 @@ impl UnresolvedReadInput<'_> {
         self.first.parameter_offsets()
     }
 
-    pub(crate) fn resolve(
+    /// Every part reads the lender's reverse catalog for `labels(n)` and
+    /// `type(r)`, not only the names its own text mentions.
+    pub(crate) fn resolve<R: crate::graph_text::GraphSymbolResolver + ?Sized>(
         self,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: &mut R,
     ) -> Result<BoundReadInput, GraphPatternTextError> {
-        let first = self.first.resolve(&mut resolve)?;
+        let first = self
+            .first
+            .resolve(crate::graph_text::LentResolver(resolve))?;
         let mut continuations = Vec::new();
         for part in self.continuations {
             continuations.push(BoundContinuation {
-                input: part.input.resolve(&mut resolve)?,
+                input: part
+                    .input
+                    .resolve(crate::graph_text::LentResolver(resolve))?,
                 join: part.join,
             });
         }
@@ -83,14 +90,69 @@ impl PreparedGraphText {
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
         tokens: &[TextToken<'_>],
+        zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
-        if !has_continuation(tokens) {
-            return Ok(UnresolvedReadInput {
-                first: Self::unresolved_for_composition(statement, declarations)?,
-                continuations: Vec::new(),
-            });
+        let multipart = has_continuation(tokens)
+            || Parser::deferred_where_continues(statement, declarations, tokens, zones);
+        let read = |deferred: &[usize],
+                    implicit: &[usize]|
+         -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            if !multipart && implicit.is_empty() {
+                return Ok(UnresolvedReadInput {
+                    first: Self::unresolved_for_composition(
+                        statement,
+                        declarations,
+                        zones,
+                        deferred,
+                    )?,
+                    continuations: Vec::new(),
+                });
+            }
+            let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+                .with_zones(zones.cloned());
+            parser.deferred_wheres = deferred.to_vec();
+            parser.implicit_withs = implicit.to_vec();
+            parser.multipart_read(statement)
+        };
+        let error = match read(&[], &[]) {
+            Err(error) => error,
+            read => return read,
+        };
+        // A required MATCH's WHERE over imported rows that the graph predicate
+        // refused, such as a computed graph operand against an imported
+        // column (`WITH 0 AS e MATCH (n) WHERE toInteger(n.id) = e`, or the
+        // same after a leading UNWIND), means what `MATCH ... WITH * WHERE ...`
+        // means: the same rows, filtered after the join. So does a required
+        // MATCH's WHERE whose existence predicate the graph predicate cannot
+        // place (`MATCH (n) WHERE (n)-[:A]-() OR (n)-[:B]-()`): the row filter
+        // reads each one from a hidden column (hoist_existence_reads). And a
+        // later MATCH clause that reads a name its child scope cannot see, an earlier
+        // clause's relationship (`MATCH (a)-[r]->(b) MATCH (b)-[s]->(c)
+        // WHERE r.w < s.w`) or an imported column, means what it means after
+        // an explicit `WITH *`: openCypher keeps relationship uniqueness per
+        // clause, so the boundary changes no row. Re-read one refusal at a
+        // time. A statement still refused reports its first error.
+        let (mut deferred, mut implicit) = (Vec::new(), Vec::new());
+        let mut offset = error.offset;
+        loop {
+            if let Some(at) = crate::set_text::multipart::continuation_where_at(tokens, offset)
+                .or_else(|| crate::set_text::multipart::existence_where_at(tokens, offset))
+                .filter(|at| !deferred.contains(at))
+            {
+                deferred.push(at);
+            } else if let Some(at) = crate::set_text::multipart::implicit_with_at(tokens, offset)
+                .filter(|at| !implicit.contains(at))
+            {
+                implicit.push(at);
+            } else {
+                break;
+            }
+            match read(&deferred, &implicit) {
+                Ok(read) => return Ok(read),
+                Err(next) => offset = next.offset,
+            }
         }
-        Parser::new_with_parameter_types(statement, declarations)?.multipart_read(statement)
+        Err(error)
     }
 }
 
@@ -98,6 +160,18 @@ impl PreparedGraphText {
 // typed NULL/empty-list witnesses only compile shape; no expression executes.
 fn admit_head(
     head: &GraphProjectionHead<'_>,
+    types: &[GraphSetColumnType],
+    parameters: &[GqlParameterSpec],
+) -> Result<(), GraphSetTextError> {
+    admit_values(
+        head.outputs.iter().map(|(name, value)| (name.at, value)),
+        types,
+        parameters,
+    )
+}
+
+fn admit_values<'a>(
+    outputs: impl IntoIterator<Item = (usize, &'a ReadValueTemplate)>,
     types: &[GraphSetColumnType],
     parameters: &[GqlParameterSpec],
 ) -> Result<(), GraphSetTextError> {
@@ -112,13 +186,16 @@ fn admit_head(
             GqlParameterType::List => GqlParameterValue::List(
                 crate::GqlListParameter::new(Vec::new()).expect("bounded empty list"),
             ),
+            GqlParameterType::Map => GqlParameterValue::Map(
+                crate::GqlMapParameter::new(Vec::new()).expect("bounded empty map"),
+            ),
         })
         .collect();
-    for (column, (name, value)) in head.outputs.iter().enumerate() {
+    for (column, (at, value)) in outputs.into_iter().enumerate() {
         let value = super::super::bind_read_value(value, &values)?;
         GraphSetProjection::admit_output(&value, types, column).map_err(|kind| {
             GraphSetTextError {
-                offset: name.at,
+                offset: at,
                 kind: GraphSetTextErrorKind::ProjectionBuild(kind),
             }
         })?;
@@ -127,25 +204,26 @@ fn admit_head(
 }
 
 fn join_spec(
-    incoming: &RowSchema<'_>,
+    left: &[GraphSetColumnType],
     inputs: &[Projection<'_>],
     keys: &[(usize, usize)],
+    comparisons: &[(usize, usize, IntegerComparison)],
     at: usize,
 ) -> Result<RowJoinSpec, GraphSetTextError> {
-    let left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
     let right: Vec<_> = inputs.iter().map(projection_type).collect();
     let typed_keys = !keys.is_empty()
         && keys.iter().all(|&(l, r)| {
             left[l] == right[r]
-                && matches!(
-                    left[l],
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
-                )
+                && (left[l].is_scalar_like()
+                    || matches!(
+                        left[l],
+                        GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                    ))
         });
     let spec = if typed_keys {
-        RowJoinSpec::new(&left, &right, keys)
+        RowJoinSpec::new(left, &right, keys)
     } else {
-        RowJoinSpec::cross(&left, &right).and_then(|spec| {
+        RowJoinSpec::cross(left, &right).and_then(|spec| {
             if keys.is_empty() {
                 return Ok(spec);
             }
@@ -165,10 +243,60 @@ fn join_spec(
             spec.with_predicate(&code)
         })
     };
-    spec.map_err(|_| expected(at, "bounded, type-compatible MATCH correlations"))
+    let spec = spec.map_err(|_| expected(at, "bounded, type-compatible MATCH correlations"))?;
+    if comparisons.is_empty() {
+        return Ok(spec);
+    }
+    // Keep typed equality keys selective. An Any-domain equality may already
+    // be ON bytecode; append to it, never overwrite it with the theta test.
+    let mut code = spec.predicate().unwrap_or_default().to_vec();
+    for &(l, r, comparison) in comparisons {
+        let conjunction = !code.is_empty();
+        code.push(GraphSetPredicateOp::Compare {
+            left: GraphSetOperand::Column(l),
+            comparison,
+            right: GraphSetOperand::Column(left.len() + r),
+        });
+        if conjunction {
+            code.push(GraphSetPredicateOp::And);
+        }
+    }
+    spec.with_predicate(&code)
+        .map_err(|_| expected(at, "bounded, type-compatible MATCH comparisons"))
 }
 
 impl<'a> Parser<'a> {
+    /// A separable ON operand over the incoming row uses the existing private
+    /// input projection. In particular it must not re-match a carried vertex:
+    /// that vertex can be NULL, and only the new bindings are null-extended.
+    pub(in crate::graph_text) fn computed_imported_operand(
+        &mut self,
+    ) -> Result<usize, GraphPatternTextError> {
+        let at = self.current.at;
+        let schema: Vec<_> = self
+            .read_row_bindings
+            .iter()
+            .map(|name| (*name, GraphSetColumnType::Any))
+            .collect();
+        let (operand, slots) = self
+            .row_operand_with_lets(&schema)
+            .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
+        let value = self
+            .scalar_let_value(operand, slots, at)
+            .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
+        if let ReadValueTemplate::Column(column) = value {
+            return Ok(column);
+        }
+        let column = self.read_row_bindings.len() + self.read_row_fields.len();
+        self.capacity(
+            column,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        self.read_row_fields.push(value);
+        Ok(column)
+    }
+
     fn multipart_read(
         mut self,
         statement: &'a str,
@@ -264,6 +392,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: Vec::new(),
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
             }
         };
         let mut result = UnresolvedReadInput {
@@ -305,7 +434,88 @@ impl<'a> Parser<'a> {
         Ok((result, incoming))
     }
 
-    fn take_part_syntax(&mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
+    /// Carried vertices whose properties the part starting at this MATCH
+    /// reads (`a.p`) although its own pattern does not bind them, in
+    /// first-read order. Predicate reads end at the next top-level WITH,
+    /// RETURN or set operation. RETURN reads the carried identity directly;
+    /// re-matching it would discard a NULL carried from an earlier OPTIONAL.
+    /// A part that names a path, a node binding of the same name
+    /// and a comprehension or quantifier local are left to the ordinary
+    /// compiler. Nothing is consumed.
+    fn carried_property_reads(
+        &self,
+        incoming: &RowSchema<'a>,
+    ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut previous = self.current.kind;
+        let mut depth = 0_usize;
+        let mut reads: Vec<Name<'a>> = Vec::new();
+        let mut excluded: Vec<&'a str> = Vec::new();
+        loop {
+            let token = lexer.next()?;
+            let after_dot = matches!(previous, TokenKind::Punct(b'.'));
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = outer;
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !after_dot
+                        && (["RETURN", "UNION", "EXCEPT", "INTERSECT"]
+                            .iter()
+                            .any(|clause| word.eq_ignore_ascii_case(clause))
+                            || (word.eq_ignore_ascii_case("WITH")
+                                && !matches!(previous, TokenKind::Word(previous)
+                                    if previous.eq_ignore_ascii_case("STARTS")
+                                        || previous.eq_ignore_ascii_case("ENDS")))) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word) if !after_dot => {
+                    let next = lexer.clone().next()?.kind;
+                    if depth == 0 && matches!(next, TokenKind::Punct(b'=')) {
+                        if matches!(previous, TokenKind::Word(clause)
+                            if clause.eq_ignore_ascii_case("MATCH"))
+                        {
+                            return Ok(Vec::new());
+                        }
+                    } else if (matches!(previous, TokenKind::Punct(b'('))
+                        && matches!(next, TokenKind::Punct(b')' | b':' | b'{')))
+                        || (matches!(previous, TokenKind::Punct(b'[' | b'('))
+                            && matches!(next, TokenKind::Word(next)
+                                if next.eq_ignore_ascii_case("IN")))
+                    {
+                        // A later part's own binding, `(m)`, `(m:L)` or
+                        // `(m {..})`, or a local `[x IN` / `(x IN`.
+                        excluded.push(word);
+                    } else if matches!(next, TokenKind::Punct(b'.'))
+                        && incoming.iter().any(|(name, kind)| {
+                            name.text == word && *kind == GraphSetColumnType::Vertex
+                        })
+                        && reads.iter().all(|read| read.text != word)
+                    {
+                        reads.push(Name {
+                            text: word,
+                            at: token.at,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+        reads.retain(|read| !excluded.contains(&read.text));
+        Ok(reads)
+    }
+
+    pub(in crate::graph_text) fn take_part_syntax(
+        &mut self,
+    ) -> Result<Syntax<'a>, GraphPatternTextError> {
         // Reset only graph-local bindings. The live lexer, declaration map and
         // definition-wide predicate/edge/identity counters are never reset.
         let mut next: Syntax<'a> = Parser::new("")?.syntax;
@@ -334,7 +544,38 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
-        self.parse_match_prefix()?;
+        self.read_comparisons = Some(Vec::new());
+        // A carried vertex whose property a required part reads (`WITH a
+        // MATCH (b) WHERE a.p < b.p`) re-matches by identity, exactly as the
+        // name-reuse form `MATCH (a), (b)` does: the key loop below
+        // correlates it with the carried column (fgdb-dhcfo). Not in an
+        // OPTIONAL part, where a read through the re-matched vertex would be
+        // NULL on a null-extended row although the carried vertex is not.
+        if kind == Some(RowJoinKind::Inner) {
+            for name in self.carried_property_reads(incoming)? {
+                self.capacity(
+                    self.syntax.variables.len(),
+                    crate::algebra::MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Vertices,
+                )?;
+                self.syntax.variables.push(name);
+            }
+        }
+        // `OPTIONAL MATCH (a) OPTIONAL MATCH (b)` left-joins clause by
+        // clause: this part ends before the next clause, at an implicit
+        // `WITH *` (multipart_head), never wrapping it in one left join.
+        self.optional_part = optional;
+        // The first part's WHERE over values is that part's implicit `WITH *
+        // WHERE` (fgdb-1c29d, fgdb-qo3jv). A continuation's WHERE stays its
+        // own: an OPTIONAL one belongs to the left join, not after it.
+        self.defer_where = kind.is_none();
+        let parsed = self.parse_match_prefix();
+        self.defer_where = false;
+        let deferred = self.deferred_where.take();
+        self.optional_part = false;
+        let row_fields = core::mem::take(&mut self.read_row_fields);
+        let row_comparisons = self.read_comparisons.take().unwrap_or_default();
+        parsed?;
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
         // positive pattern; another WITH may begin the next required/optional
@@ -382,13 +623,28 @@ impl<'a> Parser<'a> {
                     self.mutation_projection(&mut inputs, self.syntax.variables[right], None)?;
                 keys.push((left, right));
             }
-            if self.syntax.path.is_some_and(|path| path.text == name.text)
-                || self.syntax.visible_edge(name.text).is_some()
-            {
-                return Err(expected(
-                    name.at,
-                    "new path and relationship bindings after WITH",
-                ));
+            if self.syntax.names_path(name.text) {
+                return Err(expected(name.at, "new path bindings after WITH"));
+            }
+            // A carried relationship correlates by identity, as a carried
+            // vertex does (openCypher: `WITH r MATCH (a)-[r]->(b)` matches
+            // that one relationship again). It must be one root edge.
+            let edge = self
+                .syntax
+                .visible_edge(name.text)
+                .map(|(edge, scoped)| (edge.variable, edge.walk.is_some() || scoped));
+            if let Some((variable, unsupported)) = edge {
+                let Some(variable) = variable.filter(|_| !unsupported) else {
+                    return Err(expected(
+                        name.at,
+                        "a carried relationship as one root edge of the next MATCH",
+                    ));
+                };
+                if kind != GraphSetColumnType::Edge {
+                    return Err(expected(name.at, "an edge-valued imported binding"));
+                }
+                let right = self.mutation_projection(&mut inputs, variable, None)?;
+                keys.push((left, right));
             }
         }
         // The current property-map correlation record has no scope tag. Do
@@ -397,30 +653,81 @@ impl<'a> Parser<'a> {
         if !self.read_correlations.is_empty() && !self.syntax.scopes.is_empty() {
             return Err(expected(at, "root-only imported property-map correlations"));
         }
+        if !row_comparisons.is_empty() && !self.syntax.scopes.is_empty() {
+            return Err(expected(at, "root-only imported MATCH comparisons"));
+        }
         for (variable, key, left) in core::mem::take(&mut self.read_correlations) {
-            let right = self.mutation_projection(&mut inputs, variable, Some(key))?;
+            let right = self.mutation_projection(&mut inputs, variable, key)?;
             if !keys.contains(&(left, right)) {
                 keys.push((left, right));
             }
         }
+        let mut comparisons = Vec::new();
+        for comparison in row_comparisons {
+            let right =
+                self.mutation_projection(&mut inputs, comparison.variable, comparison.property)?;
+            comparisons.push((comparison.row, right, comparison.comparison));
+        }
         // An aggregate terminal addresses completed row aliases, not graph
-        // slots. Require the same explicit graph-to-row boundary as the
-        // single-source pipeline aggregate; do not invent a RETURN projection.
-        if aggregate && !self.is_word("WITH") && !(kind.is_none() && self.is_word("UNWIND")) {
+        // slots. A continuation's own RETURN reads every visible binding, so
+        // it passes through the `WITH *` boundary openCypher gives it: the
+        // incoming columns plus this MATCH's bindings, nothing invented. The
+        // first part still needs its explicit boundary before the next MATCH.
+        // An UNWIND directly after a continuation reads that same row (TCK
+        // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
+        let implicit_star = kind.is_some()
+            && deferred.is_none()
+            && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND"));
+        if aggregate
+            && !implicit_star
+            && deferred.is_none()
+            && !self.is_word("WITH")
+            && !(kind.is_none() && self.is_word("UNWIND"))
+            && !self.implicit_withs.contains(&self.current.at)
+        {
             return Err(expected(
                 self.current.at,
                 "WITH before a multipart aggregate RETURN",
             ));
         }
-        let mut head = if kind.is_none() {
+        let mut head = if let Some((lexer, at_where)) = deferred {
+            // The row pipeline reads the WHERE after the implicit `WITH *`,
+            // then this part ends at the next MATCH, as after an explicit one.
+            // A continuation's `WITH *` also keeps its incoming columns.
+            let head = if kind.is_none() {
+                self.implicit_with_head()?
+            } else {
+                let outputs = self.star_outputs(incoming, &mut inputs)?;
+                GraphProjectionHead {
+                    with: true,
+                    plain: false,
+                    inputs,
+                    outputs,
+                }
+            };
+            self.lexer = lexer;
+            self.current = at_where;
+            head
+        } else if kind.is_none() {
             self.graph_projection_head()?
+        } else if implicit_star {
+            // The same graph-to-row aggregate head owns carried properties
+            // in WITH and in an implicit WITH * before aggregate RETURN.
+            self.with_graph_head(incoming, inputs, optional)?
         } else {
             self.multipart_head(incoming, inputs, optional)?
         };
         // graph_projection_head numbers its graph inputs from zero; a
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
-        self.hoist_boundary_reads(&mut head, offset)?;
+        if !implicit_star {
+            self.hoist_boundary_reads(&mut head, offset)?;
+        }
+        let graph_page = if head.with {
+            None
+        } else {
+            self.graph_expression_page(&mut head, incoming, optional)?
+        };
         if head.inputs.is_empty() {
             // A constant projection still emits once per graph occurrence.
             self.mutation_projection(&mut head.inputs, self.syntax.variables[0], None)?;
@@ -436,7 +743,22 @@ impl<'a> Parser<'a> {
         // A continuation joins its incoming relation even when its schema is
         // empty; column count is not evidence that there was no earlier part.
         let join = if let Some(kind) = kind {
-            Some(join_spec(incoming, &head.inputs, &keys, at)?.with_kind(kind))
+            let mut left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+            if !row_fields.is_empty() {
+                // Private ON operands have the same pre-catalog domain
+                // admission as public outputs, against the real input schema.
+                admit_values(
+                    row_fields.iter().map(|value| (at, value)),
+                    &left,
+                    &self.syntax.parameters,
+                )?;
+            }
+            let field_types: Vec<_> = row_fields
+                .iter()
+                .map(|value| value.column_type(&left, &self.syntax.parameters))
+                .collect();
+            left.extend(field_types);
+            Some(join_spec(&left, &head.inputs, &keys, &comparisons, at)?.with_kind(kind))
         } else {
             None
         };
@@ -445,7 +767,7 @@ impl<'a> Parser<'a> {
             let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
             (pipeline, schema)
         } else {
-            (Vec::new(), schema)
+            (graph_page.into_iter().collect(), schema)
         };
         if !terminal && self.is_word("RETURN") && !aggregate {
             let at = self.current.at;
@@ -454,7 +776,8 @@ impl<'a> Parser<'a> {
             if !distinct {
                 self.take_all_quantifier()?;
             }
-            let (projection, schema) = self.row_projection(&next)?;
+            let (mut projection, schema) = self.row_projection(&next, true)?;
+            let page = self.return_expression_page(&next, &mut projection, distinct)?;
             // The terminal RETURN is the last reader of any hidden boundary read.
             self.boundary_reads = None;
             pipeline.push(ReadStageTemplate::Project {
@@ -466,11 +789,21 @@ impl<'a> Parser<'a> {
                     GraphSetQuantifier::All
                 },
             });
+            if let Some(page) = page {
+                pipeline.push(page);
+            }
             next = schema;
             terminal = true;
         }
         if aggregate && self.is_word("RETURN") {
             terminal = true;
+        }
+        if !row_fields.is_empty() {
+            self.capacity(
+                incoming.len() + head.inputs.len() + row_fields.len() - 1,
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
         }
         // The surrounding set parser owns terminal ORDER BY/SKIP/LIMIT. Every
         // page before a continuation was already consumed by row_pipeline_prefix.
@@ -482,6 +815,7 @@ impl<'a> Parser<'a> {
                 property: input.property,
                 path: input.path,
                 alias: input.variable,
+                collect: input.collect,
             })
             .collect();
         let projection = Some(
@@ -504,6 +838,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: incoming.iter().map(|(_, kind)| *kind).collect(),
                 correlations: keys,
+                row_fields,
             },
             next,
             terminal,
@@ -517,36 +852,27 @@ impl<'a> Parser<'a> {
         mut inputs: Vec<Projection<'a>>,
         optional: bool,
     ) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
-        if self.with_has_aggregate()? {
+        // An OPTIONAL part that stopped at the next clause, or any part that
+        // stopped at an implicit boundary (implicit_withs): `WITH *`.
+        let implicit = (optional && (self.is_word("OPTIONAL") || self.is_word("MATCH")))
+            || self.implicit_withs.contains(&self.current.at);
+        if !implicit && self.with_has_aggregate()? {
             return self.with_graph_head(incoming, inputs, optional);
         }
-        let with = self.take_word("WITH")?;
+        let with = implicit || self.take_word("WITH")?;
         if !with {
             self.word("RETURN")?;
         }
-        self.syntax.distinct = self.take_word("DISTINCT")?;
-        if !self.syntax.distinct {
-            self.take_all_quantifier()?;
+        if !implicit {
+            self.syntax.distinct = self.take_word("DISTINCT")?;
+            if !self.syntax.distinct {
+                self.take_all_quantifier()?;
+            }
         }
         let width = incoming.len();
         let mut outputs = Vec::new();
-        if self.take(b'*')? {
-            for (index, &(name, _)) in incoming.iter().enumerate() {
-                outputs.push((name, ReadValueTemplate::Column(index)));
-            }
-            let visible: Vec<_> = self.visible_graph_bindings().collect();
-            for variable in visible {
-                if incoming.iter().any(|(name, _)| name.text == variable.text) {
-                    continue;
-                }
-                self.capacity(
-                    outputs.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let column = self.mutation_projection(&mut inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(width + column)));
-            }
+        if implicit || self.take(b'*')? {
+            outputs = self.star_outputs(incoming, &mut inputs)?;
         } else {
             loop {
                 self.capacity(
@@ -555,9 +881,22 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
-                let value = self.read_resolved_value(&mut |parser| {
+                let implicit = if with {
+                    self.implicit_with_binding()?
+                } else {
+                    None
+                };
+                let value = self.read_resolved_item(&mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else { return Ok(None); };
                     let next = parser.lexer.clone().next()?;
+                    if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
+                        && let Some(argument) = super::property_map_source(word, parser.current.at, &parser.lexer)?
+                        && parser.visible_graph_bindings().any(|name| name.text == argument.text) {
+                        if optional && incoming.iter().any(|(binding, _)| binding.text == argument.text) {
+                            return Err(error(argument.at, GraphPatternTextErrorKind::Expected("project carried graph maps before OPTIONAL MATCH")));
+                        }
+                        return parser.property_map_function(&mut inputs).map(|column| Some(width + column));
+                    }
                     if matches!(next.kind, TokenKind::Punct(b'(')) {
                         if ["labels", "type", "length", "path_length", "nodes", "edges", "relationships"]
                             .iter().any(|name| word.eq_ignore_ascii_case(name))
@@ -585,40 +924,34 @@ impl<'a> Parser<'a> {
                         }
                         return Ok(None);
                     }
-                    if !matches!(next.kind, TokenKind::Punct(b'.'))
-                        && let Some(column) = incoming.iter().position(|(name, _)| name.text == word)
+                    if let Some(column) = incoming.iter().position(|(name, _)| name.text == word)
                     {
                         parser.advance()?;
                         return Ok(Some(column));
-                    }
-                    if optional && matches!(next.kind, TokenKind::Punct(b'.'))
-                        && incoming.iter().any(|(name, _)| name.text == word)
-                    {
-                        return Err(error(parser.current.at, GraphPatternTextErrorKind::Expected(
-                            "project carried vertex properties before OPTIONAL MATCH",
-                        )));
                     }
                     let graph = parser.visible_graph_bindings().any(|name| name.text == word);
                     if !graph { return Ok(None); }
                     let variable = parser.any_variable()?;
                     let property = if parser.take(b'.')? {
                         parser.require_property_variable(variable)?;
-                        Some(parser.name()?)
+                        Some(parser.schema_name()?)
                     } else { None };
                     let column = parser.mutation_projection(&mut inputs, variable, property)?;
                     Ok(Some(width + column))
                 }, 0)?;
+                let end = self.current.at;
                 let alias = if self.take_word("AS")? {
                     self.name()?
-                } else if let ReadValueTemplate::Column(column) = &value {
-                    if *column < width {
-                        incoming[*column].0
-                    } else {
-                        let input = inputs[*column - width];
-                        input.property.unwrap_or(input.variable)
-                    }
+                } else if with {
+                    implicit
+                        .filter(|(_, boundary)| {
+                            *boundary == end && matches!(value, ReadValueTemplate::Column(_))
+                        })
+                        .map(|(name, _)| name)
+                        .ok_or_else(|| expected(at, "AS alias for a computed row value"))?
                 } else {
-                    return Err(expected(at, "AS alias for a computed row value"));
+                    // An unaliased RETURN item is named by its exact text.
+                    self.source_name(at, end)
                 };
                 if outputs
                     .iter()
@@ -638,9 +971,39 @@ impl<'a> Parser<'a> {
         }
         Ok(GraphProjectionHead {
             with,
+            plain: false,
             inputs,
             outputs,
         })
+    }
+
+    /// `WITH *`: every incoming column, then each visible graph binding the
+    /// incoming row does not already carry.
+    fn star_outputs(
+        &mut self,
+        incoming: &RowSchema<'a>,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<Vec<(Name<'a>, ReadValueTemplate)>, GraphSetTextError> {
+        let width = incoming.len();
+        let mut outputs: Vec<_> = incoming
+            .iter()
+            .enumerate()
+            .map(|(index, &(name, _))| (name, ReadValueTemplate::Column(index)))
+            .collect();
+        let visible: Vec<_> = self.visible_graph_bindings().collect();
+        for variable in visible {
+            if incoming.iter().any(|(name, _)| name.text == variable.text) {
+                continue;
+            }
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let column = self.mutation_projection(inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(width + column)));
+        }
+        Ok(outputs)
     }
 }
 
@@ -669,6 +1032,9 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
+            let imported_width = input.column_types().len();
+            input = source.bind_row_fields(input, values)?;
+            let left_width = input.column_types().len();
             let right = source
                 .selection
                 .as_ref()
@@ -680,6 +1046,28 @@ impl BoundReadInput {
                     offset: source.return_at,
                     kind: GraphSetTextErrorKind::SetBuild(kind),
                 })?;
+            if !source.row_fields.is_empty() {
+                // ON may address private computed LEFT keys. Remove them
+                // before public projection/DISTINCT, restoring the original
+                // incoming + graph ordinals without changing bag occurrences.
+                let projection = (0..imported_width)
+                    .chain(left_width..input.column_types().len())
+                    .enumerate()
+                    .map(|(output, column)| {
+                        GraphSetProjection::new(
+                            format!("__fg_match_input_{output}"),
+                            GraphSetValue::Column(column),
+                        )
+                    })
+                    .collect();
+                input =
+                    input
+                        .project_ordered_output(projection)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: source.return_at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
+            }
             if let Some(projection) = &source.projection {
                 input = super::super::bind_projection(
                     input,

@@ -112,11 +112,24 @@
 //! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
+// Commit-pack reads (fgdb-79kyi) deepen the store's read futures (an object
+// read now resolves pack-first through OrderedReads), so proving a caller's
+// future Send nests deeper than the default limit of 128, which the
+// recursion_depth_exceeding_limit future-incompatibility lint
+// (rust-lang/rust#159228) rejects under -D warnings. As in fgdb-server.
+#![recursion_limit = "256"]
+
+mod buffered_read;
+pub use buffered_read::{
+    BufferLimits, BufferStats, BufferedEdge, BufferedOpenError, BufferedQueryCursor,
+    BufferedQueryError, BufferedQueryRow, BufferedReadError, BufferedReadLimits, BufferedReadView,
+    BufferedValue, MemoryError, MemoryPool,
+};
 
 mod bulk_load;
 pub use bulk_load::{
-    BulkEdge, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
-    BulkVertex, ChunkFit,
+    BulkEdge, BulkEndpoint, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy,
+    BulkRow, BulkVertex, ChunkFit, EndpointMatch,
 };
 
 mod fcw;
@@ -131,12 +144,14 @@ mod prepared_write;
 mod query;
 mod scrub;
 mod standing_query;
+#[cfg(not(target_arch = "wasm32"))]
+pub use scrub::CapsuleRecoveryError;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 pub use standing_query::{
-    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, StandingQueryError,
-    StandingQueryFailure, StandingQueryHandle, StandingQueryStats, StandingQueryView,
-    StandingReplayBatch, StandingReplayWindow, SubscribeError, SubscriptionBatch,
-    SubscriptionError, SubscriptionReceipt,
+    NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
+    StandingQueryError, StandingQueryFailure, StandingQueryHandle, StandingQueryStats,
+    StandingQueryView, StandingReplayBatch, StandingReplayWindow, SubscribeError,
+    SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
@@ -154,16 +169,23 @@ pub use gql_cert::{
 };
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, ExplainRow,
-    NativeAggregateCursor, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
-    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedNativeRead, ProcedureError,
-    QueryError, QueryResult, QueryValue, QueryWriteError, RefreshReport, ReplayRefusal,
-    ResidentIndex, ResidentIndexError,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor, ExplainRow,
+    HYBRID_SEARCH_OUTPUTS, HybridCallError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError,
+    MaintainedBeaconFailure, MaintainedBeaconIndex, MaintainedBeaconStatus, NativeAggregateCursor,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeExplainCertificate,
+    NativeResultCertificate, NativeResultSpool, NativeSpoolCursor, NativeSpoolDifference,
+    NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
+    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
+    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError,
 };
 pub use write_txn::{
-    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession, WriteTxn,
-    WriteTxnError,
+    AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
+    IdentityPermutation, WriteTxn, WriteTxnError,
 };
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
@@ -205,7 +227,7 @@ use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
 use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_all_edges_with_props};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
-use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices, merge_vertex};
+use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
@@ -214,9 +236,10 @@ pub use fgdb_strata::vertex::VertexRow;
 use fgdb_types::context::{CommitCx, TxnCx};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObligationAcquireError,
-    ObligationId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef,
+    ObligationAcquireError, ObligationId, VId,
 };
+use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -319,7 +342,7 @@ impl DatabaseKeys {
     ) -> Result<LogicalDeltaTemplate, fgdb_delta_types::CanonicalError> {
         match self.scalar_resolver.as_deref() {
             Some(resolver) => LogicalDeltaTemplate::decode_canonical_with_resolver(bytes, resolver),
-            None => LogicalDeltaTemplate::decode_canonical(bytes),
+            None => LogicalDeltaTemplate::decode_stored(bytes),
         }
     }
 
@@ -514,6 +537,15 @@ pub enum OpenError {
         path: PathBuf,
         slot_manifest: ObjectId,
     },
+    /// The root slot names a manifest in a format this build does not read:
+    /// a newer binary wrote the database. Refused by name when the manifest
+    /// is resolved, before any partition object is read and with nothing
+    /// written (fgdb-eslqh).
+    UnsupportedManifestFormat {
+        path: PathBuf,
+        slot_manifest: ObjectId,
+        format: u16,
+    },
     /// The root file exists but recovery selected no credible slot.
     SlotUnrecoverable {
         path: PathBuf,
@@ -553,6 +585,9 @@ pub enum DatabaseCreateCrashPoint {
 /// Why rebuilding the tier-D fold from the durable stream failed.
 #[derive(Debug)]
 pub enum RebuildError {
+    /// Cooperative cancellation stopped derived-state reconstruction before
+    /// its complete replacement could be published.
+    Interrupted(Box<asupersync::error::Error>),
     /// A retained handle whose Chronicle/publication relationship is unknown
     /// cannot run maintenance from its cached snapshot.
     HandleNotHealthy(DatabaseState),
@@ -666,6 +701,9 @@ pub enum WriteError {
     /// The complete committed suffix needed to validate a prepared basis is
     /// unavailable. Never interpret a missing prefix as no conflicting writes.
     PreparedHistory(IndexError),
+    /// Loading the authenticated conflict history failed before this write
+    /// entered the durable commit protocol. The current graph remains valid.
+    HistoryRebuild(Box<RebuildError>),
     /// The batch was empty. Refused rather than committed as a no-op: an empty
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
@@ -813,9 +851,10 @@ pub enum ReadError {
         asked: CommitSeq,
         frontier: CommitSeq,
     },
-    /// A delta-window cursor names a sequence the retained index no longer
-    /// holds. The batches between the cursor and `retained_after` were
-    /// retired; answering with the remaining suffix would be a gapped stream.
+    /// A delta-window cursor precedes the currently retained index. This may
+    /// be an unloaded checkpoint prefix or an explicitly retired interval;
+    /// answering with only the remaining suffix would be a gapped stream.
+    /// This error alone does not claim that durable history was deleted.
     DeltaCursorRetired {
         asked: CommitSeq,
         retained_after: CommitSeq,
@@ -831,6 +870,15 @@ pub enum ReadError {
     /// An edge relation in the admitted snapshot has no reverse name in the
     /// caller's catalog or capability scope.
     UnmappedRelation(RelationId),
+    /// A visible property has no name in the host's reverse catalog. Property
+    /// enumeration never drops an unknown property or invents a name for it.
+    UnmappedProperty(PropertyKeyId),
+    /// Property names or values cannot form one canonical bounded map (for
+    /// example, two property IDs were given the same host name).
+    InvalidPropertyMap,
+    /// The explicit version-head diagnostic could not encode an admitted
+    /// statement's canonical transcript.
+    VersionHead(CanonicalError),
 }
 
 macro_rules! from_error {
@@ -856,6 +904,14 @@ from_error!(
     SlotGenerationExhausted
 );
 from_error!(WriteError, Canonical, CanonicalError);
+impl From<RebuildError> for WriteError {
+    fn from(error: RebuildError) -> Self {
+        match error {
+            RebuildError::Index { error, .. } => Self::PreparedHistory(error),
+            error => Self::HistoryRebuild(Box::new(error)),
+        }
+    }
+}
 impl From<CommitError> for WriteError {
     fn from(error: CommitError) -> Self {
         Self::Commit(Box::new(error))
@@ -901,6 +957,16 @@ impl core::fmt::Display for OpenError {
                 "the root file in {} selected no credible slot: {detail}",
                 path.display()
             ),
+            Self::UnsupportedManifestFormat {
+                path,
+                slot_manifest,
+                format,
+            } => write!(
+                f,
+                "the root slot in {} names manifest {slot_manifest:?} in format {format}, which \
+                 this build does not read: a newer binary wrote this database",
+                path.display()
+            ),
             Self::NotADatabase { path, missing } => write!(
                 f,
                 "{} is not a database: {missing} is absent",
@@ -928,6 +994,7 @@ impl core::fmt::Display for OpenError {
 impl core::fmt::Display for RebuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Interrupted(error) => error.fmt(f),
             Self::HandleNotHealthy(state) => write!(
                 f,
                 "maintenance requires a healthy reopened handle, found {state:?}"
@@ -981,6 +1048,12 @@ impl core::fmt::Display for WriteError {
             }
             Self::PreparedHistory(error) => {
                 write!(f, "prepared-write conflict history is unavailable: {error}")
+            }
+            Self::HistoryRebuild(error) => {
+                write!(
+                    f,
+                    "prepared-write conflict history could not be loaded: {error}"
+                )
             }
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::ZonedTimestampRequiresResolver { .. } => {
@@ -1090,11 +1163,16 @@ impl core::fmt::Display for ReadError {
                 frontier,
             } => write!(
                 f,
-                "delta cursor {asked:?} was retired: window is ({retained_after:?}, {frontier:?}]"
+                "delta cursor {asked:?} is not retained: window is ({retained_after:?}, {frontier:?}]"
             ),
             Self::DeltaWindow(error) => write!(f, "delta window: {error}"),
             Self::UnmappedLabel(id) => write!(f, "unmapped vertex label id: {id:?}"),
             Self::UnmappedRelation(id) => write!(f, "unmapped edge relation id: {id:?}"),
+            Self::UnmappedProperty(id) => write!(f, "unmapped property id: {id:?}"),
+            Self::InvalidPropertyMap => {
+                f.write_str("properties do not form a canonical bounded map")
+            }
+            Self::VersionHead(error) => write!(f, "element version head: {error}"),
         }
     }
 }
@@ -1170,8 +1248,8 @@ pub enum WriteMismatchPolicy {
 pub struct CompareAndSetMismatch {
     pub elem: ElementId,
     pub name: PropertyKeyId,
-    pub expected: Option<CanonicalScalar>,
-    pub actual: Option<CanonicalScalar>,
+    pub expected: Option<CanonicalPropertyValue>,
+    pub actual: Option<CanonicalPropertyValue>,
 }
 
 impl core::fmt::Debug for CompareAndSetMismatch {
@@ -1241,6 +1319,7 @@ pub struct PreparedWrite {
     basis: CommitSeq,
     handle_owner: Arc<()>,
     dependencies: prepared_write::PreparedDependencies,
+    pub(crate) authorization_decision_digest: Option<Digest>,
 }
 
 impl PreparedWrite {
@@ -1311,7 +1390,7 @@ enum PendingRow {
     Vertex {
         vid: VId,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         /// `true` is [`WriteBatch::ensure_vertex`]: live identity is a
         /// no-op, not [`WriteError::AlreadyLive`].
         ensure: bool,
@@ -1320,7 +1399,7 @@ enum PendingRow {
         eid: EId,
         src: VId,
         dst: VId,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
         /// `true` is [`WriteBatch::ensure_edge_by_triple`]: a live
         /// `(src, relation, dst)` is a no-op even under a new eid.
         ensure: bool,
@@ -1345,20 +1424,49 @@ enum PendingRow {
     SetEdgeProperty {
         eid: EId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     SetProperty {
         vid: VId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     CompareAndSet {
         elem: ElementId,
         key: PropertyKeyId,
-        expected: Option<Box<CanonicalScalar>>,
-        value: Box<CanonicalScalar>,
+        expected: Option<Box<CanonicalPropertyValue>>,
+        value: Box<CanonicalPropertyValue>,
         mismatch: WriteMismatchPolicy,
     },
+}
+
+/// Visit every scalar a stored value holds, at any depth (fgdb-k3nub). Map
+/// keys are text and carry no artifact binding, so only values are visited.
+fn for_each_stored_scalar<E>(
+    value: &CanonicalPropertyValue,
+    visit: &mut impl FnMut(&CanonicalScalar) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => visit(scalar),
+        CanonicalPropertyValue::List(list) => list
+            .values()
+            .iter()
+            .try_for_each(|value| for_each_stored_scalar(value, &mut *visit)),
+        CanonicalPropertyValue::Map(map) => map
+            .entries()
+            .iter()
+            .try_for_each(|entry| for_each_stored_scalar(entry.value(), &mut *visit)),
+    }
+}
+
+/// Scalar properties as stored values, preserving their order.
+fn property_values(
+    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+) -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
+    props
+        .into_iter()
+        .map(|(key, value)| (key, CanonicalPropertyValue::Scalar(value)))
+        .collect()
 }
 
 impl WriteBatch {
@@ -1395,6 +1503,17 @@ impl WriteBatch {
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     ) -> &mut Self {
+        self.create_vertex_values(vid, labels, property_values(props))
+    }
+
+    /// [`WriteBatch::create_vertex`] with stored property values: scalars,
+    /// Lists and Maps (fgdb-k3nub).
+    pub fn create_vertex_values(
+        &mut self,
+        vid: VId,
+        labels: Vec<LabelId>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
@@ -1414,6 +1533,16 @@ impl WriteBatch {
         labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     ) -> &mut Self {
+        self.ensure_vertex_values(vid, labels, property_values(props))
+    }
+
+    /// [`WriteBatch::ensure_vertex`] with stored property values.
+    pub fn ensure_vertex_values(
+        &mut self,
+        vid: VId,
+        labels: Vec<LabelId>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
@@ -1432,6 +1561,17 @@ impl WriteBatch {
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.add_edge_values(eid, src, dst, property_values(props))
+    }
+
+    /// [`WriteBatch::add_edge`] with stored property values.
+    pub fn add_edge_values(
+        &mut self,
+        eid: EId,
+        src: VId,
+        dst: VId,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ) -> &mut Self {
         self.rows.push(PendingRow::Edge {
             eid,
@@ -1454,6 +1594,17 @@ impl WriteBatch {
         src: VId,
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    ) -> &mut Self {
+        self.ensure_edge_by_triple_values(eid, src, dst, property_values(props))
+    }
+
+    /// [`WriteBatch::ensure_edge_by_triple`] with stored property values.
+    pub fn ensure_edge_by_triple_values(
+        &mut self,
+        eid: EId,
+        src: VId,
+        dst: VId,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ) -> &mut Self {
         self.rows.push(PendingRow::Edge {
             eid,
@@ -1524,6 +1675,16 @@ impl WriteBatch {
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
     ) -> &mut Self {
+        self.set_vertex_property_value(vid, key, value.map(CanonicalPropertyValue::Scalar))
+    }
+
+    /// [`WriteBatch::set_vertex_property`] with a stored property value.
+    pub fn set_vertex_property_value(
+        &mut self,
+        vid: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalPropertyValue>,
+    ) -> &mut Self {
         self.rows.push(PendingRow::SetProperty { vid, key, value });
         self
     }
@@ -1537,6 +1698,16 @@ impl WriteBatch {
         eid: EId,
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
+    ) -> &mut Self {
+        self.set_edge_property_value(eid, key, value.map(CanonicalPropertyValue::Scalar))
+    }
+
+    /// [`WriteBatch::set_edge_property`] with a stored property value.
+    pub fn set_edge_property_value(
+        &mut self,
+        eid: EId,
+        key: PropertyKeyId,
+        value: Option<CanonicalPropertyValue>,
     ) -> &mut Self {
         self.rows
             .push(PendingRow::SetEdgeProperty { eid, key, value });
@@ -1562,8 +1733,8 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Vertex(vid),
             key,
-            expected: expected.map(Box::new),
-            value: Box::new(value),
+            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
+            value: Box::new(CanonicalPropertyValue::Scalar(value)),
             mismatch,
         });
         self
@@ -1581,8 +1752,8 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Edge(eid),
             key,
-            expected: expected.map(Box::new),
-            value: Box::new(value),
+            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
+            value: Box::new(CanonicalPropertyValue::Scalar(value)),
             mismatch,
         });
         self
@@ -1606,15 +1777,22 @@ pub struct EdgeRecord {
 }
 
 /// The published tier-D snapshot a reader is served from.
+///
+/// Every decoded object is immutable and individually shared. Cloning a pinned
+/// generation copies reference/index metadata and Arc handles, never the block,
+/// vertex-row, or hosted-property payloads of its unchanged history.
 #[derive(Clone, Debug)]
 struct Snapshot {
-    blocks: Vec<Vec<AdjacencyEntry>>,
+    blocks: Vec<Arc<[AdjacencyEntry]>>,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
-    /// Every writable path builds it with the generation (commits extend it
-    /// incrementally); a read-only view builds it on first use, because a
-    /// point read by property never touches adjacency.
+    /// Built on first use, because a point read by property never touches
+    /// adjacency; a commit extends it incrementally once it is built.
     adjacency: std::sync::OnceLock<Arc<gql_exec::source::AdjacencyIndex>>,
-    property_index: Arc<gql_exec::source::PropertyEqualityIndex>,
+    /// The derived property-equality index, read through
+    /// [`Snapshot::property_index`]. Built on first use, because a scan, a
+    /// traversal or a load by caller keys never looks a vertex up by value; a
+    /// commit extends it incrementally once it is built.
+    property_index: std::sync::OnceLock<Arc<gql_exec::source::PropertyEqualityIndex>>,
     /// The root's block references, aligned with `blocks`. Retained so the
     /// next commit can tell which decoded blocks the new root carries forward
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
@@ -1623,7 +1801,7 @@ struct Snapshot {
     /// Each block's decoded property sidecar, aligned with `blocks`
     /// (fgdb-yqor): the locator column plus the hosted patch's rows, or
     /// `None` for a propertyless block.
-    block_props: Vec<Option<BlockProps>>,
+    block_props: Vec<Option<Arc<BlockProps>>>,
     /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
     /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
     patches: Vec<VertexPatchRows>,
@@ -1646,7 +1824,8 @@ struct Snapshot {
 /// writing handle, beside its [`BlockWriter`], not in the [`Snapshot`] a read
 /// view shares. A view can therefore be issued without deriving them, and a
 /// commit while a view is pinned no longer copies them with the snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 struct WriteHeads {
     /// The current element-version chain head of every LIVE element,
     /// derived by folding the stream (fgdb-p3ok). This is the state a
@@ -1655,12 +1834,219 @@ struct WriteHeads {
     /// oracle's, never shared code: the differential's replay path validates
     /// every emitted image against the oracle's own chains, so a drift in
     /// either implementation is a refusal, not a silent agreement.
-    versions: std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: VersionHeads,
     /// The next unspent birth ordinal, derived by counting the creations the
     /// durable stream already contains. Derived rather than stored: identity
     /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
     /// authority beside the stream.
     next_birth_ordinal: u64,
+}
+
+/// Current heads are a sparse overlay over an admitted checkpoint. The first
+/// mutation of an existing identity derives that identity's chain; subsequent
+/// mutations use its overlay head. An explicit `None` shadows a checkpoint
+/// identity after deletion, so an older live statement can never reappear.
+#[derive(Clone, Debug, Default)]
+struct VersionHeads {
+    checkpoint: Option<Arc<CheckpointVersionBasis>>,
+    changed: std::collections::BTreeMap<ElementId, Option<ObjectId>>,
+    /// Only the diagnostic API requests the full map. Sharing an initialized
+    /// result keeps historical preparation from copying every diagnostic head.
+    complete: std::sync::OnceLock<
+        Result<Arc<std::collections::BTreeMap<ElementId, ObjectId>>, CanonicalError>,
+    >,
+}
+
+impl VersionHeads {
+    fn from_checkpoint(snapshot: &Snapshot) -> Self {
+        Self {
+            checkpoint: Some(Arc::new(CheckpointVersionBasis {
+                blocks: snapshot.blocks.clone(),
+                block_props: snapshot.block_props.clone(),
+                patches: snapshot.patches.clone(),
+                vertices: match snapshot.property_index.get() {
+                    Some(index) => std::sync::OnceLock::from(index.statement_histories()),
+                    None => std::sync::OnceLock::new(),
+                },
+                edges: std::sync::OnceLock::new(),
+                frontier: snapshot.frontier,
+                #[cfg(test)]
+                head_derivations: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            ..Self::default()
+        }
+    }
+
+    fn get(&self, elem: &ElementId) -> Result<Option<ObjectId>, CanonicalError> {
+        if let Some(version) = self.changed.get(elem) {
+            return Ok(*version);
+        }
+        if let Some(complete) = self.complete.get() {
+            return complete
+                .as_ref()
+                .map(|heads| heads.get(elem).copied())
+                .map_err(Clone::clone);
+        }
+        self.checkpoint
+            .as_ref()
+            .map_or(Ok(None), |checkpoint| checkpoint.head(*elem))
+    }
+
+    fn insert(&mut self, elem: ElementId, version: ObjectId) {
+        self.complete.take();
+        self.changed.insert(elem, Some(version));
+    }
+
+    fn remove(&mut self, elem: &ElementId) {
+        self.complete.take();
+        if self.checkpoint.is_some() {
+            self.changed.insert(*elem, None);
+        } else {
+            self.changed.remove(elem);
+        }
+    }
+
+    /// The writer has admitted a creation, proving there is no predecessor.
+    /// Recording that fact avoids building an edge-history index merely to
+    /// discover that a newly allocated identity is absent from the checkpoint.
+    fn admit_creation(&mut self, row: &DeltaRow) -> bool {
+        let elem = match row {
+            DeltaRow::CreateVertex { vid, .. } => ElementId::Vertex(*vid),
+            DeltaRow::CreateEdge { eid, .. } => ElementId::Edge(*eid),
+            _ => return false,
+        };
+        self.remove(&elem);
+        true
+    }
+
+    fn materialized(
+        &self,
+    ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, CanonicalError> {
+        self.complete
+            .get_or_init(|| {
+                // Keep the independent all-history spelling as the diagnostic
+                // oracle for the demand-derived chain path below.
+                let mut heads = match &self.checkpoint {
+                    Some(checkpoint) => {
+                        derive_versions_and_ordinal(
+                            &checkpoint.blocks,
+                            &checkpoint.block_props,
+                            &checkpoint.patches,
+                            checkpoint.frontier,
+                        )?
+                        .0
+                    }
+                    None => std::collections::BTreeMap::new(),
+                };
+                for (elem, version) in &self.changed {
+                    match version {
+                        Some(version) => {
+                            heads.insert(*elem, *version);
+                        }
+                        None => {
+                            heads.remove(elem);
+                        }
+                    }
+                }
+                Ok(Arc::new(heads))
+            })
+            .as_deref()
+            .map_err(Clone::clone)
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for VersionHeads {
+    fn eq(&self, other: &Self) -> bool {
+        self.materialized() == other.materialized()
+    }
+}
+
+#[cfg(test)]
+impl Eq for VersionHeads {}
+
+/// Immutable payloads and history coordinates only: retaining the whole
+/// Snapshot would force its copy-on-write path on every post-open commit.
+/// Vertex coordinates share the property index when it is built and are
+/// otherwise built from the patches on the first existing-vertex lookup; edge
+/// coordinates are built on the first existing-edge lookup, without indexing
+/// endpoint incidence or property values.
+#[derive(Debug)]
+struct CheckpointVersionBasis {
+    blocks: Vec<Arc<[AdjacencyEntry]>>,
+    block_props: Vec<Option<Arc<BlockProps>>>,
+    patches: Vec<VertexPatchRows>,
+    vertices: std::sync::OnceLock<gql_exec::source::StatementHistoryIndex<VId>>,
+    edges: std::sync::OnceLock<gql_exec::source::StatementHistoryIndex<EId>>,
+    frontier: CommitSeq,
+    #[cfg(test)]
+    head_derivations: std::sync::atomic::AtomicUsize,
+}
+
+impl CheckpointVersionBasis {
+    fn head(&self, elem: ElementId) -> Result<Option<ObjectId>, CanonicalError> {
+        #[cfg(test)]
+        self.head_derivations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut transcript = Vec::new();
+        let mut version = None;
+        match elem {
+            ElementId::Vertex(vid) => {
+                let index = self.vertices.get_or_init(|| {
+                    gql_exec::source::StatementHistoryIndex::vertices(&self.patches)
+                });
+                let mut history = index.coordinates(vid).peekable();
+                let mut winner = None;
+                while let Some((created_at, patch, row)) = history.next() {
+                    if history.peek().is_some_and(|next| next.0 == created_at) {
+                        continue;
+                    }
+                    let row = &self.patches[patch][row];
+                    write_vertex_statement_transcript(
+                        &mut transcript,
+                        row.vid,
+                        row.birth_ordinal,
+                        &row.labels,
+                        &row.props,
+                    )?;
+                    version = Some(statement_successor(version, &transcript));
+                    winner = Some(row);
+                }
+                Ok(winner
+                    .filter(|row| row.visible_at(self.frontier))
+                    .and(version))
+            }
+            ElementId::Edge(eid) => {
+                let index = self
+                    .edges
+                    .get_or_init(|| gql_exec::source::StatementHistoryIndex::edges(&self.blocks));
+                let mut history = index.coordinates(eid).peekable();
+                let mut winner = None;
+                while let Some((created_at, block, row)) = history.next() {
+                    if history.peek().is_some_and(|next| next.0 == created_at) {
+                        continue;
+                    }
+                    let entry = &self.blocks[block][row];
+                    let props = self.block_props[block]
+                        .as_ref()
+                        .map_or(&[][..], |props| props.props_ref(row));
+                    write_edge_statement_transcript(
+                        &mut transcript,
+                        entry.eid,
+                        entry.src,
+                        entry.relation,
+                        entry.dst,
+                        props,
+                    )?;
+                    version = Some(statement_successor(version, &transcript));
+                    winner = Some(entry);
+                }
+                Ok(winner
+                    .filter(|entry| entry.visible_at(self.frontier))
+                    .and(version))
+            }
+        }
+    }
 }
 
 fn read_error_from_index(error: IndexError) -> ReadError {
@@ -1719,6 +2105,18 @@ impl Snapshot {
             .get_or_init(|| Arc::new(gql_exec::source::AdjacencyIndex::build(&self.blocks)))
     }
 
+    /// The generation's property-equality index, built from its vertex
+    /// patches on first use when it was not built with the generation. The
+    /// build is a pure, deterministic function of `patches`, so a lazy index
+    /// equals an eager one.
+    fn property_index(&self) -> &Arc<gql_exec::source::PropertyEqualityIndex> {
+        self.property_index.get_or_init(|| {
+            Arc::new(gql_exec::source::PropertyEqualityIndex::build(
+                &self.patches,
+            ))
+        })
+    }
+
     fn in_neighbours_at(
         &self,
         dst: VId,
@@ -1753,7 +2151,10 @@ impl Snapshot {
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         self.check_frontier(as_of)?;
-        Ok(merge_vertex(&self.patches, vid, as_of))
+        let Ok(row) = gql_exec::source::find_vertex(self, vid, as_of, &mut |_| {
+            Ok::<_, core::convert::Infallible>(())
+        });
+        Ok(row.cloned())
     }
 
     fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
@@ -1774,8 +2175,9 @@ impl Snapshot {
 
 /// An immutable, in-process view of one already-authenticated published root.
 ///
-/// Acquiring a view clones one [`Arc`], not the decoded blocks. A later write
-/// uses copy-on-write only when it must preserve an older live view, while
+/// Acquiring a view clones the snapshot and maintained-search [`Arc`] pins
+/// in O(1), not the decoded blocks or index contents. A later write uses
+/// copy-on-write only when it must preserve an older live view, while
 /// compaction publishes a replacement generation without mutating the pinned
 /// one. This is deliberately not the plan's posture-closed
 /// `ReadSnapshot<Role>`: it has no authority binding, protocol cut, graph
@@ -1787,9 +2189,49 @@ impl Snapshot {
 #[must_use = "an embedded read view has no effect unless its pinned generation is read"]
 pub struct EmbeddedReadView {
     snapshot: Arc<Snapshot>,
+    namespace: DatabaseSecurityNamespaceId,
+    // Privileged, immutable query pins from this same opened handle/cut.
+    // Read-only opens and graph-only resident source views carry no registry.
+    beacon_indexes: query::BeaconQueryIndexes,
+}
+
+/// A non-owning reference to one authenticated embedded generation.
+///
+/// Upgrading pins that exact generation, including its namespace and search
+/// indexes. It never selects a newer one. A writer may dissociate this weak
+/// reference when advancing an otherwise unpinned snapshot; the host must then
+/// obtain a fresh published view through its ordinary admission boundary.
+/// Keeping this handle alone does not force snapshot copy-on-write.
+#[derive(Clone)]
+pub struct WeakEmbeddedReadView {
+    snapshot: std::sync::Weak<Snapshot>,
+    namespace: DatabaseSecurityNamespaceId,
+    beacon_indexes: query::BeaconQueryIndexes,
+}
+
+impl WeakEmbeddedReadView {
+    /// Pin the original generation if its snapshot allocation remains live.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<EmbeddedReadView> {
+        self.snapshot.upgrade().map(|snapshot| EmbeddedReadView {
+            snapshot,
+            namespace: self.namespace,
+            beacon_indexes: self.beacon_indexes.clone(),
+        })
+    }
 }
 
 impl EmbeddedReadView {
+    /// Retain this generation's identity without retaining its snapshot pin.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakEmbeddedReadView {
+        WeakEmbeddedReadView {
+            snapshot: Arc::downgrade(&self.snapshot),
+            namespace: self.namespace,
+            beacon_indexes: self.beacon_indexes.clone(),
+        }
+    }
+
     /// The exact published frontier this view is pinned to.
     #[must_use]
     pub fn frontier(&self) -> CommitSeq {
@@ -1812,6 +2254,10 @@ impl EmbeddedReadView {
     ///
     /// The returned reference points into the same shared [`Snapshot`] as the
     /// graph reads; no batch or index clone occurs when a view is acquired.
+    /// A checkpoint-opened generation may retain only its frontier boundary.
+    /// Inspect its retained floor or use [`Self::delta_since`], which refuses
+    /// older cursors. Materializing the database's window does not mutate an
+    /// already pinned view; acquire a new view after materialization.
     #[must_use]
     pub fn delta_index(&self) -> &LocalDeltaBatchIndex {
         &self.snapshot.delta_index
@@ -2112,6 +2558,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// This is not a durable identity or an authorization/session protocol.
     handle_owner: Arc<()>,
     standing_queries: Vec<standing_query::StandingQuery>,
+    /// Rebuildable resident search generations fed only after successful
+    /// durable publication. Registrations belong to this opened lifetime.
+    maintained_beacon: query::BeaconRegistry,
     coordinator: CommitCoordinator<V>,
     store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
@@ -2134,20 +2583,29 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// The published generation's version heads and birth-ordinal allocator,
     /// derived with the writer and replaced with it at every publication.
     heads: WriteHeads,
-    /// Per-open-handle, engine-owned identity reservations (never recycled;
-    /// the durable floor is re-derived from the committed stream at open).
+    /// Per-open-handle, engine-owned identity reservations (fgdb-hxgm1
+    /// channel 2). Open seeds the counters from the last marker that records
+    /// them, and every engine commit records the current ones.
     identity_allocation: std::sync::Arc<std::sync::Mutex<crate::write_txn::IdentityAllocation>>,
+    /// Prefix omitted by checkpoint open, distinct from a subsequently retired
+    /// window. Only explicit authenticated reconstruction can lower this cut.
+    delta_materialized_after: CommitSeq,
+    /// Exact native preparation state retained before the first mutation of a
+    /// lazy-open writer. Historical staging at or above that cut can replay the
+    /// loaded suffix without reading the omitted origin prefix. Captured only
+    /// when the writer changes, and released after origin materialization.
+    preparation_anchor: Option<prepared_write::PreparationAnchor>,
     /// Truthfulness fence for the retained writer/snapshot pair. D2 moves
     /// this out of `Healthy` before any derived work can fail; only completing
     /// the snapshot swap (or constructing a fresh handle in `open`) moves it
     /// back. Keeping the stale values allocated is harmless because every
     /// public graph read and every write checks this state first.
     state: DatabaseState,
-    /// Durability-and-admission receipts for the blocks this session has
-    /// already published (fgdb-gieu). Session-scoped like the writer above,
-    /// and with the same trust story: never authoritative, never persisted —
-    /// a fresh process re-earns every proof from disk via the receipts'
-    /// fallback path on its first publication.
+    /// Durability-and-admission receipts for the objects the current
+    /// generation names (fgdb-gieu). Session-scoped like the writer above:
+    /// never authoritative and never persisted. Open earns them by publishing,
+    /// or seeds them from the admission of the root the slot selected
+    /// (fgdb-ibbuq).
     receipts: PublishReceipts,
     /// The durable I/O authority retained so same-handle recovery reopens
     /// through the SAME injected filesystem rather than silently escaping to
@@ -2222,25 +2680,49 @@ impl Database<UnixVfs> {
         Self::open_with_vfs(cx, UnixVfs::new(), path, keys).await
     }
 
+    /// Make a database directory that was copied without a sync safe to open
+    /// for writing (fgdb-ibbuq).
+    ///
+    /// A writable open trusts publication. Every object the root slot's root
+    /// names was synced before the slot named it, so [`Database::open`] seeds
+    /// its publish receipts from the reopen, and the first commit syncs only
+    /// what it writes. A copy made with `cp -r`, an archive tool or similar
+    /// has had no such sync. Its files can sit in the page cache only, and a
+    /// commit that trusted them could publish a root over bytes a crash then
+    /// loses. Adopt such a copy once, before its first writable open.
+    ///
+    /// Adopting syncs every regular file under `path`, then every directory
+    /// from the deepest up, then `path`'s parent, so each name becomes durable
+    /// after the inode it names. It follows no symlinks, needs no keys, and
+    /// refuses a `path` that does not hold a database. Adopting a database
+    /// that was never copied is harmless; it only costs the syncs.
+    pub async fn adopt(cx: &CommitCx, path: impl AsRef<Path>) -> Result<Adopted, OpenError> {
+        Self::adopt_with_vfs(cx, UnixVfs::new(), path).await
+    }
+
     /// Open `path` for reads only, returning a view of its published
     /// generation.
     ///
-    /// Before trusting a root, this authenticates exactly what
-    /// [`Database::open`] does: Chronicle recovery under the writer lease, the
-    /// root slot, and the selected manifest's chain binding (one shared
-    /// selection), then the same verified reopen of every block and patch the
-    /// root names, with the same root admission. What it skips is the state
-    /// only a writer needs: the retained fold, the element-version heads, the
-    /// birth-ordinal allocator, and the delta history. The view's delta window
-    /// is empty at its frontier, so a change cursor older than the frontier is
-    /// refused as retired, never answered from a partial window.
+    /// Before trusting a root, this authenticates what [`Database::open`]
+    /// does: the committed Chronicle chain, the root slot, and the selected
+    /// manifest's chain binding (one shared selection), then the same verified
+    /// reopen of every block and patch the root names, with the same root
+    /// admission. What it skips is the state only a writer needs: the
+    /// retained fold, the element-version heads, the birth-ordinal allocator,
+    /// and the delta history. The view's delta window is empty at its
+    /// frontier, so a change cursor older than the frontier is refused as
+    /// retired, never answered from a partial window.
     ///
-    /// The fast path needs durable state that is already current: a slot that
-    /// names a root published at the recovered chain's frontier. Anything else
-    /// (no slot yet, or commits past the root after a crash or lag) needs the
-    /// writes a full open performs to heal it. In that case this opens fully
-    /// and keeps that handle's generation. Either way the writer lease is
-    /// released before this returns: the view owns no lease and cannot write.
+    /// The fast path takes no writer lease and writes nothing (fgdb-xxxnb):
+    /// it scans the committed chain without repairing a torn tail, and serves
+    /// the slot's root when that root was published at the chain's frontier.
+    /// Otherwise (no slot yet, or commits past the root) the durable state
+    /// needs the writes a full open performs to heal it, and this opens fully
+    /// and keeps that handle's generation, releasing the lease before it
+    /// returns. If a live writer holds the lease (fgdbd, another process),
+    /// healing is that writer's: the view is its last PUBLISHED generation,
+    /// which can be behind the commits it has acknowledged. The view owns no
+    /// lease and cannot write.
     pub async fn open_read_view(
         cx: &CommitCx,
         path: impl AsRef<Path>,
@@ -2423,6 +2905,50 @@ impl<V: Vfs + Clone> Database<V> {
         Self::bind_with_vfs(cx, vfs, path, keys, false).await
     }
 
+    /// [`Database::adopt`] through an explicit filesystem: the lab seam.
+    #[doc(hidden)]
+    pub async fn adopt_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+    ) -> Result<Adopted, OpenError> {
+        let path = path.as_ref();
+        require_database_dir(cx, &vfs, path).await?;
+        let mut adopted = Adopted::default();
+        let mut directories = vec![path.to_path_buf()];
+        let mut next = 0;
+        while let Some(directory) = directories.get(next).cloned() {
+            next += 1;
+            let mut entries = cx.with_restriction_async(vfs.read_dir(&directory)).await?;
+            while let Some(entry) = cx.with_restriction_async(entries.next_entry()).await? {
+                let kind = cx.with_restriction_async(entry.file_type()).await?;
+                if kind.is_dir() {
+                    directories.push(entry.path());
+                } else if kind.is_file() {
+                    let file = entry.path();
+                    cx.with_restriction_async(async {
+                        let file = vfs.open(&file, &OpenOptions::new().read(true)).await?;
+                        file.sync_all().await
+                    })
+                    .await?;
+                    adopted.files += 1;
+                }
+            }
+        }
+        // Breadth-first discovery lists every directory after its parent, so
+        // the reverse order syncs each one after all of its descendants.
+        for directory in directories.iter().rev() {
+            sync_vfs_directory(cx, &vfs, directory).await?;
+            adopted.directories += 1;
+        }
+        let parent = path
+            .parent()
+            .filter(|candidate| !candidate.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_vfs_directory(cx, &vfs, parent).await?;
+        Ok(adopted)
+    }
+
     /// [`Database::open_read_view`] through an explicit filesystem: the lab
     /// seam, as [`Database::open_with_vfs`] is for the writable open.
     #[doc(hidden)]
@@ -2434,58 +2960,132 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<EmbeddedReadView, OpenError> {
         let path = path.as_ref();
         require_database_dir(cx, &vfs, path).await?;
-        if let Some(view) = Self::read_current_generation(cx, &vfs, path, &keys).await? {
-            return Ok(view);
-        }
+        let lagging = match Self::read_current_generation(cx, &vfs, path, &keys, None).await? {
+            ReadGeneration::Current(published) => {
+                return Self::read_published(cx, &keys, published).await;
+            }
+            ReadGeneration::Lagging(published) => Some(published),
+            ReadGeneration::Unselected => None,
+        };
         // The durable state needs healing first, and healing writes: open
-        // fully, then keep only the generation that open published.
-        let database = Self::bind_with_vfs(cx, vfs, path, keys, false).await?;
-        Ok(EmbeddedReadView {
-            snapshot: Arc::clone(&database.snapshot),
-        })
+        // fully, then keep only the generation that open published. While a
+        // live writer owns the stream (fgdbd, another process), healing is
+        // that writer's, and its last published generation is a consistent
+        // read view in the meantime (fgdb-xxxnb). That generation is read only
+        // then, so a crash that heals here decodes the partition once.
+        match Self::bind_with_vfs(cx, vfs, path, keys.clone(), false).await {
+            Ok(database) => Ok(EmbeddedReadView {
+                snapshot: Arc::clone(&database.snapshot),
+                namespace: database.keys.namespace,
+                beacon_indexes: database.maintained_beacon.query_indexes().clone(),
+            }),
+            Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
+                Self::read_published(cx, &keys, lagging.expect("guarded")).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    /// The read-only open's fast path: `None` unless the slot selects a root
-    /// published at the recovered chain's frontier, in which case nothing is
-    /// left to fold or heal. The coordinator, and with it the writer lease,
-    /// drops before this returns, so a fallback open can take it.
-    async fn read_current_generation(
+    /// The read-only open's fast path, which takes no writer lease and writes
+    /// nothing: it reads the root slot, then scans the committed marker chain
+    /// WITHOUT repairing a torn tail, and binds the slot's root to that chain.
+    /// The slot is read first because a writer appends a marker before it
+    /// publishes the root that names it, so a chain scanned afterwards always
+    /// reaches the slot's frontier. `Current` when the root was published at
+    /// the chain's frontier: nothing is left to fold or heal. `Lagging` when
+    /// the chain is ahead of the last published root (a live writer mid-commit,
+    /// or a crash that needs healing): the caller decides which it is. Either
+    /// way the root is selected here and read by [`Self::read_published`].
+    ///
+    /// Type-erased like `bind_with_vfs`: a caller's `Send` proof
+    /// stops at `dyn Future + Send` instead of descending through the
+    /// coordinator, block store and checkpoint selection (fgdb-a5y6m). A lab
+    /// test awaiting `open_read_view` over the host filesystem otherwise
+    /// overflows the trait solver.
+    fn read_current_generation<'a>(
+        cx: &'a CommitCx,
+        vfs: &'a V,
+        path: &'a Path,
+        keys: &'a DatabaseKeys,
+        root_limits: Option<&'a fgdb_strata::store::RootReadLimits>,
+    ) -> SendFuture<'a, Result<ReadGeneration<V>, OpenError>>
+    where
+        V: 'a,
+    {
+        Box::pin(Self::read_current_generation_inner(
+            cx,
+            vfs,
+            path,
+            keys,
+            root_limits,
+        ))
+    }
+
+    async fn read_current_generation_inner(
         cx: &CommitCx,
         vfs: &V,
         path: &Path,
         keys: &DatabaseKeys,
-    ) -> Result<Option<EmbeddedReadView>, OpenError> {
-        let coordinator =
-            CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
-        let store = open_block_store(cx, vfs, path, keys).await?;
-        let probe = RootStore::with_vfs(vfs.clone(), path);
-        let Some(checkpoint) =
-            select_checkpoint(cx, &coordinator, &store, &probe, keys, path).await?
-        else {
-            return Ok(None);
+        root_limits: Option<&fgdb_strata::store::RootReadLimits>,
+    ) -> Result<ReadGeneration<V>, OpenError> {
+        let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
+            return Ok(ReadGeneration::Unselected);
         };
-        let chain_frontier = coordinator
-            .chain()
+        let probe = RootStore::with_vfs(vfs.clone(), path);
+        let Some((claimed, resolved)) =
+            read_slot_with_source_limits(cx, &store, &probe, keys, path, root_limits).await?
+        else {
+            return Ok(ReadGeneration::Unselected);
+        };
+        let chain = CommitCoordinator::scan_committed_chain(cx, vfs, path).await?;
+        let checkpoint = checkpoint_from_manifest(&chain, claimed, &resolved, path)?;
+        let chain_frontier = chain
             .entries()
             .last()
             .map_or(0, |entry| entry.marker.commit_seq);
-        if chain_frontier != checkpoint.published_at.0 {
-            return Ok(None);
-        }
-        let (root, blocks, block_props, patches) = store.reopen(cx, checkpoint.root_id).await?;
-        let mut snapshot = current_generation(
-            keys,
-            coordinator.chain(),
-            checkpoint.root_id,
-            root,
-            blocks,
-            block_props,
-            patches,
-        );
-        snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
-        Ok(Some(EmbeddedReadView {
-            snapshot: Arc::new(snapshot),
-        }))
+        let published = PublishedRead {
+            store,
+            root_id: checkpoint.root_id,
+            manifest: checkpoint.manifest,
+            published_at: checkpoint.published_at,
+        };
+        Ok(if chain_frontier == checkpoint.published_at.0 {
+            ReadGeneration::Current(published)
+        } else {
+            ReadGeneration::Lagging(published)
+        })
+    }
+
+    /// Read a selected published root into a read view: the same verified
+    /// reopen of every block and patch the root names as a full open, bound to
+    /// the chain it was selected against. Its root is content-addressed and
+    /// never removed, so a writer publishing meanwhile cannot change it.
+    /// Type-erased for the same reason as [`Self::read_current_generation`].
+    fn read_published<'a>(
+        cx: &'a CommitCx,
+        keys: &'a DatabaseKeys,
+        published: PublishedRead<V>,
+    ) -> SendFuture<'a, Result<EmbeddedReadView, OpenError>>
+    where
+        V: 'a,
+    {
+        Box::pin(async move {
+            let PublishedRead {
+                store,
+                root_id,
+                manifest,
+                ..
+            } = published;
+            let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
+            let mut snapshot =
+                current_generation(manifest, root_id, root, blocks, block_props, patches);
+            snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
+            Ok(EmbeddedReadView {
+                snapshot: Arc::new(snapshot),
+                namespace: keys.namespace,
+                beacon_indexes: query::BeaconQueryIndexes::default(),
+            })
+        })
     }
 
     /// The derived element-version heads, exposed for the fast-open
@@ -2495,12 +3095,17 @@ impl<V: Vfs + Clone> Database<V> {
     /// from its final row alone), so the law compares this map directly —
     /// without it, checkpoint-derived heads could drift from the fold's and
     /// every gate would stay green (GoldBarn's review, thread fgdb-l96k).
+    /// This diagnostic materializes all heads; ordinary writable open and
+    /// mutation preparation derive only the identities they need.
     #[doc(hidden)]
     pub fn element_versions(
         &self,
     ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, ReadError> {
         self.ensure_readable()?;
-        Ok(&self.heads.versions)
+        self.heads
+            .versions
+            .materialized()
+            .map_err(ReadError::VersionHead)
     }
 
     // Type-erased because every constructor funnels through this bind: a
@@ -2522,6 +3127,7 @@ impl<V: Vfs + Clone> Database<V> {
             path,
             keys,
             force_rebuild,
+            ReplayRootCapacity::DURABLE,
         ))
     }
 
@@ -2531,17 +3137,36 @@ impl<V: Vfs + Clone> Database<V> {
         path: &Path,
         keys: DatabaseKeys,
         force_rebuild: bool,
+        replay_capacity: ReplayRootCapacity,
     ) -> Result<Self, OpenError> {
-        let mut coordinator =
+        let coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
+        Self::bind_with_coordinator(
+            cx,
+            vfs,
+            path,
+            keys,
+            force_rebuild,
+            replay_capacity,
+            coordinator,
+        )
+        .await
+    }
+
+    // Recovery that restores authenticated capsule storage enters the SAME
+    // admission and replay path without dropping Chronicle's writer lease.
+    async fn bind_with_coordinator(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: DatabaseKeys,
+        force_rebuild: bool,
+        replay_capacity: ReplayRootCapacity,
+        mut coordinator: CommitCoordinator<V>,
+    ) -> Result<Self, OpenError> {
         // Hold Chronicle's writer lease while authenticating the selected
         // root, before either checkpoint replay or forced rebuilding.
-        let probe = RootStore::with_vfs(vfs.clone(), path);
-        match probe.current(cx).await {
-            Ok(slot) => validate_plain_slot(&slot, &keys, path)?,
-            Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(OpenError::Slot(error)),
-        }
+        let probe = authenticated_root_store(cx, &vfs, path, &keys).await?;
         // The product instance is first-committer-wins from the first commit
         // (fgdb-fcw-writebatch-6cxf): every `Database` constructor funnels
         // through this bind, so no product handle ever commits under
@@ -2564,17 +3189,19 @@ impl<V: Vfs + Clone> Database<V> {
         let selected = if force_rebuild {
             None
         } else {
-            select_checkpoint(cx, &coordinator, &store, &probe, &keys, path).await?
+            select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path).await?
         };
-        let (mut snapshot, writer, heads) = match selected {
+        let checkpoint_selected = selected.is_some();
+        let (mut snapshot, writer, heads, receipts) = match selected {
             Some(checkpoint) => {
                 reopen_from_verified_checkpoint(
                     cx,
                     &coordinator,
                     &store,
                     &keys,
-                    checkpoint.root_id,
+                    checkpoint,
                     &mut crypto_verification_events,
+                    replay_capacity,
                 )
                 .await?
             }
@@ -2585,6 +3212,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &store,
                     &keys,
                     &mut crypto_verification_events,
+                    replay_capacity,
                 )
                 .await?
             }
@@ -2603,6 +3231,7 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest_len = manifest_bytes_len(&snapshot)?;
         let slot_generation = match slot_store.recover(cx).await {
             Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure_slot_target_resolves(cx, &store, &snapshot, path).await?;
                 let slot = spine_slot(&keys, 1, snapshot.manifest, manifest_len);
                 slot_store
                     .create(cx, &slot)
@@ -2635,6 +3264,12 @@ impl<V: Vfs + Clone> Database<V> {
                                         expected == record.published_chain_hash
                                     })
                         }
+                        Err(error) => {
+                            if let Some(refusal) = unsupported_manifest(&error, stale, path) {
+                                return Err(refusal);
+                            }
+                            false
+                        }
                         _ => false,
                     };
                     if !resolvable {
@@ -2643,6 +3278,7 @@ impl<V: Vfs + Clone> Database<V> {
                             slot_manifest: ObjectId(slot.root_manifest_oid),
                         });
                     }
+                    ensure_slot_target_resolves(cx, &store, &snapshot, path).await?;
                     let healed = next_slot_generation(slot.slot_generation)?;
                     let next = spine_slot(&keys, healed, snapshot.manifest, manifest_len);
                     slot_store
@@ -2659,13 +3295,21 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         };
-        // The index is derived from the FULL recovered chain, not the
-        // checkpoint suffix the writer just folded. A suffix-only rebuild
-        // would open a window starting at `published_at`, and the next
-        // insert would see a gap (plan:397, FG-INV-18).
-        let delta_index =
-            rebuild_delta_index(cx, &coordinator, &keys, &mut crypto_verification_events).await?;
-        snapshot.delta_index = delta_index;
+        // The authenticated partition already contains the complete graph.
+        // A checkpoint-selected open retains only the exact marker boundary;
+        // historical delta consumers explicitly materialize the missing prefix.
+        // Full recovery retains its previous whole-stream window.
+        let delta_materialized_after = if checkpoint_selected {
+            snapshot.delta_index = empty_delta_window_at(cx, &coordinator, snapshot.frontier)?;
+            snapshot.frontier
+        } else {
+            snapshot.delta_index =
+                rebuild_delta_index(cx, &coordinator, &keys, &mut crypto_verification_events)
+                    .await?;
+            CommitSeq::ORIGIN
+        };
+        let identity_allocation =
+            crate::write_txn::IdentityAllocation::from_chain(coordinator.chain(), &keys);
         let published_frontier = snapshot.frontier;
         Ok(Self {
             coordinator,
@@ -2677,17 +3321,18 @@ impl<V: Vfs + Clone> Database<V> {
             snapshot: Arc::new(snapshot),
             writer,
             heads,
-            // Deliberately empty rather than seeded from the rebuild: the first
-            // publication's fallback re-earns every block's admission from disk
-            // through the same checks, so an open session starts from proven
-            // state without a second trust-bearing constructor (fgdb-gieu).
-            receipts: PublishReceipts::new(),
+            // Earned by the rebuild's or suffix's publication, or seeded from
+            // the slot-selected root's admission (fgdb-ibbuq).
+            receipts,
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
-            identity_allocation: std::sync::Arc::default(),
+            identity_allocation: Arc::new(std::sync::Mutex::new(identity_allocation)),
+            delta_materialized_after,
+            preparation_anchor: None,
             handle_owner: Arc::new(()),
             standing_queries: Vec::new(),
+            maintained_beacon: query::BeaconRegistry::default(),
         })
     }
 
@@ -2717,6 +3362,8 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()?;
         Ok(EmbeddedReadView {
             snapshot: Arc::clone(&self.snapshot),
+            namespace: self.keys.namespace,
+            beacon_indexes: self.maintained_beacon.query_indexes().clone(),
         })
     }
 
@@ -2892,14 +3539,18 @@ impl<V: Vfs + Clone> Database<V> {
     /// The same prepared-write validation and publication path with an optional
     /// production crash point. Foreign-owner and missing-history refusals occur
     /// before installing a validator or changing the handle's durability state.
+    ///
+    /// Type-erased like [`Self::commit_template`]: every controlled
+    /// transaction completion awaits it, so a caller's `Send` proof stops here
+    /// instead of descending through prepared-write validation.
     #[doc(hidden)]
-    pub async fn commit_prepared_with_crash(
-        &mut self,
-        cx: &CommitCx,
+    pub fn commit_prepared_with_crash<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
         prepared: PreparedWrite,
         crash_at: Option<CrashPoint>,
-    ) -> Result<CommitSeq, WriteError> {
-        self.commit_prepared_checked(cx, prepared, crash_at).await
+    ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
+        Box::pin(self.commit_prepared_checked(cx, prepared, crash_at))
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -2998,9 +3649,27 @@ impl<V: Vfs + Clone> Database<V> {
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
+        self.admit_write_values(&batch)?;
+        if batch.rows.iter().all(|pending| {
+            matches!(
+                pending,
+                PendingRow::Vertex { ensure: false, .. } | PendingRow::Edge { ensure: false, .. }
+            )
+        }) {
+            return self.build_create_template(batch);
+        }
+        self.build_general_template(batch)
+    }
+
+    fn admit_write_values(&self, batch: &WriteBatch) -> Result<(), WriteError> {
         // Validate before normalization/ensure can erase an unsupported input.
         // Validate against exactly the artifacts retained by recovery.
-        let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
+        // A version-2 kind (Date, LocalTime, Time, LocalDateTime, Duration)
+        // needs no check: every durable container stamps the format its
+        // content requires, so an older reader refuses it by name
+        // (fgdb-hbi8s).
+        // A List or Map is admitted scalar by scalar, at every depth.
+        let mut admit_scalar = |value: &CanonicalScalar| -> Result<(), WriteError> {
             if let CanonicalScalar::Timestamp(timestamp) = value
                 && let Some(zone) = timestamp.zone()
             {
@@ -3017,6 +3686,8 @@ impl<V: Vfs + Clone> Database<V> {
             }
             Ok(())
         };
+        let mut admit =
+            |value: &CanonicalPropertyValue| for_each_stored_scalar(value, &mut admit_scalar);
         for pending in &batch.rows {
             match pending {
                 PendingRow::Vertex { props, .. } | PendingRow::Edge { props, .. } => {
@@ -3043,7 +3714,16 @@ impl<V: Vfs + Clone> Database<V> {
                 | PendingRow::SetLabel { .. } => {}
             }
         }
+        Ok(())
+    }
 
+    /// Every row of `batch` as the durable delta rows of one template, in
+    /// evaluation order, for any mix of row kinds (see
+    /// [`Self::build_create_template`] for a batch of plain creates).
+    fn build_general_template(
+        &self,
+        batch: WriteBatch,
+    ) -> Result<LogicalDeltaTemplate, WriteError> {
         // Build durable rows SEQUENTIALLY, deriving every delete's
         // before-image from the fold's live state PLUS the batch prefix: a
         // create-then-delete in one batch must image the version the create
@@ -3227,8 +3907,11 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
-                        .or_else(|| self.heads.versions.get(&ElementId::Edge(eid)))
                         .copied()
+                        .map_or_else(
+                            || self.heads.versions.get(&ElementId::Edge(eid)),
+                            |head| Ok(Some(head)),
+                        )?
                         .expect("a live edge always has a version chain head");
                     prefix_deleted_edges.insert(eid);
                     DeltaRow::DeleteEdge {
@@ -3248,8 +3931,11 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Vertex(vid))
-                        .or_else(|| self.heads.versions.get(&ElementId::Vertex(vid)))
                         .copied()
+                        .map_or_else(
+                            || self.heads.versions.get(&ElementId::Vertex(vid)),
+                            |head| Ok(Some(head)),
+                        )?
                         .expect("a live vertex always has a version chain head");
                     // The cascade image is the incident set the FOLD will
                     // see when it applies this DeleteVertex. NENF emits
@@ -3542,6 +4228,196 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(template)
     }
 
+    /// [`Self::build_general_template`] for a batch of plain creates (no
+    /// ensure). It runs the same checks in the same order and gives the same
+    /// rows and the same refusals, without the batch-prefix versions,
+    /// contents and fold the general path keeps for later deletes and
+    /// updates. A bulk load's chunks are all creates. Hashing every row's
+    /// statement version, cloning its content into ordered maps and folding
+    /// rows that cannot share a target were most of their preparation
+    /// (fgdb-load-beats-memgraph-xf2n8).
+    ///
+    /// What carries over:
+    /// - A row's statement transcript can fail only where a property cannot
+    ///   encode, so it is still written, into one reused buffer, for the
+    ///   same error at the same row.
+    /// - Content admission runs after the template is built: vertices, then
+    ///   edges, each in identity order, as the general path's ordered maps
+    ///   ran it.
+    fn build_create_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
+        self.build_create_template_with_edge_prefix(batch, None)
+    }
+
+    /// A proved independent edge-creation program retains earlier created IDs
+    /// without re-preparing their rows. All checks for this chunk, including
+    /// the source-order choice of the first refusal, remain the ordinary ones.
+    fn build_create_template_with_edge_prefix(
+        &self,
+        batch: WriteBatch,
+        earlier_edges: Option<&fgdb_gql::id_hash::IdSet<EId>>,
+    ) -> Result<LogicalDeltaTemplate, WriteError> {
+        let relation = batch.relation;
+        let mut rows = Vec::with_capacity(batch.rows.len());
+        let mut created_vertices = fgdb_gql::id_hash::IdSet::<VId>::default();
+        let mut created_edges = fgdb_gql::id_hash::IdSet::<EId>::default();
+        let mut transcript = Vec::new();
+        for (visit, pending) in batch.rows.into_iter().enumerate() {
+            let intent_ordinal = u64::try_from(visit)
+                .ok()
+                .and_then(|visit| visit.checked_add(1))
+                .expect("a batch cannot contain 2^64 rows");
+            match pending {
+                PendingRow::Vertex {
+                    vid,
+                    labels,
+                    props,
+                    ensure: false,
+                } => {
+                    if created_vertices.contains(&vid) || self.writer.is_vertex_live(vid) {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    if self.writer.is_vertex_spent(vid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    let (mut labels, mut props) = (labels, props);
+                    sort_write_labels_and_props(&mut labels, &mut props);
+                    write_vertex_statement_transcript(
+                        &mut transcript,
+                        vid,
+                        intent_ordinal,
+                        &labels,
+                        &props,
+                    )?;
+                    created_vertices.insert(vid);
+                    rows.push(DeltaRow::CreateVertex {
+                        vid,
+                        birth_ordinal: intent_ordinal,
+                        labels,
+                        props,
+                        valid_time: None,
+                    });
+                }
+                PendingRow::Edge {
+                    eid,
+                    src,
+                    dst,
+                    props,
+                    ensure: false,
+                } => {
+                    if earlier_edges.is_some_and(|edges| edges.contains(&eid))
+                        || created_edges.contains(&eid)
+                        || self.writer.live_edge(eid).is_some()
+                    {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
+                    if self.writer.is_edge_spent(eid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
+                    for endpoint in [src, dst] {
+                        if !created_vertices.contains(&endpoint)
+                            && !self.writer.is_vertex_live(endpoint)
+                        {
+                            return Err(WriteError::DanglingEndpoint { eid, endpoint });
+                        }
+                    }
+                    let mut props = props;
+                    sort_write_props(&mut props);
+                    write_edge_statement_transcript(
+                        &mut transcript,
+                        eid,
+                        src,
+                        relation,
+                        dst,
+                        &props,
+                    )?;
+                    created_edges.insert(eid);
+                    rows.push(DeltaRow::CreateEdge {
+                        eid,
+                        birth_ordinal: intent_ordinal,
+                        src,
+                        relation,
+                        dst,
+                        canonical_key: None,
+                        props,
+                        valid_time: None,
+                    });
+                }
+                _ => unreachable!("build_create_template takes plain creates only"),
+            }
+        }
+        // The general path's fold hands its build the created vertices in
+        // identity order, then the edges. With labels deduplicated and
+        // properties sorted, the build can refuse these rows only for a
+        // property key repeated with two values, at the first such row in
+        // input order. Only then does the order matter, so only then are the
+        // rows put in the fold's.
+        let repeats_a_key = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+            props.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        };
+        if rows.iter().any(|row| match row {
+            DeltaRow::CreateVertex { props, .. } | DeltaRow::CreateEdge { props, .. } => {
+                repeats_a_key(props)
+            }
+            _ => false,
+        }) {
+            rows.sort_unstable_by_key(|row| match row {
+                DeltaRow::CreateVertex { vid, .. } => (0_u8, vid.0),
+                DeltaRow::CreateEdge { eid, .. } => (1, eid.0),
+                _ => unreachable!("plain creates only"),
+            });
+        }
+        let template = LogicalDeltaTemplate::build(
+            intent_semantics_oid(),
+            [0u8; 32],
+            vec![CoordinateEntry {
+                graph: GRAPH,
+                branch: BRANCH,
+                relation,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows,
+            }],
+        )?;
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for row in template.rows() {
+            match row {
+                DeltaRow::CreateVertex {
+                    vid, labels, props, ..
+                } => vertices.push((*vid, labels, props)),
+                DeltaRow::CreateEdge { eid, props, .. } => edges.push((*eid, props)),
+                _ => {}
+            }
+        }
+        vertices.sort_unstable_by_key(|(vid, ..)| *vid);
+        edges.sort_unstable_by_key(|(eid, _)| *eid);
+        for (vid, labels, props) in vertices {
+            fgdb_strata::vertex::admit_row_content(labels, props).map_err(|source| {
+                WriteError::VertexStorageAdmission {
+                    vid,
+                    source: Box::new(source),
+                }
+            })?;
+        }
+        for (eid, props) in edges {
+            fgdb_strata::edge_props::admitted_row_bytes(props).map_err(|source| {
+                WriteError::EdgeStorageAdmission {
+                    eid,
+                    source: Box::new(source),
+                }
+            })?;
+        }
+        Ok(template)
+    }
+
     /// The durable tail every commit path shares: seal the capsule, run the
     /// two-fsync protocol through whichever commit validator the caller just
     /// installed, fold the template into the retained writer, and publish the
@@ -3553,6 +4429,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// one boundary. A caller's `Send` proof then stops at `dyn Future + Send`
     /// instead of descending through Chronicle and Strata, which overflowed
     /// rustc's default recursion limit in every lab test root (fgdb-a5y6m).
+    /// Return the authenticated `CommitMarker`'s `authorization_decision_digest`
+    /// recorded for `commit_seq`, or `None` if `commit_seq` is not in the
+    /// recovered commit chain.
+    ///
+    /// Privileged owner commits record `Digest([0u8; 32])`; commits admitted
+    /// under a Warden capability token record the deterministic BLAKE3 digest
+    /// (`fgdb.warden.authz_decision.v1`) of the verified authority and
+    /// compiled capability predicates (FG-INV-20).
+    pub fn commit_authorization_decision_digest(
+        &self,
+        commit_seq: CommitSeq,
+    ) -> Result<Option<Digest>, ReadError> {
+        let _ = self.frontier()?;
+        let entries = self.coordinator.chain().entries();
+        let idx = entries.partition_point(|entry| entry.marker.commit_seq < commit_seq.0);
+        Ok(entries
+            .get(idx)
+            .filter(|entry| entry.marker.commit_seq == commit_seq.0)
+            .map(|entry| entry.marker.authorization_decision_digest))
+    }
+
     fn commit_template<'a>(
         &'a mut self,
         cx: &'a CommitCx,
@@ -3561,9 +4458,29 @@ impl<V: Vfs + Clone> Database<V> {
         publication_failure: Option<DerivedPublicationStage>,
         block_store_crash_at: Option<BlockStoreCrashPoint>,
     ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
+        self.commit_template_with_authz(
+            cx,
+            template,
+            Digest([0u8; 32]),
+            crash_at,
+            publication_failure,
+            block_store_crash_at,
+        )
+    }
+
+    fn commit_template_with_authz<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
+        template: LogicalDeltaTemplate,
+        authorization_decision_digest: Digest,
+        crash_at: Option<CrashPoint>,
+        publication_failure: Option<DerivedPublicationStage>,
+        block_store_crash_at: Option<BlockStoreCrashPoint>,
+    ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
         Box::pin(self.commit_template_inner(
             cx,
             template,
+            authorization_decision_digest,
             crash_at,
             publication_failure,
             block_store_crash_at,
@@ -3574,6 +4491,7 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         cx: &CommitCx,
         template: LogicalDeltaTemplate,
+        authorization_decision_digest: Digest,
         crash_at: Option<CrashPoint>,
         publication_failure: Option<DerivedPublicationStage>,
         mut block_store_crash_at: Option<BlockStoreCrashPoint>,
@@ -3594,6 +4512,16 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .map_err(|error| WriteError::RootCapacity(Box::new(error)))?;
         let capsule = prepare_capsule(self.keys.k_oid(), self.keys.namespace, &template)?;
+        // The allocator's counters ride in the marker (fgdb-hxgm1 channel 2):
+        // every identity this handle has issued so far, committed here or
+        // not, sits at or below them, so no reopen can reissue one. Counters
+        // are plain data, so a poisoned lock still holds a valid value.
+        let identity_counters = self
+            .identity_allocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .counters();
+        self.retain_preparation_anchor();
         let published_frontier = self.snapshot.frontier;
         // `commit_with_crash` is cancellable at every VFS await. Chronicle
         // poisons its own coordinator immediately before marker append, but a
@@ -3607,7 +4535,12 @@ impl<V: Vfs + Clone> Database<V> {
             .commit_with_crash(
                 cx,
                 &capsule.bytes,
-                |seq, oid| marker_for_capsule(seq, oid, &capsule, Vec::new()),
+                |seq, oid| {
+                    let mut marker = marker_for_capsule(seq, oid, &capsule, Vec::new())
+                        .with_identity_counters(identity_counters);
+                    marker.authorization_decision_digest = authorization_decision_digest;
+                    marker
+                },
                 crash_at,
             )
             .await
@@ -3703,12 +4636,6 @@ impl<V: Vfs + Clone> Database<V> {
                 continue;
             }
             for row in &coordinate.rows {
-                if matches!(
-                    row,
-                    DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
-                ) {
-                    next_birth_ordinal += 1;
-                }
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
                     .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -3718,6 +4645,9 @@ impl<V: Vfs + Clone> Database<V> {
                             error,
                         }),
                     })?;
+                if new_versions.admit_creation(row) {
+                    next_birth_ordinal += 1;
+                }
                 touched_elements(row, &mut touched);
             }
         }
@@ -3753,16 +4683,23 @@ impl<V: Vfs + Clone> Database<V> {
                     error,
                 }),
             })?;
-        let root = folded
-            .publish_in_place(self.keys.block_keys(), frontier)
-            .map_err(|error| WriteError::CommittedNeedsRecovery {
-                recovery,
-                source: Box::new(RebuildError::Fold {
-                    commit_seq: frontier.0,
-                    error,
-                }),
-            })?;
         let (blocks, patches) = (folded.sealed(), folded.sealed_patches());
+        let (block_prefix, patch_prefix) =
+            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
+        assert!(block_prefix <= blocks.len());
+        assert!(patch_prefix <= patches.len());
+        // This writer only appends sealed objects. Its prior root already
+        // owns the unchanged references, so construct only the new suffix.
+        // The store binds its carried membership to that exact root identity
+        // before skipping any prefix validation (fgdb-d5vo4).
+        let new_refs: Vec<_> = blocks[block_prefix..]
+            .iter()
+            .map(fgdb_strata::writer::SealedBlock::reference)
+            .collect();
+        let new_patch_refs: Vec<_> = patches[patch_prefix..]
+            .iter()
+            .map(fgdb_strata::writer::SealedPatch::reference)
+            .collect();
         // The immutable prefix remains memoized. New block, hosted-property,
         // and vertex objects share publication authority and one directory
         // barrier; no receipt escapes before the entire data batch completes.
@@ -3773,9 +4710,9 @@ impl<V: Vfs + Clone> Database<V> {
         // References inside the root prefix these receipts already verified
         // hold receipts by construction (the retained writer's sealed objects
         // extend the last published root in order), so only the rest is probed.
-        let (block_prefix, patch_prefix) = self.receipts.verified_root_prefix(PARTITION);
+        let (receipted_blocks, receipted_patches) = self.receipts.verified_root_prefix(PARTITION);
         let unpublished_blocks: Vec<&fgdb_strata::writer::SealedBlock> = blocks
-            [block_prefix.min(blocks.len())..]
+            [receipted_blocks.min(blocks.len())..]
             .iter()
             .filter(|block| {
                 !self
@@ -3784,7 +4721,7 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .collect();
         let unpublished_patches: Vec<&fgdb_strata::writer::SealedPatch> = patches
-            [patch_prefix.min(patches.len())..]
+            [receipted_patches.min(patches.len())..]
             .iter()
             .filter(|patch| {
                 !self
@@ -3809,7 +4746,7 @@ impl<V: Vfs + Clone> Database<V> {
                     block
                         .property_patch
                         .as_ref()
-                        .map(|patch| patch.bytes.as_slice()),
+                        .map(|patch| patch.bytes.as_ref()),
                 )
                 .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -3849,23 +4786,73 @@ impl<V: Vfs + Clone> Database<V> {
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         // Every root-scope law runs here. The root itself is written below,
         // together with the manifest that names it (fgdb-90i03).
-        let verified_root = self
+        let appended = self
             .store
-            .verify_root(cx, &root, &mut self.receipts)
+            .verify_root_append(
+                cx,
+                fgdb_strata::store::RootAppend {
+                    basis: self.snapshot.root,
+                    graph: GRAPH,
+                    branch: BRANCH,
+                    partition: PARTITION,
+                    published_at: frontier,
+                    carried_blocks: block_prefix,
+                    carried_patches: patch_prefix,
+                    blocks: &new_refs,
+                    vertex_patches: &new_patch_refs,
+                },
+                &mut self.receipts,
+            )
             .await
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
+        let verified_root = match appended {
+            Some(verified) => verified,
+            None => {
+                // A missing or mismatched memo grants no prefix shortcut.
+                // Recovery/replacement paths and arbitrary roots retain the
+                // complete structural, span, history and chain checks.
+                let root = fgdb_strata::root::PartitionRoot {
+                    graph: GRAPH,
+                    branch: BRANCH,
+                    partition: PARTITION,
+                    published_at: frontier,
+                    blocks: blocks
+                        .iter()
+                        .map(fgdb_strata::writer::SealedBlock::reference)
+                        .collect(),
+                    vertex_patches: patches
+                        .iter()
+                        .map(fgdb_strata::writer::SealedPatch::reference)
+                        .collect(),
+                };
+                assert!(root.blocks.starts_with(&self.snapshot.refs));
+                assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
+                self.store
+                    .verify_root(cx, &root, &mut self.receipts)
+                    .await
+                    .map_err(|error| WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::from(error)),
+                    })?
+            }
+        };
         let root_id = verified_root.id();
         // The manifest names the published root (fgdb-63w2) and binds it to
         // the chain commitment at this very commit (fgdb-90hw): the durable
         // path from this directory to its partition advances in the same
         // publish, carrying the authority claim open verifies.
-        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), root.published_at)
+        let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("the commit that published this root is on its own chain");
-        let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
-            .expect("one root is one canonical record");
+        let manifest_records = [ManifestRecord {
+            graph: GRAPH,
+            branch: BRANCH,
+            partition: PARTITION,
+            root: root_id,
+            published_chain_hash,
+        }];
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishManifest);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         // Root and manifest share one concurrent inode sync, each one's
@@ -3912,20 +4899,11 @@ impl<V: Vfs + Clone> Database<V> {
         // this publication's suffix is decoded, and the root's references pair
         // with the writer's sealed objects by position. Nothing here rebuilds
         // an identity map over every object of the partition.
-        assert!(root.blocks.starts_with(&self.snapshot.refs));
-        assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
-        assert_eq!(root.blocks.len(), blocks.len());
-        assert_eq!(root.vertex_patches.len(), patches.len());
-        let (block_prefix, patch_prefix) =
-            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::RefreshEdgeSnapshot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut fresh: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> =
-            Vec::with_capacity(root.blocks.len() - block_prefix);
-        for (reference, sealed) in root.blocks[block_prefix..]
-            .iter()
-            .zip(&blocks[block_prefix..])
-        {
+            Vec::with_capacity(new_refs.len());
+        for (reference, sealed) in new_refs.iter().zip(&blocks[block_prefix..]) {
             assert_eq!(
                 reference.block_id, sealed.block_id,
                 "a publish's root names its sealed blocks in order"
@@ -3964,16 +4942,17 @@ impl<V: Vfs + Clone> Database<V> {
             fresh.push((entries, props));
         }
         // A pinned read view may still own the previous Arc. `make_mut`
-        // preserves it through copy-on-write; without a live view the Arc is
-        // unique and this remains the old zero-copy move-forward path.
+        // copies the metadata and immutable object handles, preserving the old
+        // generation without recursively cloning its decoded payloads. A unique
+        // snapshot keeps the existing move-forward path.
         let previous = Arc::make_mut(&mut self.snapshot);
         let mut decoded = std::mem::take(&mut previous.blocks);
         let mut decoded_props = std::mem::take(&mut previous.block_props);
         assert_eq!(decoded.len(), block_prefix);
         assert_eq!(decoded_props.len(), block_prefix);
         for (entries, props) in fresh {
-            decoded.push(entries);
-            decoded_props.push(props);
+            decoded.push(Arc::from(entries));
+            decoded_props.push(props.map(Arc::new));
         }
         // The identical carry-forward rule for the vertex half: an unchanged
         // patch reference means an unchanged decoded patch, and new patches
@@ -3983,12 +4962,8 @@ impl<V: Vfs + Clone> Database<V> {
             DerivedPublicationStage::RefreshVertexSnapshot,
         );
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut fresh_patches: Vec<VertexPatchRows> =
-            Vec::with_capacity(root.vertex_patches.len() - patch_prefix);
-        for (reference, sealed) in root.vertex_patches[patch_prefix..]
-            .iter()
-            .zip(&patches[patch_prefix..])
-        {
+        let mut fresh_patches: Vec<VertexPatchRows> = Vec::with_capacity(new_patch_refs.len());
+        for (reference, sealed) in new_patch_refs.iter().zip(&patches[patch_prefix..]) {
             assert_eq!(
                 reference.patch_id, sealed.patch_id,
                 "a publish's root names its sealed patches in order"
@@ -4015,22 +4990,36 @@ impl<V: Vfs + Clone> Database<V> {
             versions: new_versions,
             next_birth_ordinal,
         };
+        // Extend a built adjacency index. An unbuilt one (a checkpoint open
+        // that nothing has read yet) stays unbuilt: building it here would
+        // move the whole-generation cost from open into the first write.
+        let adjacency = match self.snapshot.adjacency.get() {
+            Some(index) => {
+                std::sync::OnceLock::from(Arc::new(index.extend(&decoded, block_prefix)))
+            }
+            None => std::sync::OnceLock::new(),
+        };
+        // The property index likewise: a handle that has looked nothing up
+        // by value (a CLI load by caller keys) never builds or extends one.
+        let property_index = match self.snapshot.property_index.get() {
+            Some(index) => {
+                std::sync::OnceLock::from(Arc::new(index.extend(&decoded_patches, patch_prefix)))
+            }
+            None => std::sync::OnceLock::new(),
+        };
+        let previous = Arc::make_mut(&mut self.snapshot);
+        let mut refs = std::mem::take(&mut previous.refs);
+        let mut patch_refs = std::mem::take(&mut previous.patch_refs);
+        refs.extend(new_refs);
+        patch_refs.extend(new_patch_refs);
         self.snapshot = Arc::new(Snapshot {
-            adjacency: std::sync::OnceLock::from(Arc::new(
-                self.snapshot
-                    .adjacency_index()
-                    .extend(&decoded, self.snapshot.refs.len()),
-            )),
-            property_index: Arc::new(
-                self.snapshot
-                    .property_index
-                    .extend(&decoded_patches, self.snapshot.patch_refs.len()),
-            ),
+            adjacency,
+            property_index,
             blocks: decoded,
             block_props: decoded_props,
-            refs: root.blocks,
+            refs,
             patches: decoded_patches,
-            patch_refs: root.vertex_patches,
+            patch_refs,
             frontier,
             root: root_id,
             manifest,
@@ -4041,13 +5030,14 @@ impl<V: Vfs + Clone> Database<V> {
         };
         // Maintenance is derived, synchronous and fail-closed. A refusal must
         // never turn this already-durable successful publication into an abort.
-        if !self.standing_queries.is_empty() {
+        if !self.standing_queries.is_empty() || !self.maintained_beacon.is_empty() {
             let batch = self
                 .snapshot
                 .delta_index
                 .get(frontier)
                 .expect("successful publication retains its committed delta");
             standing_query::publish(&mut self.standing_queries, cx, batch);
+            self.maintained_beacon.publish(cx, &self.snapshot, batch);
         }
         Ok(self.snapshot.frontier)
     }
@@ -4058,8 +5048,15 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn index_maintenance_work(&self) -> Result<(u64, u64), ReadError> {
         self.ensure_readable()?;
         Ok((
-            self.snapshot.adjacency_index().maintenance_work(),
-            self.snapshot.property_index.maintenance_work(),
+            // An index no read has built yet performed no maintenance.
+            self.snapshot
+                .adjacency
+                .get()
+                .map_or(0, |index| index.maintenance_work()),
+            self.snapshot
+                .property_index
+                .get()
+                .map_or(0, |index| index.maintenance_work()),
         ))
     }
 
@@ -4073,7 +5070,7 @@ impl<V: Vfs + Clone> Database<V> {
             .equivalent(&gql_exec::source::AdjacencyIndex::build(
                 &self.snapshot.blocks,
             ))
-            && self.snapshot.property_index.equivalent(
+            && self.snapshot.property_index().equivalent(
                 &gql_exec::source::PropertyEqualityIndex::build(&self.snapshot.patches),
             ))
     }
@@ -4320,11 +5317,30 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(self.snapshot.frontier)
     }
 
+    /// The keyed permutation this database issues vertex identities from
+    /// (fgdb-hxgm1 channel 2). An engine identity carries no issue order of
+    /// its own; `invert` recovers its allocation counter, which the engine
+    /// advances in issue order. A replay that pairs creations with the source
+    /// rows that caused them sorts by that counter. The keys stay private.
+    #[must_use]
+    pub fn vertex_identity_permutation(&self) -> IdentityPermutation {
+        IdentityPermutation::vertices(&self.keys)
+    }
+
+    /// As [`Self::vertex_identity_permutation`], for edge identities.
+    #[must_use]
+    pub fn edge_identity_permutation(&self) -> IdentityPermutation {
+        IdentityPermutation::edges(&self.keys)
+    }
+
     /// The derived window over committed delta batches.
     ///
     /// Reads check `Healthy` like every other graph read: a fenced handle
     /// must not present a window that may have been inserted after D2 while
     /// the retained snapshot is still one commit behind.
+    /// Checkpoint open initially retains no batches before its frontier.
+    /// [`Self::ensure_delta_window`] authenticates a requested prefix on demand;
+    /// the returned index always exposes its actual retained floor.
     pub fn delta_index(&self) -> Result<&LocalDeltaBatchIndex, ReadError> {
         self.ensure_readable()?;
         Ok(&self.snapshot.delta_index)
@@ -4346,6 +5362,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// the last sequence it has applied and receives the gap-free suffix, or
     /// a refusal. A cursor past the frontier is [`ReadError::BeyondFrontier`];
     /// a cursor below the retained floor is [`ReadError::DeltaCursorRetired`].
+    /// After checkpoint open, call [`Self::ensure_delta_window`] before asking
+    /// below its initially unloaded floor. This synchronous accessor never
+    /// treats unloaded history as an empty result.
     /// Reads check `Healthy` like every other graph read.
     pub fn delta_since(
         &self,
@@ -4356,6 +5375,100 @@ impl<V: Vfs + Clone> Database<V> {
             .delta_index
             .since(after)
             .map_err(read_error_from_index)
+    }
+
+    /// Authenticate and retain every committed delta strictly after `after`.
+    ///
+    /// Checkpoint-selected open starts with an empty window at the published
+    /// frontier. This operation reads only the capsules missing between the
+    /// requested cut and the current materialization floor, verifies each
+    /// against its recovered marker, and publishes one complete replacement.
+    /// Failure or cancellation preserves the graph and the previous window.
+    /// Existing immutable read views keep their original window; reacquire a
+    /// view after this call when it needs the newly admitted history.
+    ///
+    /// This lowers only the prefix omitted by open. It cannot undo an explicit
+    /// retirement, invent a missing capsule, or weaken first-committer-wins.
+    /// Synchronous historical preparation, change-feed and resident-index
+    /// callers may use this explicit I/O boundary before their existing APIs.
+    /// Prepared-write and transaction completion also call it before validating
+    /// any basis that lies below the loaded floor.
+    ///
+    /// Type-erased like [`Self::commit_template`]: every controlled
+    /// transaction completion awaits it, so a caller's `Send` proof stops here
+    /// instead of descending through the window's capsule reads.
+    pub fn ensure_delta_window<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
+        after: CommitSeq,
+    ) -> SendFuture<'a, Result<(), RebuildError>> {
+        Box::pin(self.ensure_delta_window_inner(cx, after))
+    }
+
+    async fn ensure_delta_window_inner(
+        &mut self,
+        cx: &CommitCx,
+        after: CommitSeq,
+    ) -> Result<(), RebuildError> {
+        if !matches!(self.state, DatabaseState::Healthy { .. }) {
+            return Err(RebuildError::HandleNotHealthy(self.state));
+        }
+        let index_error = |error| RebuildError::Index {
+            commit_seq: after.0,
+            error,
+        };
+        let floor = self.delta_materialized_after;
+        let retained = self.snapshot.delta_index.retained_after_commit_seq();
+        if after.0 >= floor.0 || retained != floor {
+            // This also retains existing future and genuinely retired cursor
+            // refusals. A caller changing retention cannot turn that removal
+            // into implicit rehydration from the commit stream.
+            // Only the refusal matters here; the cursor itself is unused.
+            self.snapshot
+                .delta_index
+                .since(after)
+                .map(drop)
+                .map_err(index_error)?;
+            return Ok(());
+        }
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let mut candidate = empty_delta_window_at(cx, &self.coordinator, after)?;
+        let entries = self.coordinator.chain().entries();
+        let start = entries.partition_point(|entry| entry.marker.commit_seq <= after.0);
+        let end = entries.partition_point(|entry| entry.marker.commit_seq <= floor.0);
+        for entry in &entries[start..end] {
+            let batch = read_delta_batch(
+                cx,
+                &self.coordinator,
+                &self.keys,
+                entry,
+                &mut self.crypto_verification_events,
+            )
+            .await?;
+            candidate.insert(batch).map_err(index_error)?;
+        }
+        if candidate.frontier() != floor {
+            return Err(index_error(IndexError::Gapped {
+                expected: floor,
+                found: candidate.frontier(),
+            }));
+        }
+        for batch in self
+            .snapshot
+            .delta_index
+            .since(floor)
+            .map_err(index_error)?
+        {
+            cx.checkpoint().map_err(RebuildError::Interrupted)?;
+            candidate.insert(batch.clone()).map_err(index_error)?;
+        }
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        Arc::make_mut(&mut self.snapshot).delta_index = candidate;
+        self.delta_materialized_after = after;
+        if after == CommitSeq::ORIGIN {
+            self.preparation_anchor = None;
+        }
+        Ok(())
     }
 
     /// Consolidate the partition's durable history: fewer blocks, the SAME
@@ -4372,9 +5485,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// republished through manifest and slot, and checkpoint-selected open
     /// lands on it after authenticating its temporal projection.
     /// The full-stream rebuild remains the AUTHORITATIVE recovery and
-    /// re-derives the uncompacted layout by design (doctrine 5: derived
-    /// state is discarded and rebuilt) — its answers are identical, and its
-    /// republication simply supersedes the compacted root again.
+    /// re-derives its layout from Chronicle (doctrine 5: derived state is
+    /// discarded and rebuilt). Replay consolidates only when its reference
+    /// count exceeds the durable root capacity; all historical answers stay
+    /// identical, and republication supersedes the previous derived root.
     ///
     /// **CRASH-SAFE BY SHAPE, not by hooks**: every durable step before the
     /// final slot publication is a content-addressed APPEND — patches,
@@ -4398,126 +5512,48 @@ impl<V: Vfs + Clone> Database<V> {
         // unreferenced replacement object when no successor slot can ever
         // select it.
         let next_generation = next_slot_generation(self.slot_generation)?;
-        let compaction = fgdb_strata::compact::compact_with_props(
+        self.retain_preparation_anchor();
+        let frontier = self.snapshot.frontier;
+        let writer = consolidated_writer(
+            cx,
+            &self.keys,
             &self.snapshot.blocks,
             &self.snapshot.block_props,
-            CommitSeq(0),
-        )
-        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
-
-        // Encode the replacement generation: chains RESTART per family
-        // (state-chain semantics, fgdb-4391) and multi-chunk families link
-        // in emission order — the contract compact_with_props documents.
-        let mut chain_heads: std::collections::BTreeMap<
-            (VId, RelationId),
-            fgdb_strata::DeltaBlockVersion,
-        > = std::collections::BTreeMap::new();
-        let mut sealed = Vec::with_capacity(compaction.blocks.len());
-        for (entries, props) in compaction.blocks.iter().zip(&compaction.block_props) {
-            let family = entries
-                .first()
-                .map(|entry| (entry.src, entry.relation))
-                .expect("the packer emits no empty blocks");
-            let predecessor = chain_heads.get(&family).copied();
-            let (bytes, property_patch) = match props {
-                Some(props) => {
-                    let patch_bytes = fgdb_strata::edge_props::encode_property_patch(&props.rows)
-                        .map_err(|error| {
-                        RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
-                    })?;
-                    let patch_id = fgdb_strata::edge_props::property_patch_id(
-                        self.keys.k_oid(),
-                        self.keys.namespace,
-                        &patch_bytes,
-                    );
-                    let bytes = fgdb_strata::encode_block_with_properties(
-                        PARTITION,
-                        predecessor,
-                        entries,
-                        patch_id,
-                        &props.locators,
-                        &props.rows,
-                    )
-                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
-                    (
-                        bytes,
-                        Some(fgdb_strata::writer::SealedPropertyPatch {
-                            patch_id,
-                            bytes: patch_bytes,
-                        }),
-                    )
-                }
-                None => (
-                    fgdb_strata::encode_block(PARTITION, predecessor, entries)
-                        .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
-                    None,
-                ),
-            };
-            let (first_seq, last_seq) =
-                fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
-            let block_id = fgdb_strata::block_id(self.keys.k_oid(), self.keys.namespace, &bytes);
-            chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
-            sealed.push(fgdb_strata::writer::SealedBlock {
-                block_id,
-                bytes,
-                first_seq,
-                last_seq,
-                property_patch,
-            });
-        }
-
-        // The vertex half consolidates the same way: restatements collapse,
-        // canonical repack, spans re-derived from the rows themselves.
-        let (compacted_patches, _superseded) =
-            fgdb_strata::compact::compact_vertex_patches(&self.snapshot.patches, CommitSeq(0))
-                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
-        let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
-        for rows in &compacted_patches {
-            let bytes = fgdb_strata::vertex::encode_patch(rows)
-                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
-            let (first_seq, last_seq) =
-                fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
-            sealed_patches.push(fgdb_strata::writer::SealedPatch {
-                patch_id: fgdb_strata::vertex::vertex_patch_id(
-                    self.keys.k_oid(),
-                    self.keys.namespace,
-                    &bytes,
-                ),
-                bytes,
-                first_seq,
-                last_seq,
-            });
-        }
-
-        let frontier = self.snapshot.frontier;
-        let writer = BlockWriter::from_published_partition(
-            GRAPH,
-            BRANCH,
-            PARTITION,
-            sealed,
-            sealed_patches,
-            &compaction.blocks,
-            &compaction.block_props,
-            &compacted_patches,
+            &self.snapshot.patches,
             frontier,
-        )
-        .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+        )?;
 
-        // The logical state is unchanged, so the handle's version heads and
-        // allocator stay as they are; the shared tail republishes and reopens
-        // from disk.
+        // The logical state and allocator are unchanged. The shared tail
+        // republishes and decodes its durably admitted sealed bytes, providing
+        // an equivalent version basis without rereading the entire partition
+        // or retaining the superseded decoded payloads.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
-        let (mut snapshot, writer) = publish_and_snapshot(
+        // Trust publication (fgdb-ibbuq ruling, fgdb-l89gt): every object the
+        // handle's receipts hold was made durable before a root naming it was
+        // published, and objects are never removed, so the compacted
+        // publication skips re-reading and re-syncing them. A byte-identical
+        // compaction then costs only its root and manifest. The handle gives up
+        // its receipts here; if compaction fails, its next commit re-earns them
+        // from disk, the pre-ibbuq behaviour.
+        // A handle that has not read adjacency yet (the CLI's compact, which
+        // exits next) does not pay for an index: road-ny spent 295 of its
+        // 3,269 compaction samples building one nothing read. A serving
+        // handle keeps its index warm across the compaction.
+        let (mut snapshot, writer, receipts) = publish_and_snapshot(
             cx,
             &self.store,
             &self.keys,
             writer,
             frontier,
             published_chain_hash,
+            std::mem::take(&mut self.receipts),
+            self.snapshot.adjacency.get().is_some(),
+            self.snapshot.property_index.get().is_some(),
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
+        let versions = VersionHeads::from_checkpoint(&snapshot);
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
         let manifest_records = [ManifestRecord {
@@ -4555,11 +5591,12 @@ impl<V: Vfs + Clone> Database<V> {
             .await
             .map_err(RebuildError::Slot)?;
         self.slot_generation = next_generation;
+        self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
         self.writer = writer;
-        // Receipts describe the superseded generation; the replacement earns
-        // its own on the next publish.
-        self.receipts = PublishReceipts::new();
+        // The receipts now hold every durable object of both generations, and
+        // their root memo is the replacement root's.
+        self.receipts = receipts;
         self.state = DatabaseState::Healthy {
             published_frontier: frontier,
         };
@@ -4589,6 +5626,14 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn path(&self) -> &Path {
         self.coordinator.database_dir()
     }
+}
+
+/// What [`Database::adopt`] synced under the database directory, the
+/// directory itself included. The parent's sync is not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Adopted {
+    pub files: u64,
+    pub directories: u64,
 }
 
 /// Make every namespace entry currently visible in `directory` durable through
@@ -4631,17 +5676,30 @@ fn vertex_statement_transcript(
     vid: VId,
     birth_ordinal: u64,
     labels: &[LabelId],
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<Vec<u8>, CanonicalError> {
-    let mut out = vec![0x01];
+    let mut out = Vec::new();
+    write_vertex_statement_transcript(&mut out, vid, birth_ordinal, labels, props)?;
+    Ok(out)
+}
+
+/// [`vertex_statement_transcript`] into a reused buffer, which it clears.
+fn write_vertex_statement_transcript(
+    out: &mut Vec<u8>,
+    vid: VId,
+    birth_ordinal: u64,
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> Result<(), CanonicalError> {
+    out.clear();
+    out.push(0x01);
     out.extend_from_slice(&vid.0.to_le_bytes());
     out.extend_from_slice(&birth_ordinal.to_le_bytes());
     out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
     for label in labels {
         out.extend_from_slice(&label.0.to_le_bytes());
     }
-    append_props_transcript(&mut out, props)?;
-    Ok(out)
+    append_props_transcript(out, props)
 }
 
 /// One edge statement's transcript: identity, immutable topology, content.
@@ -4650,24 +5708,45 @@ fn edge_statement_transcript(
     src: VId,
     relation: RelationId,
     dst: VId,
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<Vec<u8>, CanonicalError> {
-    let mut out = vec![0x02];
+    let mut out = Vec::new();
+    write_edge_statement_transcript(&mut out, eid, src, relation, dst, props)?;
+    Ok(out)
+}
+
+/// [`edge_statement_transcript`] into a reused buffer, which it clears.
+fn write_edge_statement_transcript(
+    out: &mut Vec<u8>,
+    eid: EId,
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> Result<(), CanonicalError> {
+    out.clear();
+    out.push(0x02);
     out.extend_from_slice(&eid.0.to_le_bytes());
     out.extend_from_slice(&src.0.to_le_bytes());
     out.extend_from_slice(&relation.0.to_le_bytes());
     out.extend_from_slice(&dst.0.to_le_bytes());
-    append_props_transcript(&mut out, props)?;
-    Ok(out)
+    append_props_transcript(out, props)
 }
 
 fn append_props_transcript(
     out: &mut Vec<u8>,
-    props: &[(PropertyKeyId, CanonicalScalar)],
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<(), CanonicalError> {
     out.extend_from_slice(&(props.len() as u32).to_le_bytes());
     for (key, value) in props {
-        let encoded = value.encode().map_err(|_| CanonicalError::Scalar)?;
+        // A scalar's value bytes are its scalar bytes, so a scalar-only
+        // statement keeps its transcript (fgdb-k3nub).
+        let encoded = match value.as_scalar() {
+            Some(scalar) => scalar.encode().map_err(|_| CanonicalError::Scalar)?,
+            None => value
+                .encode()
+                .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))?,
+        };
         out.extend_from_slice(&key.0.to_le_bytes());
         out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
         out.extend_from_slice(&encoded);
@@ -4748,7 +5827,7 @@ fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<Ele
 /// The map still holds pre-commit heads when this runs, and each element is
 /// visited once, so `prev` is exactly the durable chain's predecessor.
 fn fold_statement_versions(
-    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: &mut VersionHeads,
     touched: &std::collections::BTreeSet<ElementId>,
     writer: &BlockWriter,
 ) -> Result<(), CanonicalError> {
@@ -4762,7 +5841,7 @@ fn fold_statement_versions(
                         &row.labels,
                         &row.props,
                     )?;
-                    let previous = versions.get(elem).copied();
+                    let previous = versions.get(elem)?;
                     versions.insert(*elem, statement_successor(previous, &transcript));
                 }
                 None => {
@@ -4772,7 +5851,7 @@ fn fold_statement_versions(
             ElementId::Edge(eid) => match writer.live_edge_statement(*eid) {
                 Some((src, relation, dst, _created_at, props)) => {
                     let transcript = edge_statement_transcript(*eid, src, relation, dst, &props)?;
-                    let previous = versions.get(elem).copied();
+                    let previous = versions.get(elem)?;
                     versions.insert(*elem, statement_successor(previous, &transcript));
                 }
                 None => {
@@ -4786,11 +5865,11 @@ fn fold_statement_versions(
 
 /// One vertex's mutable batch-prefix content: `(labels, props)`, both in
 /// canonical order.
-type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+type VertexContent = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 
 fn sort_write_labels_and_props(
     labels: &mut Vec<LabelId>,
-    props: &mut Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 ) {
     labels.sort_unstable();
     labels.dedup();
@@ -4800,7 +5879,7 @@ fn sort_write_labels_and_props(
 /// Sort by key. Identical `(key, value)` repeats collapse (the reference's
 /// `canonical_props`); a key with two different values is left adjacent so
 /// template build refuses `NonCanonicalPropertyOrder` (fgdb-nsrv).
-fn sort_write_props(props: &mut Vec<(PropertyKeyId, CanonicalScalar)>) {
+fn sort_write_props(props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>) {
     props.sort_by_key(|(key, _)| *key);
     let mut kept = 0usize;
     for i in 0..props.len() {
@@ -4824,9 +5903,11 @@ fn vertex_content_entry<'content>(
     vid: VId,
 ) -> &'content mut VertexContent {
     prefix_content.entry(vid).or_insert_with(|| {
-        let row = merge_vertex(&snapshot.patches, vid, snapshot.frontier)
-            .expect("liveness was proven before content is materialized");
-        (row.labels, row.props)
+        let Ok(row) = gql_exec::source::find_vertex(snapshot, vid, snapshot.frontier, &mut |_| {
+            Ok::<_, core::convert::Infallible>(())
+        });
+        let row = row.expect("liveness was proven before content is materialized");
+        (row.labels.clone(), row.props.clone())
     })
 }
 
@@ -4902,6 +5983,8 @@ pub fn prepare_capsule(
 /// The marker's `capsule_ref` and `logical_delta_template_digest` both come from
 /// the same [`PreparedCapsule`], so the write-time cross-check and the
 /// recovery-time cross-check are asking about the same object by construction.
+/// It carries no identity counters; the engine's own commits attach them with
+/// [`CommitMarker::with_identity_counters`].
 pub fn marker_for_capsule(
     commit_seq: u64,
     capsule_oid: ObjectId,
@@ -4929,6 +6012,7 @@ pub fn marker_for_capsule(
         resource_effect_digest: Digest([0u8; 32]),
         payload_availability_certificate_oid: None,
         flags: 0,
+        identity_counters: None,
     }
 }
 
@@ -4951,79 +6035,92 @@ pub fn marker_for_capsule(
 /// counts ride along because every create spent exactly one identity, which
 /// is also what the birth-ordinal allocator counted.
 fn derive_versions_and_ordinal(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     patches: &[VertexPatchRows],
     frontier: CommitSeq,
 ) -> Result<(std::collections::BTreeMap<ElementId, ObjectId>, u64), CanonicalError> {
-    let mut versions = std::collections::BTreeMap::new();
+    let live = |created_at: CommitSeq, retired_at: Option<CommitSeq>| {
+        retired_at.is_none_or(|r| r.0 > frontier.0) && created_at.0 <= frontier.0
+    };
+    // Statements are borrowed, sorted stably by (identity, created_at) and
+    // folded per identity. A later publication restates an equal key, so of a
+    // run of equal keys only the last (latest published) statement counts. An
+    // element's head is its last statement's version when that statement is
+    // live. Every identity with a statement was spent once.
+    let mut heads = Vec::new();
+    let mut spent = 0_u64;
+    let mut transcript = Vec::new();
 
-    // Vertices: statements keyed (vid, created_at), later patches restate.
-    let mut vertex_statements: std::collections::BTreeMap<(VId, u64), &VertexRow> =
-        std::collections::BTreeMap::new();
-    for rows in patches {
-        for row in rows {
-            vertex_statements.insert((row.vid, row.created_at.0), row);
+    let mut vertex_statements: Vec<&VertexRow> = patches.iter().flatten().collect();
+    vertex_statements.sort_by_key(|row| (row.vid, row.created_at));
+    for chain in vertex_statements.chunk_by(|a, b| a.vid == b.vid) {
+        spent += 1;
+        let mut version = None;
+        for (at, row) in chain.iter().enumerate() {
+            if chain
+                .get(at + 1)
+                .is_some_and(|next| next.created_at == row.created_at)
+            {
+                continue;
+            }
+            write_vertex_statement_transcript(
+                &mut transcript,
+                row.vid,
+                row.birth_ordinal,
+                &row.labels,
+                &row.props,
+            )?;
+            version = Some(statement_successor(version, &transcript));
         }
-    }
-    let mut spent_vertices = std::collections::BTreeSet::new();
-    let mut head: Option<(VId, ObjectId, bool)> = None;
-    for ((vid, _), row) in &vertex_statements {
-        spent_vertices.insert(*vid);
-        let previous = match &head {
-            Some((prev_vid, version, _)) if prev_vid == vid => Some(*version),
-            _ => None,
+        let (Some(last), Some(version)) = (chain.last(), version) else {
+            continue;
         };
-        let transcript =
-            vertex_statement_transcript(row.vid, row.birth_ordinal, &row.labels, &row.props)?;
-        let version = statement_successor(previous, &transcript);
-        let live =
-            row.retired_at.is_none_or(|r| r.0 > frontier.0) && row.created_at.0 <= frontier.0;
-        head = Some((*vid, version, live));
-        if live {
-            versions.insert(ElementId::Vertex(*vid), version);
-        } else {
-            versions.remove(&ElementId::Vertex(*vid));
+        if live(last.created_at, last.retired_at) {
+            heads.push((ElementId::Vertex(last.vid), version));
         }
     }
 
-    // Edges: statements keyed (eid, created_at) across publication order,
-    // later blocks restate (tombstone supersede).
-    let mut edge_statements: std::collections::BTreeMap<
-        (EId, u64),
-        (AdjacencyEntry, EdgePropertyRow),
-    > = std::collections::BTreeMap::new();
+    let mut edge_statements: Vec<(&AdjacencyEntry, &[(PropertyKeyId, CanonicalPropertyValue)])> =
+        Vec::new();
     for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
+        for (index, entry) in block.as_ref().iter().enumerate() {
             let row = props
                 .as_ref()
-                .map(|props| props.props_of(index))
-                .unwrap_or_default();
-            edge_statements.insert((entry.eid, entry.created_at.0), (*entry, row));
+                .map_or(&[][..], |props| props.borrow().props_ref(index));
+            edge_statements.push((entry, row));
         }
     }
-    let mut spent_edges = std::collections::BTreeSet::new();
-    let mut head: Option<(EId, ObjectId)> = None;
-    for ((eid, _), (entry, row)) in &edge_statements {
-        spent_edges.insert(*eid);
-        let previous = match &head {
-            Some((prev_eid, version)) if prev_eid == eid => Some(*version),
-            _ => None,
+    edge_statements.sort_by_key(|(entry, _)| (entry.eid, entry.created_at));
+    for chain in edge_statements.chunk_by(|(a, _), (b, _)| a.eid == b.eid) {
+        spent += 1;
+        let mut version = None;
+        for (at, (entry, row)) in chain.iter().enumerate() {
+            if chain
+                .get(at + 1)
+                .is_some_and(|(next, _)| next.created_at == entry.created_at)
+            {
+                continue;
+            }
+            write_edge_statement_transcript(
+                &mut transcript,
+                entry.eid,
+                entry.src,
+                entry.relation,
+                entry.dst,
+                row,
+            )?;
+            version = Some(statement_successor(version, &transcript));
+        }
+        let (Some((last, _)), Some(version)) = (chain.last(), version) else {
+            continue;
         };
-        let transcript =
-            edge_statement_transcript(*eid, entry.src, entry.relation, entry.dst, row)?;
-        let version = statement_successor(previous, &transcript);
-        head = Some((*eid, version));
-        let live =
-            entry.retired_at.is_none_or(|r| r.0 > frontier.0) && entry.created_at.0 <= frontier.0;
-        if live {
-            versions.insert(ElementId::Edge(*eid), version);
-        } else {
-            versions.remove(&ElementId::Edge(*eid));
+        if live(last.created_at, last.retired_at) {
+            heads.push((ElementId::Edge(last.eid), version));
         }
     }
 
-    Ok((versions, (spent_vertices.len() + spent_edges.len()) as u64))
+    Ok((heads.into_iter().collect(), spent))
 }
 
 /// Post-verification checkpoint reopen (fgdb-ge6a): resolve the slot's
@@ -5039,9 +6136,13 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     coordinator: &CommitCoordinator<V>,
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
-    root_id: PartitionRootVersion,
+    checkpoint: SelectedCheckpoint,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+    replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
+    let SelectedCheckpoint {
+        root_id, manifest, ..
+    } = checkpoint;
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
     let fgdb_strata::store::ReopenedPartition {
@@ -5051,28 +6152,33 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         patches,
         sealed_blocks,
         sealed_patches,
+        admission,
     } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
 
-    let mut writer = BlockWriter::from_published_partition(
+    // The walk above already validated and collapsed the whole published edge
+    // history; build the writer from that admission rather than validating
+    // every block a second time (fgdb-e8gr4).
+    let mut writer = BlockWriter::from_admitted_partition(
         GRAPH,
         BRANCH,
         PARTITION,
         sealed_blocks,
         sealed_patches,
+        &admission.edge_statements(),
         &blocks,
         &block_props,
         &patches,
         published_at,
     )
     .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
-    let (mut versions, mut next_birth_ordinal) =
-        derive_versions_and_ordinal(&blocks, &block_props, &patches, published_at).map_err(
-            |error| RebuildError::Decode {
-                commit_seq: published_at.0,
-                error,
-            },
-        )?;
+    // Admission already established permanent identity membership. Counting
+    // those identities preserves the allocator without hashing their complete
+    // statement histories or retaining an extra strong spent-set handle.
+    let mut next_birth_ordinal =
+        writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
+    let snapshot = current_generation(manifest, root_id, root, blocks, block_props, patches);
+    let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
     // resolved publication.
@@ -5087,6 +6193,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             crypto_verification_events,
         },
         published_at,
+        replay_capacity,
     )
     .await?;
 
@@ -5096,34 +6203,49 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     };
     if frontier.0 > published_at.0 {
         // The suffix advanced the fold: republish through the shared tail so
-        // the durable root/manifest catch up (the slot heals in bind).
+        // the durable root/manifest catch up (the slot heals in bind). That
+        // publication syncs every object again and earns its own receipts.
         let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
             .expect("the fold's frontier is on the recovered chain it folded");
-        let (snapshot, writer) =
-            publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
-        return Ok((snapshot, writer, heads));
+        let (snapshot, writer, receipts) = publish_and_snapshot(
+            cx,
+            store,
+            keys,
+            writer,
+            frontier,
+            published_chain_hash,
+            PublishReceipts::default(),
+            true,
+            true,
+        )
+        .await?;
+        return Ok((snapshot, writer, heads, receipts));
     }
 
     // No suffix: the partition IS current, and the snapshot assembles from
     // what the reopen already decoded — no publish, no O(blocks) writes.
-    let snapshot = current_generation(
-        keys,
-        coordinator.chain(),
-        root_id,
-        root,
-        blocks,
-        block_props,
-        patches,
-    );
-    // A writable handle extends the adjacency index on every commit, so it
-    // is built with the generation rather than on first read.
-    snapshot.adjacency_index();
-    Ok((snapshot, writer, heads))
+    // The adjacency index stays unbuilt until a read or a commit's extension
+    // needs it: a write that never reads adjacency (a pure insert) does not
+    // pay to index every published block. The first reader builds it from the
+    // whole generation, which verify_snapshot_indexes pins equal to the
+    // incremental extension chain.
+    // The root slot selected this root, so publication already made every
+    // object it names durable; the reopen just admitted each one. Owner
+    // ruling 2026-10-06 (fgdb-ibbuq, "trust publication"): seed the receipts
+    // from that admission instead of re-syncing all of them on the first
+    // commit. A copy made without syncing must be adopted before this open
+    // ([`Database::adopt`]).
+    let receipts = PublishReceipts::for_published_root(admission);
+    Ok((snapshot, writer, heads, receipts))
 }
 
-/// What an open derives: the generation readers share, the retained fold, and
-/// the write heads beside it.
-type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads);
+/// What an open derives: the generation readers share, the retained fold, the
+/// write heads beside it, and the receipts for what is already published.
+type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads, PublishReceipts);
+
+/// What a publication yields: the generation, the retained fold, and the
+/// receipts it earned.
+type PublishedGeneration = (Snapshot, BlockWriter, PublishReceipts);
 
 /// Refuse a `path` that does not hold a database before anything is opened
 /// under it. Shared by the writable and the read-only open; see
@@ -5168,6 +6290,23 @@ async fn require_database_dir<V: Vfs>(
     }
 }
 
+/// Authenticate the selected opener before reading or repairing its storage.
+/// Callers hold Chronicle's writer lease throughout this check and admission.
+async fn authenticated_root_store<V: Vfs + Clone>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+    keys: &DatabaseKeys,
+) -> Result<RootStore<V>, OpenError> {
+    let probe = RootStore::with_vfs(vfs.clone(), path);
+    match probe.current(cx).await {
+        Ok(slot) => validate_plain_slot(&slot, keys, path)?,
+        Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(OpenError::Slot(error)),
+    }
+    Ok(probe)
+}
+
 /// The Strata block store under `path`, opened through the handle's one
 /// filesystem and carrying the keys' scalar resolver when they have one.
 async fn open_block_store<V: Vfs + Clone>(
@@ -5185,10 +6324,66 @@ async fn open_block_store<V: Vfs + Clone>(
     })
 }
 
+/// [`open_block_store`] for a reader that holds no writer lease: it creates,
+/// locks and syncs nothing. `None` when the block directory does not exist:
+/// a create interrupted before it, which has no root slot either, so only a
+/// full open can heal it.
+async fn open_block_store_for_read<V: Vfs + Clone>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+    keys: &DatabaseKeys,
+) -> Result<Option<BlockStore<V>>, OpenError> {
+    let store = match BlockStore::open_existing_for_read_with_vfs(
+        cx,
+        vfs.clone(),
+        path,
+        keys.k_oid.clone(),
+        keys.namespace,
+    )
+    .await
+    {
+        Ok(store) => store,
+        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(match &keys.scalar_resolver {
+        Some(resolver) => store.with_scalar_resolver(resolver.clone()),
+        None => store,
+    }))
+}
+
+/// What the read-only open's lease-free fast path found.
+enum ReadGeneration<V: Vfs> {
+    /// The slot's root was published at the committed chain's frontier.
+    Current(PublishedRead<V>),
+    /// The committed chain is ahead of the last published root: a live
+    /// writer mid-commit, or a crash that needs healing.
+    Lagging(PublishedRead<V>),
+    /// No root slot yet (an interrupted create): only a full open can heal it.
+    Unselected,
+}
+
+/// A published root the lease-free path selected and bound to the chain it
+/// scanned, not yet read.
+struct PublishedRead<V: Vfs> {
+    store: BlockStore<V>,
+    root_id: PartitionRootVersion,
+    /// The stored manifest that selected `root_id`.
+    manifest: ManifestVersion,
+    /// The frontier already bound to this manifest and the committed chain.
+    published_at: CommitSeq,
+}
+
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
 struct SelectedCheckpoint {
     root_id: PartitionRootVersion,
     published_at: CommitSeq,
+    /// The stored manifest the root slot named, whose one record selected
+    /// `root_id`. A current checkpoint keeps this identity as its own.
+    manifest: ManifestVersion,
 }
 
 /// Select the checkpoint the root slot names, accepting it only when the
@@ -5200,12 +6395,53 @@ struct SelectedCheckpoint {
 /// neither accepts a root the other refuses.
 async fn select_checkpoint<V: Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator<V>,
+    chain: &fgdb_chronicle::MarkerChain,
     store: &BlockStore<V>,
     probe: &RootStore<V>,
     keys: &DatabaseKeys,
     path: &Path,
 ) -> Result<Option<SelectedCheckpoint>, OpenError> {
+    let Some((claimed, resolved)) = read_slot(cx, store, probe, keys, path).await? else {
+        return Ok(None);
+    };
+    checkpoint_from_manifest(chain, claimed, &resolved, path).map(Some)
+}
+
+/// The manifest the root slot names, resolved through the block store. `None`
+/// when there is no slot file (an interrupted create). Binding it to a chain
+/// is [`checkpoint_from_manifest`]'s separate step.
+async fn read_slot<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    probe: &RootStore<V>,
+    keys: &DatabaseKeys,
+    path: &Path,
+) -> Result<
+    Option<(
+        ManifestVersion,
+        Vec<(ManifestRecord, fgdb_strata::root::PartitionRoot)>,
+    )>,
+    OpenError,
+> {
+    read_slot_with_source_limits(cx, store, probe, keys, path, None).await
+}
+
+/// The same slot/manifest selection law with optional metadata admission for
+/// a bounded consumer. Limits apply to the FIRST decode, not a later reread.
+async fn read_slot_with_source_limits<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    probe: &RootStore<V>,
+    keys: &DatabaseKeys,
+    path: &Path,
+    limits: Option<&fgdb_strata::store::RootReadLimits>,
+) -> Result<
+    Option<(
+        ManifestVersion,
+        Vec<(ManifestRecord, fgdb_strata::root::PartitionRoot)>,
+    )>,
+    OpenError,
+> {
     let slot = match probe.current(cx).await {
         Ok(slot) => slot,
         Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -5214,16 +6450,64 @@ async fn select_checkpoint<V: Vfs>(
         Err(error) => return Err(OpenError::Slot(error)),
     };
     validate_plain_slot(&slot, keys, path)?;
+    let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
+    let resolved = match limits {
+        Some(limits) => {
+            store
+                .resolve_manifest_with_source_limits(cx, claimed, limits)
+                .await
+        }
+        None => store.resolve_manifest(cx, claimed).await,
+    };
+    match resolved {
+        Ok(resolved) if resolved.len() == 1 => Ok(Some((claimed, resolved))),
+        Err(error) if let Some(refusal) = unsupported_manifest(&error, claimed, path) => {
+            Err(refusal)
+        }
+        Err(error) if limits.is_some() => Err(OpenError::Store(error)),
+        _ => Err(OpenError::SlotDisagreesWithStream {
+            path: path.to_path_buf(),
+            slot_manifest: claimed.0,
+        }),
+    }
+}
+
+/// The named refusal for a manifest whose format this build does not read
+/// (fgdb-eslqh): a newer binary's database, not damage.
+fn unsupported_manifest(
+    error: &StoreError,
+    manifest: ManifestVersion,
+    path: &Path,
+) -> Option<OpenError> {
+    match error {
+        StoreError::MalformedManifest(
+            fgdb_strata::manifest::ManifestError::UnsupportedFormat { format },
+        ) => Some(OpenError::UnsupportedManifestFormat {
+            path: path.to_path_buf(),
+            slot_manifest: manifest.0,
+            format: *format,
+        }),
+        _ => None,
+    }
+}
+
+/// The checkpoint's coordinate and Chronicle ancestry have one admission law
+/// for resident and buffered readers. Byte loading belongs to the respective
+/// bounded store operation; no reader can substitute content identity for this
+/// independent marker-chain binding.
+fn checkpoint_from_manifest(
+    chain: &fgdb_chronicle::MarkerChain,
+    claimed: ManifestVersion,
+    resolved: &[(ManifestRecord, fgdb_strata::root::PartitionRoot)],
+    path: &Path,
+) -> Result<SelectedCheckpoint, OpenError> {
     let disagrees = || OpenError::SlotDisagreesWithStream {
         path: path.to_path_buf(),
-        slot_manifest: ObjectId(slot.root_manifest_oid),
+        slot_manifest: claimed.0,
     };
-    let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
-    let resolved = match store.resolve_manifest(cx, claimed).await {
-        Ok(resolved) if resolved.len() == 1 => resolved,
-        _ => return Err(disagrees()),
+    let [(record, root)] = resolved else {
+        return Err(disagrees());
     };
-    let (record, root) = &resolved[0];
     let describes_spine = record.graph == GRAPH
         && record.branch == BRANCH
         && record.partition == PARTITION
@@ -5237,24 +6521,61 @@ async fn select_checkpoint<V: Vfs>(
     // history hashes differently; a lagging root matches at its own seq and
     // heals in bind. WHAT was published stays the equivalence law's question —
     // this binding answers WHO published it.
-    let bound = chain_commitment_at(coordinator.chain(), root.published_at)
+    let bound = chain_commitment_at(chain, root.published_at)
         .is_some_and(|expected| expected == record.published_chain_hash);
     if !describes_spine || !bound {
         return Err(disagrees());
     }
-    Ok(Some(SelectedCheckpoint {
+    Ok(SelectedCheckpoint {
         root_id: record.root,
         published_at: root.published_at,
-    }))
+        manifest: claimed,
+    })
 }
 
 /// The readable generation of a verified partition that is current with the
 /// recovered chain: the decoded state, its derived indexes, and the manifest
 /// identity re-derived from the one record that publishes it. Its delta window
 /// starts empty; each caller states what history it retains.
+/// An open may write a root slot only naming a manifest the store resolves to
+/// exactly this generation's root. A slot naming an absent or different
+/// manifest makes the database unopenable by every binary (fgdb-79kyi
+/// incident, 2026-10-14), so a violation refuses the open with nothing
+/// written. Every lawful path satisfies it: a rebuild or a lagging checkpoint
+/// stored the manifest it publishes, and a current checkpoint names the stored
+/// manifest it was selected from.
+async fn ensure_slot_target_resolves<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    snapshot: &Snapshot,
+    path: &Path,
+) -> Result<(), OpenError> {
+    match store.resolve_manifest(cx, snapshot.manifest).await {
+        Ok(resolved) if resolved.len() == 1 && resolved[0].0.root == snapshot.root => Ok(()),
+        outcome => Err(OpenError::SlotUnrecoverable {
+            path: path.to_path_buf(),
+            detail: format!(
+                "refusing to name manifest {:?} in the root slot: it does not resolve to this \
+                 generation's root ({})",
+                snapshot.manifest.0,
+                match outcome {
+                    Ok(resolved) => format!("{} record(s) naming another root", resolved.len()),
+                    Err(error) => error.to_string(),
+                }
+            ),
+        }),
+    }
+}
+
+/// `manifest` is the identity of the STORED manifest that selected this
+/// checkpoint, never a re-encoding of its record. A re-encoding names the same
+/// record only while the encoder writes the stored manifest's format; once it
+/// writes a newer one, the re-derived identity names an object that was never
+/// stored, and the open's slot reconciliation would publish a root slot naming
+/// it, leaving the database unopenable by every binary (fgdb-79kyi incident,
+/// 2026-10-14, manifest V3).
 fn current_generation(
-    keys: &DatabaseKeys,
-    chain: &fgdb_chronicle::MarkerChain,
+    manifest: ManifestVersion,
     root_id: PartitionRootVersion,
     root: fgdb_strata::root::PartitionRoot,
     blocks: Vec<Vec<AdjacencyEntry>>,
@@ -5262,24 +6583,17 @@ fn current_generation(
     patches: Vec<VertexPatchRows>,
 ) -> Snapshot {
     let published_at = root.published_at;
-    let published_chain_hash = chain_commitment_at(chain, published_at)
-        .expect("select_checkpoint bound this publication to the recovered chain");
-    let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
-        .expect("one root is one canonical record");
-    let manifest_bytes =
-        encode_manifest(&manifest_records).expect("records_of proved these records canonical");
-    let manifest = ManifestVersion(fgdb_strata::manifest::manifest_id(
-        keys.k_oid(),
-        keys.namespace,
-        &manifest_bytes,
-    ));
     Snapshot {
-        // Built on first use; a writable caller forces it at once.
+        // Both built on first use by a reader; a commit extends each only
+        // once built.
         adjacency: std::sync::OnceLock::new(),
-        property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
-        blocks,
+        property_index: std::sync::OnceLock::new(),
+        blocks: blocks.into_iter().map(Arc::from).collect(),
         refs: root.blocks,
-        block_props,
+        block_props: block_props
+            .into_iter()
+            .map(|props| props.map(Arc::new))
+            .collect(),
         patches,
         patch_refs: root.vertex_patches,
         frontier: published_at,
@@ -5295,10 +6609,11 @@ async fn rebuild<V: Vfs>(
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+    replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
-    let mut versions = std::collections::BTreeMap::new();
+    let mut versions = VersionHeads::default();
     let frontier = fold_stream(
         cx,
         coordinator,
@@ -5310,12 +6625,23 @@ async fn rebuild<V: Vfs>(
             crypto_verification_events,
         },
         CommitSeq(0),
+        replay_capacity,
     )
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
         .expect("the fold's frontier is on the recovered chain it folded");
-    let (snapshot, writer) =
-        publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
+    let (snapshot, writer, receipts) = publish_and_snapshot(
+        cx,
+        store,
+        keys,
+        writer,
+        frontier,
+        published_chain_hash,
+        PublishReceipts::default(),
+        true,
+        true,
+    )
+    .await?;
     Ok((
         snapshot,
         writer,
@@ -5323,16 +6649,104 @@ async fn rebuild<V: Vfs>(
             versions,
             next_birth_ordinal,
         },
+        receipts,
+    ))
+}
+
+/// Retain a marker-authenticated boundary without manufacturing a delta batch.
+fn empty_delta_window_at<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    at: CommitSeq,
+) -> Result<LocalDeltaBatchIndex, RebuildError> {
+    if at == CommitSeq::ORIGIN {
+        return Ok(LocalDeltaBatchIndex::new());
+    }
+    let entries = coordinator.chain().entries();
+    let position = entries.partition_point(|entry| entry.marker.commit_seq < at.0);
+    let entry = entries
+        .get(position)
+        .filter(|entry| entry.marker.commit_seq == at.0)
+        .ok_or(CommitError::ChainDiverged { commit_seq: at.0 })?;
+    let EffectSource::Local {
+        logical_delta_template_digest,
+        ..
+    } = &entry.marker.effect_source;
+    LocalDeltaBatchIndex::empty_at_committed(
+        CommittedMarker::attest(
+            MarkerRef {
+                marker_oid: entry.marker_oid,
+                commit_seq: at,
+            },
+            cx,
+        ),
+        logical_delta_template_digest.0,
+    )
+    .map_err(|error| RebuildError::Index {
+        commit_seq: at.0,
+        error,
+    })
+}
+
+/// The single authenticated capsule-to-delta reconstruction path used by
+/// eager recovery and lazy prefix admission alike.
+async fn read_delta_batch<V: Vfs>(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator<V>,
+    keys: &DatabaseKeys,
+    entry: &fgdb_chronicle::marker::ChainedMarker,
+    crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
+) -> Result<LogicalDeltaBatch, RebuildError> {
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let commit_seq = CommitSeq(entry.marker.commit_seq);
+    let EffectSource::Local {
+        capsule_ref,
+        logical_delta_template_digest,
+    } = &entry.marker.effect_source;
+    if !coordinator.capsule_exists(cx, *capsule_ref).await {
+        return Err(RebuildError::MissingCapsule {
+            commit_seq: commit_seq.0,
+            capsule_oid: *capsule_ref,
+        });
+    }
+    let bytes = coordinator
+        .read_capsule(cx, *capsule_ref, crypto_verification_events)
+        .await?;
+    let recomputed = template_digest(&bytes);
+    // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
+    if recomputed != *logical_delta_template_digest {
+        return Err(RebuildError::TemplateDigestMismatch {
+            commit_seq: commit_seq.0,
+            declared: *logical_delta_template_digest,
+            recomputed,
+        });
+    }
+    let template = keys
+        .decode_template(&bytes)
+        .map_err(|error| RebuildError::Decode {
+            commit_seq: commit_seq.0,
+            error,
+        })?;
+    Ok(LogicalDeltaBatch::order(
+        &template,
+        logical_delta_template_digest.0,
+        CommittedMarker::attest(
+            MarkerRef {
+                marker_oid: entry.marker_oid,
+                commit_seq,
+            },
+            cx,
+        ),
     ))
 }
 
 /// Rebuild the derived delta window from the FULL recovered marker chain.
 ///
-/// Checkpoint-selected open folds only the suffix into the writer. The
-/// index must still cover `(0, frontier]`: a suffix-only window would
-/// start at `published_at` and the next [`LocalDeltaBatchIndex::insert`]
-/// would refuse as a gap. The index is never a second source of truth
-/// (FG-INV-18); every open reconstructs it from capsules the markers name.
+/// Used when no admitted checkpoint was selected or the caller explicitly
+/// forces stream recovery. Ordinary checkpoint open instead retains an
+/// authenticated floor and reconstructs older batches on demand. The index
+/// is never a second source of truth (FG-INV-18): every row is derived from
+/// the exact capsule named by its recovered marker.
 async fn rebuild_delta_index<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
@@ -5342,48 +6756,8 @@ async fn rebuild_delta_index<V: Vfs>(
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
-        let EffectSource::Local {
-            capsule_ref,
-            logical_delta_template_digest,
-        } = &entry.marker.effect_source;
-
-        if !coordinator.capsule_exists(cx, *capsule_ref).await {
-            return Err(RebuildError::MissingCapsule {
-                commit_seq: commit_seq.0,
-                capsule_oid: *capsule_ref,
-            });
-        }
-        let bytes = coordinator
-            .read_capsule(cx, *capsule_ref, crypto_verification_events)
-            .await?;
-        let recomputed = template_digest(&bytes);
-        // The annotation must sit on the line immediately above the
-        // comparison: UBS anchors it to the next line.
-        // ubs:ignore -- non-secret content digest over local capsule bytes, not authentication material.
-        if recomputed != *logical_delta_template_digest {
-            return Err(RebuildError::TemplateDigestMismatch {
-                commit_seq: commit_seq.0,
-                declared: *logical_delta_template_digest,
-                recomputed,
-            });
-        }
-        let template = keys
-            .decode_template(&bytes)
-            .map_err(|error| RebuildError::Decode {
-                commit_seq: commit_seq.0,
-                error,
-            })?;
-        let batch = LogicalDeltaBatch::order(
-            &template,
-            logical_delta_template_digest.0,
-            CommittedMarker::attest(
-                MarkerRef {
-                    marker_oid: entry.marker_oid,
-                    commit_seq,
-                },
-                cx,
-            ),
-        );
+        let batch =
+            read_delta_batch(cx, coordinator, keys, entry, crypto_verification_events).await?;
         index.insert(batch).map_err(|error| RebuildError::Index {
             commit_seq: commit_seq.0,
             error,
@@ -5423,13 +6797,243 @@ fn triple_is_live(
     false
 }
 
+/// Encode a zero-floor consolidation for both explicit compaction and replay.
+/// Every historical interval is retained; only redundant restatements and
+/// spare object capacity are reclaimed. Replacement chains restart per family.
+fn consolidated_writer(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
+    patches: &[VertexPatchRows],
+    frontier: CommitSeq,
+) -> Result<BlockWriter, RebuildError> {
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let compaction =
+        fgdb_strata::compact::compact_with_props(blocks, block_props, CommitSeq::ORIGIN)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
+    let mut chain_heads: std::collections::BTreeMap<
+        (VId, RelationId),
+        fgdb_strata::DeltaBlockVersion,
+    > = std::collections::BTreeMap::new();
+    let mut sealed = Vec::with_capacity(compaction.blocks.len());
+    for (entries, props) in compaction.blocks.iter().zip(&compaction.block_props) {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let family = entries
+            .first()
+            .map(|entry| (entry.src, entry.relation))
+            .expect("the packer emits no empty blocks");
+        let predecessor = chain_heads.get(&family).copied();
+        let (bytes, property_patch) = match props {
+            Some(props) => {
+                let patch_bytes = fgdb_strata::edge_props::encode_property_patch(&props.rows)
+                    .map_err(|error| {
+                        RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                    })?;
+                let patch_id = fgdb_strata::edge_props::property_patch_id(
+                    keys.k_oid(),
+                    keys.namespace,
+                    &patch_bytes,
+                );
+                let bytes = fgdb_strata::encode_block_with_properties(
+                    PARTITION,
+                    predecessor,
+                    entries,
+                    patch_id,
+                    &props.locators,
+                    &props.rows,
+                )
+                .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+                (
+                    bytes,
+                    Some(fgdb_strata::writer::SealedPropertyPatch {
+                        patch_id,
+                        bytes: patch_bytes.into(),
+                    }),
+                )
+            }
+            None => (
+                fgdb_strata::encode_block(PARTITION, predecessor, entries)
+                    .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?,
+                None,
+            ),
+        };
+        let (first_seq, last_seq) =
+            fgdb_strata::root::span_of(entries).expect("the packer emits no empty blocks");
+        let block_id = fgdb_strata::block_id(keys.k_oid(), keys.namespace, &bytes);
+        chain_heads.insert(family, fgdb_strata::DeltaBlockVersion(block_id));
+        sealed.push(fgdb_strata::writer::SealedBlock {
+            block_id,
+            bytes: bytes.into(),
+            first_seq,
+            last_seq,
+            property_patch,
+        });
+    }
+
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let (compacted_patches, _) =
+        fgdb_strata::compact::compact_vertex_patches(patches, CommitSeq::ORIGIN)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+    let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
+    for rows in &compacted_patches {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let bytes = fgdb_strata::vertex::encode_patch(rows)
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
+        let (first_seq, last_seq) =
+            fgdb_strata::vertex::span_of_rows(rows).expect("the packer emits no empty patches");
+        sealed_patches.push(fgdb_strata::writer::SealedPatch {
+            patch_id: fgdb_strata::vertex::vertex_patch_id(keys.k_oid(), keys.namespace, &bytes),
+            bytes: bytes.into(),
+            first_seq,
+            last_seq,
+        });
+    }
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    BlockWriter::from_published_partition(
+        GRAPH,
+        BRANCH,
+        PARTITION,
+        sealed,
+        sealed_patches,
+        &compaction.blocks,
+        &compaction.block_props,
+        &compacted_patches,
+        frontier,
+    )
+    .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))
+}
+
+/// Replay uses the same immutable format ceilings as live write admission.
+/// Kept explicit so recovery laws can exercise the real bind/fold/publication
+/// path at a small capacity without changing a durable format constant.
+#[derive(Clone, Copy)]
+struct ReplayRootCapacity {
+    blocks: usize,
+    patches: usize,
+}
+
+impl ReplayRootCapacity {
+    const DURABLE: Self = Self {
+        blocks: fgdb_strata::root::MAX_ROOT_BLOCKS as usize,
+        patches: fgdb_strata::root::MAX_ROOT_PATCHES as usize,
+    };
+
+    fn overflow(self, writer: &BlockWriter) -> Option<fgdb_strata::root::RootError> {
+        if writer.sealed().len() > self.blocks {
+            Some(fgdb_strata::root::RootError::ImplausibleBlockCount {
+                declared: u32::try_from(writer.sealed().len()).unwrap_or(u32::MAX),
+            })
+        } else if writer.sealed_patches().len() > self.patches {
+            Some(fgdb_strata::root::RootError::ImplausiblePatchCount {
+                declared: u32::try_from(writer.sealed_patches().len()).unwrap_or(u32::MAX),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// A compacted live root can admit more history than its original per-commit
+/// object layout can name. Replaying that layout without consolidation made
+/// such a database permanently unrebuildable (fgdb-d5vo4). At the exact format
+/// boundary, consolidate once, without dropping history or changing logical
+/// heads. An irreducible over-capacity result returns the original root-error
+/// family; it never retries indefinitely or publishes a truncated generation.
+fn consolidate_replay_if_needed(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    writer: &mut BlockWriter,
+    frontier: CommitSeq,
+    capacity: ReplayRootCapacity,
+) -> Result<(), RebuildError> {
+    if capacity.overflow(writer).is_none() {
+        return Ok(());
+    }
+    let (blocks, block_props, patches) = decode_sealed_partition(cx, keys, writer)?;
+    let replacement = consolidated_writer(cx, keys, &blocks, &block_props, &patches, frontier)?;
+    if let Some(error) = capacity.overflow(&replacement) {
+        return Err(RebuildError::Fold {
+            commit_seq: frontier.0,
+            error: fgdb_strata::writer::WriteError::Root(error),
+        });
+    }
+    *writer = replacement;
+    Ok(())
+}
+
+/// Decode exactly the immutable objects a writer has sealed, in publication
+/// order. This is the same durable-format round trip normal writes use for
+/// their new snapshot suffix; no live-map row becomes a read answer.
+///
+/// This helper grants no admission or durability. A publication calls it only
+/// after its data, root and manifest have earned the store's receipts. Replay
+/// may also use it before publication to feed the validating compactor.
+#[allow(clippy::type_complexity)]
+fn decode_sealed_partition(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    writer: &BlockWriter,
+) -> Result<
+    (
+        Vec<Vec<AdjacencyEntry>>,
+        Vec<Option<BlockProps>>,
+        Vec<VertexPatchRows>,
+    ),
+    RebuildError,
+> {
+    let mut blocks = Vec::with_capacity(writer.sealed().len());
+    let mut block_props = Vec::with_capacity(writer.sealed().len());
+    for sealed in writer.sealed() {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        let (entries, hosted) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
+            .map_err(|error| RebuildError::Store(StoreError::Malformed(error)))?;
+        let props = match hosted {
+            Some((_, locators)) => {
+                let patch = sealed
+                    .property_patch
+                    .as_ref()
+                    .expect("a sealed block declaring a hosted patch carries that patch");
+                let rows = match keys.scalar_resolver.as_deref() {
+                    Some(resolver) => fgdb_strata::edge_props::decode_property_patch_with_resolver(
+                        &patch.bytes,
+                        resolver,
+                    ),
+                    None => fgdb_strata::edge_props::decode_property_patch(&patch.bytes),
+                }
+                .map_err(|error| {
+                    RebuildError::Store(StoreError::MalformedEdgePropertyPatch(error))
+                })?;
+                Some(BlockProps { locators, rows })
+            }
+            None => None,
+        };
+        blocks.push(entries);
+        block_props.push(props);
+    }
+    let mut patches = Vec::with_capacity(writer.sealed_patches().len());
+    for sealed in writer.sealed_patches() {
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+        patches.push(
+            match keys.scalar_resolver.as_deref() {
+                Some(resolver) => {
+                    fgdb_strata::vertex::decode_patch_with_resolver(&sealed.bytes, resolver)
+                }
+                None => fgdb_strata::vertex::decode_patch(&sealed.bytes),
+            }
+            .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?,
+        );
+    }
+    Ok((blocks, block_props, patches))
+}
+
 /// Fold every committed template with `commit_seq > after` into the writer,
 /// versions map, and birth-ordinal allocator — the one stream fold shared by
 /// the from-scratch rebuild (`after = 0`) and the selected checkpoint's suffix
 /// replay past `published_at` (fgdb-ge6a).
 struct FoldState<'a> {
     writer: &'a mut BlockWriter,
-    versions: &'a mut std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: &'a mut VersionHeads,
     next_birth_ordinal: &'a mut u64,
     crypto_verification_events: &'a mut Vec<CryptoVerificationEvent>,
 }
@@ -5440,6 +7044,7 @@ async fn fold_stream<V: Vfs>(
     keys: &DatabaseKeys,
     state: &mut FoldState<'_>,
     after: CommitSeq,
+    capacity: ReplayRootCapacity,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
     let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
@@ -5493,12 +7098,6 @@ async fn fold_stream<V: Vfs>(
                 continue;
             }
             for row in &coordinate.rows {
-                if matches!(
-                    row,
-                    DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
-                ) {
-                    *state.next_birth_ordinal += 1;
-                }
                 state
                     .writer
                     .apply(keys.block_keys(), commit_seq, row)
@@ -5506,6 +7105,9 @@ async fn fold_stream<V: Vfs>(
                         commit_seq: commit_seq.0,
                         error,
                     })?;
+                if state.versions.admit_creation(row) {
+                    *state.next_birth_ordinal += 1;
+                }
                 touched_elements(row, &mut touched);
             }
         }
@@ -5537,17 +7139,30 @@ async fn fold_stream<V: Vfs>(
                 commit_seq: commit_seq.0,
                 error,
             })?;
+        consolidate_replay_if_needed(cx, keys, state.writer, commit_seq, capacity)?;
     }
     Ok(frontier)
 }
 
-/// The publication tail every open path shares: publish from a clone, make
-/// the blocks/patches/root/manifest durable, and assemble the snapshot from
-/// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+/// The publication tail every open path shares: seal the owned writer, make
+/// the blocks/patches/root/manifest durable, and decode the exact sealed bytes
+/// whose durability and root membership the store just proved. This preserves
+/// the encode -> address -> fsync -> decode round trip without a redundant
+/// writer-map clone or a second whole-partition filesystem read (fgdb-l89gt).
+/// The receipts this publication earned come back with it, so the handle's
+/// first commit does not re-sync what this call just synced (fgdb-ibbuq).
+///
+/// `receipts` seeds the publication: objects it already holds are durable
+/// under a published generation, so they are neither re-read nor re-synced.
+/// Open and recovery pass empty receipts and earn every object.
 ///
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
 /// Strata publication (fgdb-a5y6m).
+/// `build_adjacency` and `build_property_index` build the snapshot's
+/// adjacency and property-equality indexes with the generation; otherwise
+/// each is built on first use, as after a checkpoint open.
+#[allow(clippy::too_many_arguments)]
 fn publish_and_snapshot<'a, V: Vfs>(
     cx: &'a CommitCx,
     store: &'a BlockStore<V>,
@@ -5555,7 +7170,10 @@ fn publish_and_snapshot<'a, V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
-) -> SendFuture<'a, Result<(Snapshot, BlockWriter), RebuildError>> {
+    receipts: PublishReceipts,
+    build_adjacency: bool,
+    build_property_index: bool,
+) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
         store,
@@ -5563,9 +7181,13 @@ fn publish_and_snapshot<'a, V: Vfs>(
         writer,
         frontier,
         published_chain_hash,
+        receipts,
+        build_adjacency,
+        build_property_index,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_and_snapshot_inner<V: Vfs>(
     cx: &CommitCx,
     store: &BlockStore<V>,
@@ -5573,13 +7195,16 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
-) -> Result<(Snapshot, BlockWriter), RebuildError> {
-    // Publish from a clone and hand the fold state back: the caller retains it
-    // so later commits fold only their own template (fgdb-fujt). The strata
-    // equality law pins clone-publish == this very rebuild, byte for byte.
-    let (root, blocks, patches) = writer
-        .clone()
-        .publish(keys.block_keys(), frontier)
+    receipts: PublishReceipts,
+    build_adjacency: bool,
+    build_property_index: bool,
+) -> Result<PublishedGeneration, RebuildError> {
+    // This replacement writer is owned by the publication, so sealing it in
+    // place needs no copy of its complete live maps. Return the sealed fold
+    // with the snapshot so the next commit extends exactly these objects.
+    let mut writer = writer;
+    let root = writer
+        .publish_in_place(keys.block_keys(), frontier)
         .map_err(|error| RebuildError::Fold {
             commit_seq: frontier.0,
             error,
@@ -5592,9 +7217,9 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     // series, and put_root then re-read every block: a 900k-edge compaction
     // was 798 s of wall for 108 s of CPU. Nothing is reachable until the
     // root slot names the manifest, which the caller publishes after this.
-    let mut receipts = fgdb_strata::store::PublishReceipts::default();
+    let mut receipts = receipts;
     let mut batch = store.publication_batch(cx, &mut receipts, None)?;
-    for block in &blocks {
+    for block in writer.sealed() {
         batch
             .put_verified(
                 cx,
@@ -5602,12 +7227,12 @@ async fn publish_and_snapshot_inner<V: Vfs>(
                 block
                     .property_patch
                     .as_ref()
-                    .map(|patch| patch.bytes.as_slice()),
+                    .map(|patch| patch.bytes.as_ref()),
             )
             .await?;
     }
     batch.flush(cx).await?;
-    for patch in &patches {
+    for patch in writer.sealed_patches() {
         batch.put_patch_verified(cx, &patch.bytes).await?;
     }
     batch.finish(cx).await?;
@@ -5618,29 +7243,738 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     let (manifest, _) = store
         .publish_root_and_manifest(cx, verified_root, &manifest_records, &mut receipts)
         .await?;
-    let (reopened_root, decoded, decoded_props, decoded_patches) =
-        store.reopen(cx, root_id).await?;
+    // Batch admission proves identity, shape, hosted properties and history;
+    // its flush also compares the synced backing bytes before publishing an
+    // inode or pack. Root/manifest publication uses the same durable readback
+    // protocol. Existing unreceipted objects still earn the full identity and
+    // byte-equality proof, while published receipts keep their normal trust
+    // rule. Reopening here adds no proof: it only rereads and redecodes every
+    // already-admitted immutable object. A fresh database open still performs
+    // its complete authenticated root walk from disk.
+    let (decoded, decoded_props, decoded_patches) = decode_sealed_partition(cx, keys, &writer)?;
 
     Ok((
         Snapshot {
-            adjacency: std::sync::OnceLock::from(Arc::new(
-                gql_exec::source::AdjacencyIndex::build(&decoded),
-            )),
-            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
-                &decoded_patches,
-            )),
-            blocks: decoded,
-            refs: reopened_root.blocks,
-            block_props: decoded_props,
+            adjacency: if build_adjacency {
+                std::sync::OnceLock::from(Arc::new(gql_exec::source::AdjacencyIndex::build(
+                    &decoded,
+                )))
+            } else {
+                std::sync::OnceLock::new()
+            },
+            property_index: if build_property_index {
+                std::sync::OnceLock::from(Arc::new(gql_exec::source::PropertyEqualityIndex::build(
+                    &decoded_patches,
+                )))
+            } else {
+                std::sync::OnceLock::new()
+            },
+            blocks: decoded.into_iter().map(Arc::from).collect(),
+            refs: root.blocks,
+            block_props: decoded_props
+                .into_iter()
+                .map(|props| props.map(Arc::new))
+                .collect(),
             patches: decoded_patches,
-            patch_refs: reopened_root.vertex_patches,
+            patch_refs: root.vertex_patches,
             frontier,
             root: root_id,
             manifest,
             delta_index: LocalDeltaBatchIndex::new(),
         },
         writer,
+        receipts,
     ))
+}
+
+#[cfg(test)]
+mod lazy_delta_laws {
+    use super::*;
+    use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Count capsule read opens/whole-file reads through the VFS boundary.
+    /// Refusals are injected only when requested, without altering disk bytes.
+    #[derive(Clone, Debug)]
+    struct CountingVfs {
+        memory: MemVfs,
+        reads: Arc<AtomicUsize>,
+        refuse_at: Arc<AtomicUsize>,
+    }
+
+    impl CountingVfs {
+        fn new() -> Self {
+            Self {
+                memory: MemVfs::new().unwrap(),
+                reads: Arc::new(AtomicUsize::new(0)),
+                refuse_at: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        fn count(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+        fn reset(&self) {
+            self.reads.store(0, Ordering::SeqCst);
+        }
+        fn observe(&self, path: &Path) -> io::Result<()> {
+            if path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "capsules")
+            {
+                let count = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.refuse_at.load(Ordering::SeqCst) == count {
+                    return Err(io::Error::other("injected capsule read refusal"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Vfs for CountingVfs {
+        type File = MemVfsFile;
+
+        async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+            self.memory.open(path, options).await
+        }
+        async fn open_read(&self, path: &Path) -> io::Result<Self::File> {
+            self.observe(path)?;
+            self.memory.open_read(path).await
+        }
+        async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+            self.memory.metadata(path).await
+        }
+        async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+            self.memory.symlink_metadata(path).await
+        }
+        async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
+            self.memory.set_permissions(path, permissions).await
+        }
+        async fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.memory.create_dir(path).await
+        }
+        async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.memory.create_dir_all(path).await
+        }
+        async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_dir(path).await
+        }
+        async fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_file(path).await
+        }
+        async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+            self.memory.read_dir(path).await
+        }
+        async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.memory.remove_dir_all(path).await
+        }
+        async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.memory.rename(from, to).await
+        }
+        async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+            self.memory.copy(from, to).await
+        }
+        async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+            self.memory.hard_link(original, link).await
+        }
+        async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            self.memory.canonicalize(path).await
+        }
+        async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+            self.memory.read_link(path).await
+        }
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.observe(path)?;
+            self.memory.read(path).await
+        }
+        async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            self.observe(path)?;
+            self.memory.read_to_string(path).await
+        }
+        async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.memory.write(path, bytes).await
+        }
+    }
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0xa6; 32],
+            DatabaseSecurityNamespaceId([0xa7; 32]),
+            [0xa8; 32],
+        )
+    }
+
+    fn create(id: u128) -> WriteBatch {
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(id),
+            vec![],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+        );
+        batch
+    }
+
+    #[test]
+    fn checkpoint_open_reads_zero_capsules_and_materializes_only_requested_prefixes() {
+        let ((), report) = run_async_under_lab(0xa671, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for count in [8_u64, 384] {
+                let vfs = CountingVfs::new();
+                let path = vfs.memory.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                for id in 1..=count {
+                    db.write(&cx, create(u128::from(id))).await.unwrap();
+                }
+                let expected = db.delta_index().unwrap().clone();
+                drop(db);
+                vfs.reset();
+                let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(vfs.count(), 0, "checkpoint open must not read any capsule");
+                assert!(db.vertex(VId(u128::from(count))).unwrap().is_some());
+                // Explicit client identities leave the vertex counter at 0, so this is
+                // the first engine vertex.
+                assert_eq!(
+                    db.allocate_identity(
+                        &contexts.query(),
+                        fgdb_gql::insertion::GraphInsertRequest::Vertex { row: 0, vertex: 0 }
+                    )
+                    .unwrap(),
+                    ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
+                );
+                assert_eq!(
+                    vfs.count(),
+                    0,
+                    "point reads and identity allocation need no history I/O"
+                );
+                let pinned = db.pinned_read_view().unwrap();
+                let after = CommitSeq(count - 2);
+                assert!(
+                    matches!(db.delta_since(after), Err(ReadError::DeltaCursorRetired { retained_after, .. }) if retained_after == CommitSeq(count))
+                );
+                assert_eq!(db.delta_since(CommitSeq(count)).unwrap().count(), 0);
+                db.ensure_delta_window(&cx, after).await.unwrap();
+                assert_eq!(vfs.count(), 2, "only the two missing capsules are loaded");
+                assert_eq!(
+                    db.delta_since(after).unwrap().collect::<Vec<_>>(),
+                    expected.since(after).unwrap().collect::<Vec<_>>()
+                );
+                assert!(
+                    pinned.delta_since(after).is_err(),
+                    "an issued immutable view keeps its original window"
+                );
+                db.ensure_delta_window(&cx, after).await.unwrap();
+                assert_eq!(
+                    vfs.count(),
+                    2,
+                    "an already materialized cut performs no I/O"
+                );
+                db.write(&cx, create(u128::from(count) + 1)).await.unwrap();
+                vfs.reset();
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .unwrap();
+                assert_eq!(vfs.count(), usize::try_from(count - 2).unwrap());
+                assert_eq!(
+                    db.delta_since(CommitSeq::ORIGIN)
+                        .unwrap()
+                        .take(count as usize)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>()
+                );
+                assert_eq!(db.delta_frontier().unwrap(), CommitSeq(count + 1));
+                assert_eq!(db.delta_index().unwrap().len(), count as usize + 1);
+                db.delta_index().unwrap().verify().unwrap();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn failed_prefix_admission_is_atomic_retryable_and_cannot_rehydrate_retirement() {
+        let ((), report) = run_async_under_lab(0xa672, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            for id in 1..=4 {
+                db.write(&cx, create(id)).await.unwrap();
+            }
+            drop(db);
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let before = Arc::clone(&db.snapshot);
+            vfs.reset();
+            vfs.refuse_at.store(2, Ordering::SeqCst);
+            assert!(
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .is_err()
+            );
+            assert!(Arc::ptr_eq(&db.snapshot, &before));
+            assert_eq!(db.delta_materialized_after, CommitSeq(4));
+            assert_eq!(
+                db.state(),
+                DatabaseState::Healthy {
+                    published_frontier: CommitSeq(4)
+                }
+            );
+            assert!(db.vertex(VId(4)).unwrap().is_some());
+            vfs.refuse_at.store(0, Ordering::SeqCst);
+            vfs.reset();
+            db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
+            assert_eq!(
+                vfs.count(),
+                4,
+                "a failed candidate exposes no partial admitted prefix"
+            );
+            Arc::make_mut(&mut db.snapshot)
+                .delta_index
+                .retire_prefix(CommitSeq(3))
+                .unwrap();
+            vfs.reset();
+            assert!(matches!(
+                db.ensure_delta_window(&cx, CommitSeq(2)).await,
+                Err(RebuildError::Index {
+                    error: IndexError::CursorRetired { .. },
+                    ..
+                })
+            ));
+            assert_eq!(
+                vfs.count(),
+                0,
+                "explicit retirement is not a lazy cache miss"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_and_transaction_completion_reload_the_complete_conflict_interval() {
+        let ((), report) = run_async_under_lab(0xa673, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for mode in 0..4 {
+                let mut db = Database::open_memory(&cx, keys()).await.unwrap();
+                let basis = db.write(&cx, create(1)).await.unwrap();
+                let mut change = WriteBatch::new(RelationId(1));
+                change.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(20)),
+                );
+                if mode >= 2 {
+                    change.ensure_vertex(VId(1), vec![], vec![]);
+                }
+                let mut transaction = db.begin(&contexts.txn()).unwrap();
+                if mode == 3 {
+                    assert!(transaction.vertex(&db, VId(1)).unwrap().is_some());
+                }
+                let prepared = if mode != 0 {
+                    transaction.write(&mut db, change.clone()).unwrap();
+                    None
+                } else {
+                    Some(db.prepare_write(change.clone()).unwrap())
+                };
+                change.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(30)),
+                );
+                db.write(&cx, change).await.unwrap();
+                // Evict only derived payloads to exercise an old, same-owner
+                // preparation across the same unloaded-prefix shape as open.
+                // The original read basis and ownership token stay untouched.
+                Arc::make_mut(&mut db.snapshot).delta_index =
+                    empty_delta_window_at(&cx, &db.coordinator, CommitSeq(2)).unwrap();
+                db.delta_materialized_after = CommitSeq(2);
+                if let Some(prepared) = prepared {
+                    assert!(matches!(
+                        db.commit_prepared(&cx, prepared).await,
+                        Err(WriteError::FirstCommitterWins { .. })
+                    ));
+                    transaction.abort();
+                } else if mode == 1 {
+                    assert!(matches!(
+                        transaction.finish(&mut db, &cx).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ));
+                } else {
+                    assert!(matches!(
+                        transaction
+                            .commit_idempotent_rebased(&mut db, &cx, 100)
+                            .await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ));
+                }
+                assert_eq!(db.delta_materialized_after, basis);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(30).into()
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn historical_preparation_after_reopen_requires_explicit_history_and_keeps_conflicts() {
+        let ((), report) = run_async_under_lab(0xa675, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let basis = db.write(&cx, create(1)).await.unwrap();
+            let mut update = WriteBatch::new(RelationId(1));
+            update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(20)));
+            db.write(&cx, update.clone()).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.prepare_write_at(basis, update.clone()),
+                Err(WriteTxnError::Write(WriteError::PreparedHistory(
+                    IndexError::CursorRetired { .. }
+                )))
+            ));
+            assert_eq!(
+                vfs.count(),
+                0,
+                "a synchronous refusal performs no hidden I/O"
+            );
+            db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                .await
+                .unwrap();
+            let prepared = db.prepare_write_at(basis, update).unwrap();
+            assert_eq!(prepared.basis(), basis);
+            assert!(matches!(
+                db.commit_prepared(&cx, prepared).await,
+                Err(WriteError::FirstCommitterWins { .. })
+            ));
+            assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            assert_eq!(
+                vfs.count(),
+                2,
+                "reconstruction reads the exact two committed capsules"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn reopened_transactions_stage_at_their_exact_basis_without_loading_origin_history() {
+        let ((), report) = run_async_under_lab(0xa676, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let update = |id, value| {
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.set_vertex_property(
+                    VId(id),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(value)),
+                );
+                batch
+            };
+            for recover_suffix in [false, true] {
+                let vfs = CountingVfs::new();
+                let path = vfs.memory.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut seed = create(1);
+                seed.create_vertex(
+                    VId(2),
+                    vec![],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+                );
+                seed.create_vertex(VId(7), vec![], vec![]);
+                seed.add_edge(EId(9), VId(1), VId(7), vec![]);
+                db.write(&cx, seed).await.unwrap();
+                let mut retire = WriteBatch::new(RelationId(1));
+                retire.delete_vertex(VId(7));
+                if recover_suffix {
+                    assert!(matches!(
+                        db.write_with_publication_failure(
+                            &cx,
+                            retire,
+                            DerivedPublicationStage::FoldCommittedTemplate,
+                        )
+                        .await,
+                        Err(WriteError::CommittedNeedsRecovery { .. })
+                    ));
+                } else {
+                    db.write(&cx, retire).await.unwrap();
+                }
+                drop(db);
+                let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                assert!(
+                    db.preparation_anchor.is_none(),
+                    "open itself needs no writer clone"
+                );
+                let basis = db.frontier().unwrap();
+                assert_eq!(basis, CommitSeq(2));
+                let expected = db.prepare_write(update(1, 11)).unwrap().template;
+                let mut txn = db.begin(&txcx).unwrap();
+                if !recover_suffix {
+                    db.compact(&cx).await.unwrap();
+                }
+                let mut winner = update(2, 22);
+                winner.create_vertex(VId(99), vec![], vec![]);
+                db.write(&cx, winner).await.unwrap();
+                vfs.reset();
+                assert!(db.preparation_anchor.is_some());
+                assert_eq!(
+                    db.prepare_write_at(basis, update(1, 11)).unwrap().template,
+                    expected
+                );
+                assert!(matches!(
+                    db.prepare_write_at(basis, create(7)),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Vertex(VId(7))
+                    }))
+                ));
+                let mut spent_edge = WriteBatch::new(RelationId(1));
+                spent_edge.add_edge(EId(9), VId(1), VId(2), vec![]);
+                assert!(matches!(
+                    db.prepare_write_at(basis, spent_edge),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Edge(EId(9))
+                    }))
+                ));
+                // The ordinary evaluator still rejects reuse within a single
+                // statement even when normalization would erase its birth.
+                let mut same_statement = create(8);
+                same_statement.delete_vertex(VId(8));
+                same_statement.create_vertex(VId(8), vec![], vec![]);
+                assert!(matches!(
+                    db.prepare_write_at(basis, same_statement),
+                    Err(WriteTxnError::Write(WriteError::IdentitySpent {
+                        elem: ElementId::Vertex(VId(8))
+                    }))
+                ));
+                // A future identity must not leak into the pinned writer's
+                // spent set. It prepares as absent, then ordinary FCW refuses.
+                let future_identity = db.prepare_write_at(basis, create(99)).unwrap();
+                assert!(matches!(
+                    db.commit_prepared(&cx, future_identity).await,
+                    Err(WriteError::FirstCommitterWins { .. })
+                ));
+                txn.write_at_basis(&mut db, update(1, 11)).unwrap();
+                assert_eq!(txn.basis(), basis);
+                assert_eq!(
+                    txn.vertex(&db, VId(2)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(10).into()
+                );
+                // Returning the old V2 value adds a real dependency. Its
+                // changed winner must conflict even though the V1 write is
+                // disjoint; the original read basis never advances silently.
+                assert!(matches!(
+                    txn.commit(&mut db, &cx).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                ));
+                let mut txn = db.begin(&txcx).unwrap();
+                let current = txn.basis();
+                let mut unrelated = update(2, 33);
+                unrelated.create_vertex(VId(100), vec![], vec![]);
+                db.write(&cx, unrelated).await.unwrap();
+                txn.write_at_basis(&mut db, update(1, 11)).unwrap();
+                assert_eq!(txn.basis(), current);
+                assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(5));
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props[0].1,
+                    CanonicalScalar::Int(33).into()
+                );
+
+                // The ordinary API retains its explicit refresh contract, and
+                // that path also needs only this handle's post-open suffix.
+                let mut txn = db.begin(&txcx).unwrap();
+                assert!(txn.vertex(&db, VId(1)).unwrap().is_some());
+                let expected = db.prepare_write(update(1, 12)).unwrap().template;
+                let stable = txn.basis();
+                db.write(&cx, update(2, 44)).await.unwrap();
+                assert_eq!(
+                    db.prepare_write_at(stable, update(1, 12)).unwrap().template,
+                    expected
+                );
+                assert!(matches!(
+                    txn.write(&mut db, update(1, 12)),
+                    Err(WriteTxnError::SnapshotAdvanced { .. })
+                ));
+                assert_eq!(txn.refresh_snapshot(&db, &txcx).unwrap(), CommitSeq(6));
+                txn.write(&mut db, update(1, 12)).unwrap();
+                assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(7));
+                assert_eq!(
+                    vfs.count(),
+                    0,
+                    "stable staging, refresh, and completion do not load origin"
+                );
+                assert_eq!(db.delta_materialized_after, basis);
+                db.ensure_delta_window(&cx, CommitSeq::ORIGIN)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    vfs.count(),
+                    2,
+                    "only the original missing prefix is admitted"
+                );
+                assert!(db.preparation_anchor.is_none());
+                assert_eq!(
+                    db.prepare_write_at(stable, update(1, 12)).unwrap().template,
+                    expected
+                );
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn reopened_historical_resident_index_refresh_requires_and_uses_its_exact_delta_suffix() {
+        let ((), report) = run_async_under_lab(0xa677, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let query = contexts.query();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![],
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                )],
+            );
+            db.write(&cx, seed).await.unwrap();
+            let mut update = WriteBatch::new(RelationId(1));
+            update.set_vertex_property(
+                VId(1),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::ucs_basic_text("storage").unwrap()),
+            );
+            db.write(&cx, update).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let policy = fgdb_beacon::read::ReadPolicy::default();
+            let search = fgdb_beacon::read::Search::Text {
+                query: "graph",
+                k: 10,
+                mode: fgdb_beacon::TextMatch::Any,
+            };
+            let mut options =
+                fgdb_beacon::read::ReadOptions::<PropertyKeyId, LabelId>::text(PropertyKeyId(1));
+            options.as_of = Some(CommitSeq(1));
+            let mut resident = db.prepare_beacon_index(&query, &options).unwrap();
+            let pinned = resident.snapshot();
+            let before = resident.search(&query, search, policy).unwrap();
+            assert_eq!(resident.source_sequence(), CommitSeq(1));
+            assert_eq!(pinned.stats().documents, 1);
+            assert!(matches!(
+                resident.refresh(&query, &db, None, policy),
+                Err(ResidentIndexError::Source(ReadError::DeltaCursorRetired {
+                    asked: CommitSeq(1),
+                    retained_after: CommitSeq(2),
+                    frontier: CommitSeq(2),
+                }))
+            ));
+            assert_eq!(resident.source_sequence(), CommitSeq(1));
+            assert_eq!(resident.search(&query, search, policy).unwrap(), before);
+            assert_eq!(
+                vfs.count(),
+                0,
+                "historical graph projection needs no capsule reads"
+            );
+            db.ensure_delta_window(&cx, CommitSeq(1)).await.unwrap();
+            let refreshed = resident.refresh(&query, &db, None, policy).unwrap();
+            assert_eq!(
+                (
+                    refreshed.from,
+                    refreshed.through,
+                    refreshed.commits,
+                    refreshed.touched_vertices
+                ),
+                (CommitSeq(1), CommitSeq(2), 1, 1)
+            );
+            options.as_of = None;
+            let expected = db.beacon_search(&query, &options, search).unwrap();
+            assert_ne!(before, expected);
+            assert_eq!(resident.search(&query, search, policy).unwrap(), expected);
+            assert_eq!(pinned.search(&query, search, policy).unwrap(), before);
+            assert_eq!(
+                vfs.count(),
+                1,
+                "refresh reads only the one requested capsule"
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn standing_reachability_anchors_at_checkpoint_without_reading_a_capsule() {
+        let ((), report) = run_async_under_lab(0xa674, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let query = contexts.query();
+            let vfs = CountingVfs::new();
+            let path = vfs.memory.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = create(1);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.create_vertex(VId(3), vec![], vec![]);
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(&cx, seed).await.unwrap();
+            drop(db);
+            vfs.reset();
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let policy = fgdb_gql::GqlQueryPolicy::new(10_000, 10_000, 100_000, 100_000);
+            let handle = db
+                .register_standing_reachability(&query, RelationId(1), policy)
+                .unwrap();
+            let rows = db.standing_reachability(&query, &handle).unwrap();
+            assert_eq!(rows.rows().len(), 1);
+            assert_eq!(rows.rows().iter().next().unwrap().0, &(VId(1), VId(2)));
+            assert_eq!(vfs.count(), 0);
+            let mut suffix = WriteBatch::new(RelationId(1));
+            suffix.add_edge(EId(2), VId(2), VId(3), vec![]);
+            db.write(&cx, suffix).await.unwrap();
+            let rows = db.standing_reachability(&query, &handle).unwrap();
+            assert_eq!(rows.rows().len(), 3);
+            assert_eq!(rows.frontier(), CommitSeq(2));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
 
 #[cfg(test)]
@@ -5683,7 +8017,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         let base = statement_successor(None, &edge);
@@ -5697,7 +8031,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         assert_ne!(
@@ -5710,7 +8044,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(2))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(2).into())],
         )
         .expect("encodes");
         assert_ne!(
@@ -5732,10 +8066,10 @@ mod version_transcript_laws {
     }
 }
 
-/// Point reads answer from the maintained adjacency index. These laws hold it
-/// to the whole-history merge — the reference semantics — for every vertex,
-/// relation, direction, EId and sequence of a randomized history with
-/// parallel edges, tombstones, content-version successors and compaction.
+/// Point reads answer from maintained adjacency and vertex-history indexes.
+/// These laws hold them to the independent whole-history merges for every
+/// vertex, relation, direction, EId and sequence, including tombstones,
+/// content-version successors, pinned generations, compaction and recovery.
 #[cfg(test)]
 mod point_read_index_laws {
     use super::*;
@@ -5758,6 +8092,11 @@ mod point_read_index_laws {
         for as_of in 0..=snapshot.frontier.0 {
             let as_of = CommitSeq(as_of);
             for &vid in vids {
+                assert_eq!(
+                    snapshot.vertex_at(vid, as_of).unwrap(),
+                    fgdb_strata::vertex::merge_vertex(&snapshot.patches, vid, as_of),
+                    "{label}: vertex({vid:?}) at {as_of:?}"
+                );
                 for relation in relations {
                     assert_eq!(
                         snapshot.neighbours_at(vid, relation, as_of).unwrap(),
@@ -5864,11 +8203,899 @@ mod point_read_index_laws {
             );
         }
     }
+
+    #[test]
+    fn vertex_point_reads_preserve_versions_labels_deletes_and_pinned_recovered_cuts() {
+        let ((), report) = asupersync::lab::run_async_under_lab(0x761d_0101, |root| async move {
+            let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            for seed in [1_u64, 0x5eed, 0xfeed_beef] {
+                let keys = DatabaseKeys::new(
+                    [0x71; 32],
+                    DatabaseSecurityNamespaceId([0x72; 32]),
+                    [0x73; 32],
+                );
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&cx, vfs.clone(), &path, keys.clone())
+                    .await
+                    .unwrap();
+                let mut live = vec![VId(0), VId(1), VId(u128::MAX)];
+                let mut vids = live.clone();
+                // Lookup misses on either side of the actual domain are
+                // ordinary IDs, never successor arithmetic or sentinels.
+                vids.extend([VId(99_999), VId(u128::MAX - 1)]);
+                let mut initial = WriteBatch::new(RelationId(1));
+                for &vid in &live {
+                    initial.create_vertex(
+                        vid,
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+                    );
+                }
+                db.write(&cx, initial).await.unwrap();
+                let pinned = db.pinned_read_view().unwrap();
+                let original = pinned.vertices().unwrap();
+                let mut random = Lcg(seed);
+                for step in 1..=32_u64 {
+                    let mut batch = WriteBatch::new(RelationId(1));
+                    let touched = live[random.below(live.len())];
+                    let value = match step % 3 {
+                        0 => None,
+                        1 => Some(CanonicalScalar::Null),
+                        _ => Some(CanonicalScalar::Int(-(step as i64))),
+                    };
+                    batch.set_vertex_property(touched, PropertyKeyId(1), value);
+                    batch.set_vertex_label(touched, LabelId(2), step % 2 == 0);
+                    // An additional update in this same commit must not
+                    // create a competing equal-sequence visible statement.
+                    batch.set_vertex_property(
+                        touched,
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(step as i64)),
+                    );
+                    if step % 4 == 0 {
+                        let doomed = random.below(live.len());
+                        batch.delete_vertex(live.remove(doomed));
+                    }
+                    let added = VId(100 + u128::from(step));
+                    batch.create_vertex(added, vec![LabelId(1)], vec![]);
+                    live.push(added);
+                    vids.push(added);
+                    db.write(&cx, batch).await.unwrap();
+                    if step == 16 {
+                        db.compact(&cx).await.unwrap();
+                    }
+                    assert_index_matches_merge(
+                        &db,
+                        &vids,
+                        &[],
+                        &format!("seed {seed}, step {step}"),
+                    );
+                    for row in &original {
+                        assert_eq!(pinned.vertex(row.vid).unwrap(), Some(row.clone()));
+                    }
+                    assert_eq!(pinned.vertex(added).unwrap(), None);
+                }
+                let frontier = db.frontier().unwrap();
+                assert!(matches!(
+                    db.vertex_at(VId(0), CommitSeq(frontier.0 + 1)),
+                    Err(ReadError::BeyondFrontier { .. })
+                ));
+                assert!(db.verify_snapshot_indexes().unwrap());
+                drop(db);
+                for force_rebuild in [false, true] {
+                    let reopened = Database::bind_with_vfs(
+                        &cx,
+                        vfs.clone(),
+                        &path,
+                        keys.clone(),
+                        force_rebuild,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(reopened.frontier().unwrap(), frontier);
+                    assert_index_matches_merge(
+                        &reopened,
+                        &vids,
+                        &[],
+                        &format!("seed {seed}, force_rebuild {force_rebuild}"),
+                    );
+                    assert_eq!(pinned.vertices().unwrap(), original);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[cfg(test)]
+mod shared_snapshot_payload_laws {
+    use super::*;
+
+    fn assert_payload_prefix_shared(before: &Snapshot, after: &Snapshot) {
+        assert!(after.refs.starts_with(&before.refs));
+        assert!(after.patch_refs.starts_with(&before.patch_refs));
+        assert!(!before.blocks.is_empty());
+        assert!(!before.patches.is_empty());
+        assert!(!before.delta_index.is_empty());
+        for batch in before.delta_index.iter() {
+            let carried = after.delta_index.get(batch.commit_seq()).unwrap();
+            assert!(
+                core::ptr::eq(batch, carried),
+                "retaining a snapshot copied a historical delta batch"
+            );
+        }
+        let mut hosted = 0;
+        for (at, block) in before.blocks.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(block, &after.blocks[at]),
+                "unchanged adjacency object {at} was recursively cloned"
+            );
+            match (&before.block_props[at], &after.block_props[at]) {
+                (Some(left), Some(right)) => {
+                    hosted += 1;
+                    assert!(
+                        Arc::ptr_eq(left, right),
+                        "unchanged hosted property object {at} was recursively cloned"
+                    );
+                }
+                (None, None) => {}
+                _ => panic!("hosted property presence changed for an unchanged block"),
+            }
+        }
+        assert!(
+            hosted > 0,
+            "the law must exercise scalar-bearing edge objects"
+        );
+        for (at, rows) in before.patches.iter().enumerate() {
+            assert!(!rows.is_empty());
+            assert_eq!(
+                rows.as_ptr(),
+                after.patches[at].as_ptr(),
+                "unchanged vertex patch {at} was recursively cloned"
+            );
+            for (left, right) in rows.iter().zip(after.patches[at].iter()) {
+                assert_eq!(left.labels.as_ptr(), right.labels.as_ptr());
+                assert_eq!(left.props.as_ptr(), right.props.as_ptr());
+            }
+        }
+    }
+
+    fn history(snapshot: &Snapshot) -> Vec<(Vec<VertexRow>, Vec<EdgeRecord>)> {
+        (0..=snapshot.frontier.0)
+            .map(|seq| {
+                let cut = CommitSeq(seq);
+                (
+                    snapshot.vertices_at(cut).unwrap(),
+                    snapshot.edges_at(cut).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn commits_share_payloads_with_pinned_views_across_history_compaction_and_reopen() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for seed in [3_u8, 17, 91] {
+            let keys = DatabaseKeys::new(
+                [seed; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+            );
+            let mut db = runtime
+                .block_on(Database::open_memory(&cx, keys.clone()))
+                .unwrap();
+            let mut initial = WriteBatch::new(RelationId(1));
+            for vid in 1..=6 {
+                initial.create_vertex(
+                    VId(vid),
+                    vec![LabelId(1), LabelId(9)],
+                    vec![(
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![seed; 1024]).unwrap(),
+                    )],
+                );
+            }
+            for eid in 1..=5 {
+                initial.add_edge(
+                    EId(eid),
+                    VId(1),
+                    VId(eid + 1),
+                    vec![(
+                        PropertyKeyId(3),
+                        CanonicalScalar::bytes(vec![seed; 1024]).unwrap(),
+                    )],
+                );
+            }
+            initial.add_edge(
+                EId(10),
+                VId(3),
+                VId(1),
+                vec![(PropertyKeyId(3), CanonicalScalar::Int(10))],
+            );
+            initial.add_edge(
+                EId(11),
+                VId(3),
+                VId(3),
+                vec![(PropertyKeyId(3), CanonicalScalar::Int(11))],
+            );
+            runtime.block_on(db.write(&cx, initial)).unwrap();
+            let oldest_block = Arc::downgrade(&db.snapshot.blocks[0]);
+            let oldest_props = Arc::downgrade(db.snapshot.block_props[0].as_ref().unwrap());
+            let mut pinned = Vec::new();
+
+            for step in 1..=12_u64 {
+                let view = db.pinned_read_view().unwrap();
+                let expected = history(&view.snapshot);
+                // Exercise Snapshot::clone itself as well as make_mut on the
+                // real publication path. A deep-copy implementation must fail.
+                let metadata_clone = Snapshot::clone(&view.snapshot);
+                assert_payload_prefix_shared(&view.snapshot, &metadata_clone);
+                drop(metadata_clone);
+
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(3),
+                    Some(CanonicalScalar::Int(step as i64)),
+                );
+                batch.set_vertex_label(VId(1), LabelId(2), step % 2 == 0);
+                batch.set_edge_property(
+                    EId(1),
+                    PropertyKeyId(3),
+                    Some(CanonicalScalar::Int(-(step as i64))),
+                );
+                let added = VId(100 + u128::from(step));
+                batch.create_vertex(added, vec![LabelId(1)], vec![]);
+                batch.add_edge(
+                    EId(100 + u128::from(step)),
+                    VId(1),
+                    added,
+                    vec![(PropertyKeyId(3), CanonicalScalar::Int(step as i64))],
+                );
+                if step == 5 {
+                    // Both directions and a self-loop participate in this
+                    // vertex-delete cascade; earlier pinned cuts keep all three.
+                    batch.delete_vertex(VId(3));
+                }
+                if step == 7 {
+                    batch.delete_edge(EId(4));
+                }
+                runtime.block_on(db.write(&cx, batch)).unwrap();
+                assert_payload_prefix_shared(&view.snapshot, &db.snapshot);
+                assert_eq!(history(&view.snapshot), expected);
+                assert!(view.vertex(added).unwrap().is_none());
+                pinned.push((view, expected));
+
+                if step == 6 {
+                    let before = history(&db.snapshot);
+                    runtime.block_on(db.compact(&cx)).unwrap();
+                    assert_eq!(history(&db.snapshot), before);
+                }
+            }
+            assert!(db.vertex(VId(3)).unwrap().is_none());
+            for eid in [EId(2), EId(4), EId(10), EId(11)] {
+                assert!(db.edge(eid).unwrap().is_none());
+            }
+            let expected = history(&db.snapshot);
+            let latest = db.pinned_read_view().unwrap();
+            let vfs = db.vfs.clone();
+            let path = db.path().to_path_buf();
+            drop(db);
+
+            // These paths re-read the authenticated bytes and derive fresh
+            // payload allocations instead of borrowing the live generation.
+            let read_only = runtime
+                .block_on(Database::open_read_view_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                ))
+                .unwrap();
+            assert_eq!(history(&read_only.snapshot), expected);
+            drop(read_only);
+            for force_rebuild in [false, true] {
+                let reopened = runtime
+                    .block_on(Database::bind_with_vfs(
+                        &cx,
+                        vfs.clone(),
+                        &path,
+                        keys.clone(),
+                        force_rebuild,
+                    ))
+                    .unwrap();
+                assert_eq!(history(&reopened.snapshot), expected);
+                assert!(reopened.verify_snapshot_indexes().unwrap());
+            }
+
+            assert_eq!(history(&latest.snapshot), expected);
+            for (view, expected) in &pinned {
+                assert_eq!(history(&view.snapshot), *expected);
+            }
+            assert!(oldest_block.upgrade().is_some());
+            assert!(oldest_props.upgrade().is_some());
+            drop(pinned);
+            drop(latest);
+            assert!(
+                oldest_block.upgrade().is_none(),
+                "retired adjacency bytes remain owned after the last reader drops"
+            );
+            assert!(
+                oldest_props.upgrade().is_none(),
+                "retired property bytes remain owned after the last reader drops"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod root_capacity_laws {
     use super::*;
+
+    fn assert_recovered_history_matches(actual: &Database<MemVfs>, expected: &Database<MemVfs>) {
+        assert_eq!(actual.snapshot.frontier, expected.snapshot.frontier);
+        assert_eq!(
+            actual.element_versions().unwrap(),
+            expected.element_versions().unwrap()
+        );
+        assert_eq!(
+            actual.heads.next_birth_ordinal,
+            expected.heads.next_birth_ordinal
+        );
+        for seq in 0..=expected.snapshot.frontier.0 {
+            let cut = CommitSeq(seq);
+            assert_eq!(
+                fgdb_strata::root::merge_all_edges_with_props(
+                    &actual.snapshot.blocks,
+                    &actual.snapshot.block_props,
+                    cut,
+                )
+                .unwrap(),
+                fgdb_strata::root::merge_all_edges_with_props(
+                    &expected.snapshot.blocks,
+                    &expected.snapshot.block_props,
+                    cut,
+                )
+                .unwrap(),
+                "edge history at {seq}",
+            );
+            assert_eq!(
+                fgdb_strata::vertex::merge_all_vertices(&actual.snapshot.patches, cut),
+                fgdb_strata::vertex::merge_all_vertices(&expected.snapshot.patches, cut),
+                "vertex history at {seq}",
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_heads_derive_only_touched_chains_and_match_the_origin_fold() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x61; 32],
+            DatabaseSecurityNamespaceId([0x62; 32]),
+            [0x63; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        // The uninterrupted origin fold has no checkpoint derivation. Compare
+        // every prepared template too, including birth ordinals and deletes'
+        // before-version images, before either side commits it.
+        let write_both =
+            |db: &mut Database<MemVfs>, oracle: &mut Database<MemVfs>, batch: WriteBatch| {
+                let prepared = db.prepare_write(batch.clone()).unwrap();
+                let expected = oracle.prepare_write(batch).unwrap();
+                assert_eq!(prepared.template, expected.template);
+                assert_eq!(
+                    runtime.block_on(db.commit_prepared(&cx, prepared)).unwrap(),
+                    runtime
+                        .block_on(oracle.commit_prepared(&cx, expected))
+                        .unwrap()
+                );
+            };
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=12 {
+            initial.create_vertex(
+                VId(vid),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))],
+            );
+        }
+        for eid in 1..=11 {
+            initial.add_edge(
+                EId(eid),
+                VId(1),
+                VId(eid + 1),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(eid as i64))],
+            );
+        }
+        write_both(&mut db, &mut oracle, initial);
+        for turn in 1..=4 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            let value = match turn % 3 {
+                0 => None,
+                1 => Some(CanonicalScalar::Null),
+                _ => Some(CanonicalScalar::Int(turn)),
+            };
+            batch.set_vertex_property(VId(1), PropertyKeyId(1), value.clone());
+            batch.set_vertex_label(VId(1), LabelId(2), turn % 2 == 0);
+            batch.set_edge_property(EId(1), PropertyKeyId(1), value);
+            write_both(&mut db, &mut oracle, batch);
+        }
+        let mut retired = WriteBatch::new(RelationId(1));
+        retired.delete_vertex(VId(12));
+        retired.delete_edge(EId(2));
+        write_both(&mut db, &mut oracle, retired);
+        let path = db.path().to_path_buf();
+        let vfs = db.vfs.clone();
+        drop(db);
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+            ))
+            .unwrap();
+        let basis = Arc::clone(db.heads.versions.checkpoint.as_ref().unwrap());
+        let derivations = || {
+            basis
+                .head_derivations
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(derivations(), 0);
+        assert!(db.heads.versions.changed.is_empty());
+        assert!(db.heads.versions.complete.get().is_none());
+        assert!(basis.edges.get().is_none());
+        assert_eq!(Arc::strong_count(&db.snapshot), 1);
+        for (retained, published) in basis.blocks.iter().zip(&db.snapshot.blocks) {
+            assert!(Arc::ptr_eq(retained, published));
+        }
+
+        let mut append = WriteBatch::new(RelationId(1));
+        append.create_vertex(VId(100), vec![LabelId(3)], vec![]);
+        append.add_edge(EId(100), VId(1), VId(100), vec![]);
+        write_both(&mut db, &mut oracle, append);
+        assert_eq!(
+            derivations(),
+            0,
+            "new identities have no checkpoint predecessor"
+        );
+        assert_eq!(db.heads.versions.changed.len(), 2);
+        assert!(basis.edges.get().is_none());
+
+        for turn in 10..=11 {
+            let mut vertex = WriteBatch::new(RelationId(1));
+            vertex.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(turn)));
+            write_both(&mut db, &mut oracle, vertex);
+            assert_eq!(derivations(), 1, "later updates use the changed head");
+            assert!(basis.edges.get().is_none());
+        }
+        for turn in 20..=21 {
+            let mut edge = WriteBatch::new(RelationId(1));
+            edge.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(turn)));
+            write_both(&mut db, &mut oracle, edge);
+            assert_eq!(derivations(), 2);
+            assert!(basis.edges.get().is_some());
+        }
+        let mut deletion = WriteBatch::new(RelationId(1));
+        deletion.delete_vertex(VId(4));
+        deletion.delete_edge(EId(10));
+        write_both(&mut db, &mut oracle, deletion);
+        assert_eq!(
+            derivations(),
+            4,
+            "a cascade masks its edges without hashing them"
+        );
+        for elem in [
+            ElementId::Vertex(VId(4)),
+            ElementId::Edge(EId(3)),
+            ElementId::Edge(EId(10)),
+        ] {
+            assert_eq!(db.heads.versions.changed.get(&elem), Some(&None));
+            assert_eq!(db.heads.versions.get(&elem).unwrap(), None);
+        }
+        assert!(db.heads.versions.complete.get().is_none());
+        // Both a checkpoint tombstone and a post-open tombstone permanently
+        // spend the identity, without consuming another birth ordinal.
+        let births = db.heads.next_birth_ordinal;
+        for vid in [4, 12] {
+            let mut reused = WriteBatch::new(RelationId(1));
+            reused.create_vertex(VId(vid), vec![], vec![]);
+            assert!(matches!(
+                db.prepare_write(reused),
+                Err(WriteError::IdentitySpent { .. })
+            ));
+        }
+        for eid in [2, 3] {
+            let mut reused = WriteBatch::new(RelationId(1));
+            reused.add_edge(EId(eid), VId(1), VId(2), vec![]);
+            assert!(matches!(
+                db.prepare_write(reused),
+                Err(WriteError::IdentitySpent { .. })
+            ));
+        }
+        assert_eq!(db.heads.next_birth_ordinal, births);
+        assert_recovered_history_matches(&db, &oracle);
+
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(db.heads.versions.changed.is_empty());
+        assert!(db.heads.versions.complete.get().is_none());
+        assert!(!Arc::ptr_eq(
+            db.heads.versions.checkpoint.as_ref().unwrap(),
+            &basis
+        ));
+        let mut next = WriteBatch::new(RelationId(1));
+        next.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        next.create_vertex(VId(101), vec![], vec![]);
+        write_both(&mut db, &mut oracle, next);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+        for force_rebuild in [false, true] {
+            let reopened = runtime
+                .block_on(Database::bind_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                    force_rebuild,
+                ))
+                .unwrap();
+            assert_recovered_history_matches(&reopened, &oracle);
+        }
+    }
+
+    #[test]
+    fn compaction_replaces_the_lazy_basis_without_retaining_superseded_payloads() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let cx = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root).commit();
+        let keys = DatabaseKeys::new(
+            [0x64; 32],
+            DatabaseSecurityNamespaceId([0x65; 32]),
+            [0x66; 32],
+        );
+        let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        initial.create_vertex(VId(1), vec![], vec![]);
+        initial.create_vertex(VId(2), vec![], vec![]);
+        initial.add_edge(
+            EId(1),
+            VId(1),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+        );
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        let old_basis = Arc::downgrade(db.heads.versions.checkpoint.as_ref().unwrap());
+        let old_block = Arc::downgrade(&db.snapshot.blocks[0]);
+        let expected = db.element_versions().unwrap().clone();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.preparation_anchor.is_none(),
+            "origin history needs no checkpoint anchor"
+        );
+        assert!(old_basis.upgrade().is_none());
+        assert!(old_block.upgrade().is_none());
+        assert_eq!(db.element_versions().unwrap(), &expected);
+    }
+
+    #[test]
+    fn replay_consolidates_at_capacity_without_losing_history_or_write_state() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let capacity = ReplayRootCapacity {
+            blocks: 4,
+            patches: 4,
+        };
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=3 {
+            initial.create_vertex(VId(vid), vec![LabelId(1)], vec![]);
+        }
+        initial.add_edge(EId(1), VId(1), VId(2), vec![]);
+        initial.add_edge(EId(2), VId(2), VId(3), vec![]);
+        initial.add_edge(EId(3), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, initial.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, initial)).unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+
+        for turn in 1..=16 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            let value = match turn % 3 {
+                0 => None,
+                1 => Some(CanonicalScalar::Null),
+                _ => Some(CanonicalScalar::Int(turn)),
+            };
+            batch.set_edge_property(EId(1), PropertyKeyId(1), value.clone());
+            batch.set_vertex_property(VId(1), PropertyKeyId(1), value);
+            batch.set_vertex_label(VId(1), LabelId(2), turn % 2 == 0);
+            if turn == 4 {
+                batch.delete_edge(EId(2));
+            }
+            if turn == 8 {
+                batch.delete_vertex(VId(3));
+            }
+            if turn == 10 {
+                batch.create_vertex(VId(4), vec![LabelId(4)], vec![]);
+                batch.add_edge(
+                    EId(4),
+                    VId(1),
+                    VId(4),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(10))],
+                );
+            }
+            runtime.block_on(db.write(&cx, batch.clone())).unwrap();
+            runtime.block_on(oracle.write(&cx, batch)).unwrap();
+            if turn % 4 == 0 {
+                runtime.block_on(db.compact(&cx)).unwrap();
+                assert!(capacity.overflow(&db.writer).is_none());
+            }
+        }
+        assert!(oracle.writer.sealed().len() > capacity.blocks);
+        assert!(oracle.writer.sealed_patches().len() > capacity.patches);
+        assert_recovered_history_matches(&db, &oracle);
+        let uncompacted_root = oracle.partition_root().unwrap();
+        let path = db.path().to_path_buf();
+        let vfs = db.vfs.clone();
+        drop(db);
+
+        // The ordinary durable capacity preserves the original per-commit
+        // root byte-for-byte, even when the selected live root was compacted.
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                ReplayRootCapacity::DURABLE,
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), uncompacted_root);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ))
+            .unwrap();
+        assert!(capacity.overflow(&db.writer).is_none());
+        assert_recovered_history_matches(&db, &oracle);
+        let rebuilt_root = db.partition_root().unwrap();
+        assert_ne!(rebuilt_root, uncompacted_root);
+        drop(db);
+
+        // Same stream and capacity produce the same physical generation.
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), rebuilt_root);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+
+        // Reopen the published replacement through ordinary checkpoint
+        // selection, then continue both folds with new identities and a
+        // cascade. This checks live maps, chain heads, allocation and heads.
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+            ))
+            .unwrap();
+        assert_eq!(db.partition_root().unwrap(), rebuilt_root);
+        let mut reused = WriteBatch::new(RelationId(1));
+        reused.create_vertex(VId(3), vec![], vec![]);
+        assert!(matches!(
+            runtime.block_on(db.write(&cx, reused)),
+            Err(WriteError::IdentitySpent {
+                elem: ElementId::Vertex(VId(3))
+            })
+        ));
+        let mut next = WriteBatch::new(RelationId(1));
+        next.create_vertex(VId(5), vec![LabelId(5)], vec![]);
+        next.add_edge(EId(5), VId(1), VId(5), vec![]);
+        next.delete_vertex(VId(2));
+        runtime.block_on(db.write(&cx, next.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, next)).unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+        assert_eq!(pinned.vertices().unwrap().len(), 3);
+        assert!(pinned.edge(EId(2)).unwrap().is_some());
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx, vfs, &path, keys, true, capacity,
+            ))
+            .unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+    }
+
+    #[test]
+    fn checkpoint_suffix_consolidates_before_publishing_the_recovered_commit() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        initial.create_vertex(VId(1), vec![], vec![]);
+        initial.create_vertex(VId(2), vec![], vec![]);
+        initial.add_edge(EId(1), VId(1), VId(2), vec![]);
+        runtime.block_on(db.write(&cx, initial.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, initial)).unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        runtime.block_on(oracle.write(&cx, update.clone())).unwrap();
+        assert!(matches!(
+            runtime.block_on(db.write_with_publication_failure(
+                &cx,
+                update,
+                DerivedPublicationStage::PublishEdgeBlocks,
+            )),
+            Err(WriteError::CommittedNeedsRecovery { .. })
+        ));
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        let capacity = ReplayRootCapacity {
+            blocks: 1,
+            patches: 1,
+        };
+        let mut db = runtime
+            .block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                false,
+                capacity,
+            ))
+            .unwrap();
+        assert!(capacity.overflow(&db.writer).is_none());
+        assert_recovered_history_matches(&db, &oracle);
+        let mut next = WriteBatch::new(RelationId(1));
+        next.delete_vertex(VId(2));
+        runtime.block_on(db.write(&cx, next.clone())).unwrap();
+        runtime.block_on(oracle.write(&cx, next)).unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+        let db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &path, keys))
+            .unwrap();
+        assert_recovered_history_matches(&db, &oracle);
+    }
+
+    #[test]
+    fn irreducible_replay_capacity_refusal_preserves_the_selected_generation() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=4 {
+            initial.create_vertex(VId(vid), vec![], vec![]);
+        }
+        for src in 1..=3 {
+            initial.add_edge(EId(src), VId(src), VId(4), vec![]);
+        }
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        let selected = db.partition_root().unwrap();
+        let generation = db.slot_generation;
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        for capacity in [
+            ReplayRootCapacity {
+                blocks: 2,
+                patches: 1,
+            },
+            ReplayRootCapacity {
+                blocks: 3,
+                patches: 0,
+            },
+        ] {
+            let result = runtime.block_on(Database::bind_with_vfs_inner(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+                true,
+                capacity,
+            ));
+            if capacity.blocks == 2 {
+                assert!(matches!(
+                    result,
+                    Err(OpenError::Rebuild(RebuildError::Fold {
+                        commit_seq: 1,
+                        error: BlockWriteError::Root(
+                            fgdb_strata::root::RootError::ImplausibleBlockCount { declared: 3 },
+                        ),
+                    }))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(OpenError::Rebuild(RebuildError::Fold {
+                        commit_seq: 1,
+                        error: BlockWriteError::Root(
+                            fgdb_strata::root::RootError::ImplausiblePatchCount { declared: 1 },
+                        ),
+                    }))
+                ));
+            }
+            let db = runtime
+                .block_on(Database::open_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                ))
+                .unwrap();
+            assert_eq!(db.partition_root().unwrap(), selected);
+            assert_eq!(db.slot_generation, generation);
+            assert_eq!(db.vertices().unwrap().len(), 4);
+            assert_eq!(db.edges().unwrap().len(), 3);
+            drop(db);
+        }
+    }
 
     struct Lcg(u64);
     impl Lcg {
@@ -6163,3 +9390,387 @@ mod commit_growth_laws {
         assert!(all.iter().all(|record| record.entry.eid != EId(10_000)));
     }
 }
+
+#[cfg(test)]
+mod publish_receipt_laws {
+    use super::*;
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        )
+    }
+
+    /// One new vertex and one edge to it: each commit adds a block and a
+    /// vertex patch.
+    fn commit_batch(commit: u128) -> WriteBatch {
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(100 + commit), vec![], vec![]);
+        batch.add_edge(EId(commit), VId(1), VId(100 + commit), vec![]);
+        batch
+    }
+
+    /// Whether the handle holds a receipt for every block and vertex patch
+    /// its published root names, with that whole root as its verified prefix.
+    fn receipts_cover_the_root<V: Vfs + Clone>(db: &Database<V>) -> bool {
+        let snapshot = &db.snapshot;
+        db.receipts.verified_root_prefix(PARTITION)
+            == (snapshot.refs.len(), snapshot.patch_refs.len())
+            && snapshot.refs.iter().all(|reference| {
+                db.receipts
+                    .holds(fgdb_strata::DeltaBlockVersion(reference.block_id))
+            })
+            && snapshot.patch_refs.iter().all(|reference| {
+                db.receipts
+                    .holds_patch(fgdb_strata::vertex::VertexPatchVersion(reference.patch_id))
+            })
+    }
+
+    /// **EVERY OPEN PATH LEAVES THE HANDLE HOLDING RECEIPTS FOR ITS WHOLE
+    /// PUBLISHED ROOT** (fgdb-ibbuq; owner ruling 2026-10-06, "trust
+    /// publication"). The checkpoint open seeds them from the slot-selected
+    /// root's admission. The rebuild open and compaction keep the ones their
+    /// own publication earned. So the first commit after any of them syncs
+    /// only what it writes. The seeded handle's next commit publishes the same
+    /// root as a twin that never closed, so seeding changes no published byte.
+    #[test]
+    fn every_open_path_holds_receipts_for_its_published_root() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let twin_vfs = MemVfs::new().unwrap();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut twin = runtime
+            .block_on(Database::create_with_vfs(
+                &cx,
+                twin_vfs.clone(),
+                twin_vfs.database_dir(),
+                keys(),
+            ))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(twin.write(&cx, origin)).unwrap();
+        for commit in 1..=12 {
+            runtime
+                .block_on(db.write(&cx, commit_batch(commit)))
+                .unwrap();
+            runtime
+                .block_on(twin.write(&cx, commit_batch(commit)))
+                .unwrap();
+        }
+        assert_eq!(db.partition_root().unwrap(), twin.partition_root().unwrap());
+        assert!(
+            db.snapshot.refs.len() > 1 && db.snapshot.patch_refs.len() > 1,
+            "the fixture must publish several blocks and vertex patches"
+        );
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "the checkpoint open seeds receipts for the slot-selected root"
+        );
+        runtime.block_on(db.write(&cx, commit_batch(13))).unwrap();
+        runtime.block_on(twin.write(&cx, commit_batch(13))).unwrap();
+        assert_eq!(
+            db.partition_root().unwrap(),
+            twin.partition_root().unwrap(),
+            "the seeded handle publishes the never-closed twin's root"
+        );
+        assert!(receipts_cover_the_root(&db));
+
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "compaction keeps the receipts its publication earned"
+        );
+        drop(db);
+
+        let db = runtime
+            .block_on(Database::bind_with_vfs(
+                &cx,
+                vfs.clone(),
+                &dir,
+                keys(),
+                true,
+            ))
+            .unwrap();
+        assert!(
+            receipts_cover_the_root(&db),
+            "the rebuild open keeps the receipts its publication earned"
+        );
+    }
+
+    /// The regular files and directories under `dir`, `dir` included, found
+    /// without following a symlink.
+    fn count_tree(dir: &Path) -> (u64, u64) {
+        let (mut files, mut directories) = (0, 1);
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                let (below_files, below_directories) = count_tree(&entry.path());
+                files += below_files;
+                directories += below_directories;
+            } else if kind.is_file() {
+                files += 1;
+            }
+        }
+        (files, directories)
+    }
+
+    /// **ADOPTING A COPY SYNCS EVERY FILE AND DIRECTORY IN IT** (fgdb-ibbuq).
+    /// A writable open trusts that the published root's objects are durable,
+    /// which a directory copied without a sync breaks; adopt is the step that
+    /// restores the premise. It reaches exactly what an independent walk of
+    /// the tree finds, the database then opens and writes, and a directory
+    /// that is not a database is refused before anything is synced.
+    #[test]
+    fn adopt_syncs_every_file_and_directory_and_refuses_a_non_database() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let dir = std::env::temp_dir().join(format!("fgdb-adopt-law-{}", std::process::id()));
+
+        let mut db = runtime
+            .block_on(Database::create(&cx, &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        origin.create_vertex(VId(1), vec![], vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        for commit in 1..=3 {
+            runtime
+                .block_on(db.write(&cx, commit_batch(commit)))
+                .unwrap();
+        }
+        drop(db);
+
+        let adopted = runtime.block_on(Database::adopt(&cx, &dir)).unwrap();
+        let (files, directories) = count_tree(&dir);
+        assert!(files > 0 && directories > 1, "the fixture has a tree");
+        assert_eq!(adopted, Adopted { files, directories });
+
+        let mut db = runtime.block_on(Database::open(&cx, &dir, keys())).unwrap();
+        runtime.block_on(db.write(&cx, commit_batch(4))).unwrap();
+
+        let plain = dir.with_extension("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(matches!(
+            runtime.block_on(Database::adopt(&cx, &plain)),
+            Err(OpenError::NotADatabase { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod lazy_writable_adjacency_laws {
+    use super::*;
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        )
+    }
+
+    /// **A CHECKPOINT OPEN BUILDS THE ADJACENCY INDEX ONLY WHEN A READ NEEDS
+    /// IT.** A pure-insert write keeps it unbuilt and reports no adjacency
+    /// maintenance. The first read builds it equal to a fresh build of the
+    /// generation, and the next commit extends it incrementally.
+    #[test]
+    fn a_checkpoint_open_builds_adjacency_on_first_read() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=4 {
+            origin.create_vertex(VId(vid), vec![], vec![]);
+        }
+        origin.add_edge(EId(1), VId(1), VId(2), vec![]);
+        origin.add_edge(EId(2), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "open leaves it unbuilt"
+        );
+        let mut insert = WriteBatch::new(RelationId(1));
+        insert.create_vertex(VId(5), vec![], vec![]);
+        runtime.block_on(db.write(&cx, insert)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "a pure insert does not build it"
+        );
+        assert_eq!(db.index_maintenance_work().unwrap().0, 0);
+
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3)]
+        );
+        assert!(db.snapshot.adjacency.get().is_some(), "the read built it");
+        assert!(db.verify_snapshot_indexes().unwrap());
+
+        let mut edge = WriteBatch::new(RelationId(1));
+        edge.add_edge(EId(3), VId(1), VId(4), vec![]);
+        runtime.block_on(db.write(&cx, edge)).unwrap();
+        let work = db.index_maintenance_work().unwrap().0;
+        assert!(work > 0, "the commit extended the built index: {work}");
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3), VId(4)]
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
+    }
+
+    /// Compaction leaves a handle's adjacency index as it found it: unbuilt
+    /// on a handle nothing has traversed (the CLI's compact, which exits
+    /// next), rebuilt with the generation on one that serves reads.
+    #[test]
+    fn compaction_builds_adjacency_only_for_a_handle_that_had_built_it() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=3 {
+            origin.create_vertex(VId(vid), vec![], vec![]);
+        }
+        origin.add_edge(EId(1), VId(1), VId(2), vec![]);
+        origin.add_edge(EId(2), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "an untraversed handle compacts without building it"
+        );
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3)]
+        );
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_some(),
+            "a serving handle keeps its index across a compaction"
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
+    }
+
+    /// The property-equality index follows adjacency: an open, a pure insert
+    /// and an untouched compaction leave it unbuilt (a CLI load by caller
+    /// keys never pays for it), the first lookup builds it from the patches,
+    /// and a commit or compaction then keeps it, extended, equal to a fresh
+    /// build.
+    #[test]
+    fn the_property_index_is_built_by_its_first_lookup_and_then_kept() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let key = PropertyKeyId(1);
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=4_u128 {
+            let value = CanonicalScalar::Int((vid % 2) as i64);
+            origin.create_vertex(VId(vid), vec![], vec![(key, value)]);
+        }
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_none(),
+            "open leaves it unbuilt"
+        );
+        let mut insert = WriteBatch::new(RelationId(1));
+        insert.create_vertex(VId(5), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        runtime.block_on(db.write(&cx, insert)).unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_none(),
+            "a pure insert and a compaction do not build it"
+        );
+        assert_eq!(db.index_maintenance_work().unwrap().1, 0);
+
+        let odd = |db: &Database<MemVfs>| {
+            let mut vids: Vec<_> = db
+                .snapshot
+                .property_index()
+                .lookup(key, &CanonicalScalar::Int(1))
+                .into_iter()
+                .copied()
+                .collect();
+            vids.sort_unstable();
+            vids
+        };
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5)]);
+        assert!(
+            db.snapshot.property_index.get().is_some(),
+            "the lookup built it"
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
+
+        let mut more = WriteBatch::new(RelationId(1));
+        more.create_vertex(VId(7), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        runtime.block_on(db.write(&cx, more)).unwrap();
+        let work = db.index_maintenance_work().unwrap().1;
+        assert!(work > 0, "the commit extended the built index: {work}");
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5), VId(7)]);
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_some(),
+            "a serving handle keeps its index across a compaction"
+        );
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5), VId(7)]);
+        assert!(db.verify_snapshot_indexes().unwrap());
+    }
+}
+
+#[cfg(test)]
+#[path = "pre_pack_open_tests.rs"]
+mod pre_pack_open_laws;
+
+#[cfg(test)]
+#[path = "manifest_format_open_tests.rs"]
+mod manifest_format_open_laws;

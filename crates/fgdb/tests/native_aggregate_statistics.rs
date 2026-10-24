@@ -1,6 +1,6 @@
 //! Exact global statistics through native text and the pinned MVCC pull source.
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, QueryError, QueryResult, WriteBatch};
+use fgdb::{Database, DatabaseKeys, QueryResult, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::stream::VertexScanState;
@@ -201,13 +201,36 @@ fn native_average_reports_late_type_errors_and_does_not_discard_result_clauses()
         ));
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(cursor.next().is_none());
-        for text in [
-            "MATCH (n:L) WITH n.score AS s RETURN AVG(s) AS avg",
-            "MATCH (n:L) WITH n.score AS s RETURN MIN(s) AS min",
-        ] {
+        // A WITH pipeline streams its computed input. The stream keeps the
+        // WITH clause: AVG over the projected score reports the same late type
+        // error as the direct statistics, and each cursor reports exactly what
+        // ordinary execution of the same text reports.
+        let avg = "MATCH (n:L) WITH n.score AS s RETURN AVG(s) AS avg";
+        let prepared = fgdb::PreparedNativeRead::prepare(avg, &args, symbols()).unwrap();
+        let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(
+                GraphAggregateError::NonIntegerAverage { aggregate: 0 }
+            )))
+        ));
+        assert!(cursor.next().is_none());
+        for text in [avg, "MATCH (n:L) WITH n.score AS s RETURN MIN(s) AS min"] {
             let prepared = fgdb::PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
-            let res = prepared.stream_aggregate(&db, &cx, &args, wide());
-            assert!(matches!(res, Err(QueryError::AggregateStreamPlan(_))));
+            let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            match db.query(&cx, text, &args, symbols(), wide()) {
+                Ok(QueryResult::Rows { rows, .. }) => assert_eq!(
+                    rows,
+                    vec![cursor.next().unwrap().unwrap().values().to_vec()],
+                    "{text}"
+                ),
+                Ok(_) => panic!("aggregate is a read"),
+                Err(error) => assert!(
+                    matches!(cursor.next(), Some(Err(_))),
+                    "{text}: ordinary execution refused with {error:?}"
+                ),
+            }
+            assert!(cursor.next().is_none(), "{text}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

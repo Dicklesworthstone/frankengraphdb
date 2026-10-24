@@ -11,7 +11,7 @@ const P: PropertyKeyId = PropertyKeyId(1);
 #[derive(Clone)]
 struct Record {
     id: VId,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     visible: bool,
 }
 struct Source {
@@ -61,7 +61,7 @@ fn records(values: &[Option<i64>]) -> Vec<Record> {
         .map(|(at, value)| Record {
             id: VId(if at == 3 { u128::MAX } else { at as u128 }),
             properties: value
-                .map(|value| vec![(P, CanonicalScalar::Int(value))])
+                .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
                 .unwrap_or_default(),
             visible: true,
         })
@@ -293,7 +293,7 @@ fn plain_values_do_not_gain_projection_copies_and_computed_failures_keep_local_c
         let rows = (0..count)
             .map(|id| Record {
                 id: VId(id),
-                properties: vec![(P, CanonicalScalar::Int(7))],
+                properties: vec![(P, CanonicalScalar::Int(7).into())],
                 visible: true,
             })
             .collect();

@@ -32,7 +32,7 @@ fn open_aggregate<'q>(
             view,
             cx,
             as_of,
-            after: None,
+            scan: IdentityScanCursor::default(),
         },
         plan.clone(),
         policy,

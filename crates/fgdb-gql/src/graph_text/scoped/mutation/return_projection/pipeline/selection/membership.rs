@@ -22,7 +22,7 @@ impl<'a> Parser<'a> {
                 .or_insert(GqlParameterType::List);
         }
         let list = self.selection_value(schema)?;
-        if let ReadValueTemplate::Parameter { index, at } = &list {
+        if let ReadValueTemplate::Parameter { index, at, .. } = &list {
             let found = self.syntax.parameters[*index].parameter_type;
             if !matches!(
                 found,
@@ -192,11 +192,14 @@ mod tests {
         assert!(template.bind_parameters(&extra).is_err());
     }
 
+    /// An ordering against a list parameter used as a membership list is a
+    /// conflicting context and refuses before any catalog access. Equality
+    /// with it is not a conflict (fgdb-v6ku6): a scalar is unequal to a list.
     #[test]
     fn conflicting_parameter_contexts_refuse_before_catalog_access() {
         for statement in [
             "MATCH (n:X) WITH n, $ids AS old WHERE n IN $ids RETURN n",
-            "MATCH (n:X) WITH n WHERE n IN $ids AND 1 = $ids RETURN n",
+            "MATCH (n:X) WITH n WHERE n IN $ids AND 1 < $ids RETURN n",
         ] {
             let mut calls = 0;
             assert!(
@@ -207,6 +210,16 @@ mod tests {
                 .is_err()
             );
             assert_eq!(calls, 0, "{statement}");
+        }
+        let ids = GqlParameters::new()
+            .with_list("ids", vec![int(2), null()])
+            .unwrap();
+        for (operator, wanted) in [("=", vec![]), ("<>", expected(&[2, 2]))] {
+            let statement = format!(
+                "UNWIND [1, 2, 2, 3, NULL] AS n WITH n \
+                 WHERE n IN $ids AND 1 {operator} $ids RETURN n"
+            );
+            assert_eq!(run(&prepare(&statement, &ids)), wanted, "{statement}");
         }
         let mut calls = 0;
         assert!(
@@ -272,6 +285,28 @@ mod tests {
         );
         let empty = GqlParameters::new().with_list("groups", vec![]).unwrap();
         assert!(run(&template.bind_parameters(&empty).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn indexed_rhs_operands_continue_through_arithmetic_in_resolved_where() {
+        assert_eq!(
+            execute(
+                "UNWIND [0,1,2] AS n WITH n, [[2],[1]] AS groups \
+                 WHERE n IN groups[0] AND groups[1][0] + 1 = n RETURN n"
+            ),
+            expected(&[2]),
+        );
+        let arguments = GqlParameters::new()
+            .with_list("groups", vec![list(vec![int(2)]), list(vec![int(1)])])
+            .unwrap();
+        assert_eq!(
+            run(&prepare(
+                "UNWIND [0,1,2] AS n WITH n \
+                 WHERE n IN $groups[0] AND $groups[1][0] + 1 = n RETURN n",
+                &arguments,
+            )),
+            expected(&[2]),
+        );
     }
 
     #[test]

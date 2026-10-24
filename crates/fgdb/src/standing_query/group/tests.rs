@@ -66,6 +66,7 @@ fn empty(definition: PreparedGraphSetAggregate) -> State {
         input: 0,
         operator,
         output: output::State::new(definition),
+        row_output: None,
         last_delta: None,
         policy: policy(),
         frontier: CommitSeq(0),

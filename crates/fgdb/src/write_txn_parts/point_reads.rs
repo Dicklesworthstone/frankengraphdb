@@ -6,10 +6,18 @@
 enum PointReadField {
     Property(fgdb_delta_types::PropertyKeyId),
     Label(LabelId),
+    /// A positive or negative vertex-lifetime probe, without reading fields
+    /// or incidence. Edge insertion does not change vertex existence.
+    VertexExistence,
     /// All current AND absent edges of this type and direction at the vertex.
     /// The full domain is retained even when no neighbour was returned.
     Adjacency {
         relation: RelationId,
+        incoming: bool,
+    },
+    /// The same insertion gap across EVERY relation, including a relation
+    /// with no current edge. Enumerating observed types cannot represent it.
+    AnyAdjacency {
         incoming: bool,
     },
     /// Immutable incidence and existence, not the edge's property payload.
@@ -140,7 +148,8 @@ impl PointReads {
                             relation: *relation,
                             incoming,
                         },
-                    ) {
+                    ) || self.contains(element, PointReadField::AnyAdjacency { incoming })
+                    {
                         return Ok(Some(element));
                     }
                 }
@@ -203,7 +212,7 @@ impl WriteTxn {
         database: &Database<V>,
         vid: VId,
         property: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalScalar>, WriteTxnError> {
+    ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
         let field = PointReadField::Property(property);
         let row = self.point_projection(database, ElementId::Vertex(vid), field)?;
         self.point_reads
@@ -220,7 +229,7 @@ impl WriteTxn {
         database: &Database<V>,
         eid: EId,
         property: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalScalar>, WriteTxnError> {
+    ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
         let field = PointReadField::Property(property);
         let row = self.point_projection(database, ElementId::Edge(eid), field)?;
         self.point_reads

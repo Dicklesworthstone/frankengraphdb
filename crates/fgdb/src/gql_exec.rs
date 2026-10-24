@@ -2,6 +2,7 @@
 //! Source lifetimes, history and policy accounting are independent of the
 //! compiler-owned output shape. Tuples do not require a second source scan.
 
+pub(crate) mod property_maps;
 pub(crate) mod source;
 
 use crate::{
@@ -14,12 +15,13 @@ use fgdb_gql::algebra::{
     GlaIdentityOutput, GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use source::SourceEvent;
 use std::collections::BTreeMap;
 
 pub(crate) trait GqlSnapshotReader {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError>;
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError>;
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError>;
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError>;
     fn gql_admitted_snapshot(&self, _as_of: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
@@ -29,6 +31,9 @@ pub(crate) trait GqlSnapshotReader {
 impl<V: Vfs + Clone> GqlSnapshotReader for Database<V> {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         Database::vertex_at(self, vid, as_of)
+    }
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        Database::edge_at(self, eid, as_of)
     }
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
         Database::vertices_at(self, as_of)
@@ -46,6 +51,9 @@ impl GqlSnapshotReader for EmbeddedReadView {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         EmbeddedReadView::vertex_at(self, vid, as_of)
     }
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        EmbeddedReadView::edge_at(self, eid, as_of)
+    }
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
         EmbeddedReadView::vertices_at(self, as_of)
     }
@@ -57,6 +65,47 @@ impl GqlSnapshotReader for EmbeddedReadView {
         Ok(Some(&self.snapshot))
     }
 }
+/// One stored property of a vertex or edge at `as_of`, for `x.key` over an
+/// element value an expression produced (fgdb-xnd7x). The element came from a
+/// pattern at this same cut. Should it be absent there anyway, it reads NULL.
+pub(crate) fn element_property_at(
+    reader: &impl GqlSnapshotReader,
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    as_of: CommitSeq,
+) -> Result<Option<CanonicalPropertyValue>, GqlError> {
+    read_element_property(
+        element,
+        key,
+        |vid| reader.gql_vertex_at(vid, as_of),
+        |eid| reader.gql_edge_at(eid, as_of),
+    )
+}
+
+/// The one property row lookup behind every host's element reader: the
+/// vertex row or edge record at the host's cut, then its key, if present.
+pub(crate) fn read_element_property(
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    vertex: impl FnOnce(VId) -> Result<Option<VertexRow>, ReadError>,
+    edge: impl FnOnce(EId) -> Result<Option<EdgeRecord>, ReadError>,
+) -> Result<Option<CanonicalPropertyValue>, GqlError> {
+    let lookup = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+        props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| props[at].1.clone())
+    };
+    Ok(match element {
+        fgdb_delta_types::ElementId::Vertex(vid) => vertex(vid)
+            .map_err(GqlError::Read)?
+            .and_then(|row| lookup(&row.props)),
+        fgdb_delta_types::ElementId::Edge(eid) => edge(eid)
+            .map_err(GqlError::Read)?
+            .and_then(|record| lookup(&record.props)),
+    })
+}
+
 fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
     bind.bind(statement).map_err(|error| match error {
         fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
@@ -244,12 +293,30 @@ fn execute_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
     pattern: &PreparedGraphPattern<Row>,
     as_of: CommitSeq,
     policy: fgdb_gql::GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<GqlError, C>> {
+    execute_seeded_pattern_at(reader, pattern, None, as_of, policy, checkpoint)
+}
+
+/// [`execute_pattern_at`] for a pattern whose one vertex root a leading bag
+/// binds by identity (fgdb-2acff): with `seeds`, a single-root plan admits
+/// only those roots by point lookup. Other shapes, and a reader without a
+/// borrowed snapshot, admit as before; their rows are a superset the set
+/// executor's identity join narrows, exactly as for the unseeded leaf.
+pub(crate) fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
+    reader: &R,
+    pattern: &PreparedGraphPattern<Row>,
+    seeds: Option<&[VId]>,
+    as_of: CommitSeq,
+    policy: fgdb_gql::GqlQueryPolicy,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<fgdb_gql::GqlQueryExecution<Row>, fgdb_gql::GqlQueryError<GqlError, C>> {
     checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
-    AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
+    let mut admitted = AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
         .map_err(GqlError::Read)
-        .map_err(fgdb_gql::GqlQueryError::Source)?
+        .map_err(fgdb_gql::GqlQueryError::Source)?;
+    admitted.seeds = seeds.map(Box::from);
+    admitted
         .execute_governed(policy, checkpoint)
         .map_err(|error| error.map_source(GqlError::Read))
 }
@@ -265,11 +332,14 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized, Row = VId> {
     logical: GlaPlan<Row>,
     snapshot: Option<&'a Snapshot>,
     borrowed: Option<source::BorrowedTables<'a>>,
+    /// Root identities a leading bag binds (fgdb-2acff); see admit_seeded.
+    seeds: Option<Box<[VId]>>,
     vertices: BTreeMap<VId, VertexRow>,
     edges: Vec<EdgeRecord>,
     snapshot_records: u64,
     cached_labels: BTreeMap<VId, Vec<GraphValue>>,
     cached_types: BTreeMap<EId, CanonicalScalar>,
+    property_maps: property_maps::PropertyMaps,
 }
 impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
     pub(crate) fn admit(
@@ -320,11 +390,13 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             logical,
             snapshot,
             borrowed: None,
+            seeds: None,
             vertices,
             edges,
             snapshot_records: count,
             cached_labels: BTreeMap::new(),
             cached_types: BTreeMap::new(),
+            property_maps: property_maps::PropertyMaps::default(),
         })
     }
     fn materialize<E>(
@@ -334,7 +406,16 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         if self.borrowed.is_none()
             && let Some(snapshot) = self.snapshot
         {
-            let tables = source::admit(snapshot, &self.logical, self.as_of, control)?;
+            let seeded = match self.seeds.as_deref() {
+                Some(seeds) => {
+                    source::admit_seeded(snapshot, &self.logical, self.as_of, seeds, control)?
+                }
+                None => None,
+            };
+            let tables = match seeded {
+                Some(tables) => tables,
+                None => source::admit(snapshot, &self.logical, self.as_of, control)?,
+            };
             self.snapshot_records = tables.snapshot_records;
             self.borrowed = Some(tables);
         }
@@ -381,7 +462,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             }))
         }
     }
-    fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         if let Some(tables) = &self.borrowed {
             return tables.property(vid, key);
         }
@@ -391,7 +472,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             .ok()
             .map(|at| &row.props[at].1)
     }
-    fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         if let Some(tables) = &self.borrowed {
             return tables.edge_property(eid, key);
         }
@@ -504,6 +585,60 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         Ok(())
     }
 
+    fn cache_property_maps<E>(
+        &mut self,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        failure: impl Fn(ReadError) -> E,
+    ) -> Result<(), E> {
+        let catalog = self.logical.reverse_catalog.as_deref();
+        if self.logical.projects_vertex_property_maps() {
+            let rows = self
+                .borrowed
+                .iter()
+                .flat_map(|tables| tables.vertices.iter().copied())
+                .chain(self.vertices.values());
+            for row in rows {
+                let map = property_maps::collect(
+                    row.props.iter().map(|(key, value)| (*key, value)),
+                    catalog,
+                    |_| true,
+                    control,
+                    &failure,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.vertices.insert(row.vid, map);
+            }
+        }
+        if self.logical.projects_edge_property_maps() {
+            let rows = self
+                .borrowed
+                .iter()
+                .flat_map(|tables| {
+                    tables
+                        .edges
+                        .iter()
+                        .map(|(edge, properties)| (edge.0, *properties))
+                })
+                .chain(
+                    self.edges
+                        .iter()
+                        .map(|row| (row.entry.eid, row.props.as_slice())),
+                );
+            for (eid, properties) in rows {
+                let map = property_maps::collect(
+                    properties.iter().map(|(key, value)| (*key, value)),
+                    catalog,
+                    |_| true,
+                    control,
+                    &failure,
+                )?;
+                control(SourceEvent::ScratchEntry)?;
+                self.property_maps.edges.insert(eid, map);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_governed<C>(
         mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -516,7 +651,14 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         })?;
         self.validate_and_cache_catalog_symbols()
             .map_err(fgdb_gql::GqlQueryError::Source)?;
-        let result = self.logical.execute_governed_with_element_accessors(
+        self.cache_property_maps(
+            &mut |event| {
+                checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                usage.observe::<ReadError, C>(policy, event)
+            },
+            fgdb_gql::GqlQueryError::Source,
+        )?;
+        let result = self.logical.execute_governed_with_element_maps(
             self.snapshot_records,
             self.vertex_ids(),
             self.identified_edges(),
@@ -525,6 +667,8 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             |eid, key| Ok(self.edge_property(eid, key)),
             |vid| Ok(self.cached_labels.get(&vid).map(|v| v.as_slice())),
             |eid| Ok(self.cached_types.get(&eid)),
+            |vid| Ok(self.property_maps.vertices.get(&vid)),
+            |eid| Ok(self.property_maps.edges.get(&eid)),
             usage.remaining(policy),
             checkpoint,
         );
@@ -574,6 +718,52 @@ pub(crate) struct AdmissionUsage {
     records: u64,
 }
 impl AdmissionUsage {
+    /// Charge a registered kernel's admitted work estimate to the SAME
+    /// allowance as its source, projection and later result conversion.
+    /// The kernel must first cap its own execution at `remaining(policy)`.
+    pub(crate) fn charge_work<E, C>(
+        &mut self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        units: u64,
+    ) -> Result<(), fgdb_gql::GqlQueryError<E, C>> {
+        let observed = u128::from(self.work_units) + u128::from(units);
+        if observed > u128::from(policy.evaluator.max_work_units) {
+            return Err(fgdb_gql::GqlQueryError::Evaluator(
+                fgdb_gql::GlaLimitExceeded {
+                    dimension: fgdb_gql::GlaLimitDimension::WorkUnits,
+                    limit: policy.evaluator.max_work_units,
+                    observed,
+                },
+            ));
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
+    /// `n` Work events in one step: the same admitted total, and the same
+    /// refusal, as `n` calls of [`Self::observe`]. Every unit up to the
+    /// limit is admitted and the first past it refuses, observing limit + 1.
+    pub(crate) fn observe_work<E, C>(
+        &mut self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        n: u64,
+    ) -> Result<(), fgdb_gql::GqlQueryError<E, C>> {
+        let limit = policy.evaluator.max_work_units;
+        let observed = u128::from(self.work_units) + u128::from(n);
+        if n > 0 && observed > u128::from(limit) {
+            self.work_units = self.work_units.max(limit);
+            return Err(fgdb_gql::GqlQueryError::Evaluator(
+                fgdb_gql::GlaLimitExceeded {
+                    dimension: fgdb_gql::GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed: u128::from(self.work_units) + 1,
+                },
+            ));
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
     pub(crate) fn observe<E, C>(
         &mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -621,6 +811,39 @@ impl AdmissionUsage {
         *self = next;
         Ok(())
     }
+    /// Whether `records` more snapshot records, `work` more work units and
+    /// `scratch` more scratch entries all fit `policy`: charged in any order,
+    /// no event among them could refuse.
+    pub(crate) fn absorbs(
+        &self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        records: u64,
+        work: u64,
+        scratch: u64,
+    ) -> bool {
+        let fits = |used: u64, more: u64, limit: u64| {
+            used.checked_add(more).is_some_and(|total| total <= limit)
+        };
+        self.records.checked_add(records).is_some_and(|total| {
+            policy
+                .rows
+                .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, total)
+                .is_ok()
+        }) && fits(self.work_units, work, policy.evaluator.max_work_units)
+            && fits(
+                self.scratch_entries,
+                scratch,
+                policy.evaluator.max_scratch_entries,
+            )
+    }
+
+    /// Charge counts [`Self::absorbs`] admitted.
+    pub(crate) fn absorb(&mut self, records: u64, work: u64, scratch: u64) {
+        self.records += records;
+        self.work_units += work;
+        self.scratch_entries += scratch;
+    }
+
     /// Snapshot records admitted so far, for a source that reports its own
     /// execution stats (an authorized procedure call).
     pub(crate) fn snapshot_records(&self) -> u64 {
@@ -664,6 +887,55 @@ impl AdmissionUsage {
     }
 }
 
+/// Evaluate the physical factors of one already admitted original source.
+/// Source records are reported once. Admission, both evaluators and retained
+/// rows share one work/scratch allowance, even when either factor is empty.
+/// The caller retains the original admission and witnesses until both succeed.
+pub(crate) fn execute_pattern_factors<E, C>(
+    request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+    snapshot_records: u64,
+    policy: fgdb_gql::GqlQueryPolicy,
+    mut usage: AdmissionUsage,
+    mut evaluate: impl FnMut(
+        &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<E, C>,
+    >,
+) -> Result<fgdb_gql::GraphPatternFactorExecution, fgdb_gql::GqlQueryError<E, C>> {
+    let mut value = [Vec::new(), Vec::new()];
+    let mut result_rows = 0_u64;
+    for (factor, rows) in request.factors().iter().zip(&mut value) {
+        let result = evaluate(factor, usage.remaining(policy));
+        let execution = usage.finish(policy, result)?;
+        debug_assert_eq!(execution.rows.snapshot_records, snapshot_records);
+        debug_assert_eq!(execution.rows.result_rows, execution.value.len() as u64);
+        // Both vectors coexist in this address space; their row count fits u64.
+        result_rows = result_rows
+            .checked_add(execution.value.len() as u64)
+            .expect("retained factor rows fit u64");
+        usage.work_units = execution.evaluator.work_units;
+        usage.scratch_entries = execution.evaluator.scratch_entries;
+        *rows = execution.value;
+    }
+    policy
+        .rows
+        .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
+        .map_err(fgdb_gql::GqlQueryError::Rows)?;
+    Ok(fgdb_gql::GraphPatternFactorExecution {
+        value,
+        rows: fgdb_gql::GqlExecutionStats {
+            snapshot_records,
+            result_rows,
+        },
+        evaluator: fgdb_gql::GlaExecutionStats {
+            work_units: usage.work_units,
+            scratch_entries: usage.scratch_entries,
+        },
+    })
+}
+
 #[cfg(test)]
 mod admission_meter_tests {
     use super::*;
@@ -671,6 +943,36 @@ mod admission_meter_tests {
         GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError,
         GqlQueryExecution, GqlQueryPolicy,
     };
+
+    /// **N WORK UNITS IN ONE STEP ARE N WORK EVENTS.** From every starting
+    /// count around the limit, `observe_work(n)` leaves the usage and returns
+    /// the result that `n` single Work events would: everything up to the
+    /// limit is admitted, and the refusal observes limit + 1.
+    #[test]
+    fn work_in_one_step_admits_and_refuses_as_single_events() {
+        type Outcome = (AdmissionUsage, Result<(), GqlQueryError<(), ()>>);
+        for limit in [0, 1, 5, 64, 130] {
+            let policy = GqlQueryPolicy::new(1_000, 1_000, limit, 1_000);
+            for start in 0..=limit {
+                for n in [0, 1, 2, 3, 63, 64, 65, 129, 200] {
+                    let mut base = AdmissionUsage::default();
+                    base.charge_work::<(), ()>(policy, start).unwrap();
+                    let single: Outcome = {
+                        let mut usage = base;
+                        let result = (0..n)
+                            .try_for_each(|_| usage.observe::<(), ()>(policy, SourceEvent::Work));
+                        (usage, result)
+                    };
+                    let batched: Outcome = {
+                        let mut usage = base;
+                        let result = usage.observe_work::<(), ()>(policy, n);
+                        (usage, result)
+                    };
+                    assert_eq!(batched, single, "limit {limit} start {start} n {n}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn row_only_admission_ignores_work_and_does_not_charge_a_refused_record() {

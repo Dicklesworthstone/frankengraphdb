@@ -26,6 +26,9 @@
 //! dropped. No handle, no fold, no block list and no snapshot crosses between
 //! them — only the durable stream, which is the only thing they are supposed to
 //! agree about.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
@@ -53,7 +56,7 @@ use fgdb_sim::{
 use fgdb_strata::store::StoreError as BlockStoreError;
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, VId};
 use std::future::{Future, poll_fn};
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -715,7 +718,7 @@ async fn assert_reopened_vertex_matches_oracle(cx: &CommitCx, dir: &Path) {
     assert_eq!(engine_vertex.labels, vec![LabelId(3)]);
     assert_eq!(
         engine_vertex.props,
-        vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]
+        vec![(PropertyKeyId(7), CanonicalScalar::Int(1).into())]
     );
     assert_eq!(
         engine_vertex.labels,
@@ -925,7 +928,7 @@ fn the_spine_agrees_with_the_reference_oracle() {
                 continue;
             };
             let oracle_labels: Vec<LabelId> = vertex.labels.iter().copied().collect();
-            let oracle_props: Vec<(PropertyKeyId, CanonicalScalar)> = vertex
+            let oracle_props: Vec<(PropertyKeyId, CanonicalPropertyValue)> = vertex
                 .props
                 .iter()
                 .map(|(key, value)| (*key, value.clone()))
@@ -1047,7 +1050,7 @@ fn agreement_survives_a_reopen() {
 }
 
 /// Independent reconstructions of the derived delta window must agree: the
-/// engine rebuilds `LocalDeltaBatchIndex` from the recovered chain at open,
+/// engine materializes `LocalDeltaBatchIndex` from the recovered chain on demand,
 /// and `fgdb_sim::replay` inserts in the same walk. They share nothing but
 /// bytes on disk. A window the engine invented in memory would diverge.
 #[test]
@@ -1058,9 +1061,13 @@ fn the_reopened_delta_index_equals_the_independent_replay() {
         let _ = write_history(cx, &dir).await;
 
         let (engine_index, engine_seqs, engine_frontier) = {
-            let engine = Database::open(cx, &dir, engine_keys())
+            let mut engine = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("reopens");
+            engine
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("the independent delta comparison requests complete history");
             let engine_index = engine.delta_index().expect("healthy rebuilt index").clone();
             let engine_seqs: Vec<_> = engine
                 .delta_since(CommitSeq::ORIGIN)
@@ -1294,9 +1301,13 @@ fn every_post_d2_failure_fences_every_read_face_and_replays_to_the_oracle() {
             drop(db);
 
             // ENGINE SIDE: only the directory and keys cross the reopen.
-            let engine = Database::open(cx, &dir, engine_keys())
+            let mut engine = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("authoritative reopen recovers the durable commit");
+            engine
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("the recovery oracle requests the complete committed suffix");
             let engine_neighbours = engine.neighbours(VId(1), KNOWS).expect("reads");
             let engine_vertices = engine.vertices().expect("reads");
             let engine_edges = engine.edges().expect("reads");
@@ -1597,6 +1608,180 @@ fn strata_batch_inode_sync_lie_fences_before_root_publication() {
         vfs.crash().await.expect("crash");
         drop(db);
         assert_reopened_vertex_matches_oracle(&cx, &dir).await;
+    });
+}
+
+/// A vertex and an edge to it that `write_history` never used: a first commit
+/// that writes one new edge block and one new vertex patch.
+fn first_commit_batch() -> WriteBatch {
+    let mut batch = WriteBatch::new(KNOWS);
+    batch.create_vertex(VId(900), vec![], vec![]);
+    batch.add_edge(EId(900), VId(1), VId(900), vec![]);
+    batch
+}
+
+/// Recreate `from`'s tree at `to` through `vfs`, leaving every block-store
+/// object unsynced: the copy a crash catches with the strata objects still in
+/// the page cache. Those are exactly the objects a seeded receipt trusts.
+/// Every other file is synced (`Vfs::write` syncs), because the lab VFS reports
+/// an unsynced file's length from disk and Chronicle's recovery would refuse
+/// the copy before it could commit.
+async fn copy_leaving_strata_unsynced(vfs: &FaultVfs, from: &Path, to: &Path) {
+    let create = OpenOptions::new().write(true).create(true).truncate(true);
+    let strata = from.join(fgdb_strata::store::BLOCK_DIR);
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, target)) = pending.pop() {
+        vfs.create_dir(&target).await.expect("copy a directory");
+        for entry in std::fs::read_dir(&source).expect("read a source directory") {
+            let entry = entry.expect("source entry");
+            let kind = entry.file_type().expect("source entry type");
+            let destination = target.join(entry.file_name());
+            if kind.is_dir() {
+                pending.push((entry.path(), destination));
+            } else if kind.is_file() && !entry.path().starts_with(&strata) {
+                let bytes = std::fs::read(entry.path()).expect("read a source file");
+                vfs.write(&destination, &bytes)
+                    .await
+                    .expect("copy and sync a file");
+            } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).expect("read a source file");
+                let mut file = vfs
+                    .open(&destination, &create)
+                    .await
+                    .expect("create a copied file");
+                let mut written = 0;
+                while written < bytes.len() {
+                    let accepted =
+                        poll_fn(|task| Pin::new(&mut file).poll_write(task, &bytes[written..]))
+                            .await
+                            .expect("copy file bytes");
+                    assert!(accepted > 0, "a copy write made no progress");
+                    written += accepted;
+                }
+            }
+        }
+    }
+}
+
+/// Open `dir` through `vfs`, commit [`first_commit_batch`], then lose the
+/// process. Returns the committed sequence.
+async fn first_commit_then_crash(cx: &CommitCx, vfs: &FaultVfs, dir: &Path) -> CommitSeq {
+    let mut db = Database::open_with_vfs(cx, vfs.clone(), dir, engine_keys())
+        .await
+        .expect("a fresh process opens the database");
+    let seq = db
+        .write(cx, first_commit_batch())
+        .await
+        .expect("the first commit lands");
+    vfs.crash().await.expect("simulate process loss");
+    drop(db);
+    seq
+}
+
+/// The reopened database holds `seq`'s write and nothing past it.
+async fn assert_first_commit_survived(cx: &CommitCx, dir: &Path, seq: CommitSeq) {
+    let db = Database::open(cx, dir, engine_keys())
+        .await
+        .expect("the database reopens after the crash");
+    assert_eq!(db.frontier().expect("healthy frontier"), seq);
+    assert!(
+        db.vertex(VId(900)).expect("healthy read").is_some(),
+        "the first commit's vertex survived"
+    );
+    assert!(
+        db.neighbours(VId(1), KNOWS)
+            .expect("healthy read")
+            .contains(&VId(900)),
+        "the first commit's edge survived"
+    );
+}
+
+/// **A FRESH PROCESS'S FIRST COMMIT TRUSTS PUBLICATION; A COPY IS ADOPTED
+/// FIRST** (fgdb-ibbuq; owner ruling 2026-10-06, "trust publication").
+///
+/// A writable open seeds its publish receipts from the root the slot
+/// selects, so its first commit syncs only the objects it writes. Four
+/// crashes pin what that may and may not cost:
+/// - a database the engine wrote survives a crash right after a fresh
+///   process's first commit, the write included;
+/// - an fsync lie on that commit's first new strata inode is caught before
+///   any root names the object, and a reopen recovers the committed write
+///   from Chronicle;
+/// - a copy whose block-store objects never reached disk loses them at a
+///   crash after its first commit: its new root names objects the crash
+///   took, so it no longer opens. This is the control, and it also catches
+///   empty receipts, under which the first commit re-syncs those objects;
+/// - the same copy, adopted before its first open, survives.
+#[test]
+fn a_fresh_processs_first_commit_trusts_publication_and_a_copy_is_adopted_first() {
+    let source = scratch("ibbuq-source");
+    let lied = scratch("ibbuq-lied");
+    let raw_copy = scratch("ibbuq-raw-copy");
+    let adopted_copy = scratch("ibbuq-adopted-copy");
+    under_lab(0x1bb_0001, move |cx| async move {
+        let cx = &cx;
+        let history = write_history(cx, &source).await;
+        let next = CommitSeq(history.last().expect("a history").0 + 1);
+        write_history(cx, &lied).await;
+
+        let raw_vfs = FaultVfs::unix(FaultPlan::faultless());
+        copy_leaving_strata_unsynced(&raw_vfs, &source, &raw_copy).await;
+        let adopted_vfs = FaultVfs::unix(FaultPlan::faultless());
+        copy_leaving_strata_unsynced(&adopted_vfs, &source, &adopted_copy).await;
+
+        let vfs = FaultVfs::unix(FaultPlan::faultless());
+        assert_eq!(first_commit_then_crash(cx, &vfs, &source).await, next);
+        assert_first_commit_survived(cx, &source, next).await;
+
+        // D1 and D2 come first; the third eligible sync is the commit's first
+        // new strata inode, as the path assertion below pins.
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::At(3),
+            ..FaultPlan::faultless()
+        });
+        let mut db = Database::open_with_vfs(cx, vfs.clone(), &lied, engine_keys())
+            .await
+            .expect("a fresh process opens the database");
+        let error = db
+            .write(cx, first_commit_batch())
+            .await
+            .expect_err("the durable read-back exposes the lie");
+        assert!(
+            matches!(error, WriteError::CommittedNeedsRecovery { .. }),
+            "a lie after D2 must fence, not refuse: {error:?}"
+        );
+        let events = vfs.events();
+        assert_eq!(events.len(), 1, "exactly the planned lie fires");
+        assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
+        assert_eq!(
+            events[0].path.parent(),
+            Some(lied.join(fgdb_strata::store::BLOCK_DIR).as_path())
+        );
+        vfs.crash().await.expect("simulate process loss");
+        drop(db);
+        assert_first_commit_survived(cx, &lied, next).await;
+
+        let seq = first_commit_then_crash(cx, &raw_vfs, &raw_copy).await;
+        assert_eq!(seq, next);
+        let refusal = Database::open(cx, &raw_copy, engine_keys()).await;
+        assert!(
+            matches!(
+                refusal,
+                Err(OpenError::Rebuild(RebuildError::Store(_)) | OpenError::Store(_))
+            ),
+            "an unadopted copy loses the strata objects it never synced: {:?}",
+            refusal.as_ref().err()
+        );
+
+        let adopted = Database::adopt_with_vfs(cx, adopted_vfs.clone(), &adopted_copy)
+            .await
+            .expect("adopts the copy");
+        assert!(adopted.files > 0);
+        assert_eq!(
+            first_commit_then_crash(cx, &adopted_vfs, &adopted_copy).await,
+            next
+        );
+        assert_first_commit_survived(cx, &adopted_copy, next).await;
     });
 }
 
@@ -2674,6 +2859,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("a mid-history reopen rebuilds and continues");
+                    db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                        .await
+                        .expect("compare the complete independently reconstructed delta index");
                     assert_eq!(
                         db.delta_index().expect("reads"),
                         &incremental_index,
@@ -2699,6 +2887,9 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
                     db = Database::open(cx, &dir, engine_keys())
                         .await
                         .expect("the checkpoint-selected session resumes");
+                    db.ensure_delta_window(cx, CommitSeq::ORIGIN)
+                        .await
+                        .expect("retain the whole transcript for the final differential");
                 }
                 if round == 6 {
                     // Consolidate mid-history: every epoch comparison below
@@ -3027,9 +3218,13 @@ fn generated_histories_agree_with_the_oracle_at_every_epoch() {
             let retained = db.element_versions().expect("reads").clone();
             let retained_index = db.delta_index().expect("reads").clone();
             drop(db);
-            let reopened = Database::open(cx, &dir, engine_keys())
+            let mut reopened = Database::open(cx, &dir, engine_keys())
                 .await
                 .expect("reopens on the compacted generation");
+            reopened
+                .ensure_delta_window(cx, CommitSeq::ORIGIN)
+                .await
+                .expect("compare the full post-compaction transcript");
             assert_eq!(
                 reopened.element_versions().expect("reads"),
                 &retained,
@@ -3211,7 +3406,10 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
             .await
             .expect("reopens");
         let engine_v1 = engine.vertex(VId(1)).expect("reads").expect("v1 live");
-        assert_eq!(engine_v1.props, vec![(rank, CanonicalScalar::Int(7))]);
+        assert_eq!(
+            engine_v1.props,
+            vec![(rank, CanonicalScalar::Int(7).into())]
+        );
         assert!(engine.vertex(VId(8)).expect("reads").is_none());
         assert!(engine.vertex(VId(9)).expect("reads").is_none());
         assert!(engine.vertex(VId(2)).expect("reads").is_some());
@@ -3226,7 +3424,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(1),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(5))],
+                    props: vec![(rank, CanonicalScalar::Int(5).into())],
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3240,7 +3438,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(8),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(1))],
+                    props: vec![(rank, CanonicalScalar::Int(1).into())],
                 },
             ]),
         ])
@@ -3263,14 +3461,14 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    value: CanonicalScalar::Int(3),
+                    value: CanonicalScalar::Int(3).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    value: CanonicalScalar::Int(7),
+                    value: CanonicalScalar::Int(7).into(),
                 },
             ]),
         ])
@@ -3293,14 +3491,14 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::CreateVertex {
                     vid: VId(9),
                     labels: vec![],
-                    props: vec![(rank, CanonicalScalar::Int(1))],
+                    props: vec![(rank, CanonicalScalar::Int(1).into())],
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(9)),
                     name: rank,
-                    value: CanonicalScalar::Int(4),
+                    value: CanonicalScalar::Int(4).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3326,7 +3524,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
                 fgdb_reference::intents::Intent::SetProp {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(8)),
                     name: rank,
-                    value: CanonicalScalar::Int(3),
+                    value: CanonicalScalar::Int(3).into(),
                 },
             ]),
             fgdb_reference::intents::Statement::new(vec![
@@ -3348,7 +3546,7 @@ fn net_effect_fold_agrees_independently_with_reference_transactions() {
         let graph = oracle.graph(GRAPH, BRANCH).expect("oracle coordinate");
         assert_eq!(
             graph.vertex(VId(1)).expect("v1").props.get(&rank),
-            Some(&CanonicalScalar::Int(7))
+            Some(&CanonicalScalar::Int(7).into())
         );
         assert!(graph.vertex(VId(8)).is_none());
         assert!(graph.vertex(VId(9)).is_none());
@@ -3615,7 +3813,7 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CreateVertex {
                 vid: VId(1),
                 labels: vec![],
-                props: vec![(rank, CanonicalScalar::Int(5))],
+                props: vec![(rank, CanonicalScalar::Int(5).into())],
             },
         ])])
         .expect("oracle seed");
@@ -3636,8 +3834,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                 name: rank,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(7),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(7).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3659,8 +3857,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                 name: rank,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(9),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(9).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3686,8 +3884,8 @@ fn compare_and_set_agrees_independently_with_the_reference() {
                 fgdb_reference::intents::Intent::CompareAndSet {
                     elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
                     name: rank,
-                    expected: Some(CanonicalScalar::Int(5)),
-                    value: CanonicalScalar::Int(9),
+                    expected: Some(CanonicalScalar::Int(5).into()),
+                    value: CanonicalScalar::Int(9).into(),
                     mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
                 },
             ]),
@@ -3715,12 +3913,12 @@ fn compare_and_set_agrees_independently_with_the_reference() {
         let oracle_rank = graph.vertex(VId(1)).expect("v1").props.get(&rank).cloned();
         assert_eq!(
             engine_rank,
-            vec![(rank, CanonicalScalar::Int(7))],
+            vec![(rank, CanonicalScalar::Int(7).into())],
             "engine rank must be 7, got {engine_rank:?}"
         );
         assert_eq!(
             oracle_rank,
-            Some(CanonicalScalar::Int(7)),
+            Some(CanonicalScalar::Int(7).into()),
             "oracle rank must be 7, got {oracle_rank:?}"
         );
         assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
@@ -3820,7 +4018,7 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
                     src: VId(1),
                     etype: KNOWS,
                     dst: VId(2),
-                    props: vec![(weight, CanonicalScalar::Int(5))],
+                    props: vec![(weight, CanonicalScalar::Int(5).into())],
                 },
             ]),
         ])
@@ -3842,8 +4040,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                 name: weight,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(7),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(7).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3865,8 +4063,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             fgdb_reference::intents::Intent::CompareAndSet {
                 elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                 name: weight,
-                expected: Some(CanonicalScalar::Int(5)),
-                value: CanonicalScalar::Int(9),
+                expected: Some(CanonicalScalar::Int(5).into()),
+                value: CanonicalScalar::Int(9).into(),
                 mismatch: fgdb_reference::intents::MismatchPolicy::TxnAbort,
             },
         ])])
@@ -3892,8 +4090,8 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
                 fgdb_reference::intents::Intent::CompareAndSet {
                     elem: fgdb_delta_types::ElementId::Edge(EId(10)),
                     name: weight,
-                    expected: Some(CanonicalScalar::Int(5)),
-                    value: CanonicalScalar::Int(9),
+                    expected: Some(CanonicalScalar::Int(5).into()),
+                    value: CanonicalScalar::Int(9).into(),
                     mismatch: fgdb_reference::intents::MismatchPolicy::NoOp,
                 },
             ]),
@@ -3926,12 +4124,12 @@ fn compare_and_set_edge_agrees_independently_with_the_reference() {
             .cloned();
         assert_eq!(
             engine_weight,
-            vec![(weight, CanonicalScalar::Int(7))],
+            vec![(weight, CanonicalScalar::Int(7).into())],
             "engine weight must be 7, got {engine_weight:?}"
         );
         assert_eq!(
             oracle_weight,
-            Some(CanonicalScalar::Int(7)),
+            Some(CanonicalScalar::Int(7).into()),
             "oracle weight must be 7, got {oracle_weight:?}"
         );
         assert!(engine_v3, "engine vid=3 must exist after NoOp sibling");
@@ -4194,8 +4392,8 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 rows: vec![DeltaRow::Property {
                     elem: ElementId::Vertex(VId(1)),
                     property: prop,
-                    before: Some(CanonicalScalar::Int(0)),
-                    after: Some(CanonicalScalar::Int(2)),
+                    before: Some(CanonicalScalar::Int(0).into()),
+                    after: Some(CanonicalScalar::Int(2).into()),
                 }],
             }],
         )
@@ -4265,8 +4463,8 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 rows: vec![DeltaRow::Property {
                     elem: ElementId::Vertex(VId(1)),
                     property: prop,
-                    before: Some(CanonicalScalar::Int(1)),
-                    after: Some(CanonicalScalar::Int(2)),
+                    before: Some(CanonicalScalar::Int(1).into()),
+                    after: Some(CanonicalScalar::Int(2).into()),
                 }],
             }],
         )
@@ -4293,7 +4491,7 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
             .expect("reopens");
         assert_eq!(db.frontier().expect("healthy frontier").0, 3);
         let row = db.vertex(VId(1)).expect("reads").expect("durable row");
-        assert_eq!(row.props, vec![(prop, CanonicalScalar::Int(2))]);
+        assert_eq!(row.props, vec![(prop, CanonicalScalar::Int(2).into())]);
         let mut after = WriteBatch::new(KNOWS);
         after.set_vertex_property(VId(1), prop, Some(CanonicalScalar::Int(7)));
         let seq = db
@@ -4325,7 +4523,7 @@ fn a_stale_snapshot_write_batch_cannot_become_durable() {
                 .iter()
                 .map(|(key, value)| (*key, value.clone()))
                 .collect::<Vec<_>>(),
-            vec![(prop, CanonicalScalar::Int(7))],
+            vec![(prop, CanonicalScalar::Int(7).into())],
             "the oracle serves the committed prefix, not the rejected batch"
         );
     });

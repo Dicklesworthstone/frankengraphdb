@@ -201,9 +201,11 @@ fn vertex_rows() -> Vec<VertexRow> {
             props: vec![
                 (
                     PropertyKeyId(41),
-                    CanonicalScalar::ucs_basic_text("ada").expect("admissible text"),
+                    CanonicalScalar::ucs_basic_text("ada")
+                        .expect("admissible text")
+                        .into(),
                 ),
-                (PropertyKeyId(59), CanonicalScalar::Int(-1815)),
+                (PropertyKeyId(59), CanonicalScalar::Int(-1815).into()),
             ],
         },
         VertexRow {
@@ -212,7 +214,7 @@ fn vertex_rows() -> Vec<VertexRow> {
             created_at: CommitSeq(5),
             retired_at: Some(CommitSeq(9)),
             labels: vec![LabelId(31)],
-            props: vec![(PropertyKeyId(67), CanonicalScalar::Bool(true))],
+            props: vec![(PropertyKeyId(67), CanonicalScalar::Bool(true).into())],
         },
         VertexRow {
             vid: fgdb_types::VId(303),
@@ -230,11 +232,13 @@ fn property_rows() -> Vec<EdgePropertyRow> {
         vec![
             (
                 PropertyKeyId(41),
-                CanonicalScalar::ucs_basic_text("ada").expect("admissible"),
+                CanonicalScalar::ucs_basic_text("ada")
+                    .expect("admissible")
+                    .into(),
             ),
-            (PropertyKeyId(59), CanonicalScalar::Int(-1815)),
+            (PropertyKeyId(59), CanonicalScalar::Int(-1815).into()),
         ],
-        vec![(PropertyKeyId(67), CanonicalScalar::Bool(true))],
+        vec![(PropertyKeyId(67), CanonicalScalar::Bool(true).into())],
     ]
 }
 

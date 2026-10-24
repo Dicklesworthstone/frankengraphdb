@@ -193,7 +193,10 @@ fn vertex_content_restatement_reopens_to_the_same_root_and_chain() {
     );
     let reopened_now = reopened.vertex(VId(1)).expect("reads").expect("live");
     assert_eq!(reopened_now.labels, vec![label]);
-    assert_eq!(reopened_now.props, vec![(key, CanonicalScalar::Int(9))]);
+    assert_eq!(
+        reopened_now.props,
+        vec![(key, CanonicalScalar::Int(9).into())]
+    );
     assert_eq!(
         reopened_now, incremental_now,
         "frontier vertex row diverged after restatement"
@@ -215,7 +218,7 @@ fn vertex_content_restatement_reopens_to_the_same_root_and_chain() {
     assert_eq!(reopened_at_restatement.labels, vec![label]);
     assert_eq!(
         reopened_at_restatement.props,
-        vec![(key, CanonicalScalar::Int(1))]
+        vec![(key, CanonicalScalar::Int(1).into())]
     );
     assert_eq!(
         reopened_at_restatement, incremental_at_restatement,
@@ -292,7 +295,10 @@ fn edge_content_restatement_reopens_to_the_same_root_and_chain() {
         .edge_at(EId(10), CommitSeq(2))
         .expect("reads set seq")
         .expect("visible at set");
-    assert_eq!(reopened_at_set.props, vec![(key, CanonicalScalar::Int(4))]);
+    assert_eq!(
+        reopened_at_set.props,
+        vec![(key, CanonicalScalar::Int(4).into())]
+    );
     assert_eq!(
         reopened_at_set, incremental_at_set,
         "pre-clear snapshot diverged after restatement"
@@ -303,4 +309,215 @@ fn edge_content_restatement_reopens_to_the_same_root_and_chain() {
         "checkpoint-derived version heads drifted from the incremental fold \
          after edge restatement — the graph answers hide this (fgdb-l96k)"
     );
+}
+
+/// Append provenance changes at compaction and writable reopen. References and
+/// decoded objects must still describe one generation, including an older Arc
+/// retained while the unique writer advances its own vectors in place.
+#[test]
+fn appended_snapshots_preserve_pinned_history_across_compaction_and_reopen() {
+    let (runtime, cx) = production_runtime();
+    let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
+    let dir = scratch("append-pinned-reopen");
+    let relation = RelationId(u64::MAX - 1);
+    let other_relation = RelationId(u64::MAX);
+    let (a, b, c, d) = (
+        VId(u128::MAX - 10),
+        VId(u128::MAX - 9),
+        VId(u128::MAX - 8),
+        VId(u128::MAX - 7),
+    );
+    let (forward, parallel, reverse, self_loop, later) = (
+        EId(u128::MAX - 20),
+        EId(u128::MAX - 19),
+        EId(u128::MAX - 18),
+        EId(u128::MAX - 17),
+        EId(u128::MAX - 16),
+    );
+    let property = PropertyKeyId(7);
+    let mut db = runtime
+        .block_on(Database::create(&commit, &dir, keys()))
+        .unwrap();
+    let mut first = WriteBatch::new(relation);
+    first.create_vertex(
+        a,
+        vec![LabelId(1)],
+        vec![(property, CanonicalScalar::Int(1))],
+    );
+    first.create_vertex(b, vec![], vec![]);
+    first.create_vertex(c, vec![], vec![]);
+    first.add_edge(forward, a, b, vec![(property, CanonicalScalar::Int(10))]);
+    first.add_edge(parallel, a, b, vec![]);
+    first.add_edge(self_loop, c, c, vec![]);
+    assert_eq!(
+        runtime.block_on(db.write(&commit, first)).unwrap(),
+        CommitSeq(1)
+    );
+    let first_pin = db.pinned_read_view().unwrap();
+    let first_vertices = first_pin.vertices().unwrap();
+    let first_edges = first_pin.edges().unwrap();
+    assert_eq!(db.neighbours(a, relation).unwrap(), vec![b]);
+
+    let mut second = WriteBatch::new(other_relation);
+    second.add_edge(reverse, b, a, vec![(property, CanonicalScalar::Int(20))]);
+    runtime.block_on(db.write(&commit, second)).unwrap();
+    let mut third = WriteBatch::new(relation);
+    third.set_edge_property(forward, property, Some(CanonicalScalar::Int(11)));
+    third.delete_edge(parallel);
+    third.set_vertex_property(a, property, Some(CanonicalScalar::Int(2)));
+    third.set_vertex_label(b, LabelId(2), true);
+    runtime.block_on(db.write(&commit, third)).unwrap();
+    let third_pin = db.pinned_read_view().unwrap();
+    let third_vertices = third_pin.vertices().unwrap();
+    let third_edges = third_pin.edges().unwrap();
+
+    runtime.block_on(db.compact(&commit)).unwrap();
+    let mut fourth = WriteBatch::new(relation);
+    fourth.delete_vertex(c);
+    runtime.block_on(db.write(&commit, fourth)).unwrap();
+    let history = |database: &Database| {
+        (0..=database.frontier().unwrap().0)
+            .map(|seq| {
+                let cut = CommitSeq(seq);
+                (
+                    database.vertices_at(cut).unwrap(),
+                    database.edges_at(cut).unwrap(),
+                    database.neighbours_at(a, relation, cut).unwrap(),
+                    database.in_neighbours_at(a, other_relation, cut).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before_reopen = history(&db);
+    let root = db.partition_root().unwrap();
+    drop(db);
+    let mut db = runtime
+        .block_on(Database::open(&commit, &dir, keys()))
+        .unwrap();
+    assert_eq!(db.partition_root().unwrap(), root);
+    assert_eq!(history(&db), before_reopen);
+    let mut fifth = WriteBatch::new(other_relation);
+    fifth.create_vertex(d, vec![], vec![]);
+    fifth.add_edge(later, d, a, vec![]);
+    runtime.block_on(db.write(&commit, fifth)).unwrap();
+    let final_history = history(&db);
+    assert_eq!(
+        &final_history[..before_reopen.len()],
+        before_reopen.as_slice()
+    );
+    let final_root = db.partition_root().unwrap();
+    drop(db);
+    let reopened = runtime
+        .block_on(Database::open(&commit, &dir, keys()))
+        .unwrap();
+    assert_eq!(reopened.partition_root().unwrap(), final_root);
+    assert_eq!(history(&reopened), final_history);
+    assert_eq!(first_pin.vertices().unwrap(), first_vertices);
+    assert_eq!(first_pin.edges().unwrap(), first_edges);
+    assert_eq!(third_pin.vertices().unwrap(), third_vertices);
+    assert_eq!(third_pin.edges().unwrap(), third_edges);
+    assert_eq!(
+        reopened
+            .edge_at(parallel, CommitSeq(2))
+            .unwrap()
+            .unwrap()
+            .props,
+        vec![]
+    );
+    assert!(reopened.edge(parallel).unwrap().is_none());
+    assert!(reopened.edge(self_loop).unwrap().is_none());
+    assert_eq!(
+        reopened.edge(forward).unwrap().unwrap().props,
+        vec![(
+            property,
+            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(11))
+        )]
+    );
+}
+
+/// Failure after append verification, after durable root publication, or during
+/// the snapshot swap must fence the stale handle. Recovery owns the committed
+/// suffix; the next ordinary append must neither repeat nor lose it.
+#[test]
+fn failed_append_publications_recover_one_authoritative_suffix() {
+    use fgdb::{DatabaseState, DerivedPublicationStage, WriteError};
+
+    let (runtime, cx) = production_runtime();
+    let commit = PurposeContexts::narrow_runtime_root(&cx).commit();
+    let property = PropertyKeyId(7);
+    for (at, stage) in [
+        DerivedPublicationStage::PublishManifest,
+        DerivedPublicationStage::PublishRootSlot,
+        DerivedPublicationStage::RefreshVertexSnapshot,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = scratch(&format!("append-failure-{at}"));
+        let mut db = runtime
+            .block_on(Database::create(&commit, &dir, keys()))
+            .unwrap();
+        let mut first = WriteBatch::new(KNOWS);
+        first.create_vertex(VId(1), vec![], vec![]);
+        first.create_vertex(VId(2), vec![], vec![]);
+        first.add_edge(
+            EId(10),
+            VId(1),
+            VId(2),
+            vec![(property, CanonicalScalar::Int(1))],
+        );
+        runtime.block_on(db.write(&commit, first)).unwrap();
+        let second = |value| {
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.set_edge_property(EId(10), property, Some(CanonicalScalar::Int(value)));
+            batch.set_vertex_property(VId(1), property, Some(CanonicalScalar::Int(value)));
+            batch
+        };
+        runtime.block_on(db.write(&commit, second(2))).unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let expected_pin = (pinned.vertices().unwrap(), pinned.edges().unwrap());
+        let error = runtime
+            .block_on(db.write_with_publication_failure(&commit, second(3), stage))
+            .unwrap_err();
+        assert!(
+            matches!(error, WriteError::CommittedNeedsRecovery { recovery, .. } if recovery.failed_stage == stage)
+        );
+        assert!(matches!(
+            db.state(),
+            DatabaseState::NeedsAuthoritativeRecovery(_)
+        ));
+        assert!(db.edge(EId(10)).is_err());
+        let mut db = runtime
+            .block_on(db.recover_authoritatively(&commit))
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(3));
+        assert_eq!(
+            runtime.block_on(db.write(&commit, second(4))).unwrap(),
+            CommitSeq(4)
+        );
+        let root = db.partition_root().unwrap();
+        drop(db);
+        let reopened = runtime
+            .block_on(Database::open(&commit, &dir, keys()))
+            .unwrap();
+        assert_eq!(reopened.partition_root().unwrap(), root);
+        for sequence in 1..=4 {
+            assert_eq!(
+                reopened
+                    .edge_at(EId(10), CommitSeq(sequence))
+                    .unwrap()
+                    .unwrap()
+                    .props,
+                vec![(
+                    property,
+                    fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(sequence as i64))
+                )],
+                "{stage:?}: sequence {sequence}"
+            );
+        }
+        assert_eq!(
+            (pinned.vertices().unwrap(), pinned.edges().unwrap()),
+            expected_pin
+        );
+    }
 }

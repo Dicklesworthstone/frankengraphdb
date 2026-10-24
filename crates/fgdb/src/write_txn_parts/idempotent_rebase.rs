@@ -115,6 +115,14 @@ impl WriteTxn {
         let mut attempt = TxnCompletionGuard::new(self, database);
         attempt.database.frontier()?;
         checkpoint()?;
+        attempt
+            .database
+            .ensure_delta_window(cx, attempt.transaction.basis)
+            .await
+            .map_err(|error| match error {
+                crate::RebuildError::Interrupted(source) => WriteTxnError::Interrupted(source),
+                other => WriteTxnError::Write(WriteError::from(other)),
+            })?;
         if let Some((law, _, _)) = attempt.transaction.transaction_conflict_in(
             attempt.database,
             ConflictScope::Reads,
@@ -245,7 +253,7 @@ impl WriteTxn {
         )?;
         checkpoint()?;
         debug_assert_eq!(prepared.basis, frontier);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         self.basis = frontier;
         Ok(())
     }
@@ -352,7 +360,7 @@ mod idempotent_rebase_tests {
                     assert!(db.edge(PROPOSAL).unwrap().is_none());
                     assert_eq!(
                         db.edge(WINNER).unwrap().unwrap().props,
-                        vec![(P, CanonicalScalar::Int(9))]
+                        vec![(P, CanonicalScalar::Int(9).into())]
                     );
                     assert_eq!(db.vertex(NEW).unwrap().unwrap().labels, vec![LabelId(9)]);
                     assert_eq!(txcx.outstanding_obligations(), 0);
@@ -448,7 +456,7 @@ mod idempotent_rebase_tests {
             assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
             assert_eq!(
                 db.vertex(NEW).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(9))]
+                vec![(P, CanonicalScalar::Int(9).into())]
             );
             assert!(db.edge(PROPOSAL).unwrap().is_none());
             assert!(db.edge(WINNER).unwrap().is_some());
@@ -495,10 +503,10 @@ mod idempotent_rebase_tests {
             assert!(db.edge(WINNER).unwrap().is_none());
             let edge = db.edge(PROPOSAL).unwrap().unwrap();
             assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), NEW));
-            assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7).into())]);
             assert_eq!(
                 db.vertex(NEW).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(9))]
+                vec![(P, CanonicalScalar::Int(9).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -722,8 +730,8 @@ mod idempotent_rebase_tests {
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(40)),
-                    (PropertyKeyId(2), CanonicalScalar::Int(99))
+                    (P, CanonicalScalar::Int(40).into()),
+                    (PropertyKeyId(2), CanonicalScalar::Int(99).into())
                 ]
             );
             let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
@@ -1112,7 +1120,7 @@ mod idempotent_rebase_tests {
                 match case {
                     0 => assert_eq!(
                         tx.edge_property(&db, PROPOSAL, P).unwrap(),
-                        Some(CanonicalScalar::Int(7))
+                        Some(CanonicalScalar::Int(7).into())
                     ),
                     1 => assert_eq!(
                         tx.edge_property(&db, PROPOSAL, PropertyKeyId(99)).unwrap(),
@@ -1120,7 +1128,7 @@ mod idempotent_rebase_tests {
                     ),
                     2 => assert_eq!(
                         tx.vertex_property(&db, NEW, P).unwrap(),
-                        Some(CanonicalScalar::Int(7))
+                        Some(CanonicalScalar::Int(7).into())
                     ),
                     _ => assert_eq!(
                         tx.vertex_has_label(&db, NEW, LabelId(7)).unwrap(),

@@ -888,16 +888,26 @@ fn topology_live_graph_witnesses() -> Vec<TopologyWitness> {
     // activations. The law is not weakened — the mutated fact is still exactly
     // "a posture whose entry crate is absent from the workspace declares itself
     // live", which is the same half of `posture_status_drift` this row always
-    // covered. When the LAST posture activates this mutation becomes a no-op
-    // again, and the harness reds with `posture_status_drift [...] -> {}` rather
-    // than passing — the correct direction to fail, and the message names itself.
+    // covered. When the LAST posture activated (fgdb-server, 492f280d) that
+    // mutation had nothing left to flip, exactly as predicted here, and the
+    // harness redded. The same fact is now planted from the other side: a
+    // live posture is repointed at a registered crate that is not a workspace
+    // member, and still declares itself live. Both crates are found by state,
+    // not by name, so no later activation can silence the row again.
     TopologyWitness { code: "posture_status_drift", fact: "a posture whose entry crate is absent from the workspace is declared live", mutate: |r| {
-        let deferred = r
+        let absent = r
+            .crates
+            .iter()
+            .find(|row| row.activation_status != "active")
+            .expect("a registered crate that is not a workspace member")
+            .name
+            .clone();
+        let live = r
             .postures
             .iter_mut()
-            .find(|posture| posture.status == "deferred")
-            .expect("at least one posture must still be deferred for this witness to be plantable");
-        deferred.status = "live".into();
+            .find(|posture| posture.status == "live")
+            .expect("a live posture");
+        live.entry_crate = absent;
     } },
     TopologyWitness { code: "tooling_dependency", fact: "a crate that has dependencies is registered as G0 tooling", mutate: |r| r.registry.tooling_members.push("crates/fgdb-calibrate".into()) },
     // The only two-fact row in the file, and it is two because the law cannot

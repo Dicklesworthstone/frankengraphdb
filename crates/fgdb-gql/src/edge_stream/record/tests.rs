@@ -18,7 +18,7 @@ const EDGES: [(EId, VId, VId); 4] = [
 ];
 struct Masked {
     at: usize,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     denied: bool,
     fail: bool,
 }
@@ -27,10 +27,12 @@ impl Masked {
         Self {
             at: 0,
             props: vec![
-                (P, CanonicalScalar::Int(7)),
+                (P, CanonicalScalar::Int(7).into()),
                 (
                     H,
-                    CanonicalScalar::ucs_basic_text(&"private".repeat(100)).unwrap(),
+                    CanonicalScalar::ucs_basic_text(&"private".repeat(100))
+                        .unwrap()
+                        .into(),
                 ),
             ],
             denied: false,
@@ -66,11 +68,11 @@ impl EdgeScanSource for Masked {
     }
     fn next_edge_for_relation<C>(
         &mut self,
-        relation: RelationId,
+        relation: crate::algebra::EdgeRelation,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        if self.denied || relation != R {
+        if self.denied || !relation.matches(R) {
             Ok(None)
         } else {
             self.next_edge(control)
@@ -106,7 +108,8 @@ impl EdgeScanSource for Masked {
         id: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
         if self.fail {
             return Err(EdgeScanSourceError::Source("scoped edge property refused"));
@@ -151,7 +154,8 @@ impl EdgeScanSource for Masked {
         id: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<Option<Option<&'a CanonicalPropertyValue>>, EdgeScanSourceError<Self::Error, C>>
+    {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
         Ok((id.0 <= 2).then(|| (key == P).then_some(&self.props[0].1)))
     }
@@ -256,7 +260,9 @@ fn connected_join_fields_use_the_scoped_accessor_not_redacted_topology_propertie
     let mut expected = Vec::new();
     for &(r, a, b) in &EDGES {
         for &(s, from, c) in &EDGES {
-            if b == from {
+            // DIFFERENT EDGES, the textual MATCH default: r and s are both
+            // :R, so a self-loop never serves as both (fgdb-vexfr).
+            if b == from && r != s {
                 expected.push(row(vec![
                     GraphValue::Edge(r),
                     GraphValue::Vertex(a),
@@ -365,7 +371,7 @@ fn every_masked_cursor_checkpoint_fuses_and_inclusive_native_limits_are_unchange
 fn hidden_payloads_add_no_copy_work_and_partial_records_do_not_escape() {
     let source = Masked::new();
     let mut tiny = Masked::new();
-    tiny.props[1].1 = CanonicalScalar::Int(0);
+    tiny.props[1].1 = CanonicalScalar::Int(0).into();
     let copy = |source: &Masked, stop: usize| {
         let mut calls = 0;
         let result =
@@ -451,7 +457,7 @@ fn default_record_and_relation_routes_preserve_borrowed_data_and_event_order() {
     );
     assert_eq!(
         source
-            .next_edge_for_relation(R, &mut |_| Ok::<_, ()>(()))
+            .next_edge_for_relation(R.into(), &mut |_| Ok::<_, ()>(()))
             .unwrap(),
         Some(EId(0))
     );

@@ -265,7 +265,7 @@ fn restricted_path_ingestion_rolls_back_a_late_action_failure_and_can_be_retried
         for id in 200..204 {
             assert_eq!(
                 db.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(0))]
+                vec![(P, CanonicalScalar::Int(0).into())]
             );
         }
         assert!(db.vertex(VId(999)).unwrap().is_some());

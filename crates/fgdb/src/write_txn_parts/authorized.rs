@@ -18,6 +18,8 @@ use std::collections::BTreeSet;
 
 // This file is loaded through #[path] from write_txn.rs, so its children resolve
 // like mod.rs children (in write_txn_parts/). Name the real location.
+#[path = "authorized/chain.rs"]
+mod chain;
 #[path = "authorized/deletion.rs"]
 mod deletion;
 #[path = "authorized/edge_merge.rs"]
@@ -62,6 +64,17 @@ struct Execution<'cx, 'permit, Clock> {
     clock: Clock,
 }
 impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
+    /// FG-INV-20: the transaction's CommitMarker carries the digest of the
+    /// capability decision that admitted its effects (fgdb-g9af0). Every
+    /// authorized path binds it before completion; native staging binds it
+    /// on the first staged row. The first binding stands.
+    fn bind_decision(&self, transaction: &mut WriteTxn) {
+        if transaction.authorization_decision_digest.is_none() {
+            transaction.authorization_decision_digest =
+                Some(fgdb_crypto::hash(&self.permit.canonical_decision_bytes()));
+        }
+    }
+
     fn work(&mut self, amount: u64) -> Result<(), WriteTxnError> {
         self.cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
         self.permit
@@ -182,6 +195,11 @@ fn stage_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
     let (vid, creates, fields) = match &row {
+        // Like an edge ensure (graph::stage_edge): no authorized surface
+        // stages one, so fail closed before any observation (fgdb-hxgm1).
+        PendingRow::Vertex { ensure: true, .. } => {
+            return Err(WriteTxnError::AuthorizedClientIdentity);
+        }
         PendingRow::Vertex {
             vid, labels, props, ..
         } => (
@@ -228,6 +246,7 @@ fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
     row: PendingRow,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
+    execution.bind_decision(transaction);
     // Native staging replays the entire intent prefix. Charge that logical
     // input work, not merely one unit for a growing quadratic preparation.
     let prefix = u64::try_from(transaction.staged.len())
@@ -289,8 +308,11 @@ fn stage<V: Vfs + Clone, Clock: FnMut() -> u64>(
 impl<V: Vfs + Clone> Database<V> {
     /// Commit one capability-scoped graph write batch through native Chronicle.
     ///
-    /// Supports every native WriteBatch intent: vertex/edge creation and ensure,
-    /// label/property updates, CAS and deletion. Every cascade edge is checked
+    /// Supports the identity-addressed WriteBatch intents: label/property
+    /// updates, CAS and deletion. Creation and ensure intents name a chosen
+    /// identity, so they refuse with [`WriteTxnError::AuthorizedClientIdentity`]
+    /// before any observation (fgdb-hxgm1); authorized creation goes through
+    /// the insertion and MERGE surfaces, which allocate. Every cascade edge is checked
     /// with both original endpoints; whole-object deletion needs authority over
     /// every removed field. Vertex deletion also needs a capability that hides
     /// nothing (no relation scope, label clause, property scope or denial) and
@@ -346,8 +368,8 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Commit source-ordered, dependent relation batches under one capability.
     ///
-    /// Later batches see earlier creations, updates and ensure aliases through
-    /// the native transaction overlay. Every original intent is authorized
+    /// Later batches see earlier updates through the native transaction
+    /// overlay. Every original intent is authorized
     /// before and after staging; normalization cannot hide a forbidden no-op.
     /// Identity-addressed edge mutations authorize the edge's actual relation,
     /// not merely the batch's default relation. No unchecked prepared write or
@@ -362,9 +384,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Grouping adjacent same-relation intents does not change signed charges.
     ///
     /// This has the same security and residency boundaries as
-    /// [`Self::write_authorized`], including its client-selected identity
-    /// surface; it is not a zero-disclosure global uniqueness contract, a
-    /// long-lived authorized transaction, full SSI or a second commit lane.
+    /// [`Self::write_authorized`], including its refusal of chosen identities
+    /// for creation and ensure in any batch; it is not a long-lived authorized
+    /// transaction, full SSI or a second commit lane.
     #[allow(clippy::too_many_arguments)]
     pub async fn write_ordered_authorized(
         &mut self,
@@ -405,6 +427,15 @@ impl<V: Vfs + Clone> Database<V> {
                     if batch.is_empty() {
                         return Err(WriteError::EmptyBatch.into());
                     }
+                    // A create or ensure at a chosen identity would answer
+                    // whether a hidden record occupies it (fgdb-hxgm1). Refuse
+                    // here, before the workspace exists or any record is read,
+                    // so the outcome cannot depend on stored data.
+                    if batch.rows.iter().any(|row| {
+                        matches!(row, PendingRow::Vertex { .. } | PendingRow::Edge { .. })
+                    }) {
+                        return Err(WriteTxnError::AuthorizedClientIdentity);
+                    }
                 }
                 let mut workspace = Workspace(Some(self.begin(txn_cx)?));
                 for batch in batches {
@@ -419,6 +450,7 @@ impl<V: Vfs + Clone> Database<V> {
                         )?;
                     }
                 }
+                execution.bind_decision(workspace.transaction());
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, true, || execution.checkpoint())

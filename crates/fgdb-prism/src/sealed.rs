@@ -7,6 +7,7 @@
 //! The selected vertex directory is supplied by the
 //! trusted host after snapshot/label/security admission, not authorized here.
 
+use crate::projection::OrdinalPrefix;
 use crate::sealed_control::Control;
 use crate::{
     Directedness, FnxSelection, FnxWeightError, ParallelEdgePolicy, ProjectionError,
@@ -155,6 +156,8 @@ struct Projection {
     config: SealedProjectionSpec,
     mask: SealedProjectionMask,
     vertices: Vec<VId>,
+    // Zero or one budgeted directory, shared by every compressed row cursor.
+    vertex_prefix: Vec<OrdinalPrefix>,
     degrees: Vec<usize>,
     binding: SnapshotBinding,
     digest: Digest,
@@ -231,9 +234,11 @@ impl SealedGraphView {
         limits: ProjectionLimits,
     ) -> Result<Self, SealedProjectionError> {
         checkpoint(cx)?;
-        if config.selection.relation.is_none() {
-            return Err(SealedProjectionError::RelationRequired);
-        }
+        let relation = config
+            .selection
+            .relation
+            .ok_or(SealedProjectionError::RelationRequired)?;
+        partition.anchor().check_relation(relation)?;
         let scope = partition.anchor().scope();
         if config.as_of < scope.floor || config.as_of > scope.publication {
             return Err(SealedProjectionError::Read(
@@ -274,8 +279,9 @@ impl SealedGraphView {
                     cx.query,
                     IncomingIndexLimits {
                         max_incidences: limits.max_input_edges,
-                        // This indexes the whole admitted image, including other
-                        // relations and unselected endpoints, not merely n vertices.
+                        // This indexes the whole retained image, including
+                        // unselected endpoints. A relation-scoped source has
+                        // already excluded unrelated families before sealing.
                         max_rows: limits.max_input_edges,
                         max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
                     },
@@ -289,6 +295,22 @@ impl SealedGraphView {
                 )?;
                 Some(index)
             };
+        // Mandatory incoming-index construction gets its original allowance.
+        // Only spare workspace retains this optional endpoint lookup cache.
+        let mut vertex_prefix = OrdinalPrefix::reserve_retained(
+            &owned_vertices,
+            limits.max_workspace_bytes - workspace_bytes,
+        );
+        let prefix_bytes = vertex_prefix
+            .capacity()
+            .checked_mul(std::mem::size_of::<OrdinalPrefix>())
+            .ok_or(ProjectionError::SizeOverflow)?;
+        workspace_bytes = add(workspace_bytes, prefix_bytes)?;
+        admit(
+            "workspace bytes",
+            workspace_bytes,
+            limits.max_workspace_bytes,
+        )?;
         let binding = SnapshotBinding {
             root: scope.source_root.0,
             as_of: config.as_of,
@@ -306,9 +328,15 @@ impl SealedGraphView {
             u8::from(mask.weight_property_visible),
         ]);
         hash.update(&(n as u128).to_le_bytes());
-        for vertex in &owned_vertices {
+        for (index, vertex) in owned_vertices.iter().enumerate() {
             checkpoint(cx)?;
             hash.update(&vertex.0.to_le_bytes());
+            if let Some(prefix) = vertex_prefix.first_mut() {
+                prefix.include(*vertex, index);
+            }
+        }
+        if let Some(prefix) = vertex_prefix.first_mut() {
+            prefix.finish();
         }
         let mut degrees = reserve(n)?;
         let mut edges = 0usize;
@@ -323,6 +351,7 @@ impl SealedGraphView {
                 partition,
                 incoming.as_ref(),
                 &owned_vertices,
+                vertex_prefix.first(),
                 &config,
                 mask,
                 source,
@@ -384,6 +413,7 @@ impl SealedGraphView {
             config,
             mask,
             vertices: owned_vertices,
+            vertex_prefix,
             degrees,
             binding,
             digest: hash.finalize(),
@@ -433,7 +463,10 @@ impl SealedGraphView {
         self.0.vertices.get(ordinal).copied()
     }
     pub fn vertex_ordinal(&self, vertex: VId) -> Option<usize> {
-        self.0.vertices.binary_search(&vertex).ok()
+        match self.0.vertex_prefix.first() {
+            Some(prefix) => prefix.ordinal(&self.0.vertices, vertex),
+            None => self.0.vertices.binary_search(&vertex).ok(),
+        }
     }
     pub fn degree(&self, ordinal: usize) -> Option<usize> {
         self.0.degrees.get(ordinal).copied()
@@ -515,6 +548,7 @@ impl SealedGraphView {
             &self.0.partition,
             self.0.incoming.as_ref(),
             &self.0.vertices,
+            self.0.vertex_prefix.first(),
             &self.0.config,
             self.0.mask,
             source,
@@ -529,6 +563,7 @@ impl SealedGraphView {
 pub struct SealedNeighborCursor<'a> {
     raw: Incidences<'a>,
     vertices: &'a [VId],
+    vertex_prefix: Option<&'a OrdinalPrefix>,
     config: &'a SealedProjectionSpec,
     mask: SealedProjectionMask,
     source: VId,
@@ -544,6 +579,7 @@ impl<'a> SealedNeighborCursor<'a> {
         partition: &'a SealedPartition,
         incoming: Option<&'a SealedIncomingIndex>,
         vertices: &'a [VId],
+        vertex_prefix: Option<&'a OrdinalPrefix>,
         config: &'a SealedProjectionSpec,
         mask: SealedProjectionMask,
         source: usize,
@@ -566,6 +602,7 @@ impl<'a> SealedNeighborCursor<'a> {
         Ok(Self {
             raw,
             vertices,
+            vertex_prefix,
             config,
             mask,
             source,
@@ -707,7 +744,11 @@ impl<'a> SealedNeighborCursor<'a> {
             };
             // The source was admitted before opening this descriptor. Mask an
             // excluded endpoint BEFORE resolving or inspecting its properties.
-            let Ok(target) = self.vertices.binary_search(&neighbor) else {
+            let target = match self.vertex_prefix {
+                Some(prefix) => prefix.ordinal(self.vertices, neighbor),
+                None => self.vertices.binary_search(&neighbor).ok(),
+            };
+            let Some(target) = target else {
                 continue;
             };
             let weight = selected_weight(self.mask.weight_property_visible, self.config, &edge)?;
@@ -779,7 +820,7 @@ mod tests {
     use crate::{FnxWeightSpec, MissingWeightPolicy};
     use fgdb_delta_types::{PropertyKeyId, RelationId};
     use fgdb_strata::AdjacencyEntry;
-    use fgdb_types::CanonicalScalar;
+    use fgdb_types::{CanonicalList, CanonicalPropertyValue, CanonicalScalar};
 
     fn config() -> SealedProjectionSpec {
         SealedProjectionSpec {
@@ -813,13 +854,13 @@ mod tests {
 
     #[test]
     fn selected_properties_use_exact_numeric_resolution() {
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(17))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(17).into())];
         let edge = SealedEdge {
             entry: entry(VId(u128::MAX)),
             properties: &properties,
         };
         assert_eq!(selected_weight(true, &config(), &edge).unwrap(), Some(17.0));
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(i64::MAX))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Int(i64::MAX).into())];
         let edge = SealedEdge {
             entry: entry(VId(2)),
             properties: &properties,
@@ -828,6 +869,21 @@ mod tests {
             selected_weight(true, &config(), &edge),
             Err(SealedProjectionError::Weight {
                 reason: FnxWeightError::InexactInteger,
+                ..
+            })
+        ));
+        // A stored List is present but not numeric, even when it holds one
+        // integer (fgdb-k3nub): it is refused, never unwrapped or read as absent.
+        let list = CanonicalList::try_new(vec![CanonicalScalar::Int(17).into()]).unwrap();
+        let properties = [(PropertyKeyId(2), CanonicalPropertyValue::List(list))];
+        let edge = SealedEdge {
+            entry: entry(VId(2)),
+            properties: &properties,
+        };
+        assert!(matches!(
+            selected_weight(true, &config(), &edge),
+            Err(SealedProjectionError::Weight {
+                reason: FnxWeightError::NotNumeric,
                 ..
             })
         ));
@@ -892,7 +948,7 @@ mod tests {
 
     #[test]
     fn forbidden_weight_properties_are_absent_before_numeric_observation() {
-        let properties = [(PropertyKeyId(2), CanonicalScalar::Bool(true))];
+        let properties = [(PropertyKeyId(2), CanonicalScalar::Bool(true).into())];
         let edge = SealedEdge {
             entry: entry(VId(2)),
             properties: &properties,

@@ -22,8 +22,8 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_strata::{edge_props::EdgePropertyPatchError, vertex::VertexPatchError};
-use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
-use std::collections::{BTreeMap, BTreeSet};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod source;
 
@@ -31,15 +31,63 @@ mod source;
 pub struct BulkVertex {
     pub key: String,
     pub labels: Vec<LabelId>,
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    /// Stored values: scalars, Lists and Maps (fgdb-k3nub).
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 #[derive(Clone, Debug)]
 pub struct BulkEdge {
     pub key: String,
-    pub source: String,
-    pub destination: String,
+    pub source: BulkEndpoint,
+    pub destination: BulkEndpoint,
     pub relation: RelationId,
-    pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    pub props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+}
+
+/// The vertex at one end of a bulk-loaded edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BulkEndpoint {
+    /// A vertex row of the same source, named by its caller key.
+    Key(String),
+    /// The one vertex committed AS OF THE LOAD'S BASIS (the frontier before
+    /// its first chunk) that matches. Resolving at the basis makes preflight,
+    /// every chunk and every resume agree, even when this load creates
+    /// vertices that also match. No match or several is a typed preflight
+    /// refusal. Boxed so a key endpoint, the common case, stays small.
+    Match(Box<EndpointMatch>),
+}
+/// A vertex that carries `label`, when given, and whose property `key` equals
+/// `value` on its visible row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointMatch {
+    pub label: Option<LabelId>,
+    pub key: PropertyKeyId,
+    pub value: CanonicalScalar,
+}
+impl From<String> for BulkEndpoint {
+    fn from(key: String) -> Self {
+        Self::Key(key)
+    }
+}
+impl From<&str> for BulkEndpoint {
+    fn from(key: &str) -> Self {
+        Self::Key(key.to_owned())
+    }
+}
+impl BulkEndpoint {
+    /// An endpoint naming the committed vertex that matches.
+    #[must_use]
+    pub fn matching(label: Option<LabelId>, key: PropertyKeyId, value: CanonicalScalar) -> Self {
+        Self::Match(Box::new(EndpointMatch { label, key, value }))
+    }
+
+    /// The caller key, for an endpoint that names a row of this source.
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Key(key) => Some(key),
+            Self::Match(_) => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum BulkRow {
@@ -108,16 +156,32 @@ const _: () = assert!(BulkLoadPolicy::MAX_ROWS_PER_CHUNK.is_power_of_two());
 /// refuses past `max_chunk_bytes`. Chunks start at row 0, as in preflight and
 /// on resume, so the answer is a function of the source alone and a resumed
 /// load recomputes it exactly.
+///
+/// Every chunk must also keep its capsule within [`Self::TEMPLATE_BUDGET`]:
+/// each row adds an exact upper bound of its template bytes, the capsule's
+/// plaintext. Transcript bytes are a proxy for that and a poor one: a capsule
+/// ran 1.29x its transcript on one load, and rows with short keys run nearer
+/// 2x, so the CLI fitted to half the transcript cap and road-ny committed
+/// 32,768-row chunks whose capsules were about 3 MB.
 #[derive(Clone, Debug)]
 pub struct ChunkFit {
     budget: usize,
     rows: usize,
     /// Running transcript bytes of the current chunk for 2^k rows per chunk.
     open: [usize; Self::SIZES],
+    /// Running template bytes of the same chunk.
+    template: [usize; Self::SIZES],
     fits: [bool; Self::SIZES],
 }
 impl ChunkFit {
     const SIZES: usize = BulkLoadPolicy::MAX_ROWS_PER_CHUNK.ilog2() as usize + 1;
+
+    /// Template bytes a fitted chunk carries at most. A V1 capsule holds at
+    /// most 14.4 MB (fgdb-chronicle), and its RaptorQ encode grows steeply
+    /// with source symbols past 4 MiB at the largest symbol size: 8 MiB stays
+    /// well inside the cap and leaves room for the template's header and
+    /// coordinate entries.
+    pub const TEMPLATE_BUDGET: usize = 8 << 20;
 
     #[must_use]
     pub const fn new(budget: usize) -> Self {
@@ -125,18 +189,28 @@ impl ChunkFit {
             budget,
             rows: 0,
             open: [0; Self::SIZES],
+            template: [0; Self::SIZES],
             fits: [true; Self::SIZES],
         }
     }
 
     pub fn push(&mut self, cx: &QueryCx, row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
         let bytes = source::transcript_len(cx, self.rows, row)?;
-        for (k, (open, fits)) in self.open.iter_mut().zip(&mut self.fits).enumerate() {
+        let template = source::template_len(self.rows, row)?;
+        for (k, ((open, carried), fits)) in self
+            .open
+            .iter_mut()
+            .zip(&mut self.template)
+            .zip(&mut self.fits)
+            .enumerate()
+        {
             if self.rows.is_multiple_of(1 << k) {
                 *open = 0;
+                *carried = 0;
             }
             *open = open.saturating_add(bytes);
-            *fits &= *open <= self.budget;
+            *carried = carried.saturating_add(template);
+            *fits &= *open <= self.budget && *carried <= Self::TEMPLATE_BUDGET;
         }
         self.rows = self
             .rows
@@ -170,9 +244,11 @@ pub enum BulkLoadErrorKind {
     SourceChanged {
         row: usize,
     },
+    /// A source value has no canonical stored encoding: a scalar's or, since
+    /// fgdb-k3nub, a stored List's or Map's.
     SourceEncoding {
         row: usize,
-        source: fgdb_types::ScalarEncodeError,
+        source: fgdb_types::CanonicalPropertyValueError,
     },
     CounterOverflow,
     /// A source reader/decoder failed. No partially read chunk was submitted.
@@ -198,6 +274,19 @@ pub enum BulkLoadErrorKind {
         edge: String,
         endpoint: String,
     },
+    /// A `BulkEndpoint::Match` named no vertex committed as of the basis.
+    /// `row` is the zero-based source row of the edge.
+    UnresolvedEndpoint {
+        row: usize,
+        edge: String,
+        endpoint: BulkEndpoint,
+    },
+    /// A `BulkEndpoint::Match` named more than one vertex as of the basis.
+    AmbiguousEndpoint {
+        row: usize,
+        edge: String,
+        endpoint: BulkEndpoint,
+    },
     InvalidVertex {
         key: String,
         source: VertexPatchError,
@@ -207,7 +296,8 @@ pub enum BulkLoadErrorKind {
         source: EdgePropertyPatchError,
     },
     Write(WriteTxnError),
-    /// The chunk is durable, but the caller could not persist/announce it.
+    /// A validated baseline or durable chunk could not be persisted/announced.
+    /// No pending write is implied; inspect `BulkLoadError::committed`.
     Checkpoint(std::io::Error),
 }
 #[derive(Debug)]
@@ -239,7 +329,219 @@ impl core::error::Error for BulkLoadError {
     }
 }
 
+/// The vertices a load has written, by caller key. The checkpoint keeps an
+/// ordered map; the chunk loop resolves endpoints through hashed ones, since a
+/// string-keyed tree search per endpoint was ~5% of a web-google load
+/// (fgdb-79kyi). Only probed, so no order reaches a result.
+trait VertexKeys {
+    fn find(&self, key: &str) -> Option<VId>;
+}
+impl VertexKeys for BTreeMap<String, VId> {
+    fn find(&self, key: &str) -> Option<VId> {
+        self.get(key).copied()
+    }
+}
+impl VertexKeys for HashMap<String, VId> {
+    fn find(&self, key: &str) -> Option<VId> {
+        self.get(key).copied()
+    }
+}
+
+/// One load's discardable, exact endpoint resolutions at its admitted basis.
+/// The direct-mapped table is probed, never iterated for graph output. A
+/// collision, oversized key or allocation refusal merely repeats the ordinary
+/// lookup; the source, checkpoint and write admissions remain authoritative.
+struct EndpointMemo {
+    basis: CommitSeq,
+    slots: Box<[Option<EndpointMemoEntry>]>,
+    retained_bytes: usize,
+    #[cfg(test)]
+    uncached_matches: usize,
+}
+
+struct EndpointMemoEntry {
+    matched: EndpointMatch,
+    vertex: VId,
+    heap_bytes: usize,
+}
+
+impl EndpointMemo {
+    const MAX_SLOTS: usize = 4_096;
+    const MAX_BYTES: usize = 1024 * 1024;
+
+    fn new(basis: CommitSeq) -> Self {
+        Self {
+            basis,
+            slots: Box::default(),
+            retained_bytes: core::mem::size_of::<Self>(),
+            #[cfg(test)]
+            uncached_matches: 0,
+        }
+    }
+
+    fn slot(&self, matched: &EndpointMatch) -> usize {
+        use std::hash::{Hash, Hasher};
+
+        // Variant-preserving scalar Hash/Eq is intentional: load endpoint
+        // matching uses exact stored-value equality, not MERGE's numeric
+        // equivalence classes. Equality still checks every possible collision.
+        let mut hash = std::hash::DefaultHasher::new();
+        matched.label.hash(&mut hash);
+        matched.key.hash(&mut hash);
+        matched.value.hash(&mut hash);
+        (hash.finish() % self.slots.len() as u64) as usize
+    }
+
+    fn get(&self, matched: &EndpointMatch) -> Option<VId> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        self.slots[self.slot(matched)]
+            .as_ref()
+            .filter(|entry| entry.matched == *matched)
+            .map(|entry| entry.vertex)
+    }
+
+    fn remember(&mut self, matched: &EndpointMatch, vertex: VId) {
+        let Some(heap_bytes) = matched.value.owned_heap_bytes() else {
+            return;
+        };
+        if self.slots.is_empty() {
+            // Count every slot, including its inline key/identity and empty
+            // slots, before allocation. Scalar heap ownership is additional:
+            // text bindings/sort keys, byte capacity and timestamp zones all
+            // use the native accounting. Allocator bookkeeping is excluded.
+            let slot_bytes = core::mem::size_of::<Option<EndpointMemoEntry>>();
+            let slots = Self::MAX_SLOTS
+                .min(Self::MAX_BYTES.saturating_sub(core::mem::size_of::<Self>()) / slot_bytes);
+            let retained = core::mem::size_of::<Self>() + slots * slot_bytes;
+            if slots == 0 || heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+                return;
+            }
+            let mut storage = Vec::new();
+            if storage.try_reserve_exact(slots).is_err() {
+                return;
+            }
+            storage.resize_with(slots, || None);
+            // A boxed slice retains precisely the charged number of slots,
+            // independent of any spare capacity granted by Vec's allocator.
+            self.slots = storage.into_boxed_slice();
+            self.retained_bytes = retained;
+        }
+        let slot = self.slot(matched);
+        let old_heap = self.slots[slot]
+            .as_ref()
+            .map_or(0, |entry| entry.heap_bytes);
+        let retained = self.retained_bytes - old_heap;
+        if heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+            return;
+        }
+        // Release the displaced payload before cloning a fitting replacement.
+        // No failed or ambiguous resolution ever calls this method.
+        let previous = self.slots[slot].take();
+        self.retained_bytes = retained;
+        drop(previous);
+        let matched = matched.clone();
+        let Some(heap_bytes) = matched.value.owned_heap_bytes() else {
+            return;
+        };
+        if heap_bytes > Self::MAX_BYTES.saturating_sub(retained) {
+            return;
+        }
+        self.slots[slot] = Some(EndpointMemoEntry {
+            matched,
+            vertex,
+            heap_bytes,
+        });
+        self.retained_bytes = retained + heap_bytes;
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
+    /// Resolve an edge endpoint: a caller key against this source's vertices
+    /// (`fresh` for the current chunk, then the committed prefix), a match
+    /// against the committed graph as of the memo's pinned basis through the
+    /// property index. Successful exact resolutions may reuse that same basis.
+    /// A match must name exactly one visible vertex carrying the label (when
+    /// given) and the exact property value on its visible row.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_endpoint(
+        &self,
+        cx: &QueryCx,
+        memo: &mut EndpointMemo,
+        row: usize,
+        edge: &str,
+        endpoint: &BulkEndpoint,
+        fresh: &impl VertexKeys,
+        committed: &impl VertexKeys,
+    ) -> Result<VId, BulkLoadErrorKind> {
+        let matched = match endpoint {
+            BulkEndpoint::Key(key) => {
+                return fresh
+                    .find(key)
+                    .or_else(|| committed.find(key))
+                    .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
+                        edge: edge.to_owned(),
+                        endpoint: key.clone(),
+                    });
+            }
+            BulkEndpoint::Match(matched) => matched.as_ref(),
+        };
+        let EndpointMatch { label, key, value } = matched;
+        let unresolved = || BulkLoadErrorKind::UnresolvedEndpoint {
+            row,
+            edge: edge.to_owned(),
+            endpoint: endpoint.clone(),
+        };
+        // A stored NULL is never an equality candidate (as for MATCH).
+        if matches!(value, CanonicalScalar::Null) {
+            return Err(unresolved());
+        }
+        if let Some(vertex) = memo.get(matched) {
+            // Repeated endpoints still observe cancellation without re-reading
+            // the same historical vertex and cloning its property payload.
+            source::checkpoint(cx)?;
+            return Ok(vertex);
+        }
+        #[cfg(test)]
+        {
+            memo.uncached_matches += 1;
+        }
+        let mut control = |_| source::checkpoint(cx);
+        let mut found = None;
+        for vid in self.snapshot.property_index().lookup(*key, value) {
+            let Some(vertex) = crate::gql_exec::source::find_vertex(
+                &self.snapshot,
+                *vid,
+                memo.basis,
+                &mut control,
+            )?
+            else {
+                continue;
+            };
+            // Historical membership is only a candidate superset: recheck the
+            // visible row's label and exact value.
+            if label.is_some_and(|label| !vertex.labels.contains(&label))
+                || vertex
+                    .props
+                    .binary_search_by_key(key, |(property, _)| *property)
+                    .map_or(true, |at| vertex.props[at].1.as_scalar() != Some(value))
+            {
+                continue;
+            }
+            if found.replace(vertex.vid).is_some() {
+                return Err(BulkLoadErrorKind::AmbiguousEndpoint {
+                    row,
+                    edge: edge.to_owned(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+        }
+        let vertex = found.ok_or_else(unresolved)?;
+        memo.remember(matched, vertex);
+        Ok(vertex)
+    }
+
     // BulkLoadError is a resume report (kind plus committed and pending
     // checkpoints) returned once per load, not per row: its size is immaterial.
     #[allow(clippy::result_large_err)]
@@ -339,9 +641,9 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         commit_cx: &CommitCx,
         source: I,
-        mut policy: BulkLoadPolicy,
+        policy: BulkLoadPolicy,
         crash: Option<(usize, CrashPoint)>,
-        mut acknowledged: F,
+        acknowledged: F,
     ) -> Result<BulkLoadCheckpoint, BulkLoadError>
     where
         I: IntoIterator<Item = Result<BulkRow, E>>,
@@ -349,10 +651,54 @@ impl<V: Vfs + Clone> Database<V> {
         E: core::error::Error + Send + Sync + 'static,
         F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
     {
+        self.try_bulk_load_with_admission(cx, commit_cx, source, policy, crash, |_| {
+            Ok(acknowledged)
+        })
+        .await
+    }
+
+    /// Validate the complete source and any resumed prefix before invoking
+    /// `admitted` exactly once. The callback receives the checked baseline and
+    /// returns the ordinary per-durable-chunk checkpoint callback. This lets a
+    /// host publish its import origin or reconstructed recovery progress only
+    /// AFTER endpoint resolution, chunk admission and graph-prefix validation,
+    /// but BEFORE any new identity allocation or write in this invocation.
+    ///
+    /// Existing checkpoint-only entrypoints retain their original callback
+    /// sequence: one call per new durable chunk, never one for admission. An
+    /// empty load or completed resume still invokes `admitted`, but performs
+    /// no new commit. Admission callback failure returns Checkpoint with the
+    /// checked baseline and no pending write; its own external side effects
+    /// are not rolled back. Preflight failure invokes neither callback.
+    ///
+    /// The returned callback may own the same output state used by admission;
+    /// no interior mutability or second source-validation pass is required.
+    /// Each later source chunk is still replay-verified before it can commit.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-load resume report
+    pub async fn try_bulk_load_with_admission<I, E, F, A>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        source: I,
+        mut policy: BulkLoadPolicy,
+        crash: Option<(usize, CrashPoint)>,
+        admitted: A,
+    ) -> Result<BulkLoadCheckpoint, BulkLoadError>
+    where
+        I: IntoIterator<Item = Result<BulkRow, E>>,
+        I::IntoIter: Clone,
+        E: core::error::Error + Send + Sync + 'static,
+        F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
+        A: FnOnce(&BulkLoadCheckpoint) -> Result<F, std::io::Error>,
+    {
         let resuming = policy.resume.is_some();
         // Move, do not duplicate, caller-owned checkpoint maps before admission.
         let mut committed = policy.resume.take().unwrap_or_default();
         let mut source = source.into_iter();
+        // The frontier before this load's first chunk: every chunk commits
+        // exactly one sequence, and a resume requires no interleaved writer.
+        let no_keys = BTreeMap::<String, VId>::new();
         let preflight = (|| {
             source::checkpoint(cx)?;
             self.ensure_writable()
@@ -371,9 +717,17 @@ impl<V: Vfs + Clone> Database<V> {
             if !resuming {
                 committed.frontier = frontier;
             }
+            let basis = u64::try_from(committed.committed_chunks)
+                .ok()
+                .and_then(|chunks| committed.frontier.0.checked_sub(chunks))
+                .map(CommitSeq)
+                .ok_or(BulkLoadErrorKind::InvalidResume)?;
+            let mut endpoint_memo = EndpointMemo::new(basis);
             source::admit_checkpoint(cx, &committed, &policy)?;
-            let mut keys = BTreeSet::new();
-            let mut vertices = BTreeSet::new();
+            // Probed, never iterated: hashed sets spare an ordered set's string
+            // comparisons over every source key (fgdb-79kyi).
+            let mut keys = HashSet::new();
+            let mut vertices = HashSet::new();
             let mut prefix_vertices = BTreeSet::new();
             let mut prefix_edges = BTreeSet::new();
             let mut count = 0usize;
@@ -438,11 +792,26 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     BulkRow::Edge(e) => {
                         for endpoint in [&e.source, &e.destination] {
-                            if !vertices.contains(endpoint) {
-                                return Err(BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: endpoint.clone(),
-                                });
+                            match endpoint {
+                                BulkEndpoint::Key(key) => {
+                                    if !vertices.contains(key) {
+                                        return Err(BulkLoadErrorKind::DanglingEndpointKey {
+                                            edge: e.key.clone(),
+                                            endpoint: key.clone(),
+                                        });
+                                    }
+                                }
+                                BulkEndpoint::Match(_) => {
+                                    self.resolve_endpoint(
+                                        cx,
+                                        &mut endpoint_memo,
+                                        index,
+                                        &e.key,
+                                        endpoint,
+                                        &no_keys,
+                                        &no_keys,
+                                    )?;
+                                }
                             }
                         }
                         if index < committed.next_row {
@@ -454,8 +823,20 @@ impl<V: Vfs + Clone> Database<V> {
                                 .edge(*id)
                                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?
                                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
-                            if Some(&row.entry.src) != committed.vertices.get(&e.source)
-                                || Some(&row.entry.dst) != committed.vertices.get(&e.destination)
+                            let mut prefix = |endpoint| {
+                                self.resolve_endpoint(
+                                    cx,
+                                    &mut endpoint_memo,
+                                    index,
+                                    &e.key,
+                                    endpoint,
+                                    &no_keys,
+                                    &committed.vertices,
+                                )
+                                .map_err(|_| BulkLoadErrorKind::InvalidResume)
+                            };
+                            if row.entry.src != prefix(&e.source)?
+                                || row.entry.dst != prefix(&e.destination)?
                                 || row.entry.relation != e.relation
                                 || row.props != e.props
                                 || !prefix_edges.insert(*id)
@@ -481,10 +862,10 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(|_| BulkLoadErrorKind::SourceAllocation { row: count })?;
                 seals.push(transcript.finish());
             }
-            Ok(seals)
+            Ok((seals, endpoint_memo))
         })();
-        let seals = match preflight {
-            Ok(seals) => seals,
+        let (seals, mut endpoint_memo) = match preflight {
+            Ok(preflight) => preflight,
             Err(kind) => {
                 return Err(BulkLoadError {
                     kind,
@@ -502,6 +883,29 @@ impl<V: Vfs + Clone> Database<V> {
                 pending: None,
             });
         }
+        // Nothing externally acknowledges a caller-supplied/reconstructed
+        // prefix until the SAME engine preflight has validated all of it.
+        // In particular BulkEndpoint::Match must resolve at the load basis,
+        // and a previously committed edge must have those exact endpoints.
+        let mut acknowledged = match source::checkpoint(cx)
+            .and_then(|()| admitted(&committed).map_err(BulkLoadErrorKind::Checkpoint))
+        {
+            Ok(acknowledged) => acknowledged,
+            Err(kind) => {
+                return Err(BulkLoadError {
+                    kind,
+                    committed,
+                    pending: None,
+                });
+            }
+        };
+        // `committed.vertices`, hashed for endpoint resolution, and extended
+        // with each chunk exactly when the checkpoint is.
+        let mut vertex_keys: HashMap<String, VId> = committed
+            .vertices
+            .iter()
+            .map(|(key, &id)| (key.clone(), id))
+            .collect();
         for (index, seal) in seals.iter().enumerate() {
             let skip = seal.end() <= committed.next_row;
             let chunk = match source::read_verified(
@@ -531,13 +935,14 @@ impl<V: Vfs + Clone> Database<V> {
                     pending: None,
                 });
             };
-            let mut new_vertices = BTreeMap::new();
+            let mut new_vertices = HashMap::new();
             let mut new_edges = BTreeMap::new();
             let prepared = (|| {
                 let mut vertex_batch = WriteBatch::new(policy.vertex_relation);
                 let mut edge_batches: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
-                for row in chunk {
+                for (offset, row) in chunk.into_iter().enumerate() {
                     source::checkpoint(cx)?;
+                    let ordinal = seal.start + offset;
                     match row {
                         BulkRow::Vertex(v) => {
                             let ElementId::Vertex(id) = self
@@ -549,24 +954,28 @@ impl<V: Vfs + Clone> Database<V> {
                             else {
                                 unreachable!("typed allocator")
                             };
-                            vertex_batch.create_vertex(id, v.labels, v.props);
+                            vertex_batch.create_vertex_values(id, v.labels, v.props);
                             new_vertices.insert(v.key, id);
                         }
                         BulkRow::Edge(e) => {
-                            let src = *new_vertices
-                                .get(&e.source)
-                                .or_else(|| committed.vertices.get(&e.source))
-                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: e.source.clone(),
-                                })?;
-                            let dst = *new_vertices
-                                .get(&e.destination)
-                                .or_else(|| committed.vertices.get(&e.destination))
-                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: e.destination.clone(),
-                                })?;
+                            let src = self.resolve_endpoint(
+                                cx,
+                                &mut endpoint_memo,
+                                ordinal,
+                                &e.key,
+                                &e.source,
+                                &new_vertices,
+                                &vertex_keys,
+                            )?;
+                            let dst = self.resolve_endpoint(
+                                cx,
+                                &mut endpoint_memo,
+                                ordinal,
+                                &e.key,
+                                &e.destination,
+                                &new_vertices,
+                                &vertex_keys,
+                            )?;
                             let ElementId::Edge(id) = self
                                 .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
                                 .map_err(BulkLoadErrorKind::Write)?
@@ -576,7 +985,7 @@ impl<V: Vfs + Clone> Database<V> {
                             edge_batches
                                 .entry(e.relation)
                                 .or_insert_with(|| WriteBatch::new(e.relation))
-                                .add_edge(id, src, dst, e.props);
+                                .add_edge_values(id, src, dst, e.props);
                             new_edges.insert(e.key, id);
                         }
                     }
@@ -607,6 +1016,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
             {
                 Ok(frontier) => {
+                    vertex_keys.extend(new_vertices.iter().map(|(key, &id)| (key.clone(), id)));
                     committed.vertices.extend(new_vertices);
                     committed.edges.extend(new_edges);
                     committed.frontier = frontier;
@@ -641,5 +1051,182 @@ impl<V: Vfs + Clone> Database<V> {
             }
         }
         Ok(committed)
+    }
+}
+
+#[cfg(test)]
+mod endpoint_memo_tests {
+    use super::*;
+    use crate::DatabaseKeys;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{
+        CanonicalDecimal, CanonicalF64, DatabaseSecurityNamespaceId, PurposeContexts,
+    };
+
+    fn matched(value: CanonicalScalar) -> EndpointMatch {
+        EndpointMatch {
+            label: Some(LabelId(3)),
+            key: PropertyKeyId(5),
+            value,
+        }
+    }
+
+    #[test]
+    fn exact_keys_do_not_alias_numeric_variants_labels_properties_or_hash_collisions() {
+        let mut memo = EndpointMemo::new(CommitSeq(7));
+        let integer = matched(CanonicalScalar::Int(1));
+        memo.remember(&integer, VId(10));
+        for other in [
+            matched(CanonicalScalar::Float(CanonicalF64::new(1.0))),
+            matched(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_integer(1).unwrap(),
+            )),
+            matched(CanonicalScalar::ucs_basic_text("1").unwrap()),
+            EndpointMatch {
+                label: None,
+                ..integer.clone()
+            },
+            EndpointMatch {
+                key: PropertyKeyId(6),
+                ..integer.clone()
+            },
+        ] {
+            assert_eq!(memo.get(&other), None);
+            memo.remember(&other, VId(20));
+            assert_eq!(memo.get(&other), Some(VId(20)));
+            assert_ne!(memo.get(&integer), Some(VId(20)));
+            memo.remember(&integer, VId(10));
+        }
+        // Pigeonhole construction forces a real slot collision, independently
+        // of the hasher's implementation or the particular scalar encoding.
+        let mut seen = BTreeMap::new();
+        let mut collision = None;
+        for value in 0..=memo.slots.len() {
+            let key = matched(CanonicalScalar::Int(value as i64));
+            if let Some(previous) = seen.insert(memo.slot(&key), key.clone()) {
+                collision = Some((previous, key));
+                break;
+            }
+        }
+        let (first, second) = collision.expect("more distinct keys than slots");
+        memo.remember(&first, VId(30));
+        memo.remember(&second, VId(40));
+        assert_eq!(memo.get(&first), None);
+        assert_eq!(memo.get(&second), Some(VId(40)));
+        memo.remember(&first, VId(30));
+        assert_eq!(memo.get(&first), Some(VId(30)));
+        assert_eq!(memo.get(&second), None);
+    }
+
+    #[test]
+    fn byte_ceiling_counts_slot_storage_and_actual_owned_payloads() {
+        let mut memo = EndpointMemo::new(CommitSeq(0));
+        // The canonical bytes are tiny, but the caller retains a large Vec.
+        // Bypass before cloning or allocating a table, rather than treating
+        // encoded length as the retained heap bound.
+        let mut spare = Vec::with_capacity(EndpointMemo::MAX_BYTES + 1);
+        spare.push(1);
+        let large = matched(CanonicalScalar::bytes(spare).unwrap());
+        memo.remember(&large, VId(1));
+        assert!(memo.slots.is_empty());
+        assert_eq!(memo.get(&large), None);
+
+        for value in 0_u64..256 {
+            let mut bytes = vec![0; 16 * 1024];
+            bytes[..8].copy_from_slice(&value.to_be_bytes());
+            let key = matched(CanonicalScalar::bytes(bytes).unwrap());
+            memo.remember(&key, VId(u128::from(value)));
+            let actual = core::mem::size_of::<EndpointMemo>()
+                + core::mem::size_of_val(memo.slots.as_ref())
+                + memo
+                    .slots
+                    .iter()
+                    .flatten()
+                    .map(|entry| entry.matched.value.owned_heap_bytes().unwrap())
+                    .sum::<usize>();
+            assert_eq!(memo.retained_bytes, actual);
+            assert!(actual <= EndpointMemo::MAX_BYTES);
+        }
+        assert!(!memo.slots.is_empty());
+        assert!(memo.slots.len() <= EndpointMemo::MAX_SLOTS);
+        // Lack of room is an optimization miss, never a new input refusal.
+        let small = matched(CanonicalScalar::Int(99));
+        memo.remember(&small, VId(999));
+        assert_eq!(memo.get(&small), Some(VId(999)));
+    }
+
+    #[test]
+    fn repeated_resolution_matches_uncached_history_and_never_memoizes_errors() {
+        let ((), report) = run_async_under_lab(0xb71c_0301, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let query = contexts.query();
+            let commit = contexts.commit();
+            let keys = DatabaseKeys::new(
+                [0x71; 32],
+                DatabaseSecurityNamespaceId([0x72; 32]),
+                [0x73; 32],
+            );
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(17),
+                vec![LabelId(3)],
+                vec![
+                    (PropertyKeyId(5), CanonicalScalar::Int(7)),
+                    (
+                        PropertyKeyId(6),
+                        CanonicalScalar::ucs_basic_text(&"payload".repeat(1024)).unwrap(),
+                    ),
+                ],
+            );
+            for vertex in [VId(18), VId(19)] {
+                seed.create_vertex(
+                    vertex,
+                    vec![LabelId(3)],
+                    vec![(PropertyKeyId(5), CanonicalScalar::Int(9))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let endpoint = BulkEndpoint::Match(Box::new(matched(CanonicalScalar::Int(7))));
+            let keys = BTreeMap::<String, VId>::new();
+            let mut hot = EndpointMemo::new(basis);
+            let mut uncached = 0;
+            for row in 0..64 {
+                // A fresh memo runs the unchanged indexed historical resolver
+                // on every occurrence, providing the incumbent in this call.
+                let mut cold = EndpointMemo::new(basis);
+                let expected = db
+                    .resolve_endpoint(&query, &mut cold, row, "edge", &endpoint, &keys, &keys)
+                    .unwrap();
+                uncached += cold.uncached_matches;
+                let actual = db
+                    .resolve_endpoint(&query, &mut hot, row, "edge", &endpoint, &keys, &keys)
+                    .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual, VId(17));
+            }
+            assert_eq!(uncached, 64);
+            assert_eq!(hot.uncached_matches, 1);
+            for (value, ambiguous) in [(8, false), (9, true)] {
+                let endpoint = BulkEndpoint::Match(Box::new(matched(CanonicalScalar::Int(value))));
+                for row in [64, 65] {
+                    let error = db
+                        .resolve_endpoint(&query, &mut hot, row, "edge", &endpoint, &keys, &keys)
+                        .unwrap_err();
+                    match error {
+                        BulkLoadErrorKind::UnresolvedEndpoint { row: actual, .. } if !ambiguous => {
+                            assert_eq!(actual, row);
+                        }
+                        BulkLoadErrorKind::AmbiguousEndpoint { row: actual, .. } if ambiguous => {
+                            assert_eq!(actual, row);
+                        }
+                        error => panic!("{error:?}"),
+                    }
+                }
+            }
+            assert_eq!(hot.uncached_matches, 5);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

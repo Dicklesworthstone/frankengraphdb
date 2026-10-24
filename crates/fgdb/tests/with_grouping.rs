@@ -13,6 +13,7 @@ use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+use std::cell::Cell;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x5d; 32]);
 fn policy() -> GqlQueryPolicy {
@@ -56,6 +57,77 @@ async fn database(cx: &CommitCx) -> Database<MemVfs> {
     }
     db.write(cx, batch).await.unwrap();
     db
+}
+
+#[test]
+fn native_queries_refuse_unnamed_with_expressions_and_accept_explicit_bindings() {
+    let ((), report) = run_async_under_lab(0x5d_6706, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let frontier = db.frontier().unwrap();
+        let params = GqlParameters::new();
+        for text in [
+            "MATCH (n:L) WITH n.p RETURN p",
+            "MATCH (n:L) WITH n.p RETURN count(*) AS total",
+            "MATCH (n:L) WITH labels(n) RETURN n",
+            "MATCH (n:L) WITH properties(n) RETURN n",
+            "UNWIND [1] AS k MATCH (n:L) WITH n.p RETURN p",
+            "MATCH (n:L) WITH n MATCH (n:L) WITH n.p RETURN p",
+            "MATCH (n:L) WITH n.p,count(*) AS c RETURN p,c",
+            "MATCH (n:L) WITH count(*) RETURN count",
+            "UNWIND [1,2] AS n WITH sum(n) RETURN sum",
+            "MATCH (private:PrivateLabel) WITH private.secret RETURN secret LIMIT 0",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 WITH n.p RETURN p",
+        ] {
+            let calls = Cell::new(0);
+            let error = db
+                .query(
+                    &c.query(),
+                    text,
+                    &params,
+                    |kind: GraphSymbolKind, name: &str| {
+                        calls.set(calls.get() + 1);
+                        symbols(kind, name)
+                    },
+                    policy(),
+                )
+                .unwrap_err();
+            assert_eq!(calls.get(), 0, "{text}: {error:?}");
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert!(!format!("{error:?} {error}").contains("PrivateLabel"));
+        }
+        for text in [
+            "MATCH (n:L) WITH n.p AS value RETURN value ORDER BY value",
+            "MATCH (n:L) WITH ((n)) RETURN n.p AS value ORDER BY value",
+            "UNWIND [1] AS k MATCH (n:L) WITH n.p AS value,k RETURN value ORDER BY value",
+            "MATCH (n:L) WITH n MATCH (n:L) WITH n.p AS value RETURN value ORDER BY value",
+        ] {
+            assert_eq!(
+                db.query(&c.query(), text, &params, symbols, policy())
+                    .unwrap(),
+                rows(
+                    &["value"],
+                    vec![vec![value(10)], vec![value(10)], vec![value(20)]]
+                ),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            db.query(
+                &c.query(),
+                "MATCH (n:L) WITH n.p AS value,count(*) AS total RETURN value,total ORDER BY value",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+            rows(
+                &["value", "total"],
+                vec![vec![value(10), value(2)], vec![value(20), value(1)]]
+            )
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -136,8 +208,10 @@ fn a_kept_vertex_reads_its_properties_after_the_grouping_in_both_return_classes(
             (
                 "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c RETURN n.p, n.secret, c",
                 NativeReadClass::Set,
+                // An unaliased item is named by its exact source text (owner
+                // ruling 2026-09-30, fgdb-aw8lm).
                 rows(
-                    &["p", "secret", "c"],
+                    &["n.p", "n.secret", "c"],
                     vec![
                         vec![value(10), value(100), value(2)],
                         vec![value(10), value(200), value(1)],

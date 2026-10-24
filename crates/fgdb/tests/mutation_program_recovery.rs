@@ -11,13 +11,14 @@ use fgdb_gql::{
     PreparedGraphMutationText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
-type Logical = Vec<(VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Logical = Vec<(VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -33,7 +34,7 @@ fn policy() -> GraphMutationPolicy {
     )
 }
 fn input(text: &str) -> PreparedGraphMutationText {
-    PreparedGraphMutationText::prepare(text, R, |kind, name| match (kind, name) {
+    PreparedGraphMutationText::prepare(text, R, |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
@@ -78,7 +79,7 @@ fn property(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
     row.props
         .iter()
         .find(|(property, _)| *property == key)
-        .map(|(_, value)| value)
+        .map(|(_, value)| value.as_scalar().expect("scalar fixture"))
 }
 
 #[test]

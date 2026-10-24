@@ -8,7 +8,8 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(7);
@@ -82,12 +83,12 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
 fn plain(rows: &[GraphValueRow]) -> Vec<Vec<GraphValue>> {
     rows.iter().map(|row| row.values().to_vec()).collect()
 }
-fn property(props: &[(PropertyKeyId, CanonicalScalar)]) -> GraphValue {
+fn property(props: &[(PropertyKeyId, CanonicalPropertyValue)]) -> GraphValue {
     GraphValue::Scalar(
         props
             .iter()
             .find(|(key, _)| *key == P)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
             .unwrap_or(CanonicalScalar::Null),
     )
 }
@@ -114,7 +115,9 @@ fn oracle(
             }
             for s in &edges {
                 for (from, c) in orient(s.entry.src, s.entry.dst) {
-                    if s.entry.relation != R
+                    // One MATCH binds r and s under DIFFERENT EDGES.
+                    if r.entry.eid == s.entry.eid
+                        || s.entry.relation != R
                         || from != (if shape == 1 { a } else { b })
                         || (shape == 2 && c != a)
                     {

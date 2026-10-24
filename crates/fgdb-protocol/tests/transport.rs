@@ -12,6 +12,85 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+#[test]
+fn shared_duplex_keeps_read_and_write_progress_after_pending() {
+    use fgdb_protocol::transport::split_duplex;
+    use std::sync::{Arc, Mutex};
+    struct State {
+        written: bool,
+        waiting_reader: Option<Waker>,
+    }
+    struct Duplex(Arc<Mutex<State>>);
+    impl AsyncRead for Duplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let mut state = self.0.lock().unwrap();
+            if state.written {
+                buffer.put_slice(b"r");
+                Poll::Ready(Ok(()))
+            } else {
+                state.waiting_reader = Some(task.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+    impl AsyncWrite for Duplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let waker = {
+                let mut state = self.0.lock().unwrap();
+                state.written = true;
+                state.waiting_reader.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    with_cx(|cx| {
+        let state = Arc::new(Mutex::new(State {
+            written: false,
+            waiting_reader: None,
+        }));
+        let (mut reader, mut writer) = split_duplex(cx, Duplex(state)).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&reader);
+        assert_send(&writer);
+        let mut task = Context::from_waker(Waker::noop());
+        let mut bytes = [0; 1];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        assert!(
+            Pin::new(&mut reader)
+                .poll_read(&mut task, &mut buffer)
+                .is_pending()
+        );
+        // A read that returned Pending must release the shared stream. TLS's
+        // writer can then progress and wake the receive lane without deadlock.
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"request"),
+            Poll::Ready(Ok(7))
+        ));
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut task, &mut buffer),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(buffer.filled(), b"r");
+    });
+}
+
 fn with_cx(test: impl FnOnce(&Cx)) {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);

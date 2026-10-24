@@ -146,8 +146,11 @@ impl Case {
             format!(" FOR SYSTEM_TIME AS OF SEQ {}", at.0)
         });
         let columns = if self.capture { "route" } else { "a, b" };
+        // The restrictors are tested on their own, under REPEATABLE ELEMENTS.
+        // Under the DIFFERENT EDGES default (fgdb-vexfr) a WALK binds no edge
+        // twice and equals TRAIL; gql_oracle_dbcg_reads checks that.
         format!(
-            "MATCH {head}{} {body}{temporal} RETURN ALL {columns}",
+            "MATCH REPEATABLE ELEMENTS {head}{} {body}{temporal} RETURN ALL {columns}",
             self.mode.name()
         )
     }

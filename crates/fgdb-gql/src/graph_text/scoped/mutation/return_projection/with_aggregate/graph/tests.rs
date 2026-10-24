@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow};
 use crate::{GqlQueryError, GqlQueryPolicy, PreparedGraphSetText};
-use fgdb_types::{EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -21,20 +21,20 @@ fn execute(text: &str) -> (Vec<GraphValueRow>, usize) {
     let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
     let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
     assert_eq!(prepared.column_types(), bound.column_types());
-    let p = [
-        CanonicalScalar::Int(1),
-        CanonicalScalar::Int(1),
-        CanonicalScalar::Int(2),
+    let p: [CanonicalPropertyValue; 3] = [
+        CanonicalScalar::Int(1).into(),
+        CanonicalScalar::Int(1).into(),
+        CanonicalScalar::Int(2).into(),
     ];
-    let q = [
-        CanonicalScalar::Int(10),
-        CanonicalScalar::Int(20),
-        CanonicalScalar::Int(30),
+    let q: [CanonicalPropertyValue; 3] = [
+        CanonicalScalar::Int(10).into(),
+        CanonicalScalar::Int(20).into(),
+        CanonicalScalar::Int(30).into(),
     ];
-    let edge_p = CanonicalScalar::Int(5);
+    let edge_p = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     let mut calls = 0;
     let result = bound
-        .execute_governed(
+        .execute_governed_with_elements(
             GqlQueryPolicy::new(1000, 1000, 2_000_000, 2_000_000),
             |pattern, remaining| {
                 calls += 1;
@@ -58,6 +58,21 @@ fn execute(text: &str) -> (Vec<GraphValueRow>, usize) {
                     remaining,
                     || Ok::<_, &'static str>(()),
                 )
+            },
+            |_, _, _| panic!("these laws run no CALL source"),
+            |element, key| {
+                Ok(match (element, key) {
+                    (fgdb_delta_types::ElementId::Vertex(vid), PropertyKeyId(1)) => {
+                        p.get((vid.0 - 1) as usize).cloned()
+                    }
+                    (fgdb_delta_types::ElementId::Vertex(vid), PropertyKeyId(2)) => {
+                        q.get((vid.0 - 1) as usize).cloned()
+                    }
+                    (fgdb_delta_types::ElementId::Edge(_), PropertyKeyId(1)) => {
+                        Some(edge_p.clone())
+                    }
+                    _ => None,
+                })
             },
             || Ok::<_, &'static str>(()),
         )
@@ -136,18 +151,10 @@ fn optional_continuations_group_nullable_local_bindings_not_nullable_carried_cop
             row(vec![GraphValue::Vertex(VId(3)), scalar(0)])
         ]
     );
-    let mut calls = 0;
-    assert!(
-        PreparedGraphSetText::prepare(
-            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH sum(n.p) AS s RETURN s",
-            |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            },
-        )
-        .is_err()
+    assert_eq!(
+        execute("MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH sum(n.p) AS s RETURN s").0,
+        vec![row(vec![scalar(5)])]
     );
-    assert_eq!(calls, 0);
 }
 
 #[test]
@@ -202,7 +209,7 @@ fn a_kept_binding_reads_its_properties_after_the_grouping() {
         symbols,
     )
     .unwrap();
-    assert_eq!(query.columns(), &["p", "q", "c"]);
+    assert_eq!(query.columns(), &["a.p", "a.q", "c"]);
     // The same answer as re-matching the kept vertex by identity.
     assert_eq!(
         execute("MATCH (a)-[e:R]->(b) WITH a, count(e) AS c MATCH (a) RETURN a.p, a.q, c").0,
@@ -263,7 +270,7 @@ fn direct_grouping_failure_is_not_suppressed_by_limit_zero() {
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-    let zero = CanonicalScalar::Int(0);
+    let zero = CanonicalPropertyValue::from(CanonicalScalar::Int(0));
     let result = query.execute_governed(
         GqlQueryPolicy::new(10, 0, 100_000, 100_000),
         |pattern, policy| {

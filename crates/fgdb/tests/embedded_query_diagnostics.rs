@@ -50,16 +50,8 @@ const CASES: &[(&str, NativeReadClass, &str)] = &[
         NativeReadClass::Pattern,
         "since.",
     ),
-    (
-        "MATCH (p:Person) WHERE EXISTS { (p)-[:R]->() } RETURN p.p",
-        NativeReadClass::Pattern,
-        "EXISTS { (p)-[:R]->() }",
-    ),
-    (
-        "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:R]->() } RETURN p.p",
-        NativeReadClass::Pattern,
-        "NOT EXISTS { (p)-[:R]->() }",
-    ),
+    // `EXISTS { (p)-[:R]->() }` and its NOT form are openCypher's pattern
+    // subquery shorthand and now execute (fgdb-44d8n), so they left this list.
     (
         "MATCH (p:Person) RETURN p.p AS x UNION ALL MATCH (q:Person) RETURN q.p AS x ORDER BY missing",
         NativeReadClass::Set,
@@ -161,9 +153,9 @@ fn accepted_statements_still_accept() {
             "MATCH (a:Person)-[r:R]->(b:Person) RETURN type(r)",
         ];
         for (text, column, values) in [
-            ("MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since ORDER BY k.since", "since", vec![2, 11]),
-            ("MATCH (a:Person)-[k:R]->(b:Person) WHERE k.since > 3 RETURN a.p", "p", vec![7]),
-            ("MATCH (a:Person)-[:R]->()-[:R]->(b:Person) RETURN b.p ORDER BY b.p", "p", vec![7, 9]),
+            ("MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since ORDER BY k.since", "k.since", vec![2, 11]),
+            ("MATCH (a:Person)-[k:R]->(b:Person) WHERE k.since > 3 RETURN a.p", "a.p", vec![7]),
+            ("MATCH (a:Person)-[:R]->()-[:R]->(b:Person) RETURN b.p ORDER BY b.p", "b.p", vec![7, 9]),
         ] {
             let result = db.query(&contexts.query(), text, &GqlParameters::new(), symbols, policy()).unwrap();
             assert_eq!(result, QueryResult::Rows {

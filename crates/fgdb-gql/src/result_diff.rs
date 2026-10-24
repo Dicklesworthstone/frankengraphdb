@@ -96,6 +96,41 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphDiffError<E> {
 type Row = Box<[GraphAggregateValue]>;
 type Error<E, C> = GqlQueryError<GraphDiffError<E>, C>;
 
+/// Completed result changes without source or evaluator diagnostics. A host
+/// may release these after its own final authorization/delivery admission.
+/// This value grants no authority and does not claim physical noninterference.
+/// Equality and Debug cannot expose discarded work or source cardinalities.
+#[derive(PartialEq, Eq)]
+pub struct GraphResultChanges {
+    before: CommitSeq,
+    after: CommitSeq,
+    columns: Box<[String]>,
+    changes: ZSet<Row>,
+}
+impl GraphResultChanges {
+    pub fn before(&self) -> CommitSeq {
+        self.before
+    }
+    pub fn after(&self) -> CommitSeq {
+        self.after
+    }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn changes(&self) -> &ZSet<Row> {
+        &self.changes
+    }
+}
+impl core::fmt::Debug for GraphResultChanges {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphResultChanges")
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// The existing source engine's result and measured usage, not a new evaluator.
 /// Aggregate slots borrow frozen RETURN metadata and preserve repeated aliases.
 /// Constructors do not clone rows, payloads, or layout metadata.
@@ -161,6 +196,18 @@ pub struct GraphResultDiff {
     evaluator: GlaExecutionStats,
 }
 impl GraphResultDiff {
+    /// Move only the completed logical result out of the host's execution.
+    /// Payloads, columns and exact weights are transferred, never cloned.
+    /// Measured usage is discarded, not rewritten as fictitious zero usage.
+    pub fn into_changes(self) -> GraphResultChanges {
+        GraphResultChanges {
+            before: self.before,
+            after: self.after,
+            columns: self.columns,
+            changes: self.changes,
+        }
+    }
+
     pub fn before(&self) -> CommitSeq {
         self.before
     }
@@ -191,6 +238,15 @@ impl GraphResultDiff {
     /// Private endpoint output has no public row cap; explicit query pages are
     /// still part of its definition. Equal cuts/empty answers do not skip source
     /// validation, errors or cancellation. No partial delta escapes on failure.
+    ///
+    /// Adapt and consolidate each occurrence before visiting the next one.
+    /// Beyond the source's materialized endpoint, retain only the current net
+    /// support and one adapted row, not a second bag of every occurrence from
+    /// both endpoints. Source evaluation is still materialized and there is no
+    /// spill or allocator-byte bound. Work/scratch admission stays cumulative,
+    /// including copies of duplicate rows and entries removed by cancellation.
+    /// Consolidation of Before is charged before After receives its allowance;
+    /// an earlier consolidation refusal does not invoke the later source.
     pub fn execute<'a, E, C>(
         before: CommitSeq,
         after: CommitSeq,
@@ -223,7 +279,11 @@ impl GraphResultDiff {
                 meter.charge(GlaExecutionEvent::ScratchEntry)?;
             }
         }
-        let mut updates = Vec::new();
+        // One private signed relation for the entire operation. Its insertion
+        // order is exactly the former from_updates order: Before, then After.
+        // Consolidating here releases duplicate/cancelled payloads immediately
+        // and makes their actual work visible to the next source's admission.
+        let mut changes = ZSet::new();
         for endpoint in [DiffEndpoint::Before, DiffEndpoint::After] {
             meter.charge(GlaExecutionEvent::Work)?;
             let input = source(endpoint, meter.remaining()).map_err(|error| {
@@ -243,8 +303,7 @@ impl GraphResultDiff {
                         for (column, value) in row.values().iter().enumerate() {
                             cells.push(copy_value(value, endpoint, column, &mut meter)?);
                         }
-                        meter.charge(GlaExecutionEvent::ScratchEntry)?;
-                        updates.push((cells.into_boxed_slice(), ZWeight::from_i128(sign)));
+                        accumulate_row(&mut changes, cells.into_boxed_slice(), sign, &mut meter)?;
                     }
                 }
                 InputRows::Aggregates {
@@ -291,24 +350,14 @@ impl GraphResultDiff {
                             };
                             cells.push(cell);
                         }
-                        meter.charge(GlaExecutionEvent::ScratchEntry)?;
-                        updates.push((cells.into_boxed_slice(), ZWeight::from_i128(sign)));
+                        accumulate_row(&mut changes, cells.into_boxed_slice(), sign, &mut meter)?;
                     }
                 }
             }
         }
-        // The existing exact Z-set engine cancels duplicate insertions and
-        // retractions; do not threshold inputs or mistake a zero total for empty.
-        let changes: ZSet<Row> = ZSet::from_updates(updates, LimbLimit::new(4), &mut |event| {
-            meter.charge::<E>(match event {
-                ZSetEvent::Work => GlaExecutionEvent::Work,
-                ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-            })
-        })
-        .map_err(|error| match error {
-            ZSetError::Control(error) | ZSetError::Callback(error) => error,
-            _ => GqlQueryError::Source(GraphDiffError::Arithmetic),
-        })?;
+        // Only final support consumes the public row quota. Intermediate
+        // retractions can all cancel even when that quota is zero. The private
+        // relation is never released on a source, arithmetic or control error.
         let count = u64::try_from(changes.len())
             .map_err(|_| GqlQueryError::Source(GraphDiffError::Arithmetic))?;
         policy
@@ -340,6 +389,32 @@ impl core::fmt::Debug for GraphResultDiff {
             .field("data", &"[REDACTED]")
             .finish()
     }
+}
+
+// Reuse the exact signed kernel, including its promoted-weight admission and
+// entry accounting. There is no infallible arithmetic or alternate equality.
+fn accumulate_row<E, C>(
+    changes: &mut ZSet<Row>,
+    row: Row,
+    sign: i128,
+    meter: &mut Meter<'_, C>,
+) -> Result<(), Error<E, C>> {
+    changes
+        .accumulate(
+            row,
+            ZWeight::from_i128(sign),
+            LimbLimit::new(4),
+            &mut |event| {
+                meter.charge::<E>(match event {
+                    ZSetEvent::Work => GlaExecutionEvent::Work,
+                    ZSetEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                })
+            },
+        )
+        .map_err(|error| match error {
+            ZSetError::Control(error) | ZSetError::Callback(error) => error,
+            _ => GqlQueryError::Source(GraphDiffError::Arithmetic),
+        })
 }
 
 fn check_width<E, C>(
@@ -465,3 +540,62 @@ impl<C> Meter<'_, C> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod online_tests;
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    fn result(work: u64) -> GraphResultDiff {
+        GraphResultDiff {
+            before: CommitSeq(1),
+            after: CommitSeq(2),
+            columns: vec!["private-name".to_owned()].into_boxed_slice(),
+            changes: ZSet::from_updates(
+                [(
+                    vec![GraphAggregateValue::Integer(37)].into_boxed_slice(),
+                    ZWeight::ONE,
+                )],
+                LimbLimit::new(4),
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap(),
+            rows: GqlExecutionStats {
+                snapshot_records: work,
+                result_rows: 1,
+            },
+            evaluator: GlaExecutionStats {
+                work_units: work,
+                scratch_entries: work,
+            },
+        }
+    }
+
+    #[test]
+    fn logical_release_moves_payloads_and_equality_cannot_observe_source_diagnostics() {
+        let result = result(100);
+        let column = result.columns.as_ptr();
+        let row = result.changes.iter().next().unwrap().0.as_ptr();
+        let released = result.into_changes();
+        assert_eq!(released.columns().as_ptr(), column);
+        assert_eq!(released.changes().iter().next().unwrap().0.as_ptr(), row);
+        assert_eq!(released.before(), CommitSeq(1));
+        assert_eq!(released.after(), CommitSeq(2));
+        assert_eq!(released.columns(), ["private-name"]);
+        let other = self::result(9999).into_changes();
+        assert_eq!(released, other);
+        let debug = format!("{released:?}");
+        assert_eq!(debug, format!("{other:?}"));
+        for private in [
+            "private-name",
+            "37",
+            "snapshot_records",
+            "work_units",
+            "scratch_entries",
+        ] {
+            assert!(!debug.contains(private));
+        }
+    }
+}

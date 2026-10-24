@@ -6,11 +6,16 @@
 //! distinct arguments borrow the admitted input until owned rows are released.
 
 mod computed;
+mod count_summary;
+mod groups;
 mod numeric;
+mod positioned;
 mod relational;
 mod result;
 mod weighted;
+pub use count_summary::{GraphCountSource, PreparedGraphCount};
 pub use numeric::GraphExactAverage;
+pub use positioned::{PositionedEdge, PositionedGraph};
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
@@ -19,15 +24,15 @@ pub use result::{
 
 use crate::algebra::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow,
-    MAX_PATTERN_NAME_BYTES, MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection,
-    VertexPredicate,
+    MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
 };
+use crate::algebra_exec::Charges;
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryExecution, GqlQueryPolicy,
 };
-use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +134,8 @@ impl<'a> GraphAggregate<'a> {
             column: Some(column),
         }
     }
+    /// Least nonnull argument in language order. Equal numeric values retain
+    /// the least canonical representation, independently of occurrence order.
     #[must_use]
     pub const fn min(name: &'a str, column: usize) -> Self {
         Self {
@@ -137,6 +144,8 @@ impl<'a> GraphAggregate<'a> {
             column: Some(column),
         }
     }
+    /// Greatest nonnull argument in language order. Equal numeric values retain
+    /// the greatest canonical representation, independently of occurrence order.
     #[must_use]
     pub const fn max(name: &'a str, column: usize) -> Self {
         Self {
@@ -170,7 +179,11 @@ pub enum GraphAggregateBuildError {
     UnknownOutputColumn { column: GraphAggregateColumn },
     TooManyFilters { limit: usize, observed: usize },
     DuplicateOrder { column: GraphAggregateColumn },
+    RequiresOutputProjection,
+    UnknownProjectedOrderColumn { column: usize },
+    DuplicateProjectedOrder { column: usize },
     InputProjection(crate::GraphSetProjectionError),
+    InputRows(crate::row_projection::RowProjectionBuildError),
     OutputProjection(crate::GraphSetProjectionError),
 }
 
@@ -193,16 +206,26 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::InvalidName => f.write_str("invalid aggregate output name"),
             Self::DuplicateName => f.write_str("aggregate output names must be unique"),
             Self::UnknownOutputColumn { column } => {
-                write!(f, "unknown aggregate output column {column:?}")
+                write!(f, "unknown aggregate output column: {column}")
             }
             Self::TooManyFilters { limit, observed } => write!(
                 f,
                 "aggregate has {observed} HAVING predicates, limit {limit}"
             ),
             Self::DuplicateOrder { column } => {
-                write!(f, "aggregate ORDER BY repeats column {column:?}")
+                write!(f, "aggregate ORDER BY repeats {column}")
+            }
+            Self::RequiresOutputProjection => {
+                f.write_str("projected aggregate ordering requires an output projection")
+            }
+            Self::UnknownProjectedOrderColumn { column } => {
+                write!(f, "unknown projected aggregate ORDER BY column {column}")
+            }
+            Self::DuplicateProjectedOrder { column } => {
+                write!(f, "projected aggregate ORDER BY repeats column {column}")
             }
             Self::InputProjection(error) | Self::OutputProjection(error) => error.fmt(f),
+            Self::InputRows(error) => error.fmt(f),
         }
     }
 }
@@ -243,6 +266,8 @@ pub enum GraphAggregateError<E> {
     MultiplicityUnavailable,
     /// A physical path violated its ascending, contiguous root-group contract.
     NonMonotonicGroups,
+    /// A private partition row, state or key did not match its checked reducer.
+    InvalidReductionInput,
 }
 
 impl<E> GraphAggregateError<E> {
@@ -269,6 +294,7 @@ impl<E> GraphAggregateError<E> {
             Self::ResultCountOverflow => GraphAggregateError::ResultCountOverflow,
             Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
             Self::NonMonotonicGroups => GraphAggregateError::NonMonotonicGroups,
+            Self::InvalidReductionInput => GraphAggregateError::InvalidReductionInput,
         }
     }
 }
@@ -279,11 +305,11 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             Self::InputRelation(error) => write!(f, "aggregate input relation: {error}"),
             Self::NonIntegerSum { aggregate } => write!(
                 f,
-                "SUM_INT aggregate {aggregate} requires integer or null input"
+                "SUM aggregate {aggregate} requires integer, float or null input"
             ),
             Self::NonIntegerAverage { aggregate } => write!(
                 f,
-                "AVG_INT aggregate {aggregate} requires integer or null input"
+                "AVG aggregate {aggregate} requires integer, float or null input"
             ),
             Self::ArithmeticOverflow { aggregate } => write!(
                 f,
@@ -305,6 +331,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             }
             Self::NonMonotonicGroups => {
                 f.write_str("aggregate input violated its root-group ordering contract")
+            }
+            Self::InvalidReductionInput => {
+                f.write_str("aggregate partition input does not match its checked definition")
             }
         }
     }
@@ -434,13 +463,67 @@ struct KeyProjection {
     names: Box<[String]>,
 }
 
+/// The native graph owner always retains a real input. The private owned-row
+/// reducer below explicitly has no graph source and never exposes graph
+/// execution, input accessors or source certificates.
+#[derive(Clone, PartialEq, Eq)]
+struct AggregateInput(Option<PreparedGraphPattern<GraphValueRow>>);
+
+impl core::ops::Deref for AggregateInput {
+    type Target = PreparedGraphPattern<GraphValueRow>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("a graph aggregate owner always has its admitted source")
+    }
+}
+
+/// A source-independent owner for the same native accumulator/result engine.
+/// Only a complete, schema-checked occurrence bag may enter this private seam.
+/// It cannot be converted to a public graph aggregate or execute a source.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OwnedRowAggregate {
+    definition: PreparedGraphAggregate,
+}
+
+impl OwnedRowAggregate {
+    pub(crate) fn prepare(
+        columns: &[String],
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        Ok(Self {
+            definition: PreparedGraphAggregate::prepare_row_columns(
+                columns, keys, aggregates, 0, None,
+            )?,
+        })
+    }
+
+    pub(crate) fn summarize<E, C>(
+        &self,
+        rows: &[GraphValueRow],
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.definition.summarize_projected_rows(rows, control)
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:owned-row-group:v1\0".to_vec();
+        self.definition.append_grouping_transcript(&mut bytes);
+        bytes
+    }
+}
+
 /// Logical GroupAggregate over an immutable child. Ordinary ALL patterns stream
 /// directly; computed input and explicit single-source relational pipelines own
 /// bounded rows before grouping. A pipeline's existing pages remain input
 /// boundaries; offset/count here apply separately to the group output.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphAggregate {
-    input: PreparedGraphPattern<GraphValueRow>,
+    input: AggregateInput,
     computed_input: Option<Vec<crate::GraphSetProjection>>,
     relational_input: Option<crate::PreparedGraphSet>,
     keys: Vec<usize>,
@@ -457,6 +540,9 @@ pub struct PreparedGraphAggregate {
     having: Vec<GraphAggregateFilter>,
     having_expression: Option<GraphHavingExpression>,
     ordering: Vec<GraphAggregateOrder>,
+    // Positions in output_projection, never in the evaluation group schema.
+    // The two ordering setters make these mutually exclusive with ordering.
+    projected_ordering: Vec<crate::algebra::GraphValueOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -492,6 +578,28 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
+        // A plain graph aggregate reads its input only through the projected
+        // columns, so a named relationship none of them reads need not be
+        // captured (fgdb-61p1n): the definition is its unnamed spelling's.
+        // Only counts and extrema take that definition. Their answers do not
+        // depend on the order occurrences arrive in, which an identified and
+        // an unidentified plan need not share; COLLECT and the sums keep
+        // every capture.
+        let order_free = aggregates.iter().all(|aggregate| {
+            matches!(
+                aggregate.function,
+                GraphAggregateFunction::CountRows
+                    | GraphAggregateFunction::Count
+                    | GraphAggregateFunction::CountDistinct
+                    | GraphAggregateFunction::Min
+                    | GraphAggregateFunction::Max
+            )
+        });
+        let input = if order_free && computed_input.is_none() && relational_input.is_none() {
+            input.without_unread_captures()
+        } else {
+            input
+        };
         if relational_input.is_none()
             && (!input.preserves_duplicates()
                 || !matches!(
@@ -504,16 +612,7 @@ impl PreparedGraphAggregate {
         {
             return Err(GraphAggregateBuildError::RequiresUnpaginatedAll);
         }
-        if aggregates.is_empty() {
-            return Err(GraphAggregateBuildError::EmptyAggregates);
-        }
-        let width = keys.len().saturating_add(aggregates.len());
-        if width > MAX_PATTERN_VERTICES {
-            return Err(GraphAggregateBuildError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES,
-                observed: width,
-            });
-        }
+        Self::admit_group_width(keys.len(), aggregates.len())?;
         let projected_columns = computed_input
             .as_deref()
             .map(|projection| computed::projected_schema(&input, projection))
@@ -523,6 +622,38 @@ impl PreparedGraphAggregate {
             .map(crate::PreparedGraphSet::columns)
             .or(projected_columns.as_deref())
             .unwrap_or(input.columns());
+        let mut definition = Self::prepare_row_columns(columns, keys, aggregates, offset, count)?;
+        definition.input = AggregateInput(Some(input));
+        definition.computed_input = computed_input;
+        definition.relational_input = relational_input;
+        Ok(definition)
+    }
+
+    fn admit_group_width(keys: usize, aggregates: usize) -> Result<(), GraphAggregateBuildError> {
+        if aggregates == 0 {
+            return Err(GraphAggregateBuildError::EmptyAggregates);
+        }
+        let width = keys.saturating_add(aggregates);
+        if width > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: width,
+            });
+        }
+        Ok(())
+    }
+
+    /// Shared column/key/function admission. An absent source is private to
+    /// OwnedRowAggregate; public constructors install their actual source
+    /// before returning the prepared definition.
+    fn prepare_row_columns(
+        columns: &[String],
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+        offset: u64,
+        count: Option<u64>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        Self::admit_group_width(keys.len(), aggregates.len())?;
         let mut names = BTreeSet::new();
         for (at, column) in keys.iter().enumerate() {
             let name = columns
@@ -539,14 +670,7 @@ impl PreparedGraphAggregate {
             {
                 return Err(GraphAggregateBuildError::UnknownColumn { column });
             }
-            let name = aggregate.name.as_bytes();
-            if name.is_empty()
-                || name.len() > MAX_PATTERN_NAME_BYTES
-                || !(name[0].is_ascii_alphabetic() || name[0] == b'_')
-                || !name
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
+            if !crate::algebra::valid_column_name(aggregate.name) {
                 return Err(GraphAggregateBuildError::InvalidName);
             }
             if !names.insert(aggregate.name) {
@@ -567,9 +691,9 @@ impl PreparedGraphAggregate {
             })
             .collect();
         Ok(Self {
-            input,
-            computed_input,
-            relational_input,
+            input: AggregateInput(None),
+            computed_input: None,
+            relational_input: None,
             keys: keys.to_vec(),
             aggregates,
             key_names,
@@ -584,6 +708,7 @@ impl PreparedGraphAggregate {
             having: Vec::new(),
             having_expression: None,
             ordering: Vec::new(),
+            projected_ordering: Vec::new(),
         })
     }
 
@@ -593,6 +718,16 @@ impl PreparedGraphAggregate {
     #[must_use]
     pub fn input_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.input
+    }
+    /// Whether execute_governed answers this definition exactly from
+    /// `(source, relation, target)` topology although its plan requires
+    /// identified edges: a clause-complete DIFFERENT EDGES count (fgdb-ujaad)
+    /// or a support-only quantified reach (fgdb-20vwx). Hosts that route on
+    /// `requires_identified_edges` use this to keep such definitions on the
+    /// binding visitor instead of materializing every pattern row.
+    #[must_use]
+    pub fn answers_identified_edges_from_topology(&self) -> bool {
+        self.input.plan().requires_identified_edges() && weighted::answers_identified_exactly(self)
     }
     #[must_use]
     pub fn key_columns(&self) -> &[String] {
@@ -734,6 +869,44 @@ impl PreparedGraphAggregate {
         Ok(self)
     }
 
+    /// Name grouping keys by the RETURN aliases that show them (fgdb-cxjqp).
+    /// Each pair renames evaluation key `at`; every other key keeps its input
+    /// column's name. Only names change, never which cells group, evaluate,
+    /// order or appear, and names are not part of the canonical bytes. So an
+    /// aliased key reports the name its result column has, as a hidden-free
+    /// graph aggregate already does. An alias may not repeat or name a summary.
+    pub fn with_key_aliases(
+        mut self,
+        aliases: &[(usize, String)],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        for (index, (at, alias)) in aliases.iter().enumerate() {
+            if *at >= self.keys.len() {
+                return Err(GraphAggregateBuildError::UnknownOutputColumn {
+                    column: GraphAggregateColumn::GroupKey(*at),
+                });
+            }
+            if !crate::algebra::valid_column_name(alias) {
+                return Err(GraphAggregateBuildError::InvalidName);
+            }
+            if aliases[..index]
+                .iter()
+                .any(|(earlier, name)| earlier == at || name == alias)
+                || self.aggregate_names.contains(alias)
+            {
+                return Err(GraphAggregateBuildError::DuplicateName);
+            }
+        }
+        for (at, alias) in aliases {
+            self.key_names[*at] = alias.clone();
+        }
+        if let Some(projection) = &mut self.key_output {
+            projection.names = (projection.columns.iter())
+                .map(|column| self.key_names[*column].clone())
+                .collect();
+        }
+        Ok(self)
+    }
+
     /// Select DISTINCT over the visible keys and aggregate prefix. Filtering
     /// and complete group ordering precede duplicate elimination; pagination
     /// follows it. Equal output tuples retain their first ranked group, even
@@ -775,29 +948,7 @@ impl PreparedGraphAggregate {
         let child = self.input.canonical_bytes();
         bytes.extend_from_slice(&(child.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&child);
-        bytes.extend_from_slice(&(self.keys.len() as u64).to_be_bytes());
-        for column in &self.keys {
-            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
-        }
-        bytes.extend_from_slice(&(self.aggregates.len() as u64).to_be_bytes());
-        for aggregate in &self.aggregates {
-            bytes.push(match aggregate.function {
-                GraphAggregateFunction::CountRows => 0,
-                GraphAggregateFunction::Count => 1,
-                GraphAggregateFunction::CountDistinct => 2,
-                GraphAggregateFunction::SumInt => 3,
-                GraphAggregateFunction::Min => 4,
-                GraphAggregateFunction::Max => 5,
-                GraphAggregateFunction::SumIntDistinct => 6,
-                GraphAggregateFunction::AverageInt => 7,
-                GraphAggregateFunction::AverageIntDistinct => 8,
-                GraphAggregateFunction::Collect => 9,
-                GraphAggregateFunction::CollectDistinct => 10,
-            });
-            if let Some(column) = aggregate.column {
-                bytes.extend_from_slice(&(column as u64).to_be_bytes());
-            }
-        }
+        self.append_grouping_transcript(&mut bytes);
         bytes.extend_from_slice(&self.offset.to_be_bytes());
         bytes.push(u8::from(self.count.is_some()));
         if let Some(count) = self.count {
@@ -830,6 +981,17 @@ impl PreparedGraphAggregate {
                 expression.value().append_canonical_bytes(&mut bytes);
             }
         }
+        if !self.projected_ordering.is_empty() {
+            // Only the new result-order profile extends the transcript.
+            // Projection expressions above retain their exact numeric domains.
+            bytes.extend_from_slice(b"fgdb:aggregate-projected-order:v1\0");
+            bytes.extend_from_slice(&(self.projected_ordering.len() as u64).to_be_bytes());
+            for order in &self.projected_ordering {
+                bytes.extend_from_slice(&(order.column as u64).to_be_bytes());
+                bytes.push(u8::from(order.descending));
+                bytes.push(u8::from(order.nulls_first));
+            }
+        }
         self.append_input_projection(&mut bytes);
         if let Some(input) = &self.relational_input {
             bytes.extend_from_slice(b"fgdb:aggregate-relational-input:v1\0");
@@ -838,6 +1000,33 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(&relation);
         }
         bytes
+    }
+
+    fn append_grouping_transcript(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&(self.keys.len() as u64).to_be_bytes());
+        for column in &self.keys {
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+        }
+        bytes.extend_from_slice(&(self.aggregates.len() as u64).to_be_bytes());
+        for aggregate in &self.aggregates {
+            bytes.push(match aggregate.function {
+                GraphAggregateFunction::CountRows => 0,
+                GraphAggregateFunction::Count => 1,
+                GraphAggregateFunction::CountDistinct => 2,
+                GraphAggregateFunction::SumInt => 3,
+                // Tags 4/5 denoted canonical storage-order extrema.
+                GraphAggregateFunction::Min => 11,
+                GraphAggregateFunction::Max => 12,
+                GraphAggregateFunction::SumIntDistinct => 6,
+                GraphAggregateFunction::AverageInt => 7,
+                GraphAggregateFunction::AverageIntDistinct => 8,
+                GraphAggregateFunction::Collect => 9,
+                GraphAggregateFunction::CollectDistinct => 10,
+            });
+            if let Some(column) = aggregate.column {
+                bytes.extend_from_slice(&(column as u64).to_be_bytes());
+            }
+        }
     }
 
     /// Evaluate an already admitted source under one policy. Storage callers
@@ -865,13 +1054,145 @@ impl PreparedGraphAggregate {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
-        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
-        mut checkpoint: impl FnMut() -> Result<(), C>,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
-        if self.input.plan().requires_identified_edges() {
+        type NoTest<E> = fn(u32, &[VertexPredicate]) -> Result<bool, E>;
+        self.execute_input(
+            snapshot_records,
+            vertices,
+            edges,
+            None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
+            test_vertex,
+            property,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Execute the ordinary binding stream with stored-property reads for
+    /// element values in aggregate output expressions. `elements` must use the
+    /// same pinned cut and visibility scope as the input readers, including for
+    /// an element supplied as a parameter or literal outside the matched rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_reads<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        type NoTest<E> = fn(u32, &[VertexPredicate]) -> Result<bool, E>;
+        self.execute_input(
+            snapshot_records,
+            vertices,
+            edges,
+            None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
+            test_vertex,
+            property,
+            &mut |element, key| Some(elements(element, key)),
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// [`Self::execute_governed`] over a positioned graph: its vertices,
+    /// and its edges as identity triples in arrival order, with the same
+    /// value, statistics and refusals. `test_at` is `test_vertex` for the
+    /// vertex at a position. Every reader must be pure (the same answer for
+    /// the same input, with no effect), so a visitor that keeps per-vertex
+    /// state by position may skip a read that only repeats one it made;
+    /// every event is still charged as the identity-keyed visitor charges it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_positioned<'a, T, E, C>(
+        &self,
+        snapshot_records: u64,
+        graph: &PositionedGraph<'_, T>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_input(
+            snapshot_records,
+            graph.vertices(),
+            graph.triples(),
+            Some((graph, test_at)),
+            test_vertex,
+            property,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// The positioned binding visitor with the same pinned element reader as
+    /// [`Self::execute_governed_with_element_reads`]. Input order, multiplicity
+    /// and the positioned visitor's resource transcript remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_positioned_with_element_reads<'a, T, E, C>(
+        &self,
+        snapshot_records: u64,
+        graph: &PositionedGraph<'_, T>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_input(
+            snapshot_records,
+            graph.vertices(),
+            graph.triples(),
+            Some((graph, test_at)),
+            test_vertex,
+            property,
+            &mut |element, key| Some(elements(element, key)),
+            policy,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_input<'a, T, A, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        positioned: Option<(&PositionedGraph<'_, T>, A)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    where
+        A: FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
+    {
+        if self.input.plan().projects_property_maps() {
+            checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        if self.input.plan().requires_identified_edges()
+            && !weighted::answers_identified_exactly(self)
+        {
             return Err(GqlQueryError::IdentifiedEdgesRequired);
         }
         if self.relational_input.is_some() {
@@ -881,8 +1202,9 @@ impl PreparedGraphAggregate {
                 edges,
                 test_vertex,
                 property,
+                elements,
                 policy,
-                checkpoint,
+                || checkpoint.unit(),
             );
         }
         if self.computed_input.is_some() {
@@ -892,44 +1214,43 @@ impl PreparedGraphAggregate {
                 edges,
                 test_vertex,
                 property,
+                elements,
                 policy,
-                checkpoint,
+                || checkpoint.unit(),
             );
         }
-        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
         policy
             .rows
             .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
-        let mut rows = GqlExecutionStats {
-            snapshot_records,
-            result_rows: 0,
-        };
-        let mut evaluator = GlaExecutionStats::default();
-        let mut control = |event| {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if event == GlaExecutionEvent::ResultRow {
-                let next = rows.result_rows + 1;
-                policy
-                    .rows
-                    .check(GqlBudgetDimension::ResultRows, next)
-                    .map_err(GqlQueryError::Rows)?;
-                rows.result_rows = next;
-            }
-            evaluator
-                .charge_event(policy.evaluator, event)
-                .map_err(GqlQueryError::Evaluator)
-        };
+        // Evaluator runs, for a host that takes them (`Charges`).
+        let mut charges = Charges::new(checkpoint, policy, snapshot_records);
+        let mut control = |event| charges.event(event);
         let mut streaming = result::RootGroups::new(self);
-        let mut groups: BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>> = BTreeMap::new();
+        let mut groups = groups::GroupTable::new(self.keys.len());
         if self.keys.is_empty() {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, &mut control)?);
         }
-        weighted::visit_bindings(
+        // One binding's values and group key, reused by every binding. A
+        // fresh pair of pattern-wide arrays per binding was about 5 KB of
+        // stores each, most of a vertex count's time. A column past the
+        // binding's own is null, as in a fresh array.
+        let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut written = 0;
+        let visited = weighted::visit_bindings(
             self,
             vertices,
             edges,
+            positioned.map(|(graph, mut test_at)| weighted::Positioned {
+                graph,
+                test_at: move |at, predicates: &[VertexPredicate]| {
+                    test_at(at, predicates)
+                        .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
+                },
+            }),
             |vid, predicates| {
                 test_vertex(vid, predicates)
                     .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
@@ -940,7 +1261,8 @@ impl PreparedGraphAggregate {
             },
             &mut control,
             |columns, bindings, property, control, multiplicity| {
-                let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+                values[columns.len()..written.max(columns.len())].fill(ValueRef::Scalar(&NULL));
+                written = columns.len();
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     values[at] = match column {
@@ -951,12 +1273,20 @@ impl PreparedGraphAggregate {
                                 Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
+                            // Group keys borrow the source; a stored List or
+                            // Map refuses here rather than read as NULL
+                            // (fgdb-k3nub).
+                            let value = crate::integer_expression::stored_scalar(value)
+                                .map_err(GqlQueryError::from)?;
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
                         ValueProjection::Path { .. }
                         | ValueProjection::EdgeProperty { .. }
+                        | ValueProjection::Properties { .. }
+                        | ValueProjection::EdgeProperties { .. }
                         | ValueProjection::Labels { .. }
-                        | ValueProjection::Type { .. } => {
+                        | ValueProjection::Type { .. }
+                        | ValueProjection::Collected { .. } => {
                             return Err(GqlQueryError::IdentifiedEdgesRequired);
                         }
                     };
@@ -967,39 +1297,48 @@ impl PreparedGraphAggregate {
                 if let Some(streaming) = &mut streaming {
                     return streaming.push(&values[..columns.len()], multiplicity, control);
                 }
-                let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in self.keys.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     key[at] = values[*column];
                 }
                 let key = &key[..self.keys.len()];
                 control(GlaExecutionEvent::Work)?;
-                if !groups.contains_key(key) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    let mut owned_key = Vec::new();
-                    for value in key {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        owned_key.push(*value);
-                    }
-                    let state = new_group(&self.aggregates, control)?;
-                    groups.insert(owned_key, state);
+                // One probe for an existing group, two for a new one (it was
+                // three tree descents), with the same events in the same order.
+                if let Some(state) = groups.get_mut(key) {
+                    return update_group(&self.aggregates, state, &values, multiplicity, control);
                 }
-                let state = groups
-                    .get_mut(key)
-                    .expect("the admitted group was initialized");
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let mut owned_key = Vec::new();
+                for value in key {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    owned_key.push(*value);
+                }
+                let state = new_group(&self.aggregates, control)?;
+                let state = groups.insert(owned_key, state);
                 update_group(&self.aggregates, state, &values, multiplicity, control)
             },
-        )?;
-        let value = match streaming {
-            Some(streaming) => streaming.finish(&mut control)?,
-            None => self.finish_groups(&groups, &mut control)?,
-        };
-        // Even empty and zero-count outputs observe a terminal checkpoint.
-        control(GlaExecutionEvent::Work)?;
+        );
+        let finished = visited.and_then(|()| {
+            let value = match streaming {
+                Some(streaming) => streaming.finish(&mut control)?,
+                None => {
+                    self.finish_groups_with_elements(&groups.into_tree(), elements, &mut control)?
+                }
+            };
+            // Even empty and zero-count outputs observe a terminal checkpoint.
+            control(GlaExecutionEvent::Work)?;
+            Ok(value)
+        });
+        // A run's units are charged before the outcome is judged; a host
+        // refusal among them is the one per-event charging met first. A
+        // settled or refused run leaves none, so a host that has refused is
+        // not called again.
+        charges.settle()?;
         Ok(GqlQueryExecution {
-            value,
-            rows,
-            evaluator,
+            value: finished?,
+            rows: charges.rows,
+            evaluator: charges.evaluator,
         })
     }
 }
@@ -1022,7 +1361,21 @@ enum ValueRef<'a> {
         values: &'a [GraphValue],
     },
 }
-impl ValueRef<'_> {
+impl<'a> ValueRef<'a> {
+    fn orderability_value(self) -> crate::algebra::ValueRef<'a> {
+        use crate::algebra::ValueRef as Value;
+        match self {
+            Self::Scalar(value) => Value::Scalar(value),
+            Self::Vertex(value) => Value::Vertex(value),
+            Self::Edge(value) => Value::Edge(value),
+            Self::Path(value) => Value::Path(value),
+            Self::Vertices(value) => Value::Vertices(value),
+            Self::Edges(value) => Value::Edges(value),
+            Self::List(value) => Value::List(value),
+            Self::Map { keys, values } => Value::Map { keys, values },
+        }
+    }
+
     fn is_null(self) -> bool {
         matches!(self, Self::Scalar(CanonicalScalar::Null))
     }
@@ -1245,10 +1598,25 @@ fn update<'a, E, C>(
                     GraphAggregateError::MultiplicityUnavailable,
                 ));
             }
-            let Some(ValueRef::Scalar(CanonicalScalar::Int(value))) = value else {
-                return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
-                    aggregate,
-                }));
+            let value = match value {
+                Some(ValueRef::Scalar(CanonicalScalar::Int(value))) => value,
+                Some(ValueRef::Scalar(CanonicalScalar::Float(_))) => {
+                    // The first binary64 input moves this SUM to the exact
+                    // numeric state; its integer prefix carries over exactly.
+                    let mut exact = numeric::NumericAccumulator::continue_sum(*sum, *present);
+                    exact.update(
+                        value.expect("a binary64 input is present"),
+                        aggregate,
+                        control,
+                    )?;
+                    *state = Accumulator::Numeric(exact);
+                    return Ok(());
+                }
+                _ => {
+                    return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+                        aggregate,
+                    }));
+                }
             };
             *sum = sum.checked_add(i128::from(*value)).ok_or_else(overflow)?;
             *present = true;
@@ -1269,13 +1637,21 @@ fn update<'a, E, C>(
         }
         Accumulator::Extreme(current) => {
             let value = value.expect("non-count argument was checked");
-            if current.is_none_or(|old| {
-                if function == GraphAggregateFunction::Min {
-                    value < old
-                } else {
-                    value > old
+            let replace = match *current {
+                None => true,
+                Some(old) => {
+                    let order = value
+                        .orderability_value()
+                        .cmp_orderability_with_control(old.orderability_value(), control)?
+                        .then_with(|| value.cmp(&old));
+                    if function == GraphAggregateFunction::Min {
+                        order.is_lt()
+                    } else {
+                        order.is_gt()
+                    }
                 }
-            }) {
+            };
+            if replace {
                 *current = Some(value);
             }
         }

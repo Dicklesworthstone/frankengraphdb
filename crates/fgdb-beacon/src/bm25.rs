@@ -6,6 +6,12 @@ use fgdb_types::VId;
 use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
 
+#[path = "bm25/boolean.rs"]
+pub(crate) mod boolean;
+
+#[path = "bm25/conjunction.rs"]
+mod conjunction;
+
 #[path = "bm25/fuzzy.rs"]
 mod fuzzy;
 
@@ -345,10 +351,10 @@ impl TextSegment {
         Ok(segment)
     }
 
-    /// Document-at-a-time merge: auxiliary merge memory is O(unique terms + k),
-    /// not O(matching documents); the analyzed query also retains its bounded
-    /// token offsets. Only eligible postings contribute to the bounded heap,
-    /// and each document's terms are accumulated in lexical term order.
+    /// Any matches merge posting unions; All and Phrase seek intersections.
+    /// Auxiliary merge memory is O(unique terms + k), not O(matching documents);
+    /// the analyzed query also retains its bounded token offsets. Only eligible
+    /// postings contribute to the heap, with scores accumulated in lexical order.
     /// Phrase admission precedes top-k, so non-phrase hits cannot hide a lower
     /// scoring phrase. Position checks happen only for the selected generation.
     // Each argument is an independent input to one retrieval call; a struct
@@ -365,24 +371,31 @@ impl TextSegment {
         best: &mut BinaryHeap<Ranked>,
         work: &mut dyn WorkControl,
     ) -> Result<(), BeaconError> {
-        if let TextMatch::Fuzzy {
-            distance,
-            require_all,
-            max_expansions,
-        } = mode
-        {
-            return self.search_fuzzy_into(
-                query,
+        match mode {
+            TextMatch::Fuzzy {
                 distance,
                 require_all,
                 max_expansions,
-                config,
-                corpus,
-                limit,
-                eligible,
-                best,
-                work,
-            );
+            } => {
+                return self.search_fuzzy_into(
+                    query,
+                    distance,
+                    require_all,
+                    max_expansions,
+                    config,
+                    corpus,
+                    limit,
+                    eligible,
+                    best,
+                    work,
+                );
+            }
+            TextMatch::All | TextMatch::Phrase => {
+                return self.search_conjunction_into(
+                    query, mode, config, corpus, limit, eligible, best, work,
+                );
+            }
+            TextMatch::Any => {}
         }
         let terms = &query.frequencies;
         if limit == 0 || terms.is_empty() || corpus.documents == 0 || corpus.total_length == 0 {
@@ -400,21 +413,10 @@ impl TextSegment {
                     let idf = ((corpus.documents - df) as f64 + 0.5) / (df as f64 + 0.5);
                     streams.push((idf.ln_1p(), postings.iter().peekable()));
                 }
-                _ if mode != TextMatch::Any => return Ok(()),
                 _ => {}
             }
         }
         let average_length = corpus.total_length as f64 / corpus.documents as f64;
-        let mut positions = Vec::new();
-        if mode == TextMatch::Phrase {
-            work.charge(terms.len())?;
-            positions
-                .try_reserve_exact(terms.len())
-                .map_err(|_| BeaconError::ResourceLimit {
-                    resource: "phrase posting references",
-                    limit: terms.len(),
-                })?;
-        }
         loop {
             work.charge(streams.len().saturating_add(1))?;
             let Some(id) = streams
@@ -430,29 +432,20 @@ impl TextSegment {
                 .get(&id)
                 .ok_or(BeaconError::Invariant("posting has no document length"))?;
             let length_norm = 1.0 - config.b + config.b * length as f64 / average_length;
-            let mut matches = 0;
             let mut score = 0.0;
-            positions.clear();
             for (idf, stream) in &mut streams {
                 if stream.peek().is_some_and(|(next, _)| **next == id) {
                     let (_, posting) = stream
                         .next()
                         .ok_or(BeaconError::Invariant("posting cursor disappeared"))?;
-                    matches += 1;
                     if visible {
                         // Analysis limits each frequency to u32::MAX, exactly
                         // representable in f64 as in the count-only kernel.
                         score += *idf * saturation(config.k1, length_norm, posting.len() as f64);
-                        if mode == TextMatch::Phrase {
-                            positions.push(posting.as_slice());
-                        }
                     }
                 }
             }
-            if visible && (mode == TextMatch::Any || matches == terms.len()) {
-                if mode == TextMatch::Phrase && !phrase_matches(query, &positions, length, work)? {
-                    continue;
-                }
+            if visible {
                 if !score.is_finite() {
                     return Err(BeaconError::Invariant("non-finite BM25 score"));
                 }

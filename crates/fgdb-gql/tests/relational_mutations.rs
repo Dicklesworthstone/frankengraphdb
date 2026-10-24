@@ -9,8 +9,13 @@ use fgdb_gql::{
     GraphSetOperation, GraphSetQuantifier, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_DEPTH,
     PreparedGraphMutation, PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
+
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -50,6 +55,11 @@ fn execute<C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>> {
     let checkpoint = std::cell::RefCell::new(&mut checkpoint);
+    let stored: Vec<_> = values
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     mutation.execute_governed(
         policy,
         |pattern, remaining| {
@@ -60,7 +70,7 @@ fn execute<C>(
                 |_, _| Ok::<_, ()>(true),
                 |vid, key| {
                     Ok(if key == P {
-                        values.get(vid.0 as usize)
+                        stored.get(vid.0 as usize)
                     } else {
                         None
                     })
@@ -102,12 +112,12 @@ fn ranked_computed_columns_are_the_actual_assignment_schema() {
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: Q,
-                value: Some(CanonicalScalar::Int(8))
+                value: stored(CanonicalScalar::Int(8))
             },
             GraphMutationIntent::Property {
                 vertex: VId(3),
                 key: Q,
-                value: Some(CanonicalScalar::Int(5))
+                value: stored(CanonicalScalar::Int(5))
             },
         ]
     );
@@ -149,7 +159,7 @@ fn generated_filter_rank_pages_match_independent_target_value_oracle() {
                     .map(|(target, value)| GraphMutationIntent::Property {
                         vertex: VId(target as u128),
                         key: Q,
-                        value: Some(CanonicalScalar::Int(value)),
+                        value: stored(CanonicalScalar::Int(value)),
                     })
                     .collect::<Vec<_>>();
                 let scalars = values
@@ -404,6 +414,7 @@ fn ordinary_definition_is_unchanged_and_pipeline_executes_one_real_leaf() {
     assert_eq!(pipeline.selection(), ordinary.selection());
     assert_ne!(pipeline.canonical_bytes(), ordinary.canonical_bytes());
     let values = [CanonicalScalar::Int(7)];
+    let stored = values.clone().map(CanonicalPropertyValue::from);
     assert_eq!(
         run(&ordinary, &values, &[], wide()).intents(),
         run(&pipeline, &values, &[], wide()).intents()
@@ -420,7 +431,7 @@ fn ordinary_definition_is_unchanged_and_pipeline_executes_one_real_leaf() {
                     [VId(0)],
                     [],
                     |_, _| Ok::<_, ()>(true),
-                    |_, _| Ok(Some(&values[0])),
+                    |_, _| Ok(Some(&stored[0])),
                     remaining,
                     || Ok::<_, ()>(()),
                 )

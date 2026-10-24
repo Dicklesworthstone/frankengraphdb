@@ -1,15 +1,18 @@
 //! Exact means and DISTINCT sums compose with canonical database sources.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, EdgeRecord, MemVfs, VertexRow, WriteBatch, WriteError, WriteTxnError,
+    Database, DatabaseKeys, EdgeRecord, MemVfs, QueryResult, QueryValue, VertexRow, WriteBatch,
+    WriteError, WriteTxnError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateRow, GraphSymbol, GraphSymbolKind,
-    PreparedGraphAggregate, PreparedGraphAggregateText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateRow, GraphExactAverage,
+    GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq,
+    DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -97,7 +100,7 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Plain> {
                 .iter()
                 .find(|row| row.vid == edge.entry.dst)
                 .unwrap();
-            if let Some((_, CanonicalScalar::Int(value))) =
+            if let Some((_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))) =
                 destination.props.iter().find(|(key, _)| *key == P)
             {
                 values.push(*value);
@@ -364,6 +367,109 @@ fn exact_average_database_policies_share_source_and_result_allowances() {
                     .is_err()
             );
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-y255t, owner ruling option C: only a final RETURN avg(...) cell is
+/// the exact average. Arithmetic reads the binary64 nearest it, rounded
+/// once, and a WITH alias carries that binary64, as openCypher's avg is a
+/// Float. A comparison on the aggregate itself still compares the exact
+/// fraction: 7/3 is below 2.3333333333333335, the binary64 nearest it,
+/// which the WITH alias equals. Every expected Float is an IEEE operation on
+/// exactly representable values.
+#[test]
+fn an_average_is_exact_only_as_a_final_return_cell() {
+    let ((), report) = run_async_under_lab(0xa6e0_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, value) in [(1, 1), (2, 3), (3, 3)] {
+            batch.create_vertex(VId(id), vec![OWNER], vec![(P, CanonicalScalar::Int(value))]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let age = GqlParameters::new().with_int64("age", 12).unwrap();
+        let mean = 7.0 / 3.0;
+        let float = |value: f64| {
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                CanonicalF64::new(value),
+            )))
+        };
+        let truth =
+            |value: bool| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)));
+        for (text, expected) in [
+            (
+                "MATCH (n:Owner) RETURN avg(n.p) AS a",
+                QueryValue::Average(GraphExactAverage::new(7, 3).unwrap()),
+            ),
+            (
+                "MATCH (n:Owner) RETURN avg(n.p) * 2 AS a",
+                float(mean * 2.0),
+            ),
+            (
+                "MATCH (n:Owner) RETURN avg(n.p) + 0.5 AS a",
+                float(mean + 0.5),
+            ),
+            ("MATCH (n:Owner) RETURN -avg(n.p) AS a", float(-mean)),
+            (
+                "MATCH (n:Owner) RETURN avg(n.p) - avg(n.p) AS a",
+                float(0.0),
+            ),
+            // TCK With6 [5]: `$age + avg(person.age) - 1000`.
+            (
+                "MATCH (n:Owner) RETURN $age + avg(n.p) - 1000 AS a",
+                float(12.0 + mean - 1000.0),
+            ),
+            (
+                "MATCH (n:Owner) WITH $age + avg(n.p) - 1000 AS agg RETURN agg",
+                float(12.0 + mean - 1000.0),
+            ),
+            ("MATCH (n:Owner) WITH avg(n.p) AS a RETURN a", float(mean)),
+            (
+                "MATCH (n:Owner) WITH avg(n.p) AS a WHERE a > 2 RETURN a",
+                float(mean),
+            ),
+            (
+                "MATCH (n:Owner) RETURN avg(n.p) < 2.3333333333333335 AS below",
+                truth(true),
+            ),
+            (
+                "MATCH (n:Owner) WITH avg(n.p) AS a RETURN a < 2.3333333333333335 AS below",
+                truth(false),
+            ),
+            (
+                "MATCH (n:Owner) WITH avg(n.p) AS a RETURN a = 2.3333333333333335 AS rounded",
+                truth(true),
+            ),
+        ] {
+            let params = if text.contains("$age") {
+                age.clone()
+            } else {
+                GqlParameters::new()
+            };
+            let QueryResult::Rows { rows, .. } = db
+                .query(&cx, text, &params, symbols, wide())
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            else {
+                panic!("{text}: not a read");
+            };
+            assert_eq!(rows, vec![vec![expected]], "{text}");
+        }
+        let QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "MATCH (n:Owner) WITH avg(n.p) AS a WHERE a > 3 RETURN a",
+                &GqlParameters::new(),
+                symbols,
+                wide(),
+            )
+            .unwrap()
+        else {
+            panic!("not a read");
+        };
+        assert!(rows.is_empty());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

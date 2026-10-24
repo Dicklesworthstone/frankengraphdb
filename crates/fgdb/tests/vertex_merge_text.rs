@@ -115,8 +115,11 @@ fn native_merge_matches_then_creates_then_matches_created_vertex() {
         assert_eq!(
             created.props,
             vec![
-                (P, CanonicalScalar::Int(9)),
-                (NAME, CanonicalScalar::ucs_basic_text("Grace").unwrap()),
+                (P, CanonicalScalar::Int(9).into()),
+                (
+                    NAME,
+                    CanonicalScalar::ucs_basic_text("Grace").unwrap().into()
+                ),
             ]
         );
 

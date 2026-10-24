@@ -310,7 +310,7 @@ fn any_selected_ingestion_creates_per_pair_and_late_refusal_restores_outer_work(
         for vertex in [VId(201), VId(202)] {
             assert_eq!(
                 db.vertex(vertex).unwrap().unwrap().props,
-                vec![(Q, CanonicalScalar::Int(7))]
+                vec![(Q, CanonicalScalar::Int(7).into())]
             );
         }
         assert!(db.vertex(VId(99)).unwrap().is_some());
@@ -360,7 +360,7 @@ fn database_any_search_coalesces_parallel_cycles_at_the_maximum_hop_bound() {
         let frontier = db.frontier().unwrap();
         let prepare = |selector| {
             PreparedGraphText::prepare(
-                &format!("MATCH {selector} SHORTEST WALK (a)-[:R*1024]->(b) RETURN ALL b"),
+                &format!("MATCH REPEATABLE ELEMENTS {selector} SHORTEST WALK (a)-[:R*1024]->(b) RETURN ALL b"),
                 symbols,
             )
             .unwrap()

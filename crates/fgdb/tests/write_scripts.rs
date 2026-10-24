@@ -110,7 +110,7 @@ fn native_script_creates_then_updates_the_same_graph_and_survives_reopen() {
         );
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(10))]
+            vec![(Q, CanonicalScalar::Int(10).into())]
         );
 
         let (receipt, completion) = db
@@ -149,11 +149,11 @@ fn native_script_creates_then_updates_the_same_graph_and_survives_reopen() {
             .unwrap();
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1))]
+            vec![(P, CanonicalScalar::Int(1).into())]
         );
         let edge = db.edge(EId(10)).unwrap().unwrap();
         assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(2)));
-        assert_eq!(edge.props, vec![(Q, CanonicalScalar::Int(20))]);
+        assert_eq!(edge.props, vec![(Q, CanonicalScalar::Int(20).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -283,11 +283,11 @@ fn parameter_batch_ingests_shared_vertices_and_edges_with_one_durable_completion
         );
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(30))]
+            vec![(Q, CanonicalScalar::Int(30).into())]
         );
         assert_eq!(
             db.edge(EId(11)).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(20))]
+            vec![(Q, CanonicalScalar::Int(20).into())]
         );
         assert!(db.vertex(VId(3)).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);

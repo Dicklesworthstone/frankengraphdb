@@ -4,17 +4,20 @@
 //! Whitespace, `//` line comments and `/* ... */` block comments are trivia.
 //! A block comment does not nest: its first `*/` closes it. `'...'` and
 //! `"..."` are text literals and `` `...` `` is a delimited identifier. Each
-//! escapes its own delimiter only by doubling it; a backslash is an ordinary
-//! byte. Decoding affects the operand only, never the surrounding statement.
+//! escapes its own delimiter by doubling it. A text literal also takes the
+//! openCypher and GQL backslash escapes (text_scalar lists them), and its span
+//! ends only at an unescaped delimiter. A delimited identifier has no
+//! backslash escapes. Decoding affects the operand only, never the surrounding
+//! statement.
 
 use super::*;
 use crate::algebra::ScalarPredicate;
 use fgdb_types::CanonicalScalar;
 
-/// Every word the fgdb-gql grammars compare a Word token against. Keywords
-/// are plain Word tokens, so a delimited identifier spelling one would be
-/// read as that keyword; the lexer refuses it instead. The plain spelling of
-/// a non-reserved name (`n.type`) is unaffected.
+/// Every word the fgdb-gql grammars compare a Word token against. A delimited
+/// spelling keeps a distinct token so it can serve as a map key without ever
+/// becoming a clause, literal or function name. Other identifier positions
+/// refuse it explicitly. Plain non-reserved names (`n.type`) are unaffected.
 const KEYWORDS: &[&str] = &[
     "ABS",
     "ACYCLIC",
@@ -23,6 +26,7 @@ const KEYWORDS: &[&str] = &[
     "ANY",
     "AS",
     "ASC",
+    "ASCENDING",
     "AT",
     "AVG",
     "AVG_INT",
@@ -31,6 +35,7 @@ const KEYWORDS: &[&str] = &[
     "BY",
     "CALL",
     "CASE",
+    "CEIL",
     "CHAR_LENGTH",
     "CHEAPEST",
     "COALESCE",
@@ -41,6 +46,7 @@ const KEYWORDS: &[&str] = &[
     "CREATE",
     "DELETE",
     "DESC",
+    "DESCENDING",
     "DETACH",
     "DISTINCT",
     "EDGES",
@@ -51,6 +57,7 @@ const KEYWORDS: &[&str] = &[
     "EXCEPT",
     "EXISTS",
     "FALSE",
+    "FLOOR",
     "FIRST",
     "FOR",
     "FROM",
@@ -63,6 +70,7 @@ const KEYWORDS: &[&str] = &[
     "IS",
     "LABELS",
     "LAST",
+    "LEFT",
     "LENGTH",
     "LIMIT",
     "LOWER",
@@ -84,15 +92,22 @@ const KEYWORDS: &[&str] = &[
     "PATH",
     "PATH_LENGTH",
     "PATHS",
+    "RAND",
     "RELATIONSHIPS",
     "REMOVE",
+    "REPLACE",
     "RETURN",
+    "REVERSE",
+    "RIGHT",
+    "ROUND",
     "SEQ",
     "SET",
     "SHORTEST",
     "SIMPLE",
     "SIZE",
     "SKIP",
+    "SPLIT",
+    "SQRT",
     "STARTNODE",
     "STARTS",
     "SUBSTRING",
@@ -101,6 +116,8 @@ const KEYWORDS: &[&str] = &[
     "SYSTEM_TIME",
     "THEN",
     "TO",
+    "TOBOOLEAN",
+    "TOFLOAT",
     "TOINTEGER",
     "TOLOWER",
     "TOSTRING",
@@ -116,6 +133,7 @@ const KEYWORDS: &[&str] = &[
     "WHEN",
     "WHERE",
     "WITH",
+    "XOR",
     "YIELD",
 ];
 
@@ -139,7 +157,10 @@ pub(crate) fn comment_end(text: &str, at: usize) -> Result<Option<usize>, usize>
 
 /// If a quoted span (`'`, `"` or a backtick) starts at `at`, the offset just
 /// past its closing delimiter. `Err(at)`: the span never closes. The ASCII
-/// delimiters are UTF-8 boundaries even though scanning uses bytes.
+/// delimiters are UTF-8 boundaries even though scanning uses bytes. Inside a
+/// text literal a backslash escapes the next byte, so `'it\'s'` is one span;
+/// text_scalar decides whether the escape is valid. A delimited identifier
+/// has no backslash escapes.
 pub(crate) fn quoted_end(text: &str, at: usize) -> Result<Option<usize>, usize> {
     let bytes = text.as_bytes();
     let Some(&delimiter) = bytes.get(at).filter(|byte| b"'\"`".contains(byte)) else {
@@ -148,6 +169,13 @@ pub(crate) fn quoted_end(text: &str, at: usize) -> Result<Option<usize>, usize> 
     let mut end = at + 1;
     while let Some(&byte) = bytes.get(end) {
         end += 1;
+        if byte == b'\\' && delimiter != b'`' {
+            if end == bytes.len() {
+                break;
+            }
+            end += 1;
+            continue;
+        }
         if byte == delimiter {
             if bytes.get(end) != Some(&delimiter) {
                 return Ok(Some(end));
@@ -197,8 +225,9 @@ impl<'a> Lexer<'a> {
     /// Called after the shared token counter admits one opening delimiter.
     /// A text literal's token is the whole literal, delimiters included, so
     /// text_scalar knows which doubled delimiter to decode. A delimited
-    /// identifier is a Word of its body; Word borrows the statement, so a
-    /// doubled backtick inside one cannot be decoded and is refused.
+    /// identifier borrows its body, so a doubled backtick inside one cannot
+    /// be decoded and is refused. Reserved spellings retain delimiter provenance
+    /// for the map-key parser and remain opaque to every keyword lookahead.
     pub(super) fn quoted(&mut self) -> Result<Token<'a>, GraphPatternTextError> {
         let at = self.at;
         let delimiter = self.text.as_bytes()[at];
@@ -236,10 +265,10 @@ impl<'a> Lexer<'a> {
             .iter()
             .any(|keyword| body.eq_ignore_ascii_case(keyword))
         {
-            return Err(error(
+            return Ok(Token {
+                kind: TokenKind::DelimitedKeyword(body),
                 at,
-                GraphPatternTextErrorKind::Expected("a delimited identifier that is not a keyword"),
-            ));
+            });
         }
         Ok(Token {
             kind: TokenKind::Word(body),
@@ -248,71 +277,208 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Decode one text literal token, delimiters included: a doubled delimiter
-/// is one delimiter character, and nothing else is an escape.
+/// Decode one text literal token, delimiters included. A doubled delimiter
+/// is one delimiter character. A backslash starts an escape, as in openCypher
+/// and ISO GQL: `\\`, `\'`, `\"`, `` \` ``, `\b`, `\f`, `\n`, `\r` and `\t`
+/// (the letters in either case), and `\uXXXX` with exactly four hex digits,
+/// where a surrogate pair names one character. Any other escape refuses, and
+/// so does `\U`: GQL gives it six hex digits and openCypher eight, so either
+/// reading would misread the other's text.
 pub(in crate::graph_text) fn text_scalar(
     raw: &str,
     at: usize,
 ) -> Result<CanonicalScalar, GraphPatternTextError> {
     let refusal = || error(at, GraphPatternTextErrorKind::ScalarLiteral);
-    let (doubled, single) = if raw.starts_with('"') {
-        ("\"\"", '"')
-    } else {
-        ("''", '\'')
-    };
+    let delimiter = if raw.starts_with('"') { '"' } else { '\'' };
     let body = raw
         .len()
         .checked_sub(1)
         .and_then(|end| raw.get(1..end))
         .ok_or_else(refusal)?;
-    if !body.contains(doubled) {
+    if !body.contains(['\\', delimiter]) {
         return CanonicalScalar::ucs_basic_text(body).map_err(|_| refusal());
     }
     let mut decoded = String::new();
     decoded
         .try_reserve_exact(body.len())
         .map_err(|_| refusal())?;
-    let mut parts = body.split(doubled);
-    decoded.push_str(parts.next().unwrap_or_default());
-    for part in parts {
-        decoded.push(single);
-        decoded.push_str(part);
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch == delimiter {
+            // quoted_end closes the span at an undoubled delimiter.
+            if chars.next() != Some(delimiter) {
+                return Err(refusal());
+            }
+            decoded.push(delimiter);
+            continue;
+        }
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let value = match chars.next().ok_or_else(refusal)? {
+            escaped @ ('\\' | '\'' | '"' | '`') => escaped,
+            'b' | 'B' => '\u{8}',
+            'f' | 'F' => '\u{c}',
+            'n' | 'N' => '\n',
+            'r' | 'R' => '\r',
+            't' | 'T' => '\t',
+            'u' => {
+                let unit = hex_unit(&mut chars).ok_or_else(refusal)?;
+                let code = match unit {
+                    0xD800..=0xDBFF => {
+                        if chars.next() != Some('\\') || chars.next() != Some('u') {
+                            return Err(refusal());
+                        }
+                        let low = hex_unit(&mut chars).ok_or_else(refusal)?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return Err(refusal());
+                        }
+                        0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+                    }
+                    0xDC00..=0xDFFF => return Err(refusal()),
+                    _ => unit,
+                };
+                char::from_u32(code).ok_or_else(refusal)?
+            }
+            _ => return Err(refusal()),
+        };
+        decoded.push(value);
     }
     CanonicalScalar::ucs_basic_text(&decoded).map_err(|_| refusal())
 }
 
+/// Exactly four hex digits of a `\u` escape.
+fn hex_unit(chars: &mut core::str::Chars<'_>) -> Option<u32> {
+    let mut unit = 0;
+    for _ in 0..4 {
+        unit = unit * 16 + chars.next()?.to_digit(16)?;
+    }
+    Some(unit)
+}
+
 impl<'a> Parser<'a> {
-    /// `0.5`: a non-negative decimal literal, `digits . digits`, as a Float
-    /// scalar (fgdb-qnqrj), so a Float value (a Prism score, a float
-    /// property) compares with a Float of the same kind. `None` consumes
-    /// nothing. The text is parsed once, to the nearest f64, and must be
-    /// finite. A sign is the ordinary unary operator, and an exponent is not
-    /// accepted here.
+    /// `0.5`, `1e5`, `1.5e-3`: a decimal literal with a fraction, an
+    /// exponent or both, as a Float scalar (fgdb-qnqrj), so a Float value (a
+    /// Prism score, a float property) compares with a Float of the same
+    /// kind. The integer digits may be omitted (`.5`, `.1e9`). The exponent is
+    /// written without spaces (`e5`, `E-3`, `e+10`). A leading `-` makes it
+    /// negative where no unary operator exists (`n.p > -0.5`); in an
+    /// expression the sign is the ordinary unary operator. `None` consumes
+    /// nothing, and plain digits stay an integer.
+    /// The text is parsed once, to the nearest f64, and must be finite.
     pub(in crate::graph_text) fn float_literal(
         &mut self,
     ) -> Result<Option<CanonicalScalar>, GraphPatternTextError> {
-        let TokenKind::Digits(whole) = self.current.kind else {
-            return Ok(None);
-        };
-        let mut lexer = self.lexer.clone();
-        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.')) {
-            return Ok(None);
-        }
-        let TokenKind::Digits(fraction) = lexer.next()?.kind else {
+        let Some((text, consumed)) = self.scan_float_literal()? else {
             return Ok(None);
         };
         let at = self.current.at;
-        let value = format!("{whole}.{fraction}")
+        let value = text
             .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
             .ok_or_else(|| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
-        for _ in 0..3 {
+        for _ in 0..consumed {
             self.advance()?;
         }
         Ok(Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(
             value,
         ))))
+    }
+
+    /// The text of the float literal at the current token and how many
+    /// tokens it spans, without consuming any.
+    pub(in crate::graph_text) fn scan_float_literal(
+        &self,
+    ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let decimal = |digits: &str| digits.bytes().all(|byte| byte.is_ascii_digit());
+        if self.is_punct(b'.') {
+            // No integer digits: `.5`, `.1e9`. An operand never starts with a
+            // property dot, so the dot must touch its digits.
+            let digits = lexer.next()?;
+            let TokenKind::Digits(fraction) = digits.kind else {
+                return Ok(None);
+            };
+            if digits.at != self.current.at + 1 || !decimal(fraction) {
+                return Ok(None);
+            }
+            let text = format!("0.{fraction}");
+            return Self::scan_float_exponent(lexer, text, digits.at + fraction.len(), 2, true);
+        }
+        let negative = self.is_punct(b'-');
+        let (whole, mut end, mut consumed) = if negative {
+            let token = lexer.next()?;
+            let TokenKind::Digits(whole) = token.kind else {
+                return Ok(None);
+            };
+            (whole, token.at + whole.len(), 2)
+        } else {
+            let TokenKind::Digits(whole) = self.current.kind else {
+                return Ok(None);
+            };
+            (whole, self.current.at + whole.len(), 1)
+        };
+        // 0x1, 0o7 and 0b1 spell integers only.
+        if !decimal(whole) {
+            return Ok(None);
+        }
+        let mut text = format!("{}{whole}", if negative { "-" } else { "" });
+        let mut float = false;
+        let mut peek = lexer.clone();
+        if matches!(peek.next()?.kind, TokenKind::Punct(b'.')) {
+            let digits = peek.next()?;
+            let TokenKind::Digits(fraction) = digits.kind else {
+                return Ok(None);
+            };
+            text.push('.');
+            text.push_str(fraction);
+            end = digits.at + fraction.len();
+            consumed += 2;
+            float = true;
+            lexer = peek;
+        }
+        Self::scan_float_exponent(lexer, text, end, consumed, float)
+    }
+
+    /// Extend a scanned mantissa ending at byte `end` with an adjacent
+    /// exponent, which alone makes digits a float.
+    fn scan_float_exponent(
+        lexer: Lexer<'a>,
+        mut text: String,
+        end: usize,
+        mut consumed: usize,
+        mut float: bool,
+    ) -> Result<Option<(String, usize)>, GraphPatternTextError> {
+        let mut peek = lexer;
+        let exponent = peek.next()?;
+        if let TokenKind::Word(word) = exponent.kind
+            && exponent.at == end
+            && let Some(rest) = word.strip_prefix(['e', 'E'])
+        {
+            if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                text.push('e');
+                text.push_str(rest);
+                consumed += 1;
+                float = true;
+            } else if rest.is_empty() {
+                let sign = peek.next()?;
+                let digits = peek.next()?;
+                if let (TokenKind::Punct(sign_byte @ (b'+' | b'-')), TokenKind::Digits(power)) =
+                    (sign.kind, digits.kind)
+                    && sign.at == exponent.at + 1
+                    && digits.at == sign.at + 1
+                {
+                    text.push('e');
+                    text.push(char::from(sign_byte));
+                    text.push_str(power);
+                    consumed += 3;
+                    float = true;
+                }
+            }
+        }
+        Ok(float.then_some((text, consumed)))
     }
 
     /// One predicate operand path used by the root and every positive child.
@@ -354,7 +520,7 @@ impl<'a> Parser<'a> {
         {
             let right = self.property_variable()?;
             self.punct(b'.', ".")?;
-            let right_key = self.name()?;
+            let right_key = self.schema_name()?;
             return Ok(Filter::Properties {
                 left: variable,
                 left_key: key,

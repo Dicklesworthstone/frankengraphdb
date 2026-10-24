@@ -1,0 +1,18 @@
+# Opt-in macOS linking through the toolchain's own ld64.lld (fgdb-jon4t).
+#
+# Apple ld cannot link the fgdb lib test binary (its __eh_frame exceeds the
+# 16 MB compact-unwind range: "compressed function offset doesn't fit in 24
+# bits"), and the fgdb-gql lib test binary sits at the same limit. LLD links
+# both. Use it per invocation, so default builds and every other worker are
+# unchanged:
+#
+#   cargo --config .cargo/macos-lld.toml test -p fgdb --lib
+#
+# link-self-contained=+linker puts the toolchain's gcc-ld directory (which
+# holds ld64.lld) on clang's search path, so no machine-specific path appears
+# here. Target rustflags replace [build] rustflags, so threads=4 is repeated.
+[target.aarch64-apple-darwin]
+rustflags = ["-Z", "threads=4", "-Z", "unstable-options", "-C", "link-self-contained=+linker", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-Z", "threads=4", "-Z", "unstable-options", "-C", "link-self-contained=+linker", "-C", "link-arg=-fuse-ld=lld"]

@@ -48,7 +48,13 @@ fn reserve_text<Clock: FnMut() -> u64>(
         .map_err(|_| admission(WriteTxnError::Authorization(Error::TooLarge)))?;
     // Reserve original UTF-8 bytes BEFORE lexical classification, parsing or
     // declaration allocation. This is an ingress price, not compiler telemetry.
-    execution.work(bytes).map_err(admission)
+    execution.work(bytes).map_err(admission)?;
+    // Engine identities are not masked, so a capability cannot observe them
+    // through id()/elementId() (fgdb-j687q, owner ruling 2026-09-30).
+    if fgdb_gql::reads_element_identity(text) {
+        return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
+    }
+    Ok(())
 }
 
 // The trusted host still owns catalog semantics. This wrapper controls when
@@ -84,7 +90,10 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
         checkpoint(cx, execution).map_err(admission)?;
         // Keep the native query_write inference convention. Integer and
         // pagination roles are inferred by the shared typed parser.
-        if matches!(kind, GqlParameterType::Scalar(_)) {
+        if matches!(
+            kind,
+            GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+        ) {
             declarations.push((name, kind));
         }
     }
@@ -232,8 +241,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// the controlled binder's row/field, metadata, payload and repeated-global
     /// work, lowered-text compilation and expanded native binding to the SAME
     /// permit. Every row binds before graph observation or identity allocation.
-    /// Later rows see earlier checked effects; any precommit failure discards
-    /// the entire batch. Repeated identity receipts consume repeated signed rows.
+    /// MERGE and disjoint mutations see earlier checked effects. Vertex updates
+    /// that can change their own MATCH first freeze every row's selection and
+    /// expressions against the entry overlay, then authorize and apply each
+    /// original field in input order. Any precommit failure discards the entire
+    /// batch. Repeated identity receipts consume repeated signed rows.
     /// CREATE/INSERT forms keep their existing compiler. Explicit larger bound
     /// batches and the prepared-session API retain their existing contracts.
     ///

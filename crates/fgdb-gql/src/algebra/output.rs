@@ -7,7 +7,7 @@ use super::{GlaOperator, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
 use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 /// One nonempty, ordered projection of vertex bindings. Column positions match
 /// the immutable prepared pattern's `columns()`; Debug never prints identities.
@@ -260,40 +260,98 @@ mod sealed {
             self
         }
 
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
-        fn collect_properties_with_paths<'a, E>(
+        /// `collected` holds each Collect group's list (fgdb-7nwox).
+        fn collect_properties_with_paths<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             _paths: &[Option<super::super::GraphPath>],
+            _collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect_properties(operator, bindings, projected, property, control)
         }
         #[allow(clippy::too_many_arguments)]
-        fn collect_element_properties<'a, E>(
+        fn collect_element_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             _edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            )
+                -> Result<Option<&'a CanonicalPropertyValue>, E>,
             _vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             _edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect_properties_with_paths(
-                operator, bindings, paths, projected, property, control,
+                operator,
+                bindings,
+                paths,
+                &[],
+                projected,
+                property,
+                control,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn collect_element_maps<'a, E: From<crate::GraphIntegerError>>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            _collected: &[Option<crate::algebra::GraphValue>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+            edge_property: &mut impl FnMut(
+                fgdb_types::EId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+            vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _vertex_properties: &mut impl FnMut(
+                VId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            _edge_properties: &mut impl FnMut(
+                fgdb_types::EId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            Self::collect_element_properties(
+                operator,
+                bindings,
+                paths,
+                projected,
+                property,
+                edge_property,
+                vertex_labels,
+                edge_type,
+                control,
             )
         }
     }
@@ -357,11 +415,14 @@ mod sealed {
     }
 
     impl PropertyProjection for VId {
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect(operator, bindings, projected, control)
@@ -369,11 +430,14 @@ mod sealed {
     }
 
     impl PropertyProjection for GraphBindingRow {
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect(operator, bindings, projected, control)
@@ -388,16 +452,66 @@ mod sealed {
             }
         }
 
-        fn collect_element_properties<'a, E>(
+        fn collect_element_maps<'a, E: From<crate::GraphIntegerError>>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            collected: &[Option<crate::algebra::GraphValue>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+            edge_property: &mut impl FnMut(
+                fgdb_types::EId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+            vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
+            vertex_properties: &mut impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            edge_properties: &mut impl FnMut(
+                fgdb_types::EId,
+            )
+                -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            let GlaOperator::ProjectValues { columns } = operator else {
+                unreachable!("the private value-plan constructor owns its projection shape")
+            };
+            super::super::values::collect_values_with_element_maps(
+                columns,
+                bindings,
+                paths,
+                collected,
+                projected,
+                property,
+                edge_property,
+                vertex_labels,
+                edge_type,
+                &mut |vid| {
+                    super::super::values::property_map_parts(vertex_properties(vid)?)
+                        .map_err(E::from)
+                },
+                &mut |eid| {
+                    super::super::values::property_map_parts(edge_properties(eid)?).map_err(E::from)
+                },
+                control,
+            )
+        }
+
+        fn collect_element_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -409,6 +523,7 @@ mod sealed {
                 columns,
                 bindings,
                 paths,
+                &[],
                 projected,
                 property,
                 edge_property,
@@ -417,27 +532,34 @@ mod sealed {
                 control,
             )
         }
-        fn collect_properties_with_paths<'a, E>(
+        fn collect_properties_with_paths<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
+            collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectValues { columns } = operator else {
                 unreachable!("the private value-plan constructor owns its projection shape")
             };
             super::super::values::collect_values_with_paths(
-                columns, bindings, paths, projected, property, control,
+                columns, bindings, paths, collected, projected, property, control,
             )
         }
 
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectValues { columns } = operator else {
@@ -511,8 +633,13 @@ mod factorization_tests {
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
     use fgdb_delta_types::RelationId;
 
+    /// The aggregate core factors an identity-free topology, so every law
+    /// here counts homomorphisms: its pattern is read under REPEATABLE
+    /// ELEMENTS. Under the DIFFERENT EDGES default, repeated R and S atoms
+    /// would need edge identities and no core is compiled (fgdb-vexfr).
     fn prepare(text: &str) -> crate::PreparedGraphAggregate {
-        PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+        let text = text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1);
+        PreparedGraphAggregateText::prepare(&text, |kind, name| match kind {
             GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
                 "R" => 1,
                 "S" => 2,
@@ -639,6 +766,36 @@ mod factorization_tests {
 
     #[test]
     fn aggregate_core_preserves_columns_and_cannot_remove_observed_constraints() {
+        fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match kind {
+                GraphSymbolKind::Relation => {
+                    Some(GraphSymbol::Relation(RelationId(if name == "R" {
+                        1
+                    } else {
+                        2
+                    })))
+                }
+                GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
+            }
+        }
+        // Under the DIFFERENT EDGES default the two R atoms must not share an
+        // edge, which an identity-free core cannot express: none is compiled.
+        let default = PreparedGraphAggregateText::prepare(
+            "MATCH (a)-[:R]->(b)-[:S]->(a),(b)-[:R]->(c) RETURN COUNT(*) AS n",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(
+            default
+                .input_pattern()
+                .plan()
+                .aggregate_core(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
         for (text, expected) in [
             (
                 "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n",
@@ -660,20 +817,13 @@ mod factorization_tests {
                 None,
             ),
         ] {
-            let aggregate = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
-                GraphSymbolKind::Relation => {
-                    Some(GraphSymbol::Relation(RelationId(if name == "R" {
-                        1
-                    } else {
-                        2
-                    })))
-                }
-                GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
-                GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
-            })
-            .unwrap()
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
+            // An identity-free core counts homomorphisms (REPEATABLE
+            // ELEMENTS; fgdb-vexfr).
+            let text = text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1);
+            let aggregate = PreparedGraphAggregateText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
             let plan = aggregate.input_pattern().plan();
             let original = plan.canonical_bytes();
             let reduced = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap();

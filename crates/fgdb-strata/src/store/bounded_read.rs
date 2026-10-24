@@ -16,8 +16,9 @@ use fgdb_types::{CommitSeq, QueryCx, StorageReadCx};
 /// allocator-byte quota or an external-memory implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootReadLimits {
-    /// Encoded root bytes, including every segment a V4 root names. Enforced
-    /// by the bounded file reader before each decode.
+    /// Encoded root bytes, including every segment a V4 or V5 root names and
+    /// every index segment a V5 root names. Enforced by the bounded file
+    /// reader before each decode.
     pub max_root_bytes: usize,
     /// Sum of encoded block, hosted-property and vertex-patch bytes, excluding
     /// the separately bounded root. A single format-bounded object is in hand
@@ -206,6 +207,51 @@ pub type ReopenedAdjacency = (
 );
 
 impl<V: Vfs> BlockStore<V> {
+    /// Resolve a native single-partition manifest under the source's metadata
+    /// byte and reference ceilings. Bytes are bounded before decoding, and
+    /// segmented reference lists before loading or flattening their children.
+    /// Ordinary opens use the same canonical decoders and identity checks;
+    /// this entrypoint only narrows their admission bounds.
+    pub async fn resolve_manifest_with_source_limits(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::manifest::ManifestVersion,
+        limits: &RootReadLimits,
+    ) -> Result<Vec<(crate::manifest::ManifestRecord, crate::root::PartitionRoot)>, StoreError>
+    {
+        let bytes = self
+            .read_object_bytes(
+                cx,
+                id.0,
+                (limits.max_root_bytes as u64).min(super::MANIFEST_HEADER_AND_RECORDS_CEILING),
+            )
+            .await?;
+        let records =
+            crate::manifest::read_manifest(self.k_oid.expose(), self.namespace, &bytes, id)
+                .map_err(StoreError::MalformedManifest)?;
+        if records.len() > 1 {
+            return Err(StoreError::RootReferenceLimit {
+                resource: "native manifest roots",
+                requested: records.len(),
+                limit: 1,
+            });
+        }
+        let mut resolved = Vec::with_capacity(records.len());
+        for record in records {
+            let (root, _) = self
+                .get_root_and_segments_limited(
+                    cx,
+                    record.root,
+                    limits.max_root_bytes,
+                    limits.max_blocks,
+                    limits.max_vertex_patches,
+                )
+                .await?;
+            resolved.push((record, root));
+        }
+        Ok(resolved)
+    }
+
     /// Shared by ordinary root reads and source-budgeted traversal. A smaller
     /// caller limit cannot enlarge the format's canonical maximum.
     pub(super) async fn get_root_with_byte_limit(
@@ -214,6 +260,49 @@ impl<V: Vfs> BlockStore<V> {
         id: crate::PartitionRootVersion,
         maximum: usize,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
+        self.get_root_and_segments(cx, id, maximum)
+            .await
+            .map(|(root, _)| root)
+    }
+
+    /// [`Self::get_root_with_byte_limit`], also returning the segment cache
+    /// for the segments it read and proved. A V3 root names none, so its
+    /// cache is empty.
+    pub(super) async fn get_root_and_segments(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::PartitionRootVersion,
+        maximum: usize,
+    ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
+        self.get_root_and_segments_limited(cx, id, maximum, usize::MAX, usize::MAX)
+            .await
+    }
+
+    pub(super) async fn get_root_and_segments_limited(
+        &self,
+        cx: &impl StorageReadCx,
+        id: crate::PartitionRootVersion,
+        maximum: usize,
+        max_blocks: usize,
+        max_patches: usize,
+    ) -> Result<(crate::root::PartitionRoot, crate::root::SegmentCache), StoreError> {
+        let check = |resource, requested, limit| {
+            if requested > limit {
+                Err(StoreError::RootReferenceLimit {
+                    resource,
+                    requested,
+                    limit,
+                })
+            } else {
+                Ok(())
+            }
+        };
+        // The references a segmented list declares: each full index segment
+        // covers INDEX_REFS full segments, each of SEGMENT_REFS references.
+        let declared = |index: usize, segments: usize, tail: usize| {
+            (index * crate::root_segment::INDEX_REFS + segments) * crate::root_segment::SEGMENT_REFS
+                + tail
+        };
         let maximum = maximum.min(crate::root::MAX_ROOT_READ_BYTES) as u64;
         let bytes = self
             .read_object_bytes(
@@ -231,14 +320,102 @@ impl<V: Vfs> BlockStore<V> {
                 },
             ));
         }
-        let frame =
-            match crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)? {
-                crate::root::RootFrame::V3(root) => return Ok(root),
-                crate::root::RootFrame::V4(frame) => frame,
-            };
-        // A V4 root's segments share the caller's byte ceiling with the root
-        // itself, so a two-level root reads no more than a flat one could.
+        // A segmented root's index segments and segments share the caller's
+        // byte ceiling with the root itself.
         let mut remaining = maximum.saturating_sub(bytes.len() as u64);
+        let (frame, block_index, patch_index) = match crate::root::decode_root_frame(&bytes)
+            .map_err(StoreError::MalformedRoot)?
+        {
+            crate::root::RootFrame::V3(root) => {
+                check("root blocks", root.blocks.len(), max_blocks)?;
+                check(
+                    "root vertex patches",
+                    root.vertex_patches.len(),
+                    max_patches,
+                )?;
+                return Ok((root, crate::root::SegmentCache::default()));
+            }
+            // Full segments and full index segments have fixed
+            // cardinalities; refuse each list's declared total before
+            // loading any of them or allocating the flattened lists.
+            crate::root::RootFrame::V4(frame) => {
+                check(
+                    "root blocks",
+                    declared(0, frame.block_segments.len(), frame.tail_blocks.len()),
+                    max_blocks,
+                )?;
+                check(
+                    "root vertex patches",
+                    declared(0, frame.patch_segments.len(), frame.tail_patches.len()),
+                    max_patches,
+                )?;
+                (frame, Vec::new(), Vec::new())
+            }
+            crate::root::RootFrame::V5(frame) => {
+                check(
+                    "root blocks",
+                    declared(
+                        frame.block_index.len(),
+                        frame.block_segments.len(),
+                        frame.tail_blocks.len(),
+                    ),
+                    max_blocks,
+                )?;
+                check(
+                    "root vertex patches",
+                    declared(
+                        frame.patch_index.len(),
+                        frame.patch_segments.len(),
+                        frame.tail_patches.len(),
+                    ),
+                    max_patches,
+                )?;
+                // Each index segment is proven to be the one the frame
+                // names before any segment it names is read.
+                let coordinate = frame.coordinate();
+                let mut children = [Vec::new(), Vec::new()];
+                for ((class, named), list) in [
+                    (
+                        crate::root_segment::SegmentClass::Blocks,
+                        &frame.block_index,
+                    ),
+                    (
+                        crate::root_segment::SegmentClass::VertexPatches,
+                        &frame.patch_index,
+                    ),
+                ]
+                .into_iter()
+                .zip(&mut children)
+                {
+                    for (at, reference) in named.iter().enumerate() {
+                        let limit = remaining.min(crate::root_segment::INDEX_BYTES as u64);
+                        let index = self
+                            .read_object_bytes(cx, reference.segment_id, limit)
+                            .await?;
+                        remaining = remaining.saturating_sub(index.len() as u64);
+                        list.push(
+                            crate::root_segment::read_index(
+                                self.k_oid.expose(),
+                                self.namespace,
+                                &index,
+                                reference,
+                                at,
+                                coordinate,
+                                class,
+                            )
+                            .map_err(|error| {
+                                StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                            })?,
+                        );
+                    }
+                }
+                let (block_index, patch_index) =
+                    (frame.block_index.clone(), frame.patch_index.clone());
+                let [blocks, patches] = children;
+                (frame.flatten(blocks, patches), block_index, patch_index)
+            }
+        };
+        let segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
         let coordinate = frame.coordinate();
         let mut lists = [Vec::new(), Vec::new()];
         for ((class, named), list) in [
@@ -277,7 +454,9 @@ impl<V: Vfs> BlockStore<V> {
             }
         }
         let [blocks, patches] = lists;
-        crate::root::assemble_root(frame, blocks, patches).map_err(StoreError::MalformedRoot)
+        let root = crate::root::assemble_root(frame, blocks, patches)
+            .map_err(StoreError::MalformedRoot)?;
+        Ok((root, segments))
     }
 
     /// Authenticate a whole root under explicit source ceilings, retaining only
@@ -299,6 +478,54 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
     ) -> Result<ReopenedAdjacency, RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, false)
+            .await
+            .map(|(adjacency, _)| adjacency)
+    }
+
+    /// Prove the SAME complete source as `reopen_adjacency_bounded`, but retain
+    /// only one relation for the sealer. Selection happens after each block's
+    /// properties, family, predecessor and cross-object history are admitted.
+    /// Unselected source objects still consume the raw input budget.
+    pub(crate) async fn reopen_relation_adjacency_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<ReopenedAdjacency, RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), false)
+            .await
+            .map(|(adjacency, _)| adjacency)
+    }
+
+    /// Keep the admitted vertex history beside a selected relation so a
+    /// read-only analytics opener can derive its vertex directory without a
+    /// second root walk. This remains ordinary owned data, not an authority
+    /// receipt; only the sealer inside this crate can mint the image anchor.
+    pub(crate) async fn reopen_relation_with_vertices_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation), true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reopen_selected_adjacency_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: Option<fgdb_delta_types::RelationId>,
+        retain_vertices: bool,
+    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
         let root = self
             .get_root_with_byte_limit(cx, id, limits.max_root_bytes)
@@ -321,17 +548,37 @@ impl<V: Vfs> BlockStore<V> {
             .inspect_root_blocks_observed(
                 cx,
                 &root,
-                |_, _, read| Some(super::decoded_block(read)),
+                |_, _, read| {
+                    // Admission has proved that every entry in the block is
+                    // in this first entry's family. It also validated hosted
+                    // properties and the whole-root EId/chain history before
+                    // invoking this retention callback.
+                    let keep = relation.is_none_or(|relation| {
+                        read.resolved
+                            .0
+                            .first()
+                            .is_some_and(|entry| entry.relation == relation)
+                    });
+                    keep.then(|| super::decoded_block(read))
+                },
                 &mut observe,
                 1,
+                &mut super::RootWalk::default(),
             )
             .await?;
-        // Still validate the complete vertex history. The validator retains its
-        // existing owned version records, but no second patch collection is kept.
-        drop(
-            self.inspect_root_patches_observed(cx, &root, |_, _, _| None::<()>, &mut observe, 1)
-                .await?,
-        );
+        // Every caller validates the complete vertex history. A combined
+        // analytics opener keeps the same immutable rows for its directory;
+        // adjacency-only callers still retain no second patch collection.
+        let patches = self
+            .inspect_root_patches_observed(
+                cx,
+                &root,
+                |_, _, (rows, _)| retain_vertices.then_some(rows),
+                &mut observe,
+                1,
+                &mut super::RootWalk::default(),
+            )
+            .await?;
         let mut blocks = Vec::new();
         let mut properties = Vec::new();
         blocks
@@ -346,7 +593,7 @@ impl<V: Vfs> BlockStore<V> {
             properties.push(props);
         }
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
-        Ok((root, blocks, properties))
+        Ok(((root, blocks, properties), patches))
     }
 }
 

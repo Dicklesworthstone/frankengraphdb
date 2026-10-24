@@ -20,6 +20,7 @@ impl WriteTxn {
             scanned_vertices: std::cell::Cell::new(false),
             scanned_edges: std::cell::Cell::new(false),
             scanned_edge_relations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            authorization_decision_digest: None,
             state: EmbeddedTxnState::Active,
             pin: Some(pin),
         })
@@ -112,7 +113,7 @@ impl WriteTxn {
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         Ok(())
     }
 
@@ -133,7 +134,12 @@ impl WriteTxn {
         database: &mut Database<V>,
         batches: Vec<WriteBatch>,
     ) -> Result<(), WriteTxnError> {
-        self.stage_composed_writes(database, batches, false)
+        // A mixed write program or chain promises that each step sees its
+        // predecessor, as `write` does: a later step's vertices follow an
+        // earlier step's edge group, outside any shared vertex prefix, so
+        // independent groups would refuse its new edge's endpoint
+        // (`CREATE (a)-[:T]->(b); CREATE (c)-[:T]->(d)`, TCK Create3 [8]).
+        self.stage_composed_writes(database, batches, self.program_multi_relation)
     }
 
     /// Stage source-ordered, dependent writes spanning edge relations.
@@ -188,7 +194,7 @@ impl WriteTxn {
             // assigns births on every call, so a new group may move them.
             database
                 .prepare_ordered_writes(self.staged.clone())
-                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_ref()))
+                .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_deref()))
         } else {
             database.prepare_atomic_writes(self.staged.clone())
         };
@@ -201,7 +207,7 @@ impl WriteTxn {
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
-        self.prepared = Some(prepared);
+        self.prepared = Some(std::sync::Arc::new(prepared));
         Ok(())
     }
 
@@ -297,7 +303,7 @@ mod ordered_staging_tests {
             txn.write(&mut db, last).unwrap();
             assert_eq!(
                 txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]
+                vec![(P, CanonicalScalar::Int(3).into())]
             );
             assert!(txn.vertex(&db, VId(6)).unwrap().is_some());
             assert!(db.vertex(VId(5)).unwrap().is_none());
@@ -307,12 +313,12 @@ mod ordered_staging_tests {
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
             assert_eq!(
                 db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]
+                vec![(P, CanonicalScalar::Int(3).into())]
             );
             assert_eq!(db.vertex(VId(6)).unwrap().unwrap().birth_ordinal, 4);
             assert_eq!(
                 db.edge(EId(50)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]
+                vec![(P, CanonicalScalar::Int(11).into())]
             );
             for (eid, relation) in [(50, 9), (60, 2), (70, 1)] {
                 let edge = db.edge(EId(eid)).unwrap().unwrap();
@@ -354,13 +360,13 @@ mod ordered_staging_tests {
             assert_eq!(txn.prepared.as_ref().unwrap().template, prefix);
             assert_eq!(
                 txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]
+                vec![(P, CanonicalScalar::Int(2).into())]
             );
             txn.write(&mut db, last).unwrap();
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(
                 db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]
+                vec![(P, CanonicalScalar::Int(3).into())]
             );
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -473,14 +479,14 @@ mod ordered_staging_tests {
             assert!(!txn.program_multi_relation);
             assert_eq!(
                 txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]
+                vec![(P, CanonicalScalar::Int(3).into())]
             );
             assert_eq!(db.frontier().unwrap(), basis);
             let seq = txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(seq, CommitSeq(basis.0 + 1));
             assert_eq!(
                 db.edge(EId(50)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]
+                vec![(P, CanonicalScalar::Int(11).into())]
             );
             assert_eq!(db.delta_since(basis).unwrap().count(), 1);
         });
@@ -529,7 +535,7 @@ mod ordered_staging_tests {
                 assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
                 assert_eq!(
                     txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1))]
+                    vec![(P, CanonicalScalar::Int(1).into())]
                 );
                 // No remembered execution mode may outlive a rolled-back program.
                 assert!(matches!(
@@ -540,7 +546,7 @@ mod ordered_staging_tests {
                 assert!(db.vertex(VId(6)).unwrap().is_none());
                 assert_eq!(
                     db.edge(EId(50)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(10))]
+                    vec![(P, CanonicalScalar::Int(10).into())]
                 );
             }
         });
@@ -576,7 +582,7 @@ mod ordered_staging_tests {
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(
                 db.vertex(VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(3))]
+                vec![(P, CanonicalScalar::Int(3).into())]
             );
         });
         assert!(report.lab_test_passed(), "{report:?}");

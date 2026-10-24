@@ -12,6 +12,7 @@ use crate::{
     GraphSetQuantifier, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
     PreparedGraphText,
 };
+use fgdb_delta_types::PropertyKeyId;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Original byte offsets, never query fragments, names, or argument payloads.
@@ -29,17 +30,68 @@ pub enum GraphSetTextErrorKind {
     ProjectionBuild(crate::GraphSetProjectionError),
     FilterBuild(crate::GraphSetFilterError),
     AggregateBuild(crate::GraphAggregateBuildError),
+    /// UNION operands must expose the same names, independent of column order.
+    DifferentColumnsInUnion,
+    /// One unparenthesized UNION chain cannot mix ALL and DISTINCT.
+    InvalidClauseComposition,
     IntegerExpression(crate::GraphIntegerBuildError),
     IntegerOperand,
-    IntegerNesting { limit: usize },
+    IntegerNesting {
+        limit: usize,
+    },
+}
+impl core::fmt::Display for GraphSetTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Expected(item) => crate::graph_text::write_expected(f, item),
+            Self::Pattern(kind) => kind.fmt(f),
+            Self::SetBuild(error) => error.fmt(f),
+            Self::OrderBuild(error) => error.fmt(f),
+            Self::ProjectionBuild(error) => error.fmt(f),
+            Self::FilterBuild(error) => error.fmt(f),
+            Self::AggregateBuild(error) => error.fmt(f),
+            Self::DifferentColumnsInUnion => {
+                f.write_str("UNION operands must return the same column names")
+            }
+            Self::InvalidClauseComposition => {
+                f.write_str("an unparenthesized UNION chain cannot mix ALL and DISTINCT")
+            }
+            Self::IntegerExpression(error) => error.fmt(f),
+            Self::IntegerOperand => f.write_str("expected an integer operand"),
+            Self::IntegerNesting { limit } => {
+                write!(f, "integer expression nests deeper than {limit} levels")
+            }
+        }
+    }
+}
+impl GraphSetTextErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        match self {
+            Self::Expected(_) | Self::IntegerOperand => C::Syntax,
+            Self::Pattern(kind) => kind.class(),
+            Self::SetBuild(_)
+            | Self::OrderBuild(_)
+            | Self::ProjectionBuild(_)
+            | Self::FilterBuild(_)
+            | Self::AggregateBuild(_)
+            | Self::DifferentColumnsInUnion
+            | Self::InvalidClauseComposition
+            | Self::IntegerExpression(_)
+            | Self::IntegerNesting { .. } => C::Statement,
+        }
+    }
+}
+impl GraphSetTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
 }
 impl core::fmt::Display for GraphSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "graph set text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphSetTextError {}
@@ -83,10 +135,25 @@ pub(crate) enum ReadValueTemplate {
         value: Box<ReadValueTemplate>,
         list: Box<ReadValueTemplate>,
     },
+    /// Three-valued `left = right` over composite values (fgdb-9cawv).
+    Equal {
+        left: Box<ReadValueTemplate>,
+        right: Box<ReadValueTemplate>,
+    },
+    /// Three-valued `<`, `<=`, `>` or `>=` over lists (openCypher
+    /// comparability): `[1, 0] >= [1]`.
+    Ordered {
+        comparison: crate::algebra::IntegerComparison,
+        left: Box<ReadValueTemplate>,
+        right: Box<ReadValueTemplate>,
+    },
     Literal(crate::GqlScalarParameter),
     Parameter {
         index: usize,
         at: usize,
+        /// Captured before binding replaces an argument with its value. All
+        /// later scalar-kind refinements preserve this static value domain.
+        null_type: GraphSetColumnType,
     },
     Integer {
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
@@ -126,44 +193,81 @@ pub(crate) enum ReadValueTemplate {
         values: Vec<ReadValueTemplate>,
         guard: Option<Box<ReadValueTemplate>>,
     },
+    /// A map source plus explicit overrides, with NULL short-circuiting values.
+    MapOverlay {
+        base: Box<ReadValueTemplate>,
+        keys: Box<[Box<str>]>,
+        values: Vec<ReadValueTemplate>,
+    },
     MapGet {
         map: Box<ReadValueTemplate>,
         key: Box<str>,
+        property: ElementKeySlot,
     },
     Keys(Box<ReadValueTemplate>),
+    /// A scalar expression over composite operands (fgdb-o5o9t): `values`
+    /// evaluate over the enclosing row, then `body` over that row extended
+    /// by one slot per value, value `i` at `Local(values.len() - 1 - i)`.
+    Let {
+        values: Vec<ReadValueTemplate>,
+        body: Box<ReadValueTemplate>,
+    },
+    /// A temporal constructor (fgdb-txbg9), with the statement's pinned
+    /// tzdb for named zones.
+    Temporal {
+        function: crate::GraphTemporalFunction,
+        argument: Box<ReadValueTemplate>,
+        zones: Option<crate::GqlTimeZones>,
+    },
+    /// reverse() or split() (fgdb-13l85); a longer call's argument is the
+    /// list of its arguments.
+    Function {
+        function: crate::GraphValueFunction,
+        argument: Box<ReadValueTemplate>,
+    },
+    /// A searched CASE whose results may be composite (fgdb-13l85): the
+    /// first TRUE condition selects its value, else `otherwise` or NULL.
+    Case {
+        arms: Vec<(ReadValueTemplate, ReadValueTemplate)>,
+        otherwise: Option<Box<ReadValueTemplate>>,
+    },
+    /// rand() at call `site`, under `scope` element locals (fgdb-13l85).
+    Random {
+        site: u32,
+        scope: u32,
+    },
 }
+
+/// The catalog binding of one `x.key` read (fgdb-xnd7x). The parser records
+/// each read's key with an empty slot. Preparation resolves every recorded key
+/// once, through the statement's resolver, before any binding, and binding
+/// stamps the answer on the bound MapGet. A slot that no resolution filled
+/// binds Unbound, so an element operand stays a typed error rather than NULL.
+#[derive(Clone, Default)]
+pub(crate) struct ElementKeySlot(std::sync::Arc<std::sync::OnceLock<Option<PropertyKeyId>>>);
+
+impl ElementKeySlot {
+    pub(crate) fn resolve(&self, key: Option<PropertyKeyId>) {
+        // One statement resolves through one resolver, so a repeated
+        // resolution would give the same answer.
+        let _ = self.0.set(key);
+    }
+
+    pub(crate) fn bind(&self) -> crate::GraphElementKey {
+        match self.0.get() {
+            None => crate::GraphElementKey::Unbound,
+            Some(None) => crate::GraphElementKey::Missing,
+            Some(Some(key)) => crate::GraphElementKey::Property(*key),
+        }
+    }
+}
+
 impl ReadValueTemplate {
-    /// Whether this value binds a list-comprehension element anywhere.
-    pub(crate) fn binds_elements(&self) -> bool {
-        match self {
-            Self::Local(_)
-            | Self::Comprehension { .. }
-            | Self::Quantifier { .. }
-            | Self::Reduce { .. } => true,
-            Self::Slice { list, from, to } => {
-                list.binds_elements()
-                    || [from, to]
-                        .into_iter()
-                        .flatten()
-                        .any(|bound| bound.binds_elements())
-            }
-            Self::Range { start, end, step } => {
-                start.binds_elements()
-                    || end.binds_elements()
-                    || step.as_deref().is_some_and(Self::binds_elements)
-            }
-            Self::MapLiteral { values, guard, .. } => {
-                values.iter().any(Self::binds_elements)
-                    || guard.as_deref().is_some_and(Self::binds_elements)
-            }
-            Self::MapGet { map, .. } | Self::Keys(map) => map.binds_elements(),
-            Self::List(items) => items.iter().any(Self::binds_elements),
-            Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
-            Self::Size(inner) => inner.binds_elements(),
-            Self::In { value, list } => value.binds_elements() || list.binds_elements(),
-            Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
-                false
-            }
+    pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
+        Self::Parameter {
+            index,
+            at,
+            null_type: GraphSetColumnType::parameter_domain(kind),
         }
     }
 
@@ -174,20 +278,39 @@ impl ReadValueTemplate {
     ) -> GraphSetColumnType {
         match self {
             Self::Column(index) => input[*index],
+            // NULL is dynamically typed (bound as TypedNull(Any)).
+            Self::Literal(value) if matches!(value.value(), fgdb_types::CanonicalScalar::Null) => {
+                GraphSetColumnType::Any
+            }
             Self::List(_)
             | Self::Comprehension { .. }
             | Self::Slice { .. }
             | Self::Range { .. } => GraphSetColumnType::List,
-            Self::Reduce { .. } | Self::MapLiteral { .. } | Self::MapGet { .. } => {
-                GraphSetColumnType::Any
-            }
+            // A temporal value reads its fields like a map entry (`d.year`).
+            Self::Reduce { .. }
+            | Self::MapLiteral { .. }
+            | Self::MapOverlay { .. }
+            | Self::MapGet { .. }
+            | Self::Temporal { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
-            Self::Local(_) => GraphSetColumnType::Any,
+            // reverse() is a list or a text; split() is a list; a sum with a
+            // list operand is a list or, over scalars, a scalar.
+            Self::Function { function, .. } => match function {
+                crate::GraphValueFunction::Reverse
+                | crate::GraphValueFunction::Add
+                | crate::GraphValueFunction::Subtract
+                | crate::GraphValueFunction::Coalesce
+                | crate::GraphValueFunction::PathNodes
+                | crate::GraphValueFunction::PathRelationships => GraphSetColumnType::Any,
+                crate::GraphValueFunction::Split => GraphSetColumnType::List,
+                crate::GraphValueFunction::PercentileDisc
+                | crate::GraphValueFunction::PercentileCont => GraphSetColumnType::Scalar,
+            },
+            Self::Let { body, .. } => body.column_type(input, parameters),
+            Self::Local(_) | Self::Case { .. } => GraphSetColumnType::Any,
             Self::Index { .. } => GraphSetColumnType::Any,
-            Self::Parameter { index, .. }
-                if parameters[*index].parameter_type == GqlParameterType::List =>
-            {
-                GraphSetColumnType::List
+            Self::Parameter { index, .. } => {
+                GraphSetColumnType::parameter_domain(parameters[*index].parameter_type)
             }
             _ => GraphSetColumnType::Scalar,
         }
@@ -327,7 +450,7 @@ impl ReadValueTemplate {
                     value.append_template_transcript(bytes);
                 }
             }
-            Self::MapGet { map, key } => {
+            Self::MapGet { map, key, .. } => {
                 bytes.push(15);
                 map.append_template_transcript(bytes);
                 ordinal(bytes, key.len());
@@ -336,6 +459,71 @@ impl ReadValueTemplate {
             Self::Keys(map) => {
                 bytes.push(16);
                 map.append_template_transcript(bytes);
+            }
+            Self::MapOverlay { base, keys, values } => {
+                bytes.push(18);
+                base.append_template_transcript(bytes);
+                ordinal(bytes, keys.len());
+                for (key, value) in keys.iter().zip(values) {
+                    ordinal(bytes, key.len());
+                    bytes.extend_from_slice(key.as_bytes());
+                    value.append_template_transcript(bytes);
+                }
+            }
+            Self::Let { values, body } => {
+                bytes.push(19);
+                ordinal(bytes, values.len());
+                for value in values {
+                    value.append_template_transcript(bytes);
+                }
+                body.append_template_transcript(bytes);
+            }
+            Self::Equal { left, right } => {
+                bytes.push(20);
+                left.append_template_transcript(bytes);
+                right.append_template_transcript(bytes);
+            }
+            Self::Temporal {
+                function,
+                argument,
+                zones,
+            } => {
+                // A pinned tzdb is part of the plan: tag 26 and its identity.
+                match zones {
+                    None => bytes.extend_from_slice(&[21, function.tag()]),
+                    Some(zones) => {
+                        bytes.extend_from_slice(&[26, function.tag()]);
+                        bytes.extend_from_slice(zones.tzdb().as_bytes());
+                    }
+                }
+                argument.append_template_transcript(bytes);
+            }
+            Self::Function { function, argument } => {
+                bytes.extend_from_slice(&[23, function.tag()]);
+                argument.append_template_transcript(bytes);
+            }
+            Self::Ordered {
+                comparison,
+                left,
+                right,
+            } => {
+                bytes.extend_from_slice(&[22, comparison.tag()]);
+                left.append_template_transcript(bytes);
+                right.append_template_transcript(bytes);
+            }
+            Self::Case { arms, otherwise } => {
+                bytes.push(24);
+                ordinal(bytes, arms.len());
+                for (condition, value) in arms {
+                    condition.append_template_transcript(bytes);
+                    value.append_template_transcript(bytes);
+                }
+                optional(bytes, otherwise.as_deref());
+            }
+            Self::Random { site, scope } => {
+                bytes.push(25);
+                bytes.extend_from_slice(&site.to_be_bytes());
+                bytes.extend_from_slice(&scope.to_be_bytes());
             }
         }
     }
@@ -417,7 +605,7 @@ impl ReadStageTemplate {
     /// Count the physical relational nodes produced by native binding.
     pub(crate) fn depth(&self) -> usize {
         match self {
-            Self::Page { .. } => 0,
+            Self::Page { computed, .. } => usize::from(computed.is_some()) * 2,
             Self::Aggregate { .. } => 3,
             _ => 1,
         }
@@ -435,21 +623,44 @@ impl ReadStageTemplate {
                 bytes.extend_from_slice(name.as_bytes());
                 value.append_template_transcript(bytes);
             }
+            Self::InputRows { name } => {
+                bytes.push(0xff);
+                bytes.extend_from_slice(b"fgdb:gql:initial-rows:v1\0");
+                bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+            }
             Self::Call {
                 namespace,
                 name,
                 arguments,
+                names,
                 outputs,
                 vertices,
+                graph_projection,
                 ..
             } => {
-                bytes.push(5);
+                // A named call has its own tag, so every positional call keeps
+                // its exact template bytes.
+                bytes.push(if graph_projection.is_some() {
+                    8
+                } else if names.is_empty() {
+                    5
+                } else {
+                    6
+                });
                 for text in [namespace, name] {
                     bytes.extend_from_slice(&(text.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(text.as_bytes());
                 }
+                if let Some(projection) = graph_projection {
+                    projection.append_transcript(bytes);
+                }
                 bytes.extend_from_slice(&(arguments.len() as u64).to_be_bytes());
-                for argument in arguments {
+                for (index, argument) in arguments.iter().enumerate() {
+                    if let Some(name) = names.get(index) {
+                        bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(name.as_bytes());
+                    }
                     argument.append_template_transcript(bytes);
                 }
                 bytes.extend_from_slice(&(outputs.len() as u64).to_be_bytes());
@@ -487,9 +698,18 @@ impl ReadStageTemplate {
                 order,
                 offset,
                 count,
+                computed,
                 ..
             } => {
-                bytes.push(3);
+                // Existing column-only pages keep their exact identity.
+                bytes.push(if computed.is_some() { 7 } else { 3 });
+                if let Some(computed) = computed {
+                    bytes.extend_from_slice(&(computed.visible as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(computed.values.len() as u64).to_be_bytes());
+                    for value in &computed.values {
+                        value.append_template_transcript(bytes);
+                    }
+                }
                 bytes.extend_from_slice(&(order.len() as u64).to_be_bytes());
                 for column in order {
                     bytes.push(u8::from(column.descending));
@@ -521,7 +741,7 @@ pub(crate) fn comparison_tag(comparison: IntegerComparison) -> u8 {
     }
 }
 
-fn append_projection_transcript(bytes: &mut Vec<u8>, items: &[ReadProjectionTemplate]) {
+pub(crate) fn append_projection_transcript(bytes: &mut Vec<u8>, items: &[ReadProjectionTemplate]) {
     bytes.extend_from_slice(&(items.len() as u64).to_be_bytes());
     for item in items {
         item.append_template_transcript(bytes);
@@ -535,6 +755,17 @@ impl BoundSetTextInput {
     pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
         fn ordinal(bytes: &mut Vec<u8>, value: usize) {
             bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        if !self.row_fields.is_empty() {
+            // Input tags 0/1 are the original selection, 2/3 are multipart
+            // owners. Keep every existing definition byte-identical while
+            // giving computed join keys a distinct, self-delimiting domain.
+            bytes.push(4);
+            bytes.extend_from_slice(b"fgdb:gql:row-field-correlations:v1\0");
+            ordinal(bytes, self.row_fields.len());
+            for value in &self.row_fields {
+                value.append_template_transcript(bytes);
+            }
         }
         match &self.selection {
             None => bytes.push(0),
@@ -576,6 +807,16 @@ impl BoundSetTextInput {
             ordinal(bytes, *from);
             ordinal(bytes, *to);
         }
+        // Only an owned input appends: every other transcript keeps its bytes.
+        if let Some((columns, types)) = self.owned.as_deref() {
+            bytes.push(0xff);
+            ordinal(bytes, columns.len());
+            for (name, kind) in columns.iter().zip(types) {
+                ordinal(bytes, name.len());
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.push(set_column_type_tag(*kind));
+            }
+        }
     }
 }
 
@@ -585,20 +826,14 @@ fn parameter_type_tag(kind: GqlParameterType) -> u8 {
         GqlParameterType::UInt64 => 1,
         GqlParameterType::List => 2,
         GqlParameterType::Scalar(kind) => 3 + kind as u8,
+        // Keep every existing parameter tag unchanged; canonical scalar kinds
+        // occupy tags 3..=10.
+        GqlParameterType::Map => 11,
     }
 }
 
 fn set_column_type_tag(kind: GraphSetColumnType) -> u8 {
-    match kind {
-        GraphSetColumnType::Vertex => 0,
-        GraphSetColumnType::Scalar => 1,
-        GraphSetColumnType::Path => 2,
-        GraphSetColumnType::Vertices => 3,
-        GraphSetColumnType::Edges => 4,
-        GraphSetColumnType::Edge => 5,
-        GraphSetColumnType::List => 6,
-        GraphSetColumnType::Any => 7,
-    }
+    kind.tag()
 }
 #[derive(Clone)]
 pub(crate) enum ReadFilterOperand {
@@ -636,17 +871,30 @@ pub(crate) enum ReadStageTemplate {
         namespace: String,
         name: String,
         arguments: Vec<ReadValueTemplate>,
+        /// One name per argument when the call names them (`k => 10`);
+        /// empty for a positional call. A call never mixes the two.
+        names: Vec<String>,
+        /// Byte offset of each argument's value, for binding refusals.
+        offsets: Vec<usize>,
         /// (procedure output, column alias), in YIELD order.
         outputs: Vec<(String, String)>,
         /// YIELD positions the statement matches as vertices (`MATCH (n)` on
         /// the column, written or implied by `n.p`), ascending. The host
         /// refuses unless each is a vertex-valued output (fgdb-luq0b).
         vertices: Vec<usize>,
+        /// The first positional fnx map after its literal schema names have
+        /// been resolved. It is not an algorithm argument at execution.
+        graph_projection: Option<crate::ProcedureGraphProjection>,
     },
     Unwind {
         at: usize,
         name: String,
         value: ReadValueTemplate,
+    },
+    /// A typed external input relation, installed only after validating the
+    /// leading UNWIND source. Each input row has one canonical map cell.
+    InputRows {
+        name: String,
     },
     Project {
         at: usize,
@@ -662,8 +910,29 @@ pub(crate) enum ReadStageTemplate {
         order: Vec<GraphValueOrder>,
         offset: ReadPageNumber,
         count: Option<ReadPageNumber>,
+        computed: Option<ReadOrderProjection>,
     },
 }
+
+/// Scalar keys are evaluated over the frozen input row, then ranked and
+/// removed. `visible` also removes graph/input cells retained solely for this
+/// page. The complete projection remains private through successful paging.
+#[derive(Clone)]
+pub(crate) struct ReadOrderProjection {
+    pub(crate) values: Vec<ReadValueTemplate>,
+    pub(crate) visible: usize,
+}
+
+/// A catalog-free output-row page compiled by the shared expression parser.
+/// Parameter ordinals are local to this page; the compound statement admits
+/// their names and types together with every leaf before resolving any symbol.
+#[derive(Clone)]
+pub(crate) struct CompoundOrderTemplate {
+    pub(crate) stage: ReadStageTemplate,
+    pub(crate) parameters: Vec<GqlParameterSpec>,
+    pub(crate) parameter_offsets: Vec<usize>,
+}
+
 #[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
     pub(crate) selection: Option<PreparedGraphText>,
@@ -676,6 +945,13 @@ pub(crate) struct BoundSetTextInput {
     pub(crate) singleton: bool,
     pub(crate) leading: Vec<ReadStageTemplate>,
     pub(crate) correlations: Vec<(usize, usize)>,
+    pub(crate) row_fields: Vec<ReadValueTemplate>,
+    /// A chained write's input (`CREATE (a) WITH a CREATE (b)`): the previous
+    /// write's output columns, read through one owned leaf (`SetNode::Owned`)
+    /// that the executing host fills with that write's rows. No graph source.
+    /// Boxed: only chain steps have one, and every read template embeds this.
+    #[allow(clippy::type_complexity)]
+    pub(crate) owned: Option<Box<(Vec<String>, Vec<GraphSetColumnType>)>>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
@@ -727,6 +1003,21 @@ struct OrderKey {
     at: usize,
     order: GraphValueOrder,
 }
+/// Source spans exist only during compound preparation. Once validated, the
+/// page holds a native expression template; binding never scans the span again.
+#[derive(Clone)]
+struct OrderExpression {
+    span: std::ops::Range<usize>,
+    template: Option<CompoundOrderTemplate>,
+}
+impl OrderExpression {
+    fn prepared(&self) -> &CompoundOrderTemplate {
+        self.template
+            .as_ref()
+            .expect("compound ordering is checked before catalog access")
+    }
+}
+
 #[derive(Clone)]
 enum NodeKind {
     Leaf(usize),
@@ -746,6 +1037,7 @@ struct Node {
     order: Vec<OrderKey>,
     offset: PageNumber,
     count: Option<PageNumber>,
+    expression_order: Option<OrderExpression>,
 }
 impl Node {
     fn new(kind: NodeKind, at: usize, depth: usize) -> Result<Self, GraphSetTextError> {
@@ -765,48 +1057,98 @@ impl Node {
             order: Vec::new(),
             offset: PageNumber::Literal(0),
             count: None,
+            expression_order: None,
         })
     }
-    fn validate(&mut self, schemas: &[Schema]) -> Result<usize, GraphSetTextError> {
-        let first = match &mut self.kind {
+    /// Whether every ORDER BY key names an output column of `schema`, exactly
+    /// as validate resolves a single read's keys.
+    fn order_resolves(&self, schema: &Schema) -> bool {
+        self.order.iter().all(|key| match &key.variable {
+            None => schema.columns.contains(&key.name),
+            Some(variable) => schema.returned.iter().any(|source| {
+                source
+                    .as_ref()
+                    .is_some_and(|(v, p)| v == variable && *p == key.name)
+            }),
+        })
+    }
+    fn validate(
+        &mut self,
+        schemas: &[Schema],
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        uses: &mut Vec<(usize, GqlParameterSpec)>,
+    ) -> Result<Schema, GraphSetTextError> {
+        // Every subtree returns its derived schema. A leftmost leaf alone is
+        // insufficient once a descendant set widens a concrete column to Any.
+        let mut schema = match &mut self.kind {
             NodeKind::Leaf(at) => {
                 self.depth = schemas[*at].depth;
-                *at
+                schemas[*at].clone()
             }
             NodeKind::Scope(input) => {
-                let first = input.validate(schemas)?;
+                let schema = input.validate(schemas, statement, declarations, uses)?;
                 self.depth = input.depth + 1;
-                first
+                schema
             }
-            NodeKind::Binary { left, right, .. } => {
-                let l = left.validate(schemas)?;
-                let r = right.validate(schemas)?;
-                self.depth = 1 + left.depth.max(right.depth);
-                let (left, right) = (&schemas[l].types, &schemas[r].types);
-                if left.len() != right.len() {
+            NodeKind::Binary {
+                operation,
+                left,
+                right,
+                ..
+            } => {
+                let mut left_schema = left.validate(schemas, statement, declarations, uses)?;
+                let right_schema = right.validate(schemas, statement, declarations, uses)?;
+                let alignment = (*operation == GraphSetOperation::Union)
+                    .then(|| union_column_order(&left_schema.columns, &right_schema.columns))
+                    .transpose()
+                    .map_err(|()| fail(self.at, GraphSetTextErrorKind::DifferentColumnsInUnion))?;
+                let reorders = alignment
+                    .as_ref()
+                    .is_some_and(|columns| columns.iter().enumerate().any(|(i, &j)| i != j));
+                self.depth = 1 + left.depth.max(right.depth + usize::from(reorders));
+                if left_schema.types.len() != right_schema.types.len() {
                     return Err(fail(
                         self.at,
                         GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnCount {
-                            left: left.len(),
-                            right: right.len(),
+                            left: left_schema.types.len(),
+                            right: right_schema.types.len(),
                         }),
                     ));
                 }
-                for (column, (&left, &right)) in left.iter().zip(right).enumerate() {
-                    if left != right {
-                        return Err(fail(
+                for (column, left) in left_schema.types.iter_mut().enumerate() {
+                    let right = right_schema.types
+                        [alignment.as_ref().map_or(column, |columns| columns[column])];
+                    *left = left.common_set_domain(right).ok_or_else(|| {
+                        fail(
                             self.at,
                             GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
                                 column,
-                                left,
+                                left: *left,
                                 right,
                             }),
-                        ));
-                    }
+                        )
+                    })?;
                 }
-                l
+                left_schema
             }
         };
+        if let Some(order) = &mut self.expression_order {
+            let template = CompoundOrderTemplate::prepare(
+                &statement[order.span.clone()],
+                declarations,
+                &schema.columns,
+                &schema.types,
+            )
+            .map_err(|error| rebase_error(order.span.start, error))?;
+            // The ordinary native page adds both its key projection and its
+            // order-preserving private-column removal to the physical depth.
+            self.depth += template.stage.depth();
+            for (spec, offset) in template.parameters.iter().zip(&template.parameter_offsets) {
+                uses.push((order.span.start + *offset, spec.clone()));
+            }
+            order.template = Some(template);
+        }
         if self.depth > MAX_GRAPH_SET_DEPTH {
             return Err(fail(
                 self.at,
@@ -816,7 +1158,7 @@ impl Node {
                 }),
             ));
         }
-        let schema = &schemas[first];
+        schema.depth = self.depth;
         let mut used = BTreeSet::new();
         for key in &mut self.order {
             let column = match &key.variable {
@@ -853,7 +1195,7 @@ impl Node {
             }
             key.order.column = column;
         }
-        Ok(first)
+        Ok(schema)
     }
     fn bind(
         &self,
@@ -873,7 +1215,31 @@ impl Node {
                 right,
             } => {
                 let left = left.bind(inputs, arguments)?;
-                let right = right.bind(inputs, arguments)?;
+                let mut right = right.bind(inputs, arguments)?;
+                if *operation == GraphSetOperation::Union && left.columns() != right.columns() {
+                    let columns =
+                        union_column_order(left.columns(), right.columns()).map_err(|()| {
+                            fail(self.at, GraphSetTextErrorKind::DifferentColumnsInUnion)
+                        })?;
+                    let projection = left
+                        .columns()
+                        .iter()
+                        .zip(columns)
+                        .map(|(name, column)| {
+                            crate::GraphSetProjection::new(
+                                name.clone(),
+                                crate::GraphSetValue::Column(column),
+                            )
+                        })
+                        .collect();
+                    // Preserve each arm's own order/page and multiplicity;
+                    // the enclosing UNION owns its ALL/DISTINCT semantics.
+                    right = right
+                        .project(projection, GraphSetQuantifier::All)
+                        .map_err(|kind| {
+                            fail(self.at, GraphSetTextErrorKind::ProjectionBuild(kind))
+                        })?;
+                }
                 left.combine(*operation, *quantifier, right)
                     .map_err(|kind| fail(self.at, GraphSetTextErrorKind::SetBuild(kind)))?
             }
@@ -884,12 +1250,20 @@ impl Node {
                 .with_order_by(&order)
                 .map_err(|kind| fail(self.at, GraphSetTextErrorKind::OrderBuild(kind)))?;
         }
-        Ok(bound.with_page(
+        bound = bound.with_page(
             self.offset.value(arguments),
             self.count.as_ref().map(|n| n.value(arguments)),
-        ))
+        );
+        if let Some(order) = &self.expression_order {
+            bound = order
+                .prepared()
+                .bind(bound, arguments)
+                .map_err(|error| rebase_error(order.span.start, error))?;
+        }
+        Ok(bound)
     }
 }
+#[derive(Clone)]
 struct Schema {
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
@@ -898,11 +1272,38 @@ struct Schema {
     returned: Vec<Option<(String, String)>>,
 }
 
+fn union_column_order(left: &[String], right: &[String]) -> Result<Vec<usize>, ()> {
+    if left.len() != right.len() {
+        return Err(());
+    }
+    left.iter()
+        .map(|name| {
+            right
+                .iter()
+                .position(|candidate| candidate == name)
+                .ok_or(())
+        })
+        .collect()
+}
+
+/// Whether the token at `at` opens a read pipeline: MATCH, OPTIONAL MATCH,
+/// UNWIND, CALL, RETURN or WITH.
+fn opens_pipeline(tokens: &[TextToken<'_>], at: usize) -> bool {
+    tokens.get(at).is_some_and(|token| {
+        token.word("MATCH")
+            || token.word("UNWIND")
+            || token.word("CALL")
+            || token.word("RETURN")
+            || token.word("WITH")
+            || (token.word("OPTIONAL") && tokens.get(at + 1).is_some_and(|next| next.word("MATCH")))
+    })
+}
+
 /// The terminal RETURN's plain property items, one entry per output column:
 /// `(var, name)` for an item that is exactly `var.name`, with or without an
 /// alias. An entry is kept only when the item's position names the column it
-/// should (its alias, else the default `name`), so a RETURN this cannot read
-/// item by item yields no entries rather than a misaligned one.
+/// should (its alias, else its source text `var.name`), so a RETURN this
+/// cannot read item by item yields no entries rather than a misaligned one.
 fn returned_properties(
     tokens: &[TextToken<'_>],
     columns: &[String],
@@ -953,15 +1354,15 @@ fn returned_properties(
                 rest @ ..,
             ] => {
                 let named = match rest {
-                    [] => *p,
+                    [] => format!("{v}.{p}"),
                     [TextKind::Word(as_), TextKind::Word(alias)]
                         if as_.eq_ignore_ascii_case("AS") =>
                     {
-                        *alias
+                        (*alias).to_owned()
                     }
                     _ => return None,
                 };
-                (named == column.as_str()).then(|| ((*v).to_owned(), (*p).to_owned()))
+                (named == *column).then(|| ((*v).to_owned(), (*p).to_owned()))
             }
             _ => None,
         })
@@ -1020,6 +1421,7 @@ impl<'a> Composition<'a> {
             ));
         }
         let mut node = self.intersection(depth)?;
+        let mut union_quantifier = None;
         while self.current().word("UNION") || self.current().word("EXCEPT") {
             let token = self.current();
             let operation = if token.word("UNION") {
@@ -1029,6 +1431,15 @@ impl<'a> Composition<'a> {
             };
             self.advance();
             let quantifier = self.quantifier();
+            if operation == GraphSetOperation::Union {
+                if union_quantifier.is_some_and(|previous| previous != quantifier) {
+                    return Err(fail(
+                        token.at,
+                        GraphSetTextErrorKind::InvalidClauseComposition,
+                    ));
+                }
+                union_quantifier = Some(quantifier);
+            }
             let right = self.intersection(depth)?;
             let height = 1 + node.depth.max(right.depth);
             node = Node::new(
@@ -1042,8 +1453,127 @@ impl<'a> Composition<'a> {
                 height,
             )?;
         }
-        self.tail(&mut node)?;
+        if self.has_expression_order(matches!(node.kind, NodeKind::Leaf(_))) {
+            let start = self.current().at;
+            let end = self.expression_order_end()?;
+            if let NodeKind::Leaf(leaf) = node.kind {
+                // A single read keeps its existing graph/row expression scope.
+                self.spans[leaf].end = end;
+                self.spans[leaf].last_token = self.at;
+            } else {
+                // A compound page sees only the completed output schema. Keep
+                // the original bytes, including original diagnostic positions;
+                // no synthetic RETURN/MATCH text or execution-time parser.
+                node.expression_order = Some(OrderExpression {
+                    span: start..end,
+                    template: None,
+                });
+            }
+        } else {
+            self.tail(&mut node)?;
+        }
         Ok(node)
+    }
+
+    /// Find one untouched page span using the already admitted token stream.
+    /// An enclosing set parenthesis is not part of the scalar expression.
+    /// Check delimiter kinds as well as depth before any catalog callback.
+    fn expression_order_end(&mut self) -> Result<usize, GraphSetTextError> {
+        let mut delimiters = Vec::new();
+        loop {
+            let token = self.current();
+            if matches!(token.kind, TextKind::End)
+                || (delimiters.is_empty() && (token.punct(b')') || token.punct(b';')))
+            {
+                break;
+            }
+            match token.kind {
+                TextKind::Punct(ch @ (b'(' | b'[' | b'{')) => {
+                    if delimiters.len() == MAX_GRAPH_SET_DEPTH {
+                        return Err(expected(token.at, "bounded graph-expression nesting"));
+                    }
+                    delimiters.push(ch);
+                }
+                TextKind::Punct(ch @ (b')' | b']' | b'}')) => {
+                    let opening = match ch {
+                        b')' => b'(',
+                        b']' => b'[',
+                        _ => b'{',
+                    };
+                    if delimiters.pop() != Some(opening) {
+                        return Err(expected(token.at, "matching graph-expression delimiter"));
+                    }
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+        if !delimiters.is_empty() {
+            return Err(expected(
+                self.current().at,
+                "closing graph-expression delimiter",
+            ));
+        }
+        Ok(self.current().at)
+    }
+
+    /// Routing over admitted tokens only. The ordinary scalar compiler owns
+    /// every expression; this recognizes the old column-only tail so its
+    /// template and bound-plan bytes remain unchanged.
+    fn has_expression_order(&self, allow_returned_property: bool) -> bool {
+        let token = |at| self.tokens.get(at).copied();
+        if !self.current().word("ORDER")
+            || !token(self.at + 1).is_some_and(|token| token.word("BY"))
+        {
+            return false;
+        }
+        let mut at = self.at + 2;
+        loop {
+            if !token(at).is_some_and(|token| matches!(token.kind, TextKind::Word(_))) {
+                return true;
+            }
+            at += 1;
+            if token(at).is_some_and(|token| token.punct(b'.')) {
+                // After a set or parenthesized output boundary, `doc.rank`
+                // reads a returned row value, not an arm's graph binding.
+                // Let the shared expression compiler resolve MAP/temporal
+                // fields. Single reads retain their projected-property alias
+                // path; a quoted `doc.rank` is still one plain column token.
+                if !allow_returned_property {
+                    return true;
+                }
+                at += 1;
+                if !token(at).is_some_and(|token| matches!(token.kind, TextKind::Word(_))) {
+                    return true;
+                }
+                at += 1;
+            }
+            if token(at).is_some_and(|token| {
+                ["ASC", "ASCENDING", "DESC", "DESCENDING"]
+                    .iter()
+                    .any(|direction| token.word(direction))
+            }) {
+                at += 1;
+            }
+            if token(at).is_some_and(|token| token.word("NULLS")) {
+                at += 1;
+                if !token(at).is_some_and(|token| token.word("FIRST") || token.word("LAST")) {
+                    return true;
+                }
+                at += 1;
+            }
+            if token(at).is_some_and(|token| token.punct(b',')) {
+                at += 1;
+                continue;
+            }
+            return !token(at).is_some_and(|token| {
+                matches!(token.kind, TextKind::End)
+                    || token.punct(b')')
+                    || token.punct(b';')
+                    || token.word("SKIP")
+                    || token.word("LIMIT")
+            });
+        }
     }
     fn intersection(&mut self, depth: usize) -> Result<Node, GraphSetTextError> {
         let mut node = self.term(depth)?;
@@ -1082,12 +1612,7 @@ impl<'a> Composition<'a> {
             let height = input.depth + 1;
             return Node::new(NodeKind::Scope(Box::new(input)), at, height);
         }
-        if !(self.current().word("MATCH")
-            || self.current().word("UNWIND")
-            || self.current().word("CALL")
-            || self.current().word("RETURN")
-            || self.current().word("WITH"))
-        {
+        if !opens_pipeline(&self.tokens, self.at) {
             return Err(expected(
                 at,
                 "read pipeline or parenthesized set expression",
@@ -1180,14 +1705,8 @@ impl<'a> Composition<'a> {
         {
             next += 1;
         }
-        self.tokens.get(next).is_some_and(|token| {
-            token.word("MATCH")
-                || token.word("UNWIND")
-                || token.word("CALL")
-                || token.word("RETURN")
-                || token.word("WITH")
-                || token.punct(b'(')
-        })
+        opens_pipeline(&self.tokens, next)
+            || self.tokens.get(next).is_some_and(|token| token.punct(b'('))
     }
     fn tail(&mut self, node: &mut Node) -> Result<(), GraphSetTextError> {
         if self.take_word("ORDER") {
@@ -1209,9 +1728,11 @@ impl<'a> Composition<'a> {
                     variable = Some(std::mem::replace(&mut name, property.to_owned()));
                     self.advance();
                 }
-                let descending = self.take_word("DESC");
-                if !descending {
-                    self.take_word("ASC");
+                // openCypher and GQL spell the directions ASC/ASCENDING and
+                // DESC/DESCENDING.
+                let descending = self.take_word("DESC") || self.take_word("DESCENDING");
+                if !descending && !self.take_word("ASC") {
+                    self.take_word("ASCENDING");
                 }
                 let nulls_first = if self.take_word("NULLS") {
                     if self.take_word("FIRST") {
@@ -1260,9 +1781,9 @@ impl<'a> Composition<'a> {
         let token = self.current();
         let result = match token.kind {
             TextKind::Digits(digits) => {
-                PageNumber::Literal(digits.parse::<u64>().map_err(|_| {
-                    pattern_kind(token.at, GraphPatternTextErrorKind::IntegerOutOfRange)
-                })?)
+                PageNumber::Literal(crate::graph_text::integer_magnitude(digits).ok_or_else(
+                    || pattern_kind(token.at, GraphPatternTextErrorKind::IntegerOutOfRange),
+                )?)
             }
             TextKind::Parameter(name) => {
                 let name = name.to_owned();
@@ -1284,8 +1805,48 @@ impl<'a> Composition<'a> {
     }
 }
 
+/// Each unique (domain, name) resolves once across every arm. The reverse
+/// catalog is the caller's, so `labels(n)` and `type(r)` name every id the
+/// caller's catalog names, not only the ones the statement text mentions.
+struct CachedSymbols<'r, R: ?Sized> {
+    resolve: &'r mut R,
+    cache: BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+
+impl<R> crate::graph_text::GraphSymbolResolver for CachedSymbols<'_, R>
+where
+    R: crate::graph_text::GraphSymbolResolver + ?Sized,
+{
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(value) = self.cache.get(&key) {
+            return Some(*value);
+        }
+        let value = self.resolve.resolve_symbol(kind, name)?;
+        self.cache.insert(key, value);
+        Some(value)
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.resolve.time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<crate::graph_text::ReverseSymbolCatalog> {
+        self.resolve.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolve.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        self.resolve.reverse_relation(id)
+    }
+}
+
 /// One immutable compound text definition. MATCH operands retain their own
-/// variables and scopes; positional set output names come from the left side.
+/// variables and scopes. UNION aligns matching output names to the left side;
+/// INTERSECT and EXCEPT retain positional output names from the left side.
 /// Binding never reparses, calls the catalog, reads a database or substitutes
 /// argument values into text. The resulting PreparedGraphSet uses all existing
 /// live/historical/pinned/transaction set-execution entrypoints.
@@ -1312,9 +1873,15 @@ impl core::fmt::Debug for PreparedGraphSetText {
 impl PreparedGraphSetText {
     /// UNION/EXCEPT associate left; INTERSECT binds more tightly. Every set
     /// operator defaults to DISTINCT and may explicitly select ALL/DISTINCT.
+    /// UNION operands must return the same column names, in any order, and one
+    /// unparenthesized UNION chain must use ALL throughout or DISTINCT throughout.
     /// Parentheses preserve operand-local order/page. An unparenthesized final
     /// ORDER BY/SKIP/LIMIT applies to the complete set, never only its last arm.
-    /// ORDER BY accepts leftmost output names, ASC/DESC and NULLS FIRST/LAST.
+    /// Compound ORDER BY accepts expressions over leftmost output columns,
+    /// including parameters, ASC/DESC and NULLS FIRST/LAST. Private arm bindings
+    /// are out of scope. Keys are evaluated after set arithmetic, before
+    /// ranking/windowing, then removed from the ordered public output.
+    /// Existing output-column-only pages keep their exact plan encoding.
     /// Without a set operator it also accepts `var.prop` when the RETURN
     /// projected exactly that property, aliased or not, and orders by that
     /// output column.
@@ -1323,7 +1890,8 @@ impl PreparedGraphSetText {
     /// Leaf syntax is the shared graph-pattern profile, including WALK,
     /// OPTIONAL and EXISTS. RETURN also accepts scalar literals, parameters and
     /// checked nullable i64 arithmetic (+ - * / %, signs, ABS, NULLIF, COALESCE).
-    /// Computed expressions require AS aliases. They evaluate before DISTINCT,
+    /// An unaliased RETURN item is named by its source text, as in openCypher
+    /// (`n.p`, `count(*)`, `n.p + 1`). Computed values evaluate before DISTINCT,
     /// ordering and pagination; all selected property inputs retain eager source
     /// error behavior. Constants preserve match multiplicity. Use this same
     /// entrypoint for a single MATCH with computed outputs or a compound set.
@@ -1363,6 +1931,22 @@ impl PreparedGraphSetText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphSetTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, &mut resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a resolver whose reverse
+    /// catalog names every label and relation id. `labels(n)` and `type(r)`
+    /// columns read names from that catalog. A bare closure has none, so its
+    /// arms fall back to the names their own text mentions.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphSetTextError>
+    where
+        R: crate::graph_text::GraphSymbolResolver + ?Sized,
+    {
+        let zones = resolve.time_zones();
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)
             .map_err(|error| pattern_error(0, error))?;
         let mut parser = Composition {
@@ -1375,58 +1959,81 @@ impl PreparedGraphSetText {
         if !matches!(parser.current().kind, TextKind::End) {
             return Err(expected(parser.current().at, "end of compound statement"));
         }
-        let mut pending = Vec::new();
-        let mut schemas = Vec::new();
-        let mut uses = parser.page_parameters;
-        let mut operands = 0;
-        for span in &parser.spans {
-            let names: BTreeSet<_> = parser.tokens[span.first_token..span.last_token]
-                .iter()
-                .filter_map(|token| match token.kind {
-                    TextKind::Parameter(name) => Some(name),
-                    _ => None,
-                })
-                .collect();
-            let local: Vec<_> = declarations
-                .iter()
-                .copied()
-                .filter(|(name, _)| names.contains(name))
-                .collect();
-            let input = PreparedGraphText::unresolved_read_input(
-                &statement[span.start..span.end],
-                &local,
-                &parser.tokens[span.first_token..span.last_token],
-            )
-            .map_err(|error| rebase_error(span.start, error))?;
-            operands += input.operand_count();
-            if operands > MAX_GRAPH_SET_OPERANDS {
-                return Err(fail(
-                    span.start,
-                    GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands {
-                        limit: MAX_GRAPH_SET_OPERANDS,
-                        observed: operands,
-                    }),
-                ));
+        let page_parameters = std::mem::take(&mut parser.page_parameters);
+        let tokens = &parser.tokens;
+        let compile = |spans: &[Span], mut uses: Vec<(usize, GqlParameterSpec)>| {
+            let mut pending = Vec::new();
+            let mut schemas = Vec::new();
+            let mut operands = 0;
+            for span in spans {
+                let names: BTreeSet<_> = tokens[span.first_token..span.last_token]
+                    .iter()
+                    .filter_map(|token| match token.kind {
+                        TextKind::Parameter(name) => Some(name),
+                        _ => None,
+                    })
+                    .collect();
+                let local: Vec<_> = declarations
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| names.contains(name))
+                    .collect();
+                let input = PreparedGraphText::unresolved_read_input(
+                    &statement[span.start..span.end],
+                    &local,
+                    &tokens[span.first_token..span.last_token],
+                    zones.as_ref(),
+                )
+                .map_err(|error| rebase_error(span.start, error))?;
+                operands += input.operand_count();
+                if operands > MAX_GRAPH_SET_OPERANDS {
+                    return Err(fail(
+                        span.start,
+                        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands {
+                            limit: MAX_GRAPH_SET_OPERANDS,
+                            observed: operands,
+                        }),
+                    ));
+                }
+                let (columns, types) = input.column_schema();
+                let returned =
+                    returned_properties(&tokens[span.first_token..span.last_token], &columns);
+                schemas.push(Schema {
+                    columns,
+                    types,
+                    depth: input.depth(),
+                    returned,
+                });
+                for (spec, offset) in input
+                    .parameter_schema()
+                    .iter()
+                    .zip(input.parameter_offsets())
+                {
+                    uses.push((span.start + *offset, spec.clone()));
+                }
+                pending.push(input);
             }
-            let (columns, types) = input.column_schema();
-            let returned =
-                returned_properties(&parser.tokens[span.first_token..span.last_token], &columns);
-            schemas.push(Schema {
-                columns,
-                types,
-                depth: input.depth(),
-                returned,
-            });
-            for (spec, offset) in input
-                .parameter_schema()
-                .iter()
-                .zip(input.parameter_offsets())
-            {
-                uses.push((span.start + *offset, spec.clone()));
-            }
-            pending.push(input);
+            Ok::<_, GraphSetTextError>((pending, schemas, uses))
+        };
+        let (mut pending, mut schemas, mut uses) = compile(&parser.spans, page_parameters)?;
+        // A single read's ORDER BY that names no output column ranks by the
+        // read's own scope, as `RETURN n ORDER BY k` after `WITH ..., x AS k`
+        // or `UNWIND ... AS k` (fgdb-ujuga). Only a compound set's tail is
+        // limited to output columns, so recompile that read with the complete
+        // tail it owns. A tail naming only outputs keeps its column template.
+        if let NodeKind::Leaf(leaf) = root.kind
+            && !root.order_resolves(&schemas[leaf])
+        {
+            let (end, last_token) = (parser.current().at, parser.at);
+            parser.spans[leaf].end = end;
+            parser.spans[leaf].last_token = last_token;
+            root.order.clear();
+            root.offset = PageNumber::Literal(0);
+            root.count = None;
+            // Only this tail recorded page parameters: the read now owns them.
+            (pending, schemas, uses) = compile(&parser.spans, Vec::new())?;
         }
-        let first = root.validate(&schemas)?;
+        let schema = root.validate(&schemas, statement, declarations, &mut uses)?;
         uses.sort_by_key(|(offset, _)| *offset);
         let mut parameters: Vec<GqlParameterSpec> = Vec::new();
         let mut parameter_offsets = Vec::new();
@@ -1464,15 +2071,9 @@ impl PreparedGraphSetText {
         }
         // No catalog calls occurred above. Keep one domain-aware cache around
         // the existing per-pattern resolver; errors retain original offsets.
-        let mut cache = BTreeMap::new();
-        let mut symbols = |kind, name: &str| {
-            let key = (kind, name.to_owned());
-            if let Some(value) = cache.get(&key) {
-                return Some(*value);
-            }
-            let value = resolve(kind, name)?;
-            cache.insert(key, value);
-            Some(value)
+        let mut symbols = CachedSymbols {
+            resolve,
+            cache: BTreeMap::new(),
         };
         let mut inputs = Vec::new();
         for (input, span) in pending.into_iter().zip(&parser.spans) {
@@ -1485,8 +2086,8 @@ impl PreparedGraphSetText {
             statement: statement.to_owned(),
             root,
             inputs,
-            columns: schemas[first].columns.clone(),
-            types: schemas[first].types.clone(),
+            columns: schema.columns,
+            types: schema.types,
             parameters,
             parameter_offsets,
         })
@@ -1533,6 +2134,11 @@ impl PreparedGraphSetText {
             }
         }
         fn node(bytes: &mut Vec<u8>, tree: &Node) {
+            // Tag 3 is an expression-page wrapper around the existing node
+            // encoding. Unaffected trees retain their exact v1 transcript.
+            if tree.expression_order.is_some() {
+                bytes.push(3);
+            }
             match &tree.kind {
                 NodeKind::Leaf(input) => {
                     bytes.push(0);
@@ -1575,6 +2181,18 @@ impl PreparedGraphSetText {
                 Some(count) => {
                     bytes.push(1);
                     page(bytes, count);
+                }
+            }
+            if let Some(order) = &tree.expression_order {
+                let template = order.prepared();
+                template.stage.append_template_transcript(bytes);
+                // Expressions use page-local parameter ordinals. Retaining
+                // their names prevents different global argument bindings
+                // from aliasing the same resolved-unbound plan identity.
+                ordinal(bytes, template.parameters.len());
+                for spec in &template.parameters {
+                    name(bytes, &spec.name);
+                    bytes.push(parameter_type_tag(spec.parameter_type));
                 }
             }
         }
@@ -1634,6 +2252,30 @@ impl PreparedGraphSetText {
             if !matches!(tree.offset, PageNumber::Literal(0)) || tree.count.is_some() {
                 operators.push("Limit");
             }
+            if let Some(expression) = &tree.expression_order {
+                let ReadStageTemplate::Page {
+                    order,
+                    offset,
+                    count,
+                    computed,
+                    ..
+                } = &expression.prepared().stage
+                else {
+                    unreachable!("compound ordering compiles only a native page");
+                };
+                if computed.is_some() {
+                    operators.push("ProjectOrderKeys");
+                }
+                if !order.is_empty() {
+                    operators.push("OrderByValues");
+                }
+                if !matches!(offset, ReadPageNumber::Literal(0)) || count.is_some() {
+                    operators.push("Limit");
+                }
+                if computed.is_some() {
+                    operators.push("ProjectOrderedOutput");
+                }
+            }
         }
         let mut operators = Vec::new();
         node(&mut operators, &self.root);
@@ -1644,6 +2286,9 @@ impl PreparedGraphSetText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         // Reject the complete argument map before constructing any leaf plan.
         for (spec, &offset) in self.parameters.iter().zip(&self.parameter_offsets) {
             let value = arguments

@@ -3,20 +3,25 @@
 //! admitted-row work, operator visits, scratch growth and final row release.
 
 mod comparison;
+mod different_edges;
 mod join;
 mod policy;
 mod projection;
 mod trail;
-pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
+pub(crate) use comparison::{
+    charge_payload, charge_stored_payload, compare_element_properties, compare_properties,
+    compare_stored,
+};
+pub(crate) use policy::Charges;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
-pub use projection::ProjectedRows;
+pub use projection::{GovernedCheckpoint, ProjectedRows};
 
 use crate::algebra::{
-    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphWalkSearch,
-    VertexPredicate,
+    EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath,
+    GraphWalkSearch, VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +119,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GlaExecutionError<E
     }
 }
 
+#[inline]
 fn increment(
     value: u64,
     limit: u64,
@@ -130,6 +136,7 @@ fn increment(
     Ok(observed as u64)
 }
 
+#[inline]
 fn charge(
     stats: &mut GlaExecutionStats,
     limits: GlaExecutionLimits,
@@ -153,8 +160,9 @@ fn charge(
 }
 
 type Adjacency = BTreeMap<VId, Vec<VId>>;
-type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
-type IdentifiedIndex = BTreeMap<(RelationId, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
+type Index = BTreeMap<(EdgeRelation, GlaDirection), Adjacency>;
+use crate::identified::{IdentifiedAdjacency, IdentifiedNeighbors, IdentifiedStage};
+type IdentifiedIndex = BTreeMap<(EdgeRelation, GlaDirection), IdentifiedAdjacency>;
 
 // Search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
@@ -215,15 +223,45 @@ fn push_neighbor<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     control(GlaExecutionEvent::ScratchEntry)?;
+    // Scans deliver edges grouped by source, so the newest key usually takes
+    // the next neighbor without a search from the root. Same events.
+    if let Some(mut last) = adjacency.last_entry()
+        && *last.key() == source
+    {
+        last.get_mut().push(destination);
+        return Ok(());
+    }
     adjacency.entry(source).or_default().push(destination);
     Ok(())
 }
 
+/// Whether `values` is already ascending, one charged comparison per
+/// adjacent pair up to the first descent. Edges usually arrive in canonical
+/// (source, destination) order, which leaves forward and reverse neighbor
+/// lists sorted: a heapsort's worst case (every sift moves) at about
+/// 3 d log d charged events for a list of d, against d - 1 for this check.
+fn ascending<T: Ord, E>(
+    values: &[T],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    for pair in values.windows(2) {
+        control(GlaExecutionEvent::Work)?;
+        if pair[0] > pair[1] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// In-place iterative heapsort; each comparison/swap crosses the work seam.
+/// An already ascending list is only checked (`ascending`).
 fn sort_neighbors<E>(
     values: &mut [VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
+    if ascending(values, control)? {
+        return Ok(());
+    }
     let len = values.len();
     for root in (0..len / 2).rev() {
         sift_neighbors(values, root, len, control)?;
@@ -261,6 +299,32 @@ fn sift_neighbors<E>(
     Ok(())
 }
 
+/// The distinct type-alternation selectors a plan registered in its index.
+fn alternation_selectors(selectors: impl Iterator<Item = EdgeRelation>) -> Vec<EdgeRelation> {
+    let mut alternations: Vec<_> = selectors
+        .filter(|selector| matches!(selector, EdgeRelation::Set(_)))
+        .collect();
+    alternations.sort_unstable();
+    alternations.dedup();
+    alternations
+}
+
+/// Every index selector one edge of `relation` belongs to: its own type,
+/// the untyped selector, and each registered alternation naming the type.
+fn edge_selectors(
+    relation: RelationId,
+    alternations: &[EdgeRelation],
+) -> impl Iterator<Item = EdgeRelation> + '_ {
+    [EdgeRelation::One(relation), EdgeRelation::Any]
+        .into_iter()
+        .chain(
+            alternations
+                .iter()
+                .copied()
+                .filter(move |selector| selector.matches(relation)),
+        )
+}
+
 fn build_index<E>(
     operators: &[GlaOperator],
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
@@ -287,6 +351,7 @@ fn build_index<E>(
         }
     }
     join::register_indexes(operators, &mut index, control)?;
+    let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         for direction in [
@@ -294,16 +359,22 @@ fn build_index<E>(
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            let Some(adjacency) = index.get_mut(&(relation, direction)) else {
-                continue;
-            };
-            match direction {
-                GlaDirection::Forward => push_neighbor(adjacency, source, destination, control)?,
-                GlaDirection::Reverse => push_neighbor(adjacency, destination, source, control)?,
-                GlaDirection::Undirected => {
-                    push_neighbor(adjacency, source, destination, control)?;
-                    if source != destination {
-                        push_neighbor(adjacency, destination, source, control)?;
+            for selector in edge_selectors(relation, &alternations) {
+                let Some(adjacency) = index.get_mut(&(selector, direction)) else {
+                    continue;
+                };
+                match direction {
+                    GlaDirection::Forward => {
+                        push_neighbor(adjacency, source, destination, control)?
+                    }
+                    GlaDirection::Reverse => {
+                        push_neighbor(adjacency, destination, source, control)?
+                    }
+                    GlaDirection::Undirected => {
+                        push_neighbor(adjacency, source, destination, control)?;
+                        if source != destination {
+                            push_neighbor(adjacency, destination, source, control)?;
+                        }
                     }
                 }
             }
@@ -352,44 +423,66 @@ fn build_identified_index<E>(
                 index.entry((relation, direction))
             {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                e.insert(BTreeMap::new());
+                e.insert(IdentifiedAdjacency::default());
             }
         }
     }
-    for (edge, source, relation, destination) in edges {
-        control(GlaExecutionEvent::Work)?;
+    let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
+    // Identified edges need not arrive grouped by endpoint, so each push is
+    // one hash probe into a stage, which becomes the flat adjacency once at
+    // the end. Neighbors keep their arrival order within a key, so every
+    // charged event, and each list's sort, is as before.
+    let keys: Vec<_> = index.keys().copied().collect();
+    let mut staged: Vec<IdentifiedStage> =
+        keys.iter().map(|_| IdentifiedStage::default()).collect();
+    // The stages one relation's edges join, in the order the per-edge walk
+    // reaches them (direction, then selector), resolved once per run of that
+    // relation: three tree searches per edge were 9% of an epinions SHORTEST.
+    let stages_of = |relation| {
+        let mut stages = Vec::new();
         for direction in [
             GlaDirection::Forward,
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
-            let Some(adjacency) = index.get_mut(&(relation, direction)) else {
-                continue;
-            };
+            for selector in edge_selectors(relation, &alternations) {
+                if let Ok(at) = keys.binary_search(&(selector, direction)) {
+                    stages.push((at, direction));
+                }
+            }
+        }
+        stages
+    };
+    let mut resolved: Option<(RelationId, Vec<(usize, GlaDirection)>)> = None;
+    for (edge, source, relation, destination) in edges {
+        control(GlaExecutionEvent::Work)?;
+        if resolved
+            .as_ref()
+            .is_none_or(|(known, _)| *known != relation)
+        {
+            resolved = Some((relation, stages_of(relation)));
+        }
+        let (_, stages) = resolved.as_ref().expect("resolved above");
+        for &(at, direction) in stages {
+            let adjacency = &mut staged[at];
             let (from, to) = if direction == GlaDirection::Reverse {
                 (destination, source)
             } else {
                 (source, destination)
             };
             control(GlaExecutionEvent::ScratchEntry)?;
-            if !adjacency.contains_key(&from) {
-                control(GlaExecutionEvent::ScratchEntry)?;
-            }
-            adjacency.entry(from).or_default().push((edge, to));
+            adjacency.push(from, (edge, to), control)?;
             if direction == GlaDirection::Undirected && source != destination {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                if !adjacency.contains_key(&destination) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                }
-                adjacency
-                    .entry(destination)
-                    .or_default()
-                    .push((edge, source));
+                adjacency.push(destination, (edge, source), control)?;
             }
         }
     }
+    for (key, adjacency) in keys.into_iter().zip(staged) {
+        index.insert(key, adjacency.finish());
+    }
     for adjacency in index.values_mut() {
-        for neighbors in adjacency.values_mut() {
+        for neighbors in adjacency.lists_mut() {
             sort_identified_neighbors(neighbors, control)?;
         }
     }
@@ -424,6 +517,9 @@ fn sort_identified_neighbors<E>(
         }
         Ok(())
     }
+    if ascending(values, control)? {
+        return Ok(());
+    }
     let end = values.len();
     for root in (0..end / 2).rev() {
         sift(values, root, end, control)?;
@@ -442,7 +538,9 @@ enum Enumeration<'i> {
     Scan { at: usize },
     Candidates(join::Candidates<'i>),
     Walk(WalkExpansion<'i>),
-    Identified(trail::IdentifiedExpansion<'i>),
+    // Boxed: the different-edges cursors (7d752d17) made this the one large
+    // arm, and every Continuation::Enumerate carried its full size.
+    Identified(Box<trail::IdentifiedExpansion<'i>>),
 }
 
 impl Enumeration<'_> {
@@ -505,13 +603,27 @@ enum Continuation<'i> {
         slots: u32,
         width: usize,
     },
+    /// A pattern comprehension's scope (fgdb-7nwox). Its exhaustion
+    /// publishes the collected list and continues after the scope.
+    Collect {
+        group: usize,
+        end: usize,
+        width: usize,
+    },
+    /// The list a Collect published, and the one it replaced.
+    Collected {
+        group: usize,
+        previous: Option<crate::algebra::GraphValue>,
+    },
 }
 
 struct Execution<'i, F, C, P, Row> {
     test_vertex: F,
     control: C,
     project: P,
-    predicate_cache: BTreeMap<(usize, VId), bool>,
+    // Probed per binding and never iterated, so a hash map: one probe where
+    // a tree took a search for get and another for insert.
+    predicate_cache: crate::id_hash::IdMap<(usize, VId), bool>,
     projected: ProjectedRows<Row>,
     active_probe: Option<usize>,
     probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
@@ -522,6 +634,9 @@ struct Execution<'i, F, C, P, Row> {
     identified_index: Option<&'i IdentifiedIndex>,
     segments: [Option<GraphPath>; crate::algebra::MAX_PATTERN_BINDINGS],
     paths: [Option<GraphPath>; crate::algebra::MAX_PATTERN_IDENTITIES],
+    /// Each Collect group's witnesses so far, then its published list.
+    collecting: [Vec<crate::algebra::GraphValue>; crate::algebra::MAX_PATTERN_IDENTITIES],
+    collected: [Option<crate::algebra::GraphValue>; crate::algebra::MAX_PATTERN_IDENTITIES],
     continuations: Vec<Continuation<'i>>,
     terminal_closure: Option<join::TerminalClosure>,
 }
@@ -553,11 +668,16 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                     *yielded = false;
                 }
             }
-            Continuation::Bind { width } | Continuation::Optional { width, .. } => {
+            Continuation::Bind { width }
+            | Continuation::Optional { width, .. }
+            | Continuation::Collect { width, .. } => {
                 bindings.truncate(*width);
             }
             Continuation::CapturePath { capture, previous } => {
                 self.paths[*capture] = previous.take();
+            }
+            Continuation::Collected { group, previous } => {
+                self.collected[*group] = previous.take();
             }
             Continuation::Probe {
                 width, previous, ..
@@ -582,6 +702,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -610,6 +731,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -685,7 +807,22 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                             next = Some(end + 1);
                         }
                     }
-                    Continuation::Bind { .. } | Continuation::CapturePath { .. } => {}
+                    // The scope is exhausted: every witness is collected, in
+                    // enumeration order, and the occurrence continues past it
+                    // with its outer bindings (fgdb-7nwox).
+                    Continuation::Collect { group, end, .. } => {
+                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                        let list = crate::algebra::GraphValue::List(
+                            core::mem::take(&mut self.collecting[group]).into_boxed_slice(),
+                        );
+                        let previous = self.collected[group].replace(list);
+                        self.continuations
+                            .push(Continuation::Collected { group, previous });
+                        next = Some(end + 1);
+                    }
+                    Continuation::Bind { .. }
+                    | Continuation::CapturePath { .. }
+                    | Continuation::Collected { .. } => {}
                 }
                 continue;
             };
@@ -706,6 +843,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         &operators[closure.projection],
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )?;
@@ -754,6 +892,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         operator,
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )? {
@@ -781,21 +920,19 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         }
                         continue;
                     };
-                    let key = (ordinal, vid);
-                    let keep = if let Some(keep) = self.predicate_cache.get(&key) {
-                        *keep
-                    } else {
-                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                        // Cache hits neither reread the source nor repeat literal
-                        // comparison work. Reserve that work before source entry.
-                        for predicate in predicates {
-                            for _ in 0..predicate.comparison_work_units() {
-                                (self.control)(GlaExecutionEvent::Work)?;
+                    let keep = match self.predicate_cache.entry((ordinal, vid)) {
+                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            // Cache hits neither reread the source nor repeat literal
+                            // comparison work. Reserve that work before source entry.
+                            for predicate in predicates {
+                                for _ in 0..predicate.comparison_work_units() {
+                                    (self.control)(GlaExecutionEvent::Work)?;
+                                }
                             }
+                            *entry.insert((self.test_vertex)(vid, predicates)?)
                         }
-                        let keep = (self.test_vertex)(vid, predicates)?;
-                        self.predicate_cache.insert(key, keep);
-                        keep
                     };
                     if !keep {
                         next = None;
@@ -808,6 +945,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         operator,
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )?;
@@ -855,17 +993,47 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         ),
                     };
                     let cursor = if let Some(identified) = self.identified_index {
-                        let capture = operators
-                            .iter()
-                            .any(|op| matches!(op, GlaOperator::CapturePath { .. }));
-                        Enumeration::Identified(trail::IdentifiedExpansion::new(
-                            source,
-                            bounds,
-                            search,
-                            identified.get(&(*relation, *direction)),
-                            capture,
-                            &mut self.control,
-                        )?)
+                        let capture = operators.iter().any(|op| {
+                            matches!(
+                                op,
+                                GlaOperator::CapturePath { .. }
+                                    | GlaOperator::DifferentEdges { .. }
+                            )
+                        });
+                        let adjacency = identified
+                            .get(&(*relation, *direction))
+                            .map(|adjacency| adjacency as &dyn IdentifiedNeighbors);
+                        let cursor = if let Some(segments) =
+                            different_edges::for_expansion(operators, ordinal, bindings.len())
+                        {
+                            let Some(forbidden) = different_edges::forbidden(
+                                segments,
+                                &self.segments,
+                                &mut self.control,
+                            )?
+                            else {
+                                next = None;
+                                continue;
+                            };
+                            trail::IdentifiedExpansion::new_different_edges(
+                                source,
+                                bounds,
+                                search,
+                                adjacency,
+                                forbidden,
+                                &mut self.control,
+                            )?
+                        } else {
+                            trail::IdentifiedExpansion::new(
+                                source,
+                                bounds,
+                                search,
+                                adjacency,
+                                capture,
+                                &mut self.control,
+                            )?
+                        };
+                        Enumeration::Identified(Box::new(cursor))
                     } else if matches!(operator, GlaOperator::VarLengthExpand { .. }) {
                         Enumeration::Walk(WalkExpansion::new(
                             search,
@@ -927,6 +1095,46 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         width: bindings.len(),
                     });
                 }
+                GlaOperator::Collect { group, end, .. } => {
+                    let group = *group as usize;
+                    self.collecting[group].clear();
+                    self.continuations.push(Continuation::Collect {
+                        group,
+                        end: *end as usize,
+                        width: bindings.len(),
+                    });
+                }
+                // One witness: its element (a NULL for none), then the next.
+                GlaOperator::CollectEnd { group, value } => {
+                    use crate::algebra::{GraphPathFunction, GraphValue, ValueProjection};
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    let null = || GraphValue::Scalar(fgdb_types::CanonicalScalar::Null);
+                    let element = match value {
+                        Some(ValueProjection::Vertex { slot }) => bindings
+                            .get(slot.ordinal() as usize)
+                            .copied()
+                            .flatten()
+                            .map_or_else(null, GraphValue::Vertex),
+                        Some(ValueProjection::Path { capture, function }) => {
+                            match self.paths[*capture as usize].as_ref() {
+                                Some(path) if *function == GraphPathFunction::Edge => path
+                                    .steps()
+                                    .first()
+                                    .map_or_else(null, |(edge, _)| GraphValue::Edge(*edge)),
+                                Some(path) => {
+                                    for _ in 0..=path.len() {
+                                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                                    }
+                                    GraphValue::Path(path.clone())
+                                }
+                                None => null(),
+                            }
+                        }
+                        _ => null(),
+                    };
+                    self.collecting[*group as usize].push(element);
+                    next = None;
+                }
                 GlaOperator::BindVertex { source } | GlaOperator::BindOuterVertex { source } => {
                     let value = bindings[source.ordinal() as usize];
                     if value.is_none() && matches!(operator, GlaOperator::BindVertex { .. }) {
@@ -938,6 +1146,11 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         width: bindings.len(),
                     });
                     bindings.push(value);
+                }
+                GlaOperator::DifferentEdges { segments } => {
+                    if !different_edges::accepts(segments, &self.segments, &mut self.control)? {
+                        next = None;
+                    }
                 }
                 GlaOperator::CapturePath {
                     capture,
@@ -961,15 +1174,34 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                                 complete = false;
                                 break;
                             };
-                            if segment.start() != endpoint {
+                            // A segment is recorded from the vertex its edge was
+                            // expanded from. A closing edge back to a bound vertex,
+                            // or a walk the plan expanded from its far end, ends
+                            // where the path stands instead: read it backwards,
+                            // so the path keeps its declared order (fgdb-tk2u6).
+                            let raw = segment.steps();
+                            let end = raw.last().map_or(segment.start(), |step| step.1);
+                            let forward = segment.start() == endpoint;
+                            if !forward && end != endpoint {
                                 complete = false;
                                 break;
                             }
-                            for step in segment.steps() {
+                            for index in 0..raw.len() {
                                 (self.control)(GlaExecutionEvent::Work)?;
                                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
                                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                                steps.push(*step);
+                                let step = if forward {
+                                    raw[index]
+                                } else {
+                                    let at = raw.len() - 1 - index;
+                                    let previous = if at == 0 {
+                                        segment.start()
+                                    } else {
+                                        raw[at - 1].1
+                                    };
+                                    (raw[at].0, previous)
+                                };
+                                steps.push(step);
                                 endpoint = step.1;
                             }
                         }
@@ -1028,6 +1260,7 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  _paths: &[Option<GraphPath>],
+                 _collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1048,9 +1281,16 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
         if !self.requires_identified_edges() {
             return self.execute_with_properties_control(
                 vertices,
@@ -1071,6 +1311,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1084,6 +1325,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         control,
@@ -1101,13 +1343,58 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+        edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        self.execute_with_element_maps_control(
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            vertex_labels,
+            edge_type,
+            |_| Ok(None),
+            |_| Ok(None),
+            control,
+        )
+    }
+
+    /// Enumerating map sources must name every visible property of the same
+    /// admitted element. A bound element with no properties supplies an empty
+    /// map; only an absent graph binding produces NULL without a source read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_element_maps_control<'a, E: From<crate::GraphIntegerError>>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut edge_property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
+        mut edge_properties: impl FnMut(EId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
-        if !self.requires_identified_edges() && !self.projects_labels() && !self.projects_types() {
+        if !self.requires_identified_edges()
+            && !self.projects_labels()
+            && !self.projects_types()
+            && !self.projects_property_maps()
+        {
             return self.execute_with_properties_control(
                 vertices,
                 edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
@@ -1127,6 +1414,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1143,15 +1431,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                             control,
                         );
                     }
-                    Row::collect_element_properties(
+                    Row::collect_element_maps(
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         &mut edge_property,
                         &mut vertex_labels,
                         &mut edge_type,
+                        &mut vertex_properties,
+                        &mut edge_properties,
                         control,
                     )?;
                     Ok(false)
@@ -1167,9 +1458,16 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
+        if self.projects_property_maps() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
         self.execute_projected(
             vertices,
             edges,
@@ -1179,6 +1477,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1192,6 +1491,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         control,
@@ -1220,6 +1520,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -1252,6 +1553,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -1279,7 +1581,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             project,
-            predicate_cache: BTreeMap::new(),
+            predicate_cache: crate::id_hash::IdMap::default(),
             projected: ProjectedRows::<Row>::for_plan(distinct, operators),
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
@@ -1288,6 +1590,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             identified_index: identified_index.as_ref(),
             segments: core::array::from_fn(|_| None),
             paths: core::array::from_fn(|_| None),
+            collecting: core::array::from_fn(|_| Vec::new()),
+            collected: core::array::from_fn(|_| None),
             continuations: Vec::with_capacity(operators.len()),
             terminal_closure: if terminal && identified_index.is_none() {
                 join::TerminalClosure::compile(operators)
@@ -1316,18 +1620,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                     .as_ref()
                     .and_then(|index| index.get(&(*relation, *direction)))
                 {
-                    for (source, neighbors) in adjacency {
+                    for (source, neighbors) in adjacency.iter() {
                         for &(edge, destination) in neighbors {
                             (execution.control)(GlaExecutionEvent::Work)?;
                             for _ in 0..3 {
                                 (execution.control)(GlaExecutionEvent::ScratchEntry)?;
                             }
                             execution.segments[1] = Some(GraphPath::new(
-                                *source,
+                                source,
                                 vec![(edge, destination)].into_boxed_slice(),
                             ));
                             bindings.clear();
-                            bindings.extend([Some(*source), Some(destination)]);
+                            bindings.extend([Some(source), Some(destination)]);
                             execution.visit(operators, 1, &mut bindings, &index)?;
                             execution.segments[1] = None;
                         }
@@ -1518,7 +1822,7 @@ mod tests {
                 reads.set(reads.get() + 1);
                 assert_eq!(vid, VId(2));
                 Ok::<_, ()>(predicates.iter().all(|predicate| {
-                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7))])
+                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7).into())])
                 }))
             })
             .unwrap();
@@ -1733,6 +2037,39 @@ mod tests {
     }
 
     #[test]
+    fn an_ascending_neighbor_list_is_checked_not_sorted() {
+        for len in 0..=40_u128 {
+            // Repeated neighbors (parallel edges) are still ascending.
+            let values: Vec<_> = (0..len).map(|at| VId(at / 2)).collect();
+            let mut checked = values.clone();
+            let mut events = 0;
+            sort_neighbors(&mut checked, &mut |event| {
+                assert_eq!(event, GlaExecutionEvent::Work);
+                events += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert_eq!(checked, values);
+            assert_eq!(events, len.saturating_sub(1));
+
+            let values: Vec<_> = (0..len).map(|at| (EId(at), VId(len - at))).collect();
+            let mut checked = values.clone();
+            let mut events = 0;
+            sort_identified_neighbors(&mut checked, &mut |_| {
+                events += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert_eq!(checked, values);
+            assert_eq!(events, len.saturating_sub(1));
+        }
+        // One descent anywhere still sorts the whole list.
+        let mut values = vec![VId(1), VId(2), VId(3), VId(0)];
+        sort_neighbors(&mut values, &mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(values, [VId(0), VId(1), VId(2), VId(3)]);
+    }
+
+    #[test]
     fn controlled_ordering_can_stop_at_every_event_without_losing_occurrences() {
         let original = [
             VId(9),
@@ -1804,5 +2141,176 @@ mod tests {
         assert_eq!(result, Err("stopped in adjacency ordering"));
         assert_eq!(events, stop);
         assert_eq!(reads, 0);
+    }
+
+    type OrderedIdentifiedIndex =
+        BTreeMap<(EdgeRelation, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
+
+    /// The identified index the flat one replaced (fgdb-61p1n): a staging map
+    /// of vectors per key, collected into ordered maps, then each list sorted
+    /// in key order. Its lists, their order and its events are the oracle.
+    fn ordered_identified_index<E>(
+        operators: &[GlaOperator],
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<OrderedIdentifiedIndex, E> {
+        type Stage = crate::id_hash::IdMap<VId, Vec<(EId, VId)>>;
+        fn push<E>(
+            stage: &mut Stage,
+            from: VId,
+            neighbor: (EId, VId),
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            match stage.entry(from) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().push(neighbor)
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    entry.insert(vec![neighbor]);
+                }
+            }
+            Ok(())
+        }
+        let mut index = OrderedIdentifiedIndex::new();
+        for operator in operators {
+            let GlaOperator::ScanEdges {
+                relation,
+                direction,
+            } = operator
+            else {
+                continue;
+            };
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                index.entry((*relation, *direction))
+            {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                e.insert(BTreeMap::new());
+            }
+        }
+        let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
+        let keys: Vec<_> = index.keys().copied().collect();
+        let mut staged: Vec<Stage> = keys.iter().map(|_| Stage::default()).collect();
+        for (edge, source, relation, destination) in edges {
+            control(GlaExecutionEvent::Work)?;
+            for direction in [
+                GlaDirection::Forward,
+                GlaDirection::Reverse,
+                GlaDirection::Undirected,
+            ] {
+                for selector in edge_selectors(relation, &alternations) {
+                    let Ok(at) = keys.binary_search(&(selector, direction)) else {
+                        continue;
+                    };
+                    let (from, to) = if direction == GlaDirection::Reverse {
+                        (destination, source)
+                    } else {
+                        (source, destination)
+                    };
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    push(&mut staged[at], from, (edge, to), control)?;
+                    if direction == GlaDirection::Undirected && source != destination {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        push(&mut staged[at], destination, (edge, source), control)?;
+                    }
+                }
+            }
+        }
+        for (key, stage) in keys.into_iter().zip(staged) {
+            let mut entries: Vec<_> = stage.into_iter().collect();
+            entries.sort_unstable_by_key(|(from, _)| *from);
+            index.insert(key, entries.into_iter().collect());
+        }
+        for adjacency in index.values_mut() {
+            for neighbors in adjacency.values_mut() {
+                sort_identified_neighbors(neighbors, control)?;
+            }
+        }
+        Ok(index)
+    }
+
+    /// The flat identified index holds exactly the ordered one's lists, in
+    /// its order, and charges exactly its events (fgdb-61p1n): random edges
+    /// with self-loops, parallel edges and three relations, into random key
+    /// sets of one type, an alternation and the untyped selector, in every
+    /// orientation, edges arriving in no endpoint order.
+    #[test]
+    fn flat_identified_index_equals_the_ordered_one_event_for_event() {
+        let alternation = EdgeRelation::alternation(&[RelationId(1), RelationId(2)]).unwrap();
+        let selectors = [
+            EdgeRelation::One(RelationId(1)),
+            EdgeRelation::One(RelationId(2)),
+            alternation,
+            EdgeRelation::Any,
+        ];
+        let directions = [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ];
+        let mut state = 0x1de7_1f1e_d000_0001_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut checked, mut listed) = (0, 0);
+        for _ in 0..300 {
+            let operators: Vec<GlaOperator> = (0..1 + random(5))
+                .map(|_| GlaOperator::ScanEdges {
+                    relation: selectors[random(4) as usize],
+                    direction: directions[random(3) as usize],
+                })
+                .collect();
+            let vertices = 1 + random(25);
+            let edges: Vec<(EId, VId, RelationId, VId)> = (0..random(120))
+                .map(|eid| {
+                    let vertex = |at: u64| VId(u128::from(at) * 0x9_0000_0007 % 1_000_003);
+                    (
+                        EId((u128::from(random(1 << 30)) << 8) | u128::from(eid)),
+                        vertex(random(vertices)),
+                        RelationId(1 + random(3)),
+                        vertex(random(vertices)),
+                    )
+                })
+                .collect();
+            let (mut flat_log, mut ordered_log) = (Vec::new(), Vec::new());
+            let flat = build_identified_index(&operators, edges.iter().copied(), &mut |event| {
+                flat_log.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            let ordered =
+                ordered_identified_index(&operators, edges.iter().copied(), &mut |event| {
+                    ordered_log.push(event);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            assert_eq!(flat_log, ordered_log);
+            assert_eq!(
+                flat.keys().collect::<Vec<_>>(),
+                ordered.keys().collect::<Vec<_>>()
+            );
+            for (key, adjacency) in &flat {
+                let lists: Vec<(VId, Vec<(EId, VId)>)> = adjacency
+                    .iter()
+                    .map(|(endpoint, list)| (endpoint, list.to_vec()))
+                    .collect();
+                let expected: Vec<_> = ordered[key].clone().into_iter().collect();
+                assert_eq!(lists, expected, "{key:?}");
+                for probe in 0..vertices + 2 {
+                    let vertex = VId(u128::from(probe) * 0x9_0000_0007 % 1_000_003);
+                    assert_eq!(
+                        adjacency.neighbors(&vertex),
+                        ordered[key].neighbors(&vertex)
+                    );
+                }
+                listed += lists.len();
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 300);
+        assert!(listed > 3_000, "{listed}");
     }
 }

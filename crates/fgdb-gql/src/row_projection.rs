@@ -24,14 +24,45 @@ mod unwind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowProjectionBuildError {
-    InputWidth { observed: usize },
-    ColumnCount { input: usize, columns: usize },
+    InputWidth {
+        observed: usize,
+    },
+    ColumnCount {
+        input: usize,
+        columns: usize,
+    },
+    OutputType {
+        column: usize,
+        inferred: GraphSetColumnType,
+        declared: GraphSetColumnType,
+    },
     Projection(GraphSetProjectionError),
     Filter(GraphSetFilterError),
 }
 impl core::fmt::Display for RowProjectionBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row projection definition: {self:?}")
+        match self {
+            Self::InputWidth { observed } => {
+                write!(
+                    f,
+                    "projection input has an inadmissible width of {observed} columns"
+                )
+            }
+            Self::ColumnCount { input, columns } => write!(
+                f,
+                "projection declares {columns} column types for {input} projected columns"
+            ),
+            Self::OutputType {
+                column,
+                inferred,
+                declared,
+            } => write!(
+                f,
+                "projection column {column} yields {inferred}, but {declared} is declared"
+            ),
+            Self::Projection(error) => error.fmt(f),
+            Self::Filter(error) => error.fmt(f),
+        }
     }
 }
 impl core::error::Error for RowProjectionBuildError {}
@@ -59,6 +90,9 @@ pub struct RowProjectionSpec {
     filter: Box<[GraphSetPredicateOp]>,
     // Only the checked UNWIND constructor expands the last evaluated cell.
     expand_last: bool,
+    // That cell holds the bounds of an UNWIND range(), whose members the
+    // expansion generates instead of reading a materialized list.
+    expand_range: bool,
 }
 impl RowProjectionSpec {
     pub fn new(
@@ -101,7 +135,36 @@ impl RowProjectionSpec {
             quantifier,
             filter: Box::new([]),
             expand_last: false,
+            expand_range: false,
         })
+    }
+
+    /// Widen only the declared output domains of already-checked expressions.
+    /// Native procedure schemas can expose Any while a registered kernel
+    /// proves a concrete domain. Every requested domain must contain the
+    /// inferred one; this never narrows Any or converts a value. Input
+    /// admission, expressions, filters and occurrence semantics stay intact.
+    pub fn widen_output_types(
+        mut self,
+        output: Vec<GraphSetColumnType>,
+    ) -> Result<Self, RowProjectionBuildError> {
+        if output.len() != self.types.len() {
+            return Err(RowProjectionBuildError::ColumnCount {
+                input: self.types.len(),
+                columns: output.len(),
+            });
+        }
+        for (column, (&inferred, &declared)) in self.types.iter().zip(&output).enumerate() {
+            if inferred.common_set_domain(declared) != Some(declared) {
+                return Err(RowProjectionBuildError::OutputType {
+                    column,
+                    inferred,
+                    declared,
+                });
+            }
+        }
+        self.types = output.into();
+        Ok(self)
     }
 
     /// Select complete input rows without renaming, deduplicating or changing
@@ -144,6 +207,7 @@ impl RowProjectionSpec {
             quantifier: GraphSetQuantifier::All,
             filter: code.to_vec().into_boxed_slice(),
             expand_last: false,
+            expand_range: false,
         })
     }
 
@@ -348,7 +412,14 @@ impl IncrementalRowProjection {
                 |column, error| RowProjectionError::Expression { column, error },
             )?;
             if self.spec.expand_last {
-                unwind::append(&row, weight, limbs, control, &mut updates)?;
+                unwind::append(
+                    &row,
+                    weight,
+                    limbs,
+                    self.spec.expand_range,
+                    control,
+                    &mut updates,
+                )?;
             } else {
                 let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
                 charge(control, ZSetEvent::ScratchEntry)?;

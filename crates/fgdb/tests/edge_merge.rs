@@ -59,13 +59,14 @@ async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
     for id in 1..=4_u128 {
         batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
     }
-    batch.add_edge(
-        EId(10),
-        VId(1),
-        VId(2),
-        vec![(WEIGHT, CanonicalScalar::Int(3))],
-    );
+    // The MERGE map {WEIGHT: 7} is a match predicate (fgdb-at06q): edge 10
+    // matches it, and its sibling 13 on the same pair is filtered out.
+    batch.add_edge(EId(10), VId(1), VId(2), weight(7));
+    batch.add_edge(EId(13), VId(1), VId(2), weight(3));
     db.write(cx, batch).await.unwrap();
+}
+fn weight(value: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+    vec![(WEIGHT, CanonicalScalar::Int(value))]
 }
 
 #[test]
@@ -94,7 +95,9 @@ fn one_existing_relationship_matches_without_allocation_or_write() {
             .unwrap();
         assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(10)));
         assert_eq!(stats.created_edges, 0);
-        assert_eq!(stats.overlay_edges, 1);
+        // The pair probe inspects both parallel edges (10 and 13); only edge
+        // 10 satisfies the map.
+        assert_eq!(stats.overlay_edges, 2);
         assert_eq!(allocations.get(), 0);
         assert!(matches!(
             txn.finish(&mut db, &commit).await.unwrap(),
@@ -116,7 +119,7 @@ fn parallel_relationships_and_multiple_endpoint_pairs_refuse_before_allocation()
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
         let mut parallel = WriteBatch::new(R);
-        parallel.add_edge(EId(11), VId(1), VId(2), vec![]);
+        parallel.add_edge(EId(11), VId(1), VId(2), weight(7));
         db.write(&commit, parallel).await.unwrap();
 
         let allocations = Cell::new(0);
@@ -197,13 +200,13 @@ fn zero_relationship_creates_one_edge_with_frozen_properties_and_survives_reopen
         assert_eq!(outcome, GraphEdgeMergeOutcome::Created(EId(20)));
         let staged = txn.edge(&db, EId(20)).unwrap().unwrap();
         assert_eq!((staged.entry.src, staged.entry.dst), (VId(2), VId(3)));
-        assert_eq!(staged.props, vec![(WEIGHT, CanonicalScalar::Int(7))]);
+        assert_eq!(staged.props, vec![(WEIGHT, CanonicalScalar::Int(7).into())]);
         assert!(db.edge(EId(20)).unwrap().is_none());
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.frontier().unwrap().0 > before.0);
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(WEIGHT, CanonicalScalar::Int(7))]
+            vec![(WEIGHT, CanonicalScalar::Int(7).into())]
         );
         db.compact(&commit).await.unwrap();
         drop(db);
@@ -212,7 +215,7 @@ fn zero_relationship_creates_one_edge_with_frozen_properties_and_survives_reopen
             .unwrap();
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(WEIGHT, CanonicalScalar::Int(7))]
+            vec![(WEIGHT, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -231,7 +234,7 @@ fn staged_edge_creation_and_deletion_are_visible_to_merge() {
 
         let mut txn = db.begin(&txcx).unwrap();
         let mut create = WriteBatch::new(R);
-        create.add_edge(EId(30), VId(3), VId(4), vec![]);
+        create.add_edge(EId(30), VId(3), VId(4), weight(7));
         txn.write(&mut db, create).unwrap();
         let (stats, matched) = txn
             .execute_graph_edge_merge_governed(
@@ -245,6 +248,7 @@ fn staged_edge_creation_and_deletion_are_visible_to_merge() {
         assert_eq!(matched, GraphEdgeMergeOutcome::Matched(EId(30)));
         assert_eq!(stats.created_edges, 0);
 
+        // With edge 10 deleted, only the filtered sibling 13 remains: a miss.
         let mut remove = WriteBatch::new(R);
         remove.delete_edge(EId(10));
         txn.write(&mut db, remove).unwrap();
@@ -318,16 +322,134 @@ fn wrong_identity_collision_and_concurrent_matching_insert_never_publish_duplica
 
         let mut competitor = db.begin(&txcx).unwrap();
         let mut edge = WriteBatch::new(R);
-        edge.add_edge(EId(200), VId(2), VId(4), vec![]);
+        edge.add_edge(EId(200), VId(2), VId(4), weight(7));
         competitor.write(&mut db, edge).unwrap();
         competitor.commit(&mut db, &commit).await.unwrap();
 
         assert!(
             first.commit(&mut db, &commit).await.is_err(),
-            "whole-edge scan must reject a concurrent matching relationship insert"
+            "the pair's incidence gap must reject a concurrent matching relationship insert"
         );
         assert!(db.edge(EId(100)).unwrap().is_none());
         assert!(db.edge(EId(200)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn indexed_pair_probe_preserves_parallel_properties_orientation_and_staged_rollback() {
+    let ((), report) = run_async_under_lab(0xed9e_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=600_u128 {
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        for id in 1..=600_u128 {
+            if id != 100 && id != 102 {
+                seed.add_edge(EId(id), VId(100), VId(id), weight(7));
+            }
+        }
+        seed.add_edge(EId(1000), VId(100), VId(102), weight(7));
+        seed.add_edge(EId(1001), VId(100), VId(102), weight(3));
+        seed.add_edge(EId(1002), VId(100), VId(100), weight(7));
+        seed.add_edge(EId(1003), VId(102), VId(100), weight(3));
+        db.write(&commit, seed).await.unwrap();
+        // The endpoint hint includes retained identities and base/overlay
+        // duplicates. They must not change the winning visible property image.
+        let mut history = WriteBatch::new(R);
+        history.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(11)));
+        history.delete_edge(EId(200));
+        db.write(&commit, history).await.unwrap();
+        let mut restore = WriteBatch::new(R);
+        restore.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(7)));
+        db.write(&commit, restore).await.unwrap();
+
+        // Even with complete vertex admission there is room for only the
+        // pair's three records, not the hub's unrelated relationships.
+        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(603, 10, 5_000_000, 5_000_000));
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.savepoint(&db, "before-pair-edits").unwrap();
+        for (merge, candidates) in [
+            (definition(100, Some(102)), 2),
+            (definition(102, Some(100)).with_undirected(), 3),
+        ] {
+            let (stats, outcome) = txn
+                .execute_graph_edge_merge_governed(
+                    &mut db,
+                    &query,
+                    &merge,
+                    bounded,
+                    |_| -> Result<ElementId, ()> {
+                        panic!("the matching parallel edge must not allocate")
+                    },
+                )
+                .unwrap();
+            assert_eq!(stats.overlay_edges, candidates);
+            assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1000)));
+        }
+        let (stats, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(100)).with_undirected(),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the self-loop already exists") },
+            )
+            .unwrap();
+        assert_eq!(stats.overlay_edges, 1, "a self-loop has one EId");
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1002)));
+
+        let mut edits = WriteBatch::new(R);
+        edits.set_edge_property(EId(1000), WEIGHT, Some(CanonicalScalar::Int(3)));
+        edits.set_edge_property(EId(1001), WEIGHT, Some(CanonicalScalar::Int(7)));
+        txn.write(&mut db, edits).unwrap();
+        let (_, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the staged property now matches") },
+            )
+            .unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1001)));
+
+        let mut replacement = WriteBatch::new(R);
+        replacement.delete_edge(EId(1001));
+        replacement.add_edge(EId(u128::MAX), VId(100), VId(102), weight(7));
+        txn.write(&mut db, replacement).unwrap();
+        let (stats, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("the staged replacement already exists") },
+            )
+            .unwrap();
+        assert_eq!(stats.overlay_edges, 2);
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(u128::MAX)));
+        txn.rollback_to_savepoint(&db, "before-pair-edits").unwrap();
+        let (_, outcome) = txn
+            .execute_graph_edge_merge_governed(
+                &mut db,
+                &query,
+                &definition(100, Some(102)),
+                bounded,
+                |_| -> Result<ElementId, ()> { panic!("rollback restores the basis match") },
+            )
+            .unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(1000)));
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert!(db.edge(EId(u128::MAX)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

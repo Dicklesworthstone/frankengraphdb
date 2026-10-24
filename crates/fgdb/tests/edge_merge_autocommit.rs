@@ -45,6 +45,10 @@ fn definition(source: i64, destination: i64) -> PreparedGraphEdgeMerge {
     )
     .unwrap()
 }
+/// The MERGE map's own field, so an existing edge carrying it matches.
+fn mapped() -> Vec<(PropertyKeyId, CanonicalScalar)> {
+    vec![(PropertyKeyId(2), CanonicalScalar::Int(5))]
+}
 fn policy() -> GraphEdgeMergePolicy {
     GraphEdgeMergePolicy::new(GqlQueryPolicy::new(5_000, 5_000, 2_000_000, 2_000_000))
 }
@@ -62,7 +66,8 @@ fn autocommit_relationship_merge_read_closes_match_and_commits_create() {
         for id in 1..=3_u128 {
             seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
         }
-        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        // The MERGE map is a match predicate (fgdb-at06q): edge 10 carries it.
+        seed.add_edge(EId(10), VId(1), VId(2), mapped());
         db.write(&commit, seed).await.unwrap();
 
         let before = db.frontier().unwrap();
@@ -122,8 +127,8 @@ fn autocommit_parallel_ambiguity_aborts_without_new_commit() {
         let mut seed = WriteBatch::new(R);
         seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
         seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
-        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
-        seed.add_edge(EId(11), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), mapped());
+        seed.add_edge(EId(11), VId(1), VId(2), mapped());
         db.write(&commit, seed).await.unwrap();
         let before = db.frontier().unwrap();
 

@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -52,14 +52,27 @@ fn evaluate(text: &str, vertices: &[VId], edges: &[Edge]) -> Vec<GraphValueRow> 
         .unwrap();
     let values = vertices
         .iter()
-        .map(|vid| (*vid, CanonicalScalar::Int(vid.0 as i64)))
+        .map(|vid| {
+            (
+                *vid,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(vid.0 as i64)),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     pattern
         .plan()
-        .execute_governed_with_properties(
+        .execute_governed_with_identified_properties(
             (vertices.len() + edges.len()) as u64,
             vertices.iter().copied(),
-            edges.iter().copied(),
+            // Each occurrence is a distinct fixture relationship, including
+            // parallel tuples; keep its identity through quantified clauses.
+            edges
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(at, (source, relation, target))| {
+                    (EId(at as u128), source, relation, target)
+                }),
             |vid, predicates| {
                 Ok::<_, ()>(
                     predicates
@@ -246,7 +259,7 @@ fn aggregation_consumes_the_completed_join_bag_not_optional_prefix_rows() {
                 (VId(2), S, VId(3)),
             ],
             |_, _| Ok::<_, ()>(true),
-            |_, _| Ok::<Option<&CanonicalScalar>, ()>(None),
+            |_, _| Ok::<Option<&CanonicalPropertyValue>, ()>(None),
             wide(),
             || Ok::<_, ()>(()),
         )
@@ -268,7 +281,7 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
         "MATCH (a) MATCH (b) WHERE c.p=1 MATCH (c) RETURN c",
         "MATCH (a) MATCH (b) WHERE EXISTS { MATCH (b) } RETURN b",
         "MATCH (a) WHERE EXISTS { MATCH (a) MATCH (a) } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*]->(b) RETURN b",
+        "MATCH (a) OPTIONAL MATCH (a) MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN b",
         "MATCH (a) MATCH ANY SHORTEST WALK (a)-[:R*1..2]->(b)-[:S]->(c) RETURN c LIMIT 0",
         &too_many,
     ] {
@@ -286,7 +299,7 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     let maximal = format!("MATCH (a){} RETURN a", " MATCH (a)".repeat(64));
     assert_eq!(evaluate(&maximal, &[VId(1)], &[]).len(), 1);
     // Bounded var-length in a late plain MATCH is valid GQL since bounded
-    // plain MATCH is a WALK: optional re-bind of (a), then one finite
+    // plain MATCH admits a finite edge-distinct path: optional re-bind of (a), then one finite
     // 1..2 occurrence (1->2; length 2 dies at 2), absence eliminated.
     let optional_var = evaluate(
         "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*1..2]->(b) RETURN b",
@@ -349,7 +362,11 @@ fn joined_write_scripts_and_parameter_batches_share_the_same_selection_compiler(
     else {
         panic!("wrong joined write dispatch")
     };
-    let ops = update.selection().plan().operators();
+    let ops = update
+        .selection()
+        .expect("a MATCH mutation reads a graph selection")
+        .plan()
+        .operators();
     let boundary = ops
         .iter()
         .position(|op| matches!(op, GlaOperator::OptionalEnd { .. }))

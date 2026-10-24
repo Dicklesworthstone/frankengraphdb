@@ -31,6 +31,7 @@ use crate::edge_props::{
     EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES,
     admitted_row_bytes, encode_property_patch, property_patch_id,
 };
+use crate::id_map::{IdMap, IdSet};
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{
     VertexPatchError, VertexPatchRows, VertexRow, encode_patch, span_of_rows, vertex_patch_id,
@@ -40,10 +41,11 @@ use crate::{
     encode_block_with_properties, validate_entry,
 };
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::CanonicalPropertyValue;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// A sealed block: its identity, its bytes, the range it covers, and — when
 /// any of its entries carry properties — the hosted edge property patch the
@@ -51,7 +53,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedBlock {
     pub block_id: ObjectId,
-    pub bytes: Vec<u8>,
+    /// Immutable encoded payload. Retained writers and historical preparation
+    /// anchors share these bytes; cloning a writer never copies sealed history.
+    pub bytes: Arc<[u8]>,
     pub first_seq: CommitSeq,
     pub last_seq: CommitSeq,
     /// The FGSP object this block's locators reference, if any. The caller
@@ -64,7 +68,7 @@ pub struct SealedBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedPropertyPatch {
     pub patch_id: ObjectId,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
 }
 
 impl SealedBlock {
@@ -78,6 +82,8 @@ impl SealedBlock {
     }
 }
 
+/// An encoded edge seal: its blocks, and the chain heads of only the families
+/// it advanced, which committing the seal merges into the writer's heads.
 type EncodedEdgeSeal = (
     Vec<SealedBlock>,
     BTreeMap<(VId, RelationId), DeltaBlockVersion>,
@@ -109,7 +115,7 @@ enum VertexContentUpdate {
     },
     Property {
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
 }
 
@@ -118,7 +124,7 @@ enum VertexContentUpdate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedPatch {
     pub patch_id: ObjectId,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
     pub first_seq: CommitSeq,
     pub last_seq: CommitSeq,
 }
@@ -266,14 +272,15 @@ impl core::error::Error for WriteError {}
 
 /// Folds delta rows into sealed blocks for one partition.
 ///
-/// `Clone` is load-bearing, not convenience: `publish` consumes the writer,
-/// so a caller that keeps folding across publications — the incremental
-/// snapshot path that removes the O(history) per-commit rebuild
-/// (`fgdb-fujt`) — publishes from a clone and retains the original. The fold
-/// is a deterministic function of the row sequence, so a clone-publish at
-/// sequence k is byte-identical to a fresh writer replaying rows 1..k and
-/// publishing; `tests/incremental_publish_equals_rebuild.rs` pins exactly
-/// that equality, per shape, with a control that can fail.
+/// `Clone` preserves an exact independent fold, including live rows and spent
+/// identities, for historical preparation. Sealed payloads are immutable and
+/// shared individually, so the clone copies maps and object metadata without
+/// copying historical encoded bytes. Continued folding changes only the
+/// clone's private staging/live state and appends new sealed objects.
+/// `publish_in_place` serves the retained live writer without a clone. A
+/// clone-publish at sequence k remains byte-identical to a fresh writer
+/// replaying rows 1..k; `tests/incremental_publish_equals_rebuild.rs` pins that
+/// equality, independent subsequent mutation, and payload sharing.
 #[derive(Debug, Clone)]
 pub struct BlockWriter {
     graph: GraphId,
@@ -286,12 +293,14 @@ pub struct BlockWriter {
     /// AND properties, because a tombstone must RESTATE the properties so a
     /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
     /// the vertex live map remembers rows for the same reason.
-    live: BTreeMap<EId, LiveEdge>,
+    live: IdMap<EId, LiveEdge>,
     /// Every EId admitted while replaying this partition-local writer.
     ///
     /// The graph-wide allocator is enforced before partition routing; this is a
-    /// defense-in-depth check over the history visible to this fold.
-    spent: BTreeSet<EId>,
+    /// defense-in-depth check over the history visible to this fold. Shared
+    /// copy-on-write so the engine allocator can probe it without a copy
+    /// ([`BlockWriter::spent_edges`]).
+    spent: Arc<IdSet<EId>>,
     sealed: Vec<SealedBlock>,
     /// The newest sealed block per descriptor family — the predecessor each
     /// family's NEXT block links (V6, fgdb-4391). Rebuilt deterministically by
@@ -310,9 +319,10 @@ pub struct BlockWriter {
     /// `DeleteVertex` names only the VId, while the tombstone that retires a
     /// SEALED row must restate the exact birth — ordinal, labels, properties —
     /// and only the creation carried those.
-    live_vertices: BTreeMap<VId, VertexRow>,
-    /// Every VId admitted while replaying this partition-local writer.
-    spent_vertices: BTreeSet<VId>,
+    live_vertices: IdMap<VId, VertexRow>,
+    /// Every VId admitted while replaying this partition-local writer, shared
+    /// copy-on-write like `spent`.
+    spent_vertices: Arc<IdSet<VId>>,
     sealed_patches: Vec<SealedPatch>,
     /// Live identities whose same-seq creation has already been sealed in
     /// this run. A later same-seq delete cannot fold those away — the
@@ -342,65 +352,123 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Result<Self, RootError> {
-        let mut live = BTreeMap::new();
-        for (entry, props) in
-            crate::root::merge_all_edges_with_props(blocks, block_props, frontier)?
-        {
-            live.insert(
-                entry.eid,
-                LiveEdge {
-                    src: entry.src,
-                    relation: entry.relation,
-                    dst: entry.dst,
-                    created_at: entry.created_at,
-                    props,
-                },
-            );
-        }
-        let mut spent = BTreeSet::new();
-        for block in blocks {
-            for entry in block {
-                spent.insert(entry.eid);
-            }
-        }
-        let mut live_vertices = BTreeMap::new();
-        for row in crate::vertex::merge_all_vertices(patches, frontier) {
-            live_vertices.insert(row.vid, row);
-        }
-        let mut spent_vertices = BTreeSet::new();
-        for rows in patches {
-            for row in rows {
-                spent_vertices.insert(row.vid);
-            }
-        }
+        let live_edges = crate::root::merge_all_edges_with_props(blocks, block_props, frontier)?;
+        Ok(Self::assemble_published(
+            graph,
+            branch,
+            partition,
+            sealed,
+            sealed_patches,
+            live_edges,
+            blocks,
+            patches,
+            frontier,
+        ))
+    }
+
+    /// [`Self::from_published_partition`] over the edge history a root walk
+    /// already admitted ([`crate::store::RootAdmission::edge_statements`]),
+    /// so a writable open validates published history ONCE, in the walk,
+    /// instead of collapsing every block a second time here (fgdb-e8gr4).
+    /// `admitted` must be the collapse of exactly `blocks`, in order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_admitted_partition(
+        graph: GraphId,
+        branch: BranchId,
+        partition: u64,
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        admitted: &BTreeMap<(EId, CommitSeq), AdjacencyEntry>,
+        blocks: &[Vec<AdjacencyEntry>],
+        block_props: &[Option<crate::edge_props::BlockProps>],
+        patches: &[VertexPatchRows],
+        frontier: CommitSeq,
+    ) -> Result<Self, RootError> {
+        let live_edges =
+            crate::root::merge_admitted_edges_with_props(admitted, blocks, block_props, frontier)?;
+        Ok(Self::assemble_published(
+            graph,
+            branch,
+            partition,
+            sealed,
+            sealed_patches,
+            live_edges,
+            blocks,
+            patches,
+            frontier,
+        ))
+    }
+
+    /// The rest of a published writer, once its live edges are known.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_published(
+        graph: GraphId,
+        branch: BranchId,
+        partition: u64,
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        live_edges: Vec<(AdjacencyEntry, crate::edge_props::EdgePropertyRow)>,
+        blocks: &[Vec<AdjacencyEntry>],
+        patches: &[VertexPatchRows],
+        frontier: CommitSeq,
+    ) -> Self {
+        // Collecting an identity map keeps the last pair of a repeated key,
+        // as inserting in order does.
+        let live: IdMap<EId, LiveEdge> = live_edges
+            .into_iter()
+            .map(|(entry, props)| {
+                (
+                    entry.eid,
+                    LiveEdge {
+                        src: entry.src,
+                        relation: entry.relation,
+                        dst: entry.dst,
+                        created_at: entry.created_at,
+                        props,
+                    },
+                )
+            })
+            .collect();
+        let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let live_vertices: IdMap<VId, VertexRow> =
+            crate::vertex::merge_all_vertices(patches, frontier)
+                .into_iter()
+                .map(|row| (row.vid, row))
+                .collect();
+        let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).
-        let mut chain_heads = BTreeMap::new();
-        for (sealed_block, entries) in sealed.iter().zip(blocks) {
-            if let Some(first) = entries.first() {
-                chain_heads.insert(
-                    (first.src, first.relation),
-                    DeltaBlockVersion(sealed_block.block_id),
-                );
-            }
-        }
-        Ok(Self {
+        let chain_heads = last_wins(
+            sealed
+                .iter()
+                .zip(blocks)
+                .filter_map(|(sealed_block, entries)| {
+                    entries.first().map(|first| {
+                        (
+                            (first.src, first.relation),
+                            DeltaBlockVersion(sealed_block.block_id),
+                        )
+                    })
+                })
+                .collect(),
+        );
+        Self {
             graph,
             branch,
             partition,
             pending: BTreeMap::new(),
             live,
-            spent,
+            spent: Arc::new(spent),
             sealed,
             chain_heads,
             pending_vertices: BTreeMap::new(),
             live_vertices,
-            spent_vertices,
+            spent_vertices: Arc::new(spent_vertices),
             sealed_patches,
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
             last_seq: (frontier.0 > 0).then_some(frontier),
-        })
+        }
     }
 
     pub fn new(graph: GraphId, branch: BranchId, partition: u64) -> Self {
@@ -409,13 +477,13 @@ impl BlockWriter {
             branch,
             partition,
             pending: BTreeMap::new(),
-            live: BTreeMap::new(),
-            spent: BTreeSet::new(),
+            live: IdMap::new(),
+            spent: Arc::default(),
             sealed: Vec::new(),
             chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
-            live_vertices: BTreeMap::new(),
-            spent_vertices: BTreeSet::new(),
+            live_vertices: IdMap::new(),
+            spent_vertices: Arc::default(),
             sealed_patches: Vec::new(),
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
@@ -473,6 +541,22 @@ impl BlockWriter {
         self.spent_vertices.contains(&vid)
     }
 
+    /// A shared, immutable view of every edge identity this fold admitted:
+    /// the engine allocator's existence check (fgdb-hxgm1 channel 2). The
+    /// handle is an O(1) clone. While a strong handle is outstanding, the
+    /// fold's next admission copies the set instead of mutating it under the
+    /// reader. A caller that may outlive that admission keeps an
+    /// `Arc::downgrade` instead: the fold then mutates in place, and the weak
+    /// handle stops upgrading.
+    pub fn spent_edges(&self) -> Arc<IdSet<EId>> {
+        Arc::clone(&self.spent)
+    }
+
+    /// The vertex counterpart of [`BlockWriter::spent_edges`].
+    pub fn spent_vertices(&self) -> Arc<IdSet<VId>> {
+        Arc::clone(&self.spent_vertices)
+    }
+
     /// Is `vid` live in this fold?
     pub fn is_vertex_live(&self, vid: VId) -> bool {
         self.live_vertices.contains_key(&vid)
@@ -505,11 +589,15 @@ impl BlockWriter {
     /// the exact set a vertex deletion's cascade before-image must equal
     /// (both directions, the reference semantics).
     pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
-        self.live
+        // The identity map holds no order: sort the incident identities.
+        let mut incident: Vec<EId> = self
+            .live
             .iter()
             .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
             .map(|(eid, _)| *eid)
-            .collect()
+            .collect();
+        incident.sort_unstable();
+        incident
     }
 
     /// How many vertex rows are pending — the vertex half of the seal signal.
@@ -590,7 +678,7 @@ impl BlockWriter {
                         props: props.clone(),
                     },
                 );
-                let was_fresh = self.spent.insert(*eid);
+                let was_fresh = Arc::make_mut(&mut self.spent).insert(*eid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::DeleteEdge { eid, .. } => {
@@ -710,16 +798,16 @@ impl BlockWriter {
                 // apply returned a no-op-shaped error.
                 if need_vertex_seal && need_edge_seal {
                     let vertex_sealed = self.encode_pending_vertices(keys)?;
-                    let (edge_sealed, next_heads) =
+                    let (edge_sealed, advanced) =
                         self.encode_pending_edges_except(keys, &deferred_same_commit)?;
                     self.commit_vertex_seal(vertex_sealed);
-                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
+                    self.commit_edge_seal_except(edge_sealed, advanced, &deferred_same_commit);
                 } else if need_vertex_seal {
                     self.seal_vertices(keys)?;
                 } else if need_edge_seal {
-                    let (edge_sealed, next_heads) =
+                    let (edge_sealed, advanced) =
                         self.encode_pending_edges_except(keys, &deferred_same_commit)?;
-                    self.commit_edge_seal_except(edge_sealed, next_heads, &deferred_same_commit);
+                    self.commit_edge_seal_except(edge_sealed, advanced, &deferred_same_commit);
                 }
                 for eid in sorted_retired_incident_edges {
                     self.retire(keys, *eid, seq)?;
@@ -774,7 +862,7 @@ impl BlockWriter {
                 }
                 self.pending_vertices.insert((*vid, seq), row.clone());
                 self.live_vertices.insert(*vid, row);
-                let was_fresh = self.spent_vertices.insert(*vid);
+                let was_fresh = Arc::make_mut(&mut self.spent_vertices).insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
             DeltaRow::LabelMembership {
@@ -1060,11 +1148,13 @@ impl BlockWriter {
             )
         });
         // Encode every chunk before committing. Intra-seal predecessor
-        // links still advance — but only on a local copy — so a later
-        // chunk's refusal leaves `chain_heads` and `pending` exactly as
-        // they were (`seal_vertices` already does this; the public apply
-        // contract is that every typed refusal is a no-op).
-        let mut next_heads = self.chain_heads.clone();
+        // links still advance, but only in a local overlay of the families
+        // this seal touches, so a later chunk's refusal leaves `chain_heads`
+        // and `pending` exactly as they were (`seal_vertices` already does
+        // this; the public apply contract is that every typed refusal is a
+        // no-op). The overlay, not a copy of every head ever sealed, keeps a
+        // commit's seal from growing with the partition's history.
+        let mut advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion> = BTreeMap::new();
         let mut sealed = Vec::with_capacity(staged.len());
         for chunk in staged {
             let StagedChunk {
@@ -1086,7 +1176,10 @@ impl BlockWriter {
                     locators.push(u8::try_from(rows.len()).expect("chunked to the ceiling"));
                 }
             }
-            let predecessor = next_heads.get(&family).copied();
+            let predecessor = advanced
+                .get(&family)
+                .or_else(|| self.chain_heads.get(&family))
+                .copied();
             let (bytes, property_patch) = if rows.is_empty() {
                 (
                     encode_block(self.partition, predecessor, &entries)
@@ -1109,31 +1202,31 @@ impl BlockWriter {
                     bytes,
                     Some(SealedPropertyPatch {
                         patch_id,
-                        bytes: patch_bytes,
+                        bytes: patch_bytes.into(),
                     }),
                 )
             };
             let sealed_id = block_id(keys.0, keys.1, &bytes);
             // The family's chain advances to this block; the next chunk of
             // the same family — even within THIS seal — links to it.
-            next_heads.insert(family, DeltaBlockVersion(sealed_id));
+            advanced.insert(family, DeltaBlockVersion(sealed_id));
             sealed.push(SealedBlock {
                 block_id: sealed_id,
-                bytes,
+                bytes: bytes.into(),
                 first_seq,
                 last_seq,
                 property_patch,
             });
         }
-        Ok((sealed, next_heads))
+        Ok((sealed, advanced))
     }
 
     fn commit_edge_seal(
         &mut self,
         sealed: Vec<SealedBlock>,
-        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
     ) {
-        self.commit_edge_seal_except(sealed, next_heads, &BTreeSet::new());
+        self.commit_edge_seal_except(sealed, advanced, &BTreeSet::new());
     }
 
     /// Commit an edge seal while retaining same-commit creations that the
@@ -1141,7 +1234,7 @@ impl BlockWriter {
     fn commit_edge_seal_except(
         &mut self,
         sealed: Vec<SealedBlock>,
-        next_heads: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
+        advanced: BTreeMap<(VId, RelationId), DeltaBlockVersion>,
         deferred: &BTreeSet<EdgeStatementKey>,
     ) {
         for (key, statement) in &self.pending {
@@ -1150,7 +1243,7 @@ impl BlockWriter {
                     .insert((statement.entry.eid, statement.entry.created_at));
             }
         }
-        self.chain_heads = next_heads;
+        self.chain_heads.extend(advanced);
         self.pending.retain(|key, _| deferred.contains(key));
         self.sealed.extend(sealed);
     }
@@ -1166,9 +1259,9 @@ impl BlockWriter {
         if self.pending.is_empty() {
             return Ok(None);
         }
-        let (sealed, next_heads) = self.encode_pending_edges(keys)?;
+        let (sealed, advanced) = self.encode_pending_edges(keys)?;
         let first = sealed.first().cloned();
-        self.commit_edge_seal(sealed, next_heads);
+        self.commit_edge_seal(sealed, advanced);
         Ok(first)
     }
 
@@ -1195,7 +1288,7 @@ impl BlockWriter {
         eid: EId,
         seq: CommitSeq,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     ) -> Result<(), WriteError> {
         let current = self
             .live
@@ -1235,9 +1328,9 @@ impl BlockWriter {
                         props: successor_row.clone(),
                     },
                 );
-                self.live
-                    .entry(eid)
-                    .and_modify(|live| live.props = successor_row);
+                if let Some(live) = self.live.get_mut(&eid) {
+                    live.props = successor_row;
+                }
                 return Ok(());
             }
             // The same-commit creation already sealed (format ceiling).
@@ -1431,7 +1524,7 @@ impl BlockWriter {
             let (first_seq, last_seq) = span_of_rows(&chunk).expect("non-empty");
             sealed.push(SealedPatch {
                 patch_id: vertex_patch_id(keys.0, keys.1, &bytes),
-                bytes,
+                bytes: bytes.into(),
                 first_seq,
                 last_seq,
             });
@@ -1507,6 +1600,51 @@ impl BlockWriter {
         };
         validate_root(&root).map_err(WriteError::Root)?;
         Ok(root)
+    }
+}
+
+/// The map that inserting `pairs` in order builds, a later pair replacing an
+/// earlier one with an equal key, built in one bulk pass. A writable open
+/// assembles its writer's maps from millions of pairs; one insert each, in the
+/// random key order a keyed EId permutation gives, was most of that assembly
+/// on a packed web-google (fgdb-e8gr4).
+fn last_wins<K: Ord, V>(mut pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
+    // Stable: pairs with equal keys keep their order, so the last one wins.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut unique: Vec<(K, V)> = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        match unique.last_mut() {
+            Some(last) if last.0 == pair.0 => *last = pair,
+            _ => unique.push(pair),
+        }
+    }
+    unique.into_iter().collect()
+}
+
+#[cfg(test)]
+mod last_wins_tests {
+    use super::last_wins;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn last_wins_builds_the_map_that_inserting_in_order_builds() {
+        let mut state = 0x001a_570f_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for trial in 0..2_000 {
+            let len = next(64) as usize;
+            let keys = 1 + next(40);
+            let pairs: Vec<(u64, u64)> = (0..len).map(|at| (next(keys), at as u64)).collect();
+            let mut inserted = BTreeMap::new();
+            for &(key, value) in &pairs {
+                inserted.insert(key, value);
+            }
+            assert_eq!(last_wins(pairs), inserted, "trial {trial}");
+        }
     }
 }
 
@@ -1680,7 +1818,7 @@ mod tests {
                 elem: ElementId::Edge(EId(10)),
                 property: PropertyKeyId(7),
                 before: None,
-                after: Some(CanonicalScalar::Int(4)),
+                after: Some(CanonicalScalar::Int(4).into()),
             },
         );
         assert_eq!(
@@ -2180,5 +2318,134 @@ mod tests {
             edge_ceiling - 1,
             "the planted illegal families stay; the cascade added nothing"
         );
+    }
+
+    /// fgdb-e8gr4: a writer built from a root walk's ADMITTED edge history
+    /// equals one that re-collapses every published block. The walk is an
+    /// EdgeHistoryValidator observing each block in publication order, as
+    /// `reopen_sealed` does. The history mixes two families, a retirement, a
+    /// content successor, a vertex-delete cascade and a later creation. Both
+    /// paths share property rows and vertex patches verbatim, so the law
+    /// isolates the one input that differs: where the collapse comes from.
+    #[test]
+    fn a_writer_from_the_admitted_history_equals_a_revalidated_one() {
+        let (graph, branch) = (GraphId(1), BranchId(1));
+        let vertex = |vid: u128, ordinal| DeltaRow::CreateVertex {
+            vid: VId(vid),
+            birth_ordinal: ordinal,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        };
+        let edge = |eid: u128, src: u128, relation: u64, dst: u128, ordinal| DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: ordinal,
+            src: VId(src),
+            relation: RelationId(relation),
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        };
+        let unversioned = fgdb_types::ids::ObjectId([0; 32]);
+        let commits = [
+            vec![vertex(1, 0), vertex(2, 1), vertex(3, 2)],
+            vec![
+                edge(10, 1, 1, 2, 3),
+                edge(11, 2, 1, 3, 4),
+                edge(12, 1, 2, 3, 5),
+            ],
+            vec![DeltaRow::DeleteEdge {
+                eid: EId(11),
+                before_version: unversioned,
+            }],
+            vec![DeltaRow::Property {
+                elem: ElementId::Edge(EId(10)),
+                property: PropertyKeyId(7),
+                before: None,
+                after: Some(CanonicalScalar::Int(4).into()),
+            }],
+            vec![DeltaRow::DeleteVertex {
+                vid: VId(3),
+                before_version: unversioned,
+                sorted_retired_incident_edges: vec![EId(12)],
+            }],
+            vec![edge(13, 2, 1, 1, 6)],
+        ];
+        let mut writer = BlockWriter::new(graph, branch, 0);
+        for (index, rows) in commits.iter().enumerate() {
+            let at = CommitSeq(index as u64 + 1);
+            for row in rows {
+                writer.apply(keys(), at, row).expect("legal history folds");
+            }
+            writer.seal(keys()).expect("per-commit edge seal");
+            writer
+                .seal_vertices(keys())
+                .expect("per-commit vertex seal");
+        }
+        let frontier = CommitSeq(commits.len() as u64);
+        let (_, sealed, sealed_patches) = writer.publish(keys(), frontier).expect("publishes");
+        let blocks: Vec<Vec<AdjacencyEntry>> = sealed
+            .iter()
+            .map(|block| crate::decode_block(&block.bytes).expect("decodes"))
+            .collect();
+        let block_props: Vec<Option<crate::edge_props::BlockProps>> =
+            blocks.iter().map(|_| None).collect();
+        let walk = |count: usize| {
+            let mut validator = crate::root::EdgeHistoryValidator::default();
+            for (at, block) in blocks.iter().enumerate().take(count) {
+                validator.observe_block(at, block).expect("lawful history");
+            }
+            validator
+        };
+        let admitted = walk(blocks.len());
+        // Retirements and the content successor restate earlier statements:
+        // the collapse is not a copy of the entries.
+        let entries: usize = blocks.iter().map(Vec::len).sum();
+        assert!(admitted.statements().len() < entries, "{entries} entries");
+
+        let revalidated = BlockWriter::from_published_partition(
+            graph,
+            branch,
+            0,
+            sealed.clone(),
+            sealed_patches.clone(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("revalidated writer");
+        let from_walk = BlockWriter::from_admitted_partition(
+            graph,
+            branch,
+            0,
+            sealed.clone(),
+            sealed_patches.clone(),
+            &admitted.statements(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("admitted writer");
+        assert_eq!(format!("{from_walk:?}"), format!("{revalidated:?}"));
+
+        // The comparison can fail: an admission that missed the last block
+        // yields a different writer.
+        let stale = BlockWriter::from_admitted_partition(
+            graph,
+            branch,
+            0,
+            sealed,
+            sealed_patches,
+            &walk(blocks.len() - 1).statements(),
+            &blocks,
+            &block_props,
+            &[],
+            frontier,
+        )
+        .expect("stale writer");
+        assert_ne!(format!("{stale:?}"), format!("{revalidated:?}"));
     }
 }

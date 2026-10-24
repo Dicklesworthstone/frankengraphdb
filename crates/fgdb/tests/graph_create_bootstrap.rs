@@ -81,7 +81,12 @@ fn verify_bootstrap(db: &Database<MemVfs>, base: u128, seed: i64) {
         assert_eq!(vertex.labels, vec![NODE]);
         assert_eq!(
             vertex.props,
-            vec![(P, value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))]
+            vec![(
+                P,
+                value
+                    .map_or(CanonicalScalar::Null, CanonicalScalar::Int)
+                    .into()
+            )]
         );
     }
     for (offset, source, destination) in [(0, base, base + 1), (1, base + 1, base), (2, base, base)]
@@ -92,7 +97,7 @@ fn verify_bootstrap(db: &Database<MemVfs>, base: u128, seed: i64) {
             (VId(source), VId(destination), R)
         );
         let properties = if offset == 0 {
-            vec![(P, CanonicalScalar::Int(seed))]
+            vec![(P, CanonicalScalar::Int(seed).into())]
         } else {
             vec![]
         };
@@ -115,7 +120,7 @@ fn empty_database_bootstrap_and_dependent_match_publish_once_and_reopen_with_his
         let basis = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
         let calls = Cell::new(0);
-        let template = PreparedGraphInsertText::prepare(BOOTSTRAP, R, |kind, name| {
+        let template = PreparedGraphInsertText::prepare(BOOTSTRAP, R, |kind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         })
@@ -198,7 +203,7 @@ fn empty_database_bootstrap_and_dependent_match_publish_once_and_reopen_with_his
         verify_bootstrap(&db, 200, 20);
         let copy = db.vertex(VId(1_000)).unwrap().unwrap();
         assert_eq!(copy.labels, vec![COPY]);
-        assert_eq!(copy.props, vec![(P, CanonicalScalar::Int(110))]);
+        assert_eq!(copy.props, vec![(P, CanonicalScalar::Int(110).into())]);
         assert_eq!(db.edge(EId(1_000)).unwrap().unwrap().entry.src, VId(100));
         assert_eq!(calls.get(), 3);
         assert_eq!(first.canonical_bytes(), frozen);

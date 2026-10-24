@@ -24,13 +24,42 @@
 
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, CanonicalScalarResolver,
+    ScalarProfileVersion,
+};
 
 /// `FGSP` — FrankenGraph Strata Property patch.
 pub const PROPERTY_PATCH_MAGIC: [u8; 4] = *b"FGSP";
 
 /// Format version. Durable formats are versioned from day one (§16.6).
 pub const PROPERTY_PATCH_FORMAT_V1: u16 = 1;
+/// V1 plus property values of scalar profile version 2 (fgdb-hbi8s). An
+/// exact additive minor: a patch is V2 if and only if a row holds such a
+/// value ([`property_patch_format_for`]), so every other patch keeps its V1
+/// bytes and identity, and an older reader refuses V2 by name.
+pub const PROPERTY_PATCH_FORMAT_V2: u16 = 2;
+/// V2 plus List and Map property values (fgdb-k3nub), encoded as
+/// [`CanonicalPropertyValue`] bytes whose scalars keep their scalar bytes.
+/// Exact: a patch is V3 if and only if a row holds a collection.
+pub const PROPERTY_PATCH_FORMAT_V3: u16 = 3;
+
+/// The one format `rows` may be written in.
+pub fn property_patch_format_for(rows: &[EdgePropertyRow]) -> u16 {
+    let values = || rows.iter().flatten().map(|(_, value)| value);
+    if values().any(CanonicalPropertyValue::is_collection) {
+        return PROPERTY_PATCH_FORMAT_V3;
+    }
+    let profile = values()
+        .map(CanonicalPropertyValue::required_scalar_profile)
+        .max()
+        .unwrap_or(ScalarProfileVersion::V1);
+    if profile > ScalarProfileVersion::V1 {
+        PROPERTY_PATCH_FORMAT_V2
+    } else {
+        PROPERTY_PATCH_FORMAT_V1
+    }
+}
 
 /// Durable object kind for a block-hosted edge property patch — §5.1
 /// logical-identity header, with the same interim-numbering caveat as
@@ -51,8 +80,9 @@ pub(crate) const PROPERTY_PATCH_HEADER_BYTES: u64 = 10;
 #[repr(transparent)]
 pub struct EdgePropertyPatchVersion(pub ObjectId);
 
-/// One entry's property list: strictly ascending by key, values canonical.
-pub type EdgePropertyRow = Vec<(PropertyKeyId, CanonicalScalar)>;
+/// One entry's property list: strictly ascending by key, values canonical
+/// scalars, Lists and Maps (fgdb-k3nub).
+pub type EdgePropertyRow = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 
 /// A block's decoded property sidecar: the locator column and the hosted
 /// patch's rows, kept together because neither means anything alone.
@@ -66,13 +96,18 @@ impl BlockProps {
     /// The property list of the entry at `index`, empty when the entry's
     /// locator is 0 or the block hosts no patch at all.
     pub fn props_of(&self, index: usize) -> EdgePropertyRow {
+        self.props_ref(index).to_vec()
+    }
+
+    /// [`Self::props_of`] borrowed from the decoded patch, for a caller that
+    /// only reads the row.
+    pub fn props_ref(&self, index: usize) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
         match self.locators.get(index) {
             Some(&locator) if locator != 0 => self
                 .rows
                 .get(usize::from(locator) - 1)
-                .cloned()
-                .unwrap_or_default(),
-            _ => Vec::new(),
+                .map_or(&[], Vec::as_slice),
+            _ => &[],
         }
     }
 }
@@ -85,6 +120,11 @@ pub enum EdgePropertyPatchError {
     NotAPropertyPatch,
     /// A format version this build does not implement.
     UnsupportedFormat { format: u16 },
+    /// A supported format that is not the one the rows require
+    /// ([`property_patch_format_for`]): V1 over a profile-2 value, V2 over
+    /// rows V1 encodes, V1 or V2 over a collection, or V3 over scalar-only
+    /// rows.
+    FormatMismatch { format: u16, required: u16 },
     /// The bytes end before the declared rows do.
     Truncated { at: usize },
     /// Bytes remain after the declared rows.
@@ -109,6 +149,11 @@ pub enum EdgePropertyPatchError {
     ScalarDecode {
         at: usize,
         error: fgdb_types::ScalarDecodeError,
+    },
+    /// A List or Map property value refused canonical encoding or decoding.
+    PropertyValue {
+        at: usize,
+        error: CanonicalPropertyValueError,
     },
     /// The bytes are well-formed and WRONG — not the patch asked for.
     IdentityMismatch {
@@ -136,6 +181,11 @@ impl core::fmt::Display for EdgePropertyPatchError {
             Self::UnsupportedFormat { format } => {
                 write!(f, "edge property patch format {format} is not implemented")
             }
+            Self::FormatMismatch { format, required } => write!(
+                f,
+                "edge property patch format {format} declared over rows that require format \
+                 {required}"
+            ),
             Self::Truncated { at } => {
                 write!(
                     f,
@@ -167,6 +217,9 @@ impl core::fmt::Display for EdgePropertyPatchError {
             }
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
+            }
+            Self::PropertyValue { at, error } => {
+                write!(f, "row {at} collection property value: {error}")
             }
             Self::IdentityMismatch { expected, actual } => {
                 write!(f, "bytes are {actual:?}, not the requested {expected:?}")
@@ -229,18 +282,25 @@ pub fn encode_property_patch(rows: &[EdgePropertyRow]) -> Result<Vec<u8>, EdgePr
     }
     let mut out = Vec::new();
     out.extend_from_slice(&PROPERTY_PATCH_MAGIC);
-    out.extend_from_slice(&PROPERTY_PATCH_FORMAT_V1.to_le_bytes());
+    out.extend_from_slice(&property_patch_format_for(rows).to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for (at, row) in rows.iter().enumerate() {
         validate_row(at, row)?;
         let props = u32::try_from(row.len()).expect("row length bounded by canonical admission");
         out.extend_from_slice(&props.to_le_bytes());
         for (key, value) in row {
-            let encoded = value
-                .encode()
-                .map_err(|error| EdgePropertyPatchError::ScalarEncode { at, error })?;
+            // A scalar keeps its scalar bytes and error; a collection is its
+            // CanonicalPropertyValue encoding.
+            let encoded = match value.as_scalar() {
+                Some(scalar) => scalar
+                    .encode()
+                    .map_err(|error| EdgePropertyPatchError::ScalarEncode { at, error })?,
+                None => value
+                    .encode()
+                    .map_err(|error| EdgePropertyPatchError::PropertyValue { at, error })?,
+            };
             out.extend_from_slice(&key.0.to_le_bytes());
-            let len = u32::try_from(encoded.len()).expect("scalar profile bounds its encoding");
+            let len = u32::try_from(encoded.len()).expect("value bounds limit its encoding");
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(&encoded);
         }
@@ -281,7 +341,10 @@ fn decode_property_patch_inner(
     }
     let start = take(&mut at, 2)?;
     let format = u16::from_le_bytes(bytes[start..start + 2].try_into().expect("two bytes"));
-    if format != PROPERTY_PATCH_FORMAT_V1 {
+    if !matches!(
+        format,
+        PROPERTY_PATCH_FORMAT_V1 | PROPERTY_PATCH_FORMAT_V2 | PROPERTY_PATCH_FORMAT_V3
+    ) {
         return Err(EdgePropertyPatchError::UnsupportedFormat { format });
     }
     let start = take(&mut at, 4)?;
@@ -304,14 +367,25 @@ fn decode_property_patch_inner(
             let len = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"))
                 as usize;
             let start = take(&mut at, len)?;
-            // This is the closed graph-value decoder; no JWT or signature state exists here.
-            // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
             let encoded = &bytes[start..start + len];
-            let value = match resolver {
-                Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
-                None => CanonicalScalar::decode(encoded),
-            }
-            .map_err(|error| EdgePropertyPatchError::ScalarDecode { at: row_at, error })?;
+            let value = if CanonicalPropertyValue::is_collection_encoding(encoded) {
+                match resolver {
+                    Some(resolver) => {
+                        CanonicalPropertyValue::decode_with_resolver(encoded, resolver)
+                    }
+                    None => CanonicalPropertyValue::decode_stored(encoded),
+                }
+                .map_err(|error| EdgePropertyPatchError::PropertyValue { at: row_at, error })?
+            } else {
+                // This is the closed graph-value decoder; no JWT or signature state exists here.
+                // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
+                match resolver {
+                    Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
+                    None => CanonicalScalar::decode_stored(encoded),
+                }
+                .map(CanonicalPropertyValue::Scalar)
+                .map_err(|error| EdgePropertyPatchError::ScalarDecode { at: row_at, error })?
+            };
             row.push((key, value));
         }
         validate_row(row_at, &row)?;
@@ -321,6 +395,12 @@ fn decode_property_patch_inner(
         return Err(EdgePropertyPatchError::TrailingBytes {
             extra: bytes.len() - at,
         });
+    }
+    // The value decoder admits every tag this build knows under every
+    // header, so the header is checked against what the rows hold.
+    let required = property_patch_format_for(&rows);
+    if format != required {
+        return Err(EdgePropertyPatchError::FormatMismatch { format, required });
     }
     Ok(rows)
 }

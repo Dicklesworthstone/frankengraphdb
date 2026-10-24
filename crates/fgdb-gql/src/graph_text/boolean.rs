@@ -7,6 +7,9 @@
 //! Property IN/NOT IN lists and BETWEEN/NOT BETWEEN ranges lower to the same
 //! checked comparisons, preserving UNKNOWN, typed arguments and source errors.
 
+mod row_comparison;
+pub(super) use row_comparison::RowComparison;
+
 use super::*;
 use crate::algebra::{
     GraphBooleanExpression, GraphBooleanOp as Op, GraphBooleanOperand as Operand,
@@ -18,8 +21,9 @@ const MAX_BOOLEAN_NESTING: usize = 64;
 
 pub(super) enum SyntaxItem<'a> {
     Atom(Filter<'a>),
+    /// A column with no key is a vertex read by id()/elementId() (fgdb-j687q).
     Expression {
-        columns: Vec<(Name<'a>, Name<'a>)>,
+        columns: Vec<(Name<'a>, Option<Name<'a>>)>,
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
     },
     Truth(Option<bool>),
@@ -33,8 +37,14 @@ struct Parsed<'a> {
     extended: bool,
     /// `q.v = m` against an imported row column (fgdb-ezgeq): variable,
     /// property, row column and offset. Valid only as a top-level AND
-    /// conjunct, where it is the join key `(q {v: m})` already makes.
-    correlations: Vec<(Name<'a>, Name<'a>, usize, usize)>,
+    /// conjunct, where it is the join key `(q {v: m})` already makes. With
+    /// no property, `q = m` equates the element itself with the row value.
+    correlations: Vec<(Name<'a>, Option<Name<'a>>, usize, usize)>,
+    /// Non-equality top-level conjuncts owned by a multipart join's ON.
+    comparisons: Vec<RowComparison<'a>>,
+    /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
+    /// each is the label `(v:L)` writes inline in this scope.
+    labels: Vec<(Name<'a>, Name<'a>)>,
 }
 impl<'a> Parsed<'a> {
     fn push(&mut self, item: SyntaxItem<'a>, at: usize) -> Result<(), GraphPatternTextError> {
@@ -53,8 +63,23 @@ impl<'a> Parser<'a> {
             program: Vec::new(),
             extended: false,
             correlations: Vec::new(),
+            comparisons: Vec::new(),
+            labels: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
+        if let Some(&(variable, _)) = parsed.labels.first() {
+            // Under OR, NOT or parentheses a label test is a Boolean leaf the
+            // compound evaluator cannot read; flat, it is an inline label.
+            if parsed.extended {
+                return Err(error(
+                    variable.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a label predicate only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            self.syntax.labels.extend(parsed.labels.iter().copied());
+        }
         if let Some(&(_, _, _, at)) = parsed.correlations.first() {
             // Under OR, NOT or parentheses the equality is no longer a join
             // key, and a row value is not a filter operand in this profile.
@@ -69,6 +94,20 @@ impl<'a> Parser<'a> {
             self.read_correlations.extend(
                 (parsed.correlations.iter()).map(|&(variable, key, row, _)| (variable, key, row)),
             );
+        }
+        if let Some(comparison) = parsed.comparisons.first() {
+            if parsed.extended {
+                return Err(error(
+                    comparison.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "an imported row comparison only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            self.read_comparisons
+                .as_mut()
+                .expect("row comparisons require a multipart ON owner")
+                .extend(parsed.comparisons);
         }
         if !parsed.extended {
             // This is the old AND-only profile, not a migration to a different
@@ -190,6 +229,10 @@ impl<'a> Parser<'a> {
             ));
         }
         let at = self.current.at;
+        if let Some(comparison) = self.computed_row_comparison()? {
+            parsed.comparisons.push(comparison);
+            return Ok(());
+        }
         if self.starts_scalar_predicate()? {
             self.admit_compound_leaf()?;
             let (columns, program) = self.boolean_scalar_expression()?;
@@ -242,6 +285,26 @@ impl<'a> Parser<'a> {
             parsed.extended = true;
             return parsed.push(SyntaxItem::Truth(value), at);
         }
+        // openCypher `v:L1:L2` over a vertex bound in this scope. No program
+        // item: boolean_predicates lowers it or refuses it.
+        if let TokenKind::Word(word) = self.current.kind
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+        {
+            if !self.syntax.variables.iter().any(|name| name.text == word) {
+                return Err(error(at, GraphPatternTextErrorKind::UnknownVariable));
+            }
+            let variable = self.name()?;
+            while self.take(b':')? {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                parsed.labels.push((variable, self.schema_name()?));
+                self.predicates += 1;
+            }
+            return Ok(());
+        }
         if self.compound_property_predicate(parsed)? {
             return Ok(());
         }
@@ -249,6 +312,10 @@ impl<'a> Parser<'a> {
             // No program item: the flat profile ignores its AND, and any
             // other profile refuses the correlation (boolean_predicates).
             parsed.correlations.push(correlation);
+            return Ok(());
+        }
+        if let Some(comparison) = self.row_comparison()? {
+            parsed.comparisons.push(comparison);
             return Ok(());
         }
         self.positive_predicate()?;
@@ -268,10 +335,18 @@ impl<'a> Parser<'a> {
     /// matches and kinds never coerce. Inside an OPTIONAL or EXISTS scope the
     /// row columns are hidden, so nothing here matches. Any other shape (an
     /// operator after `m`, `<`, `<>`) consumes nothing and parses as before.
+    ///
+    /// `x = m` or `m = x`, where `x` is a root vertex or a root relationship
+    /// of this MATCH, is the identity form of the same key: openCypher's
+    /// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the
+    /// carried `a` exactly as `MATCH (a)` reusing the name does.
     #[allow(clippy::type_complexity)]
     fn row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, Name<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+        if let Some(correlation) = self.row_field_correlation()? {
+            return Ok(Some(correlation));
+        }
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }
@@ -284,6 +359,50 @@ impl<'a> Parser<'a> {
             lexer.next()?.kind,
             lexer.next()?.kind,
         ];
+        if let [
+            TokenKind::Word(left),
+            TokenKind::Punct(b'='),
+            TokenKind::Word(right),
+            TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')'),
+            _,
+        ] = tokens
+        {
+            let row = |word: &str| {
+                (self.read_row_bindings.iter()).position(|binding| binding.text == word)
+            };
+            // Inside a later required MATCH the variables are that clause's
+            // own, all of them candidates; the root count is the outer one.
+            let roots = (self.syntax.variables.get(..self.syntax.root_variables))
+                .unwrap_or(&self.syntax.variables);
+            let element = |word: &str| {
+                (roots.iter())
+                    .copied()
+                    .find(|variable| variable.text == word)
+                    .or_else(|| {
+                        self.syntax
+                            .visible_edge(word)
+                            .filter(|(edge, scoped)| !*scoped && edge.walk.is_none())
+                            .and_then(|(edge, _)| edge.variable)
+                    })
+            };
+            let pair = match (row(left), element(left), row(right), element(right)) {
+                (Some(row), None, None, Some(variable))
+                | (None, Some(variable), Some(row), None) => Some((row, variable)),
+                _ => None,
+            };
+            if let Some((row, variable)) = pair {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                self.advance()?;
+                self.punct(b'=', "=")?;
+                self.advance()?;
+                self.predicates += 1;
+                return Ok(Some((variable, None, row, at)));
+            }
+        }
         // The atom must end at its fifth token.
         if !matches!(
             lexer.next()?.kind,
@@ -297,7 +416,7 @@ impl<'a> Parser<'a> {
             [
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
                 TokenKind::Punct(b'='),
                 TokenKind::Word(name),
             ] => (row(name), true),
@@ -306,7 +425,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'='),
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
             ] => (row(name), false),
             _ => (None, false),
         };
@@ -324,13 +443,13 @@ impl<'a> Parser<'a> {
         }
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         if property_first {
             self.punct(b'=', "=")?;
             self.advance()?;
         }
         self.predicates += 1;
-        Ok(Some((variable, key, row, at)))
+        Ok(Some((variable, Some(key), row, at)))
     }
 
     fn literal_starts_in_list(&self) -> Result<bool, GraphPatternTextError> {
@@ -343,13 +462,26 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_scalar_predicate(&self) -> Result<bool, GraphPatternTextError> {
+        // A number or text literal on the left (`1 = a.n`, `'b' < a.s`) is a
+        // scalar comparison; the flat lowering reads only `v.p op value`.
+        if matches!(
+            self.current.kind,
+            TokenKind::Digits(_) | TokenKind::Quoted(_)
+        ) {
+            return Ok(true);
+        }
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
         let mut depth = 0_usize;
         let mut arithmetic = false;
         let mut operand_end = false;
         let mut after_dot = false;
+        let mut previous = None;
         let property_compound = self.starts_compound_property_predicate()?;
+        // A comparison chain (`a.p < b.q = c.r`) needs the scalar compiler;
+        // `<=`, `<>`, `>=` and `!=` each count once.
+        let mut comparisons = 0_usize;
+        let mut comparing = false;
         loop {
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b'{' | b'}') => break,
@@ -358,7 +490,20 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b')') => depth -= 1,
                 // `||` concatenation and `=~` matching need the scalar compiler.
                 TokenKind::Punct(b'|' | b'~') => return Ok(true),
-                TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
+                TokenKind::Punct(b'<' | b'>' | b'=' | b'!') if depth == 0 && !comparing => {
+                    comparisons += 1;
+                    if comparisons > 1 {
+                        return Ok(true);
+                    }
+                }
+                TokenKind::Punct(b'+' | b'*' | b'/' | b'%' | b'^') => arithmetic = true,
+                TokenKind::Parameter(_)
+                    if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
+                {
+                    // Map argument fields are bound operands of the existing
+                    // scalar VM, including simple property comparisons.
+                    return Ok(true);
+                }
                 TokenKind::Punct(b'-') => {
                     // A signed numeric RHS keeps the original typed comparison
                     // (including i64::MIN). Binary subtraction and nonliteral
@@ -371,11 +516,24 @@ impl<'a> Parser<'a> {
                     }
                 }
                 TokenKind::Word(word) => {
+                    // id(x)/elementId(x) (fgdb-j687q) are scalar operands too;
+                    // their argument is an element column, not a scalar, so
+                    // they are not SCALAR_FUNCTIONS.
                     if !after_dot
-                        && super::SCALAR_FUNCTIONS
+                        && (super::SCALAR_FUNCTIONS
                             .iter()
                             .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                            || word.eq_ignore_ascii_case("ID")
+                            || word.eq_ignore_ascii_case("ELEMENTID"))
                         && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    {
+                        return Ok(true);
+                    }
+                    // `length(<expression>)` of text; `length(p)` of a lone
+                    // name keeps the path predicate reading (fgdb-20foe).
+                    if !after_dot
+                        && word.eq_ignore_ascii_case("LENGTH")
+                        && Self::length_argument(lexer.clone())? == Some(None)
                     {
                         return Ok(true);
                     }
@@ -387,13 +545,13 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(true);
                     }
+                    // The atom ends at AND/OR or at any clause keyword: a
+                    // following `CREATE (a)-[:R]->(b)` is not arithmetic.
                     if depth == 0
                         && !after_dot
-                        && [
-                            "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
-                        ]
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                        && (word.eq_ignore_ascii_case("AND")
+                            || word.eq_ignore_ascii_case("OR")
+                            || Self::ends_where(word, previous))
                     {
                         break;
                     }
@@ -416,6 +574,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Digits(_)
                 | TokenKind::Parameter(_)
                 | TokenKind::Quoted(_)
+                | TokenKind::DelimitedKeyword(_)
                 | TokenKind::Punct(b')' | b']') => true,
                 TokenKind::Word(word) => {
                     after_dot
@@ -426,6 +585,8 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
+            comparing = matches!(token.kind, TokenKind::Punct(b'<' | b'>' | b'=' | b'!'));
+            previous = Some(token.kind);
             token = lexer.next()?;
         }
         Ok(arithmetic)
@@ -440,7 +601,10 @@ impl<'a> Parser<'a> {
         }
         let mut lexer = self.lexer.clone();
         if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
-            || !matches!(lexer.next()?.kind, TokenKind::Word(_))
+            || !matches!(
+                lexer.next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            )
         {
             return Ok(false);
         }
@@ -448,8 +612,15 @@ impl<'a> Parser<'a> {
         if matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
             token = lexer.next()?;
         }
-        Ok(matches!(token.kind, TokenKind::Word(word)
-            if word.eq_ignore_ascii_case("IN") || word.eq_ignore_ascii_case("BETWEEN")))
+        Ok(match token.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("BETWEEN") => true,
+            // A list argument (`n.p IN $ids`) is the scalar compiler's
+            // membership; this lowering reads only a literal list (fgdb-dn9q3).
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => {
+                !matches!(lexer.next()?.kind, TokenKind::Parameter(_))
+            }
+            _ => false,
+        })
     }
 
     fn admit_compound_leaf(&mut self) -> Result<(), GraphPatternTextError> {
@@ -491,7 +662,7 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         let negate = self.take_word("NOT")?;
         parsed.extended = true;
         if self.take_word("IN")? {
@@ -581,8 +752,9 @@ enum Atom {
 #[derive(Clone)]
 enum Item {
     Atom(Atom),
+    /// A column with no key is the vertex itself (id()/elementId()).
     Expression {
-        columns: Vec<(String, PropertyKeyId)>,
+        columns: Vec<(String, Option<PropertyKeyId>)>,
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
     },
     Truth(Option<bool>),
@@ -601,6 +773,44 @@ pub(super) struct BoundBooleanTemplate {
 }
 
 impl BoundBooleanTemplate {
+    /// Inspect the same resolved property operands and eager scalar columns
+    /// that binding supplies to the Boolean evaluator. No argument value can
+    /// erase a read, and names distinguish domains rather than entity aliases.
+    /// Keyless scalar columns are element identities; other graph projections
+    /// are refused by `boolean_scalar_expression` before this template exists.
+    pub(super) fn selects_on_any_property(
+        &self,
+        mut property: impl FnMut(crate::GraphSetColumnType, PropertyKeyId) -> bool,
+    ) -> bool {
+        let mut reads = |variable: &str, key| {
+            let kind = if self.edge_variables.iter().any(|name| name == variable) {
+                crate::GraphSetColumnType::Edge
+            } else {
+                crate::GraphSetColumnType::Vertex
+            };
+            property(kind, key)
+        };
+        self.program.iter().any(|item| match item {
+            Item::Atom(atom) => match atom {
+                Atom::Property { variable, key, .. }
+                | Atom::Scalar { variable, key, .. }
+                | Atom::Null { variable, key, .. } => reads(variable, *key),
+                Atom::Properties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    ..
+                } => reads(left, *left_key) || reads(right, *right_key),
+                Atom::VertexNull { .. } | Atom::Identity { .. } => false,
+            },
+            Item::Expression { columns, .. } => columns
+                .iter()
+                .any(|(variable, key)| key.is_some_and(|key| reads(variable, key))),
+            Item::Truth(_) | Item::And | Item::Or | Item::Not => false,
+        })
+    }
+
     /// Append the resolved unbound program: variable/property identities,
     /// comparisons and structure only. Numeric operands encode as typed
     /// literals or parameter indices through the shared helper; scalar
@@ -674,11 +884,23 @@ impl BoundBooleanTemplate {
                     encode_atom(bytes, atom);
                 }
                 Item::Expression { columns, program } => {
-                    bytes.push(1);
+                    // Property-only expressions keep their bytes; a vertex
+                    // column (id()/elementId(), fgdb-j687q) selects tag 6,
+                    // which tags each column.
+                    let vertices = columns.iter().any(|(_, key)| key.is_none());
+                    bytes.push(if vertices { 6 } else { 1 });
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for (variable, key) in columns {
                         append_name(bytes, variable);
-                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        match key {
+                            Some(key) => {
+                                if vertices {
+                                    bytes.push(1);
+                                }
+                                bytes.extend_from_slice(&key.0.to_be_bytes());
+                            }
+                            None => bytes.push(0),
+                        }
                     }
                     bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
                     for op in program {
@@ -779,7 +1001,9 @@ impl BoundBooleanTemplate {
                     columns: columns
                         .into_iter()
                         .map(|(variable, key)| {
-                            property(key).map(|key| (variable.text.to_owned(), key))
+                            key.map(&mut property)
+                                .transpose()
+                                .map(|key| (variable.text.to_owned(), key))
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     program,
@@ -892,6 +1116,16 @@ impl BoundBooleanTemplate {
         }
     }
 
+    /// A key-less scalar column (id()/elementId()) reads the element itself:
+    /// the captured relationship for an edge variable, else the vertex.
+    fn element_operand<'a>(&self, variable: &'a str) -> Operand<'a> {
+        if self.edge_variables.iter().any(|name| name == variable) {
+            Operand::Edge(variable)
+        } else {
+            Operand::Vertex(variable)
+        }
+    }
+
     pub(super) fn bind(
         &self,
         values: &[GqlParameterValue],
@@ -914,7 +1148,9 @@ impl BoundBooleanTemplate {
                     GqlParameterValue::Scalar(value) => {
                         Ok(Some(value.predicate(IntegerComparison::Equal)))
                     }
-                    GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) => {
+                    GqlParameterValue::UInt64(_)
+                    | GqlParameterValue::List(_)
+                    | GqlParameterValue::Map(_) => {
                         Err(error(self.at, GraphPatternTextErrorKind::BooleanExpression))
                     }
                 },
@@ -937,7 +1173,10 @@ impl BoundBooleanTemplate {
             .map(|item| match item {
                 Item::Expression { columns, .. } => columns
                     .iter()
-                    .map(|(variable, key)| property(variable, *key))
+                    .map(|(variable, key)| match key {
+                        Some(key) => property(variable, *key),
+                        None => self.element_operand(variable),
+                    })
                     .collect(),
                 _ => Vec::new(),
             })
@@ -1115,7 +1354,7 @@ mod template_tests {
 mod compound_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::VId;
+    use fgdb_types::{CanonicalPropertyValue, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -1135,6 +1374,10 @@ mod compound_tests {
     }
 
     fn rows(predicate: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
+        let values: Vec<Option<CanonicalPropertyValue>> = values
+            .iter()
+            .map(|value| value.clone().map(CanonicalPropertyValue::from))
+            .collect();
         let plan = prepare(predicate);
         let result = plan
             .plan()
@@ -1314,7 +1557,7 @@ mod compound_tests {
     fn empty_membership_still_propagates_property_source_failure() {
         for predicate in ["n.p IN []", "n.p NOT IN []", "n.p IN [1, n.q]"] {
             let plan = prepare(predicate);
-            let value = CanonicalScalar::Int(1);
+            let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
             let result = plan.plan().execute_governed_with_properties(
                 1,
                 [VId(1)],

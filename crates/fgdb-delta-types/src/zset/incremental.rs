@@ -175,6 +175,40 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
         })
     }
 
+    /// Prepare only the two input arrangements, without visiting pair products.
+    /// This has the input-state and empty-output semantics of
+    /// `prepare_filtered(..., |_, _, _, _| Ok(false))`, but performs no candidate
+    /// enumeration, predicate evaluation or weight multiplication. It is for
+    /// consumers deriving their own outer/presence output from these inputs;
+    /// it is NOT a substitute for the matched derivative of a normal join.
+    ///
+    /// Both signed deltas retain ordinary weight admission and checked count
+    /// integration. Work/scratch use the caller's original control, and the
+    /// ordinary exclusive-borrow guard publishes both sides or neither. The
+    /// returned delta is empty; callers must separately prepare their output
+    /// before committing. Key comparisons and allocation retain this module's
+    /// existing boundary. No unchanged group is scanned or copied.
+    pub fn prepare_inputs<E>(
+        &mut self,
+        delta_left: &ZSet<(K, L)>,
+        delta_right: &ZSet<(K, R)>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<JoinUpdate<'_, K, L, R>, ZSetError<E>> {
+        event(control, ZSetEvent::Work)?;
+        let left = grouped(delta_left, limbs, control)?;
+        let right = grouped(delta_right, limbs, control)?;
+        let left = prepare_changes(&self.left, &left, limbs, control)?;
+        let right = prepare_changes(&self.right, &right, limbs, control)?;
+        event(control, ZSetEvent::Work)?;
+        Ok(JoinUpdate {
+            owner: self,
+            left,
+            right,
+            delta: ZSet::new(),
+        })
+    }
+
     /// One complete algebra tick. For multi-operator atomic publication use
     /// `prepare`, prepare downstream output, then commit the update guard.
     pub fn apply<E>(
@@ -716,3 +750,217 @@ mod tests {
 
 #[cfg(test)]
 mod filtered_tests;
+
+#[cfg(test)]
+mod input_only_tests {
+    use super::*;
+
+    const LIMBS: LimbLimit = LimbLimit::new(16);
+    type Join = IncrementalJoin<i32, i32, i32>;
+
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
+    fn bag(rows: &[((i32, i32), i128)]) -> ZSet<(i32, i32)> {
+        ZSet::from_updates(
+            rows.iter().map(|&(row, n)| (row, ZWeight::from_i128(n))),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
+    }
+    fn seed() -> Join {
+        let mut join = Join::new();
+        join.prepare_inputs(
+            &bag(&[((0, 1), 2)]),
+            &bag(&[((0, 2), 3)]),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
+        .commit();
+        join
+    }
+
+    #[test]
+    fn input_only_signed_ticks_match_the_live_false_filtered_operator() {
+        for a in -2..=2 {
+            for b in -2..=2 {
+                for da in -2..=2 {
+                    for db in -2..=2 {
+                        let mut inputs = Join::new();
+                        let mut filtered = Join::new();
+                        for (left, right) in [
+                            (bag(&[((0, 1), a)]), bag(&[((0, 2), b)])),
+                            (bag(&[((0, 1), da)]), bag(&[((0, 2), db)])),
+                        ] {
+                            assert!(
+                                inputs
+                                    .prepare_inputs(&left, &right, LIMBS, &mut allow)
+                                    .unwrap()
+                                    .commit()
+                                    .is_empty()
+                            );
+                            assert!(
+                                filtered
+                                    .prepare_filtered(
+                                        &left,
+                                        &right,
+                                        LIMBS,
+                                        &mut allow,
+                                        |_, _, _, _| Ok(false)
+                                    )
+                                    .unwrap()
+                                    .commit()
+                                    .is_empty()
+                            );
+                            assert_eq!(inputs, filtered);
+                        }
+                        let left = ZWeight::from_i128(a + da);
+                        let right = ZWeight::from_i128(b + db);
+                        assert_eq!(
+                            inputs.left_weight(&0, &1),
+                            (!left.is_zero()).then_some(&left)
+                        );
+                        assert_eq!(
+                            inputs.right_weight(&0, &2),
+                            (!right.is_zero()).then_some(&right)
+                        );
+                        let snapshot = inputs.snapshot(LIMBS, &mut allow).unwrap();
+                        let product = ZWeight::from_i128((a + da) * (b + db));
+                        assert_eq!(
+                            snapshot.weight(&(0, 1, 2)),
+                            (!product.is_zero()).then_some(&product)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn input_only_refusals_and_dropped_guards_publish_neither_side() {
+        let left = bag(&[((0, 1), -2), ((1, 5), 4)]);
+        let right = bag(&[((0, 2), -3), ((1, 6), -2)]);
+        let mut state = seed();
+        let mut calls = 0;
+        {
+            let pending = state
+                .prepare_inputs(&left, &right, LIMBS, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+            assert!(pending.delta().is_empty());
+        }
+        assert_eq!(state, seed());
+        for stop in 1..=calls {
+            let mut seen = 0;
+            let error = state
+                .prepare_inputs(&left, &right, LIMBS, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                })
+                .unwrap_err();
+            assert_eq!(error, ZSetError::Control(stop));
+            assert_eq!(seen, stop);
+            assert_eq!(state, seed());
+        }
+        state
+            .prepare_inputs(&left, &right, LIMBS, &mut allow)
+            .unwrap()
+            .commit();
+        assert!(state.left_group(&0).is_none());
+        assert!(state.right_group(&0).is_none());
+        assert_eq!(state.left_weight(&1, &5), Some(&ZWeight::from_i128(4)));
+        assert_eq!(state.right_weight(&1, &6), Some(&ZWeight::from_i128(-2)));
+    }
+
+    #[test]
+    fn input_counts_are_admitted_even_when_pair_products_are_not_needed() {
+        let left = bag(&[((0, 1), i128::MAX)]);
+        let right = bag(&[((0, 2), 2)]);
+        let mut state = Join::new();
+        // Both input counts fit the inline domain; their product does not.
+        state
+            .prepare_inputs(&left, &right, LimbLimit::new(0), &mut allow)
+            .unwrap()
+            .commit();
+        assert!(matches!(
+            state.snapshot(LimbLimit::new(0), &mut allow),
+            Err(ZSetError::Arithmetic(_))
+        ));
+        let mut unchanged = Join::new();
+        unchanged
+            .prepare_inputs(&left, &right, LIMBS, &mut allow)
+            .unwrap()
+            .commit();
+        let increment = bag(&[((0, 1), 1)]);
+        assert!(matches!(
+            state.prepare_inputs(
+                &increment,
+                &bag(&[((0, 2), 1)]),
+                LimbLimit::new(0),
+                &mut allow
+            ),
+            Err(ZSetError::Arithmetic(_))
+        ));
+        assert_eq!(state, unchanged);
+        state
+            .prepare_inputs(&increment, &ZSet::new(), LIMBS, &mut allow)
+            .unwrap()
+            .commit();
+        assert!(state.left_weight(&0, &1).unwrap().is_promoted());
+        // Transfer admission still rejects promoted input under an insufficient
+        // allowance, before any counterpart or result could mask it.
+        let promoted = left.plus(&increment, LIMBS, &mut allow).unwrap();
+        let mut empty = Join::new();
+        assert!(matches!(
+            empty.prepare_inputs(&promoted, &ZSet::new(), LimbLimit::new(0), &mut allow),
+            Err(ZSetError::WeightAdmission { .. })
+        ));
+        assert_eq!(empty, Join::new());
+    }
+
+    #[test]
+    fn input_only_work_depends_on_changes_not_opposite_same_key_population() {
+        let mut traces = Vec::new();
+        for n in [1, 512] {
+            let rows = bag(&(0..n).map(|v| ((0, v), 1)).collect::<Vec<_>>());
+            let mut actual = Join::new();
+            actual
+                .prepare_inputs(&rows, &rows, LIMBS, &mut allow)
+                .unwrap()
+                .commit();
+            let mut incumbent = Join::new();
+            incumbent
+                .prepare_filtered(&rows, &rows, LIMBS, &mut allow, |_, _, _, _| Ok(false))
+                .unwrap()
+                .commit();
+            let delta = bag(&[((0, 0), 1)]);
+            let mut events = Vec::new();
+            assert!(
+                actual
+                    .prepare_inputs(&delta, &ZSet::new(), LIMBS, &mut |event| {
+                        events.push(event);
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap()
+                    .commit()
+                    .is_empty()
+            );
+            let mut rejected = 0;
+            incumbent
+                .prepare_filtered(&delta, &ZSet::new(), LIMBS, &mut allow, |_, _, _, _| {
+                    rejected += 1;
+                    Ok(false)
+                })
+                .unwrap()
+                .commit();
+            assert_eq!(rejected, n);
+            assert_eq!(actual, incumbent);
+            traces.push(events);
+        }
+        assert_eq!(traces[0], traces[1]);
+    }
+}

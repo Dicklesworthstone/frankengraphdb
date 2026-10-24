@@ -13,6 +13,18 @@ use crate::{
 };
 use core::cmp::Ordering;
 
+/// The native Cartesian occurrence copy, shared by materialized, folded and
+/// external execution. Both input rows already belong to complete children.
+/// This owns no ordering, filtering, pagination or public result admission.
+pub(super) fn copy_cross_pair<E>(
+    left: &GraphValueRow,
+    right: &GraphValueRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValueRow, E> {
+    control(GlaExecutionEvent::Work)?;
+    selected_cross::copy_pair(left, right, None, control)
+}
+
 struct Meter<Checkpoint> {
     policy: GqlQueryPolicy,
     checkpoint: Checkpoint,
@@ -88,7 +100,21 @@ impl<Checkpoint> Meter<Checkpoint> {
         execution: &GqlQueryExecution<GraphValueRow>,
         operand: usize,
     ) -> SetResult<(), E, C> {
-        if u64::try_from(execution.value.len()).ok() != Some(execution.rows.result_rows) {
+        self.absorb_statistics(
+            execution.rows,
+            execution.evaluator,
+            u64::try_from(execution.value.len()).ok(),
+            operand,
+        )
+    }
+    fn absorb_statistics<E, C>(
+        &mut self,
+        rows: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        retained: Option<u64>,
+        operand: usize,
+    ) -> SetResult<(), E, C> {
+        if retained != Some(rows.result_rows) {
             return Err(GqlQueryError::Source(
                 GraphSetExecutionError::InvalidSourceStatistics { operand },
             ));
@@ -96,7 +122,7 @@ impl<Checkpoint> Meter<Checkpoint> {
         let snapshot_records = self
             .rows
             .snapshot_records
-            .checked_add(execution.rows.snapshot_records)
+            .checked_add(rows.snapshot_records)
             .ok_or_else(|| {
                 GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {
                     dimension: GqlBudgetDimension::SnapshotRecords,
@@ -108,13 +134,13 @@ impl<Checkpoint> Meter<Checkpoint> {
             .map_err(GqlQueryError::Rows)?;
         let work_units = evaluator_sum(
             self.evaluator.work_units,
-            execution.evaluator.work_units,
+            evaluator.work_units,
             self.policy.evaluator.max_work_units,
             GlaLimitDimension::WorkUnits,
         )?;
         let scratch_entries = evaluator_sum(
             self.evaluator.scratch_entries,
-            execution.evaluator.scratch_entries,
+            evaluator.scratch_entries,
             self.policy.evaluator.max_scratch_entries,
             GlaLimitDimension::ScratchEntries,
         )?;
@@ -172,16 +198,12 @@ impl<Checkpoint> Meter<Checkpoint> {
     }
 }
 
-pub(super) fn execute<E, C, S, Checkpoint>(
+pub(super) fn execute<E, C>(
     query: &PreparedGraphSet,
     policy: GqlQueryPolicy,
-    source: &mut S,
-    checkpoint: Checkpoint,
-) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C>
-where
-    S: GraphSetSource<E, C>,
-    Checkpoint: FnMut() -> Result<(), C>,
-{
+    source: &mut dyn GraphSetSource<E, C>,
+    checkpoint: &mut dyn FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
     let mut meter = Meter {
         policy,
         checkpoint,
@@ -212,22 +234,33 @@ fn run<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
     if page::supports(query) {
         return page::collect(query, source, meter, operand);
     }
-    let rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    let rows = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()
+    {
         // Admit and finish both original children once, even if the left bag
-        // is empty. Do not allocate rejected Cartesian candidate rows.
+        // is empty. Do not allocate rejected Cartesian candidate rows. A
+        // seeded right leaf admits only the left bag's root identities.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
-        let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
-        selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
-            meter.event(event)
-        })?
+        if let Some(rows) = selected_cross::factors::collect(&left, inputs, source, meter, operand)?
+        {
+            rows
+        } else {
+            let right =
+                match selected_cross::seeded::collect(&left, inputs, source, meter, operand)? {
+                    Some(rows) => rows,
+                    None => run(right, source, meter, operand)?,
+                };
+            let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
+            selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
+                meter.event(event)
+            })?
+        }
     } else {
         run_node(query, source, meter, operand)?
     };
@@ -286,14 +319,45 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.absorb(&execution, at)?;
-    for row in &execution.value {
+    finish_source_rows(execution.value, &query.types, at, meter)
+}
+
+fn finish_source_rows<E, C, Checkpoint>(
+    mut rows: Vec<GraphValueRow>,
+    types: &[GraphSetColumnType],
+    at: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    check_source_rows(&rows, types, at, meter)?;
+    merge::sort(
+        &mut rows,
+        &mut |event| meter.event(event),
+        &mut |a, b, control| compare_rows(a, b, &[], control),
+    )?;
+    Ok(rows)
+}
+
+/// Every source row has the operand's admitted schema.
+fn check_source_rows<E, C, Checkpoint>(
+    rows: &[GraphValueRow],
+    types: &[GraphSetColumnType],
+    at: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<(), E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    for row in rows {
         meter.event(GlaExecutionEvent::ScratchEntry)?;
-        if row.len() != query.types.len() {
+        if row.len() != types.len() {
             return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
                 operand: at,
             }));
         }
-        for (value, kind) in row.values().iter().zip(&query.types) {
+        for (value, kind) in row.values().iter().zip(types) {
             meter.event(GlaExecutionEvent::Work)?;
             if !kind.accepts(value) {
                 return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
@@ -302,13 +366,7 @@ where
             }
         }
     }
-    let mut rows = execution.value;
-    merge::sort(
-        &mut rows,
-        &mut |event| meter.event(event),
-        &mut |a, b, control| compare_rows(a, b, &[], control),
-    )?;
-    Ok(rows)
+    Ok(())
 }
 
 fn run_node<E, C, S, Checkpoint>(
@@ -318,7 +376,7 @@ fn run_node<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     Ok(match &query.node {
@@ -347,15 +405,28 @@ where
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vec![GraphValueRow::unit()]
         }
+        // The write charged these rows as it built them; the tail counts its
+        // own work over them from here.
+        SetNode::Owned { .. } => source.owned().ok_or(GqlQueryError::Source(
+            GraphSetExecutionError::OwnedRowsUnavailable,
+        ))?,
         SetNode::Unwind { input, value } => {
             let input = run(input, source, meter, operand)?;
+            let mut read = |element, key| {
+                source.element_property(element, key).map(|read| {
+                    read.map_err(|error| {
+                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                    })
+                })
+            };
             let mut output = Vec::new();
             for (row_at, row) in input.into_iter().enumerate() {
-                meter.event(GlaExecutionEvent::Work)?;
-                let column = row.len();
-                let list = projection::evaluate_value(value, &row, column, &mut |event| {
-                    meter.event(event)
-                })
+                let mut rows = projection::UnwindRows::new(
+                    row,
+                    value,
+                    &mut |event| meter.event(event),
+                    &mut read,
+                )
                 .map_err(|error| match error {
                     projection::ProjectionFailure::Control(error) => error,
                     projection::ProjectionFailure::Arithmetic { column, error } => {
@@ -366,34 +437,11 @@ where
                         })
                     }
                 })?;
-                let values = match list {
-                    GraphValue::List(values) => values,
-                    value if value.is_null() => continue,
-                    _ => {
-                        return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
-                            row: row_at,
-                            column,
-                            error: crate::GraphIntegerError {
-                                instruction: 0,
-                                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-                            },
-                        }));
-                    }
-                };
-                for value in values.into_vec() {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut cells = Vec::new();
-                    for cell in row.values() {
-                        cells.push(projection::copy_value(cell, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    // The evaluated element already owns its metered payload;
-                    // only the newly retained output cell needs reservation.
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    cells.push(value);
-                    output.push(GraphValueRow::from_owned_values(cells));
+                while let Some((row, next)) =
+                    rows.next_with_control(&mut |event| meter.event(event))?
+                {
+                    rows = next;
+                    output.push(row);
                 }
             }
             output
@@ -404,15 +452,9 @@ where
             let mut output = Vec::new();
             for left_row in &left {
                 for right_row in &right {
-                    meter.event(GlaExecutionEvent::Work)?;
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    let mut cells = Vec::new();
-                    for cell in left_row.values().iter().chain(right_row.values()) {
-                        cells.push(projection::copy_value(cell, &mut |event| {
-                            meter.event(event)
-                        })?);
-                    }
-                    output.push(GraphValueRow::from_owned_values(cells));
+                    output.push(copy_cross_pair(left_row, right_row, &mut |event| {
+                        meter.event(event)
+                    })?);
                 }
             }
             output
@@ -460,7 +502,16 @@ where
                     GraphSetExecutionError::ProcedureUnavailable { operand: at },
                 ))?
                 .map_err(|error| meter.source_error(error))?;
-            admit_source_rows(query, execution, at, meter)?
+            if call.preserves_row_order() {
+                // A ranked procedure (`hybrid.*`) delivers its rows best
+                // first, ties by ascending vertex. That order is the
+                // relation's own, so it is checked but not re-sorted.
+                meter.absorb(&execution, at)?;
+                check_source_rows(&execution.value, &query.types, at, meter)?;
+                execution.value
+            } else {
+                admit_source_rows(query, execution, at, meter)?
+            }
         }
         SetNode::Scope(input) => run(input, source, meter, operand)?,
         SetNode::Filter { input, predicate } => {
@@ -481,10 +532,25 @@ where
             input,
             projection,
             quantifier,
+            preserve_order,
         } => {
-            let preserve_order = input.preserves_row_order();
+            let preserve_order = *preserve_order || input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
-            project_rows(input, projection, *quantifier, preserve_order, meter)?
+            let mut read = |element, key| {
+                source.element_property(element, key).map(|read| {
+                    read.map_err(|error| {
+                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                    })
+                })
+            };
+            project_rows(
+                input,
+                projection,
+                *quantifier,
+                preserve_order,
+                meter,
+                &mut read,
+            )?
         }
         SetNode::Binary {
             operation,
@@ -512,6 +578,7 @@ fn project_rows<E, C, Checkpoint>(
     quantifier: GraphSetQuantifier,
     preserve_order: bool,
     meter: &mut Meter<Checkpoint>,
+    read: &mut projection::ElementRead<'_, GqlQueryError<GraphSetExecutionError<E>, C>>,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
     Checkpoint: FnMut() -> Result<(), C>,
@@ -519,10 +586,12 @@ where
     let mut output = Vec::new();
     for (row_at, row) in input.into_iter().enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
-        let row = GraphSetProjection::evaluate_row_with_control(
+        let row = GraphSetProjection::evaluate_numbered_row_with_control(
             &row,
+            row_at as u64,
             projection,
             &mut |event| meter.event(event),
+            read,
             |column, error| {
                 GqlQueryError::Source(GraphSetExecutionError::Projection {
                     row: row_at,
@@ -558,6 +627,56 @@ where
     })
 }
 
+/// Group the private occurrence bag of a write under its existing prefix.
+/// Input expressions, exact native accumulation and checked row conversion
+/// all precede final RETURN paging. Intermediate group rows consume work,
+/// never the final result-row allowance; no source is invoked here.
+pub(crate) fn finish_owned_aggregate<E, C>(
+    input: GqlQueryExecution<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    grouping: &super::WriteReturnGroup,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    let mut meter = Meter {
+        policy,
+        checkpoint,
+        rows: GqlExecutionStats {
+            snapshot_records: input.rows.snapshot_records,
+            result_rows: 0,
+        },
+        evaluator: input.evaluator,
+    };
+    // A write's owned rows have no graph source to read elements from.
+    let input = project_rows(
+        input.value,
+        &grouping.inputs,
+        GraphSetQuantifier::All,
+        true,
+        &mut meter,
+        &mut projection::no_element_reads,
+    )?;
+    let value = grouping
+        .summarize_value_rows(&input, &mut |event| {
+            let event = if event == GlaExecutionEvent::ResultRow {
+                GlaExecutionEvent::Work
+            } else {
+                event
+            };
+            meter
+                .event(event)
+                .map_err(|error| error.map_source(crate::GraphAggregateError::InputRelation))
+        })
+        .map_err(|error| {
+            error.map_source(|error| GraphSetExecutionError::Aggregate(Box::new(error)))
+        })?;
+    (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
+    Ok(GqlQueryExecution {
+        value,
+        rows: meter.rows,
+        evaluator: meter.evaluator,
+    })
+}
+
 /// Finish an already admitted owned bag using the ordinary native projection,
 /// DISTINCT, ordering and page kernels. The private owner has checked the input
 /// schema and charged every retained input cell; counters include its complete
@@ -580,7 +699,14 @@ pub(crate) fn finish_owned_projection<E, C>(
         },
         evaluator: input.evaluator,
     };
-    let rows = project_rows(input.value, projection, quantifier, true, &mut meter)?;
+    let rows = project_rows(
+        input.value,
+        projection,
+        quantifier,
+        true,
+        &mut meter,
+        &mut projection::no_element_reads,
+    )?;
     let rows = order_page(rows, order, page.0, page.1, &mut meter)?;
     for _ in &rows {
         meter.event(GlaExecutionEvent::ResultRow)?;
@@ -591,6 +717,74 @@ pub(crate) fn finish_owned_projection<E, C>(
         rows: meter.rows,
         evaluator: meter.evaluator,
     })
+}
+
+/// The policy a write's WITH head finishes under. Its rows are private input
+/// to the tail, so only the tail's final rows spend the result-row allowance.
+pub(crate) fn owned_head_policy(policy: GqlQueryPolicy) -> GqlQueryPolicy {
+    GqlQueryPolicy::new(
+        policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+        u64::MAX,
+        policy.evaluator.max_work_units,
+        policy.evaluator.max_scratch_entries,
+    )
+}
+
+/// Run a write tail over its finished head under what the write and head
+/// left of the statement's allowance, with the statement's own result-row
+/// limit. Counters continue the head's: work and scratch add, snapshot
+/// records are the write's, and result rows are the tail's alone.
+pub(crate) fn finish_owned_tail<E, C>(
+    head: GqlQueryExecution<GraphValueRow>,
+    tail: &PreparedGraphSet,
+    policy: GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+    let remaining = |limit: u64, spent: u64| limit.saturating_sub(spent);
+    let budget = GqlQueryPolicy::new(
+        remaining(
+            policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+            head.rows.snapshot_records,
+        ),
+        policy.rows.max_result_rows().unwrap_or(u64::MAX),
+        remaining(policy.evaluator.max_work_units, head.evaluator.work_units),
+        remaining(
+            policy.evaluator.max_scratch_entries,
+            head.evaluator.scratch_entries,
+        ),
+    );
+    let output = tail.execute_over_owned(head.value, budget, checkpoint)?;
+    // The tail ran inside what the head left, so each sum stays within the
+    // statement's own limit; saturation only guards an unbounded policy.
+    Ok(GqlQueryExecution {
+        value: output.value,
+        rows: GqlExecutionStats {
+            snapshot_records: head.rows.snapshot_records,
+            result_rows: output.rows.result_rows,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: head
+                .evaluator
+                .work_units
+                .saturating_add(output.evaluator.work_units),
+            scratch_entries: head
+                .evaluator
+                .scratch_entries
+                .saturating_add(output.evaluator.scratch_entries),
+        },
+    })
+}
+
+/// Restore canonical child order for a proved plain aggregate input. The
+/// caller admits the scalar, identity and path projection domains; this does
+/// not admit arbitrary computed collections or explicit ORDER BY semantics.
+/// The shared fallible sort moves retained values in place and charges every
+/// comparison, scalar/path payload examination and swap to the same control.
+pub(crate) fn sort_canonical_values<E>(
+    values: &mut [GraphValue],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    merge::sort(values, control, &mut compare_value)
 }
 
 fn compare_value<E>(
@@ -651,7 +845,7 @@ fn compare_rows<E>(
                 }
             }
             (false, false) => {
-                let result = compare_value(a, b, control)?;
+                let result = a.compare_orderability_with_control(b, control)?;
                 if key.descending {
                     result.reverse()
                 } else {

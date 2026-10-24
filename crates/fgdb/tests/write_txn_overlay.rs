@@ -103,7 +103,7 @@ fn staged_create_is_txn_visible_and_base_invisible_until_commit() {
                 .expect("overlay reads")
                 .expect("the txn sees its own staged create");
             assert_eq!(overlay.labels, vec![LabelId(5)]);
-            assert_eq!(overlay.props, vec![(PROP, int(7))]);
+            assert_eq!(overlay.props, vec![(PROP, int(7).into())]);
             assert!(
                 db.vertex(VId(2)).expect("base reads").is_none(),
                 "DIRTY READ: the staged create leaked into the shared handle \
@@ -115,7 +115,7 @@ fn staged_create_is_txn_visible_and_base_invisible_until_commit() {
                 .vertex(&db, VId(1))
                 .expect("overlay reads the base")
                 .expect("committed state is visible through the overlay");
-            assert_eq!(bystander.props, vec![(PROP, int(0))]);
+            assert_eq!(bystander.props, vec![(PROP, int(0).into())]);
 
             txn.commit(&mut db, &commit).await.expect("commits");
             assert!(
@@ -130,7 +130,7 @@ fn staged_create_is_txn_visible_and_base_invisible_until_commit() {
             .expect("reopens");
         let row = db.vertex(VId(2)).expect("reads").expect("durable vertex");
         assert_eq!(row.labels, vec![LabelId(5)]);
-        assert_eq!(row.props, vec![(PROP, int(7))]);
+        assert_eq!(row.props, vec![(PROP, int(7).into())]);
     });
 }
 
@@ -185,19 +185,19 @@ fn staged_update_overlays_without_leaking_and_abort_restores_nothing() {
                 .expect("the live vertex is visible through the overlay");
             assert_eq!(
                 overlay.props,
-                vec![(PROP, int(9))],
+                vec![(PROP, int(9).into())],
                 "the overlay serves the staged value"
             );
             assert_eq!(
                 db.vertex(VId(1)).expect("base reads").expect("row").props,
-                vec![(PROP, int(0))],
+                vec![(PROP, int(0).into())],
                 "DIRTY READ: the staged update leaked into the shared handle"
             );
 
             txn.abort();
             assert_eq!(
                 db.vertex(VId(1)).expect("base reads").expect("row").props,
-                vec![(PROP, int(0))],
+                vec![(PROP, int(0).into())],
                 "abort restores nothing because nothing ever changed"
             );
         }
@@ -207,7 +207,7 @@ fn staged_update_overlays_without_leaking_and_abort_restores_nothing() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(0))],
+            vec![(PROP, int(0).into())],
             "the staged 9 never became durable"
         );
     });

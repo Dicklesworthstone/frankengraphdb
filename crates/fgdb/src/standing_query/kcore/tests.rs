@@ -6,19 +6,20 @@ use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
 }
-fn build(snapshot: &crate::Snapshot) -> State {
+fn build(snapshot: &crate::Snapshot, native_rows: bool) -> State {
     let mut checkpoint = || Ok(());
     let mut meter = Meter {
         policy: policy(),
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    State::from_snapshot(snapshot, RelationId(1), &mut meter).unwrap()
+    State::from_snapshot(snapshot, RelationId(1), native_rows, &mut meter).unwrap()
 }
 fn unchanged(actual: &State, before: &State) {
     assert_eq!(actual.input, before.input);
     assert_eq!(actual.cores, before.cores);
     assert_eq!(actual.rows, before.rows);
+    assert_eq!(actual.relational, before.relational);
     assert_eq!(actual.frontier, before.frontier);
     assert_eq!(actual.stats, before.stats);
     assert_eq!(actual.failure, before.failure);
@@ -27,7 +28,13 @@ fn unchanged(actual: &State, before: &State) {
 
 #[test]
 fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact() {
-    let ((), report) = run_async_under_lab(0x6b63_0110, |root| async move {
+    for native_rows in [false, true] {
+        composed_refusals(native_rows);
+    }
+}
+
+fn composed_refusals(native_rows: bool) {
+    let ((), report) = run_async_under_lab(0x6b63_0110, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let keys = DatabaseKeys::new(
@@ -52,14 +59,14 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
         }
         db.write(&commit, seed).await.unwrap();
         let baseline = Arc::clone(&db.snapshot);
-        let before = build(&baseline);
+        let before = build(&baseline, native_rows);
         let mut change = WriteBatch::new(RelationId(1));
         change.delete_edge(EId(1));
         db.write(&commit, change).await.unwrap();
         let batch = db.delta_since(baseline.frontier).unwrap().next().unwrap();
-        let expected = build(&db.snapshot);
+        let expected = build(&db.snapshot, native_rows);
         assert_ne!(before.rows, expected.rows);
-        let mut state = build(&baseline);
+        let mut state = build(&baseline, native_rows);
         let mut calls = 0;
         let stats = {
             let mut checkpoint = || {
@@ -75,10 +82,12 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
             meter.stats
         };
         assert_eq!(state.rows, expected.rows);
+        assert_eq!(state.value_rows(), expected.value_rows());
+        assert_eq!(state.value_delta().is_some(), native_rows);
         assert_eq!(state.cores, expected.cores);
         assert_eq!(state.input, expected.input);
         for stop in 1..=calls {
-            let mut state = build(&baseline);
+            let mut state = build(&baseline, native_rows);
             let mut visited = 0;
             {
                 let mut checkpoint = || {
@@ -123,7 +132,7 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
                 Some(StandingQueryFailure::ScratchBudget),
             ),
         ] {
-            let mut state = build(&baseline);
+            let mut state = build(&baseline, native_rows);
             let mut checkpoint = || Ok(());
             let mut meter = Meter {
                 policy: GqlQueryPolicy::new(100_000, result, work, scratch),
@@ -137,6 +146,7 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
             } else {
                 outcome.unwrap();
                 assert_eq!(state.rows, expected.rows);
+                assert_eq!(state.value_rows(), expected.value_rows());
                 assert_eq!(state.cores, expected.cores);
             }
         }
@@ -155,7 +165,7 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            let result = State::from_snapshot(&baseline, RelationId(1), &mut meter);
+            let result = State::from_snapshot(&baseline, RelationId(1), native_rows, &mut meter);
             if allowance == records as u64 {
                 assert_eq!(result.unwrap().rows, before.rows);
             } else {

@@ -213,8 +213,8 @@ fn query_returns_canonical_new_values_with_masked_fields_and_one_reopenable_comm
         assert_eq!(
             db.edge(EId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(2)),
-                (SECRET, CanonicalScalar::Int(99))
+                (P, CanonicalScalar::Int(2).into()),
+                (SECRET, CanonicalScalar::Int(99).into())
             ]
         );
         let state = (db.vertices().unwrap(), db.edges().unwrap());
@@ -417,10 +417,12 @@ fn readwrite_preflight_precedes_creation_even_when_the_result_would_be_empty() {
                 .unwrap_err();
             assert_eq!(authorization(&error), Some(Error::PermissionDenied));
             assert_eq!(db.frontier().unwrap(), before);
+            // The refused CREATE reserved nothing: the vertex counter of this
+            // fresh database still issues its first identity.
             assert_eq!(
                 db.allocate_identity(&query_cx, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }

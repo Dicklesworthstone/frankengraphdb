@@ -12,9 +12,8 @@ use crate::{Database, WriteTxnError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
-    GraphSymbolResolver, GraphWriteProgramError, GraphWriteProgramPolicy,
-    GraphWriteScriptExecutionError,
+    GqlParameters, GqlQueryPolicy, GraphMutationProgramError, GraphSymbolResolver,
+    GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
 };
 use fgdb_types::{CommitCx, QueryCx, TxnCx};
 
@@ -166,7 +165,7 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx: &CommitCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         policy: GraphWriteProgramPolicy,
     ) -> Result<QueryResult, QueryWriteError<WriteTxnError>> {
@@ -204,7 +203,7 @@ impl WriteTxn {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         policy: GraphWriteProgramPolicy,
     ) -> Result<QueryResult, QueryWriteError<WriteTxnError>> {
@@ -242,8 +241,8 @@ mod engine_write_tests {
     use crate::{DatabaseKeys, MemVfs};
     use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::PropertyKeyId;
-    use fgdb_gql::GraphAggregateValue;
     use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GraphAggregateValue, GraphSymbol, GraphSymbolKind};
     use fgdb_types::context::SimulationCheckpointProbe;
     use fgdb_types::{
         CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -445,7 +444,7 @@ mod engine_write_tests {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(copies[0]).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(8))]
+                vec![(P, CanonicalScalar::Int(8).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -492,7 +491,7 @@ mod engine_write_tests {
                 &cx,
                 "CREATE (n {p:2}) RETURN n",
                 &GqlParameters::new(),
-                |_, _| panic!("wrong owner must refuse before catalog resolution"),
+                |_, _: &str| panic!("wrong owner must refuse before catalog resolution"),
                 R,
                 policy(),
             ));
@@ -518,7 +517,7 @@ mod engine_write_tests {
                 &cx,
                 "CREATE (n {p:4}) RETURN n",
                 &GqlParameters::new(),
-                |_, _| panic!("stale basis must refuse before catalog resolution"),
+                |_, _: &str| panic!("stale basis must refuse before catalog resolution"),
                 R,
                 policy(),
             ));
@@ -539,7 +538,7 @@ mod engine_write_tests {
                 &cx,
                 "CREATE (n {p:5}) RETURN n",
                 &GqlParameters::new(),
-                |_, _| panic!("finished workspace must refuse before catalog resolution"),
+                |_, _: &str| panic!("finished workspace must refuse before catalog resolution"),
                 R,
                 policy(),
             ));
@@ -628,7 +627,7 @@ mod engine_write_tests {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(ids[0]).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(9))]
+                vec![(P, CanonicalScalar::Int(9).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

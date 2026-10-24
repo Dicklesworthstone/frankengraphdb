@@ -24,7 +24,16 @@ pub enum GraphMutationProgramBuildError {
 }
 impl core::fmt::Display for GraphMutationProgramBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "mutation program definition: {self:?}")
+        match self {
+            Self::Empty => f.write_str("a write program requires at least one statement"),
+            Self::TooManyStatements { limit, observed } => {
+                write!(f, "write program has {observed} statements, limit {limit}")
+            }
+            Self::MixedRelation { statement } => write!(
+                f,
+                "statement {statement} writes a different relation than the program's first statement"
+            ),
+        }
     }
 }
 impl core::error::Error for GraphMutationProgramBuildError {}
@@ -237,7 +246,7 @@ impl PreparedGraphMutationProgram {
             meter.boundary(statement)?;
             let stats = stage(input, meter.remaining())
                 .map_err(|source| meter.translate(statement, source))?;
-            meter.absorb(statement, input.actions().len(), stats)?;
+            meter.absorb(statement, input.maximum_effects_per_binding(), stats)?;
         }
         checkpoint().map_err(|source| GraphMutationProgramError::Interrupted {
             completed_statements: self.statements.len(),
@@ -318,17 +327,19 @@ impl ProgramMeter {
             remainder(D::Effects),
         )
     }
+    /// `row_effects` bounds the effects one selected row may propose.
     fn absorb<E, C>(
         &mut self,
         statement: usize,
-        actions: usize,
+        maximum_effects_per_binding: usize,
         stats: GraphMutationStats,
     ) -> Result<(), GraphMutationProgramError<E, C>> {
         use GraphMutationProgramDimension as D;
         let targets = u128::from(stats.target_vertices) + u128::from(stats.target_edges);
         if targets > u128::from(stats.effects)
             || (targets == 0) != (stats.effects == 0)
-            || u128::from(stats.effects) > u128::from(stats.selection.result_rows) * actions as u128
+            || u128::from(stats.effects)
+                > u128::from(stats.selection.result_rows) * maximum_effects_per_binding as u128
         {
             return Err(GraphMutationProgramError::InvalidStatistics { statement });
         }

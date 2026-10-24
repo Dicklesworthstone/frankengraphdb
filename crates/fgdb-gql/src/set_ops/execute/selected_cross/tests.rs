@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::IntegerComparison;
 use crate::{GqlParameters, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn allow(_: GlaExecutionEvent) -> Result<(), usize> {
     Ok(())
@@ -430,8 +430,8 @@ fn native_unwind_match_selection_reaches_the_physical_path_without_new_syntax() 
         fused(&prepared),
         "native binding must reach the selected-product path"
     );
-    let s1 = CanonicalScalar::Int(1);
-    let s2 = CanonicalScalar::Int(2);
+    let s1 = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
+    let s2 = CanonicalPropertyValue::from(CanonicalScalar::Int(2));
     let result = prepared
         .execute_governed(
             policy(),
@@ -617,7 +617,10 @@ fn prepare_p(text: &str) -> Result<PreparedGraphSet, crate::GraphSetTextError> {
 
 /// Execute over two vertices with p(1) = 1 and p(2) = 2; the rows as a bag.
 fn over_two_vertices(prepared: &PreparedGraphSet) -> Vec<GraphValueRow> {
-    let (s1, s2) = (CanonicalScalar::Int(1), CanonicalScalar::Int(2));
+    let (s1, s2) = (
+        CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+        CanonicalPropertyValue::from(CanonicalScalar::Int(2)),
+    );
     let mut rows = prepared
         .execute_governed(
             policy(),
@@ -673,8 +676,10 @@ fn leading_unwind_match_with_reads_graph_properties_beside_row_columns() {
     let expected = over_two_vertices(&correlated);
     assert_eq!(expected.len(), 3);
     assert_eq!(over_two_vertices(&with_where), expected);
-    // Unaliased items take the column's own name, as at a MATCH-first WITH.
-    let named = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p RETURN x, p").unwrap();
+    // Forwarded variables keep their names; property expressions need AS at
+    // this boundary just as they do at a MATCH-first WITH.
+    assert!(prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p RETURN x, p").is_err());
+    let named = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p AS p RETURN x, p").unwrap();
     assert_eq!(over_two_vertices(&named).len(), 2);
 }
 
@@ -709,13 +714,16 @@ fn leading_unwind_match_with_refuses_malformed_neighbours() {
             "UNWIND [1] AS x MATCH (n) WITH x, n.p AS x RETURN x",
             "two items cannot share an alias",
         ),
-        (
-            "UNWIND [1] AS x MATCH (n) WITH x, n RETURN n.p",
-            "past the boundary only the projected row exists",
-        ),
     ] {
         assert!(prepare_p(text).is_err(), "{why}: {text}");
     }
+    // A vertex carried past the boundary still reads its properties: `n` is a
+    // projected column, so `n.p` after `WITH x, n` is valid openCypher.
+    let carried = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n RETURN n.p").unwrap();
+    assert_eq!(
+        over_two_vertices(&carried),
+        vec![row(&[Some(1)]), row(&[Some(2)])]
+    );
 }
 
 #[test]
@@ -730,4 +738,64 @@ fn leading_unwind_match_with_star_carries_leading_columns_and_named_bindings() {
             row(&[Some(2)]),
         ]
     );
+}
+
+#[test]
+fn a_hinted_boundary_is_the_bisected_one_and_an_ascending_left_probes_twice() {
+    // Duplicate and missing keys; every probe key and every hint, including
+    // ones past the end, find the boundary that counting finds.
+    let data = [0, 1, 1, 3, 4, 4, 4, 6];
+    let right: Vec<_> = data.iter().map(|&key| row(&[Some(key)])).collect();
+    let index: Vec<usize> = (0..right.len()).collect();
+    for key in -1..=8 {
+        let probe = row(&[Some(key)]);
+        let below = data.iter().filter(|&&at| at < key).count();
+        let through = data.iter().filter(|&&at| at <= key).count();
+        for hint in 0..=right.len() + 1 {
+            let keys = [(0, 0)];
+            assert_eq!(
+                boundary(&probe, &right, &index, &keys, false, hint, &mut allow),
+                Ok(below),
+                "lower {key} from {hint}"
+            );
+            assert_eq!(
+                boundary(&probe, &right, &index, &keys, true, hint, &mut allow),
+                Ok(through),
+                "upper {key} from {hint}"
+            );
+        }
+    }
+    // Left rows ascending through 1024 dense keys: each range costs its
+    // eligibility check and four key comparisons, where bisection takes ~20.
+    let right: Vec<_> = (0..1024).map(|key| row(&[Some(key)])).collect();
+    let index = Index {
+        keys: vec![(0, 0)],
+        ordinals: (0..right.len()).collect(),
+    };
+    let mut comparison = 0;
+    boundary(
+        &row(&[Some(0)]),
+        &right,
+        &index.ordinals,
+        &index.keys,
+        false,
+        0,
+        &mut |_| {
+            comparison += 1;
+            Ok::<_, usize>(())
+        },
+    )
+    .unwrap();
+    let mut hint = 0;
+    for key in 0..1024 {
+        let mut events = 0;
+        let range = index
+            .range(&row(&[Some(key)]), &right, &mut hint, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+        assert_eq!(range, key as usize..key as usize + 1);
+        assert!(events <= 1 + 4 * comparison, "{key}: {events} events");
+    }
 }

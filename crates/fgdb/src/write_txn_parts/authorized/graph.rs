@@ -201,34 +201,19 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
             props,
             ensure,
         } => {
+            // Authorized surfaces stage engine-allocated creations only. An
+            // ensure names a chosen identity, and resolving its alias would
+            // scan incidence the capability may not see (fgdb-hxgm1,
+            // fgdb-4iiho). The client batch path refuses it before any read;
+            // fail closed here too, before any observation.
+            if *ensure {
+                return Err(WriteTxnError::AuthorizedClientIdentity);
+            }
             execution.relation(relation)?;
             let fields = execution.fields([], props.iter().map(|(key, _)| *key))?;
             execution.endpoint(transaction, database, *src)?;
             execution.endpoint(transaction, database, *dst)?;
-            let mut target = *eid;
-            if *ensure {
-                // Native ensure-by-triple ignores the requested EId when ANY
-                // live alias satisfies the triple. Authorize that actual edge,
-                // not an invented edge under the unused requested identity.
-                // Only an alias with this exact (src, relation, dst) can be
-                // selected, and such an edge is visible: its relation and both
-                // endpoints were admitted above. Every other incident edge is
-                // resolved unmetered and skipped; only the selected alias is
-                // charged, like any record read (FG-INV-20, fgdb-4iiho).
-                for candidate in incident_candidates(transaction, database, *src, execution)? {
-                    execution.poll()?;
-                    if let Some(edge) = transaction.edge(database, candidate).map_err(redacted)?
-                        && edge.entry.src == *src
-                        && edge.entry.relation == relation
-                        && edge.entry.dst == *dst
-                    {
-                        execution.checkpoint()?;
-                        target = candidate;
-                        break;
-                    }
-                }
-            }
-            (target, true, false, fields)
+            (*eid, true, false, fields)
         }
         PendingRow::DeleteEdge { eid, .. } => {
             // A whole-edge delete erases every property. Refusing only when
@@ -297,9 +282,10 @@ pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let Some(record) = execution.edge_record(transaction, database, eid)? else {
             continue;
         };
-        // An ignored ensure alias may name a live but unrelated edge. Its
-        // ORIGINAL identity/endpoint record, not its input spelling, decides
-        // incidence. Do not authorize or delete an unrelated hidden edge.
+        // A candidate's ORIGINAL identity/endpoint record, not a staged
+        // spelling, decides incidence. Authorized surfaces stage no ensure
+        // aliases (fgdb-hxgm1), so this is defensive: never authorize or
+        // delete an edge the deleted vertex does not actually touch.
         if record.entry.src != vid && record.entry.dst != vid {
             continue;
         }

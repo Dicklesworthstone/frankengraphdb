@@ -3,9 +3,8 @@
 mod captured_shortest;
 
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkSearch, VId};
-use crate::{GraphTrailCursor, GraphWalkBounds};
+use crate::{GraphTrailCursor, GraphWalkBounds, IdentifiedNeighbors};
 use captured_shortest::{CaptureMode, CapturedPathCursor};
-use std::collections::BTreeMap;
 
 pub(super) enum IdentifiedExpansion<'a> {
     Path(crate::walk::GraphPathCursor<'a>),
@@ -17,11 +16,40 @@ pub(super) enum IdentifiedExpansion<'a> {
 }
 
 impl<'a> IdentifiedExpansion<'a> {
+    /// Clause-wide relationship restrictions participate in traversal before
+    /// shortest selection. Filtering a chosen WALK afterwards can discard a
+    /// shorter invalid walk without ever finding the actual shortest trail.
+    pub(super) fn new_different_edges<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        adjacency: Option<&'a dyn IdentifiedNeighbors>,
+        forbidden: Vec<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mode = match search {
+            GraphWalkSearch::All | GraphWalkSearch::Trail => {
+                return GraphTrailCursor::new(source, bounds, adjacency, control).map(|cursor| {
+                    Self::Trail {
+                        cursor: cursor.with_forbidden_edges(forbidden),
+                        capture: true,
+                    }
+                });
+            }
+            GraphWalkSearch::AllShortest => CaptureMode::AllShortest,
+            GraphWalkSearch::AnyShortest => CaptureMode::AnyShortest,
+            GraphWalkSearch::Acyclic => CaptureMode::Acyclic,
+            GraphWalkSearch::Simple => CaptureMode::Simple,
+        };
+        CapturedPathCursor::new(source, bounds, mode, adjacency, control)
+            .map(|cursor| Self::Layered(cursor.with_different_edges(forbidden)))
+    }
+
     pub(super) fn new<E>(
         source: VId,
         bounds: GraphWalkBounds,
         search: GraphWalkSearch,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn IdentifiedNeighbors>,
         capture: bool,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {

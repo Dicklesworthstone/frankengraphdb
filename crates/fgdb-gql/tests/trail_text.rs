@@ -1,24 +1,24 @@
 //! Native TRAIL stays identity-sensitive through scopes and relational consumers.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValue, GraphValueRow,
-    PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GraphColumn, GraphMatchMode, GraphPathFunction, GraphPatternBuilder, GraphValue,
+    GraphValueRow, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWalkBounds,
     PreparedGraphAggregateText, PreparedGraphPipelineAggregateText, PreparedGraphSetText,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const VERTICES: [VId; 3] = [VId(1), VId(2), VId(3)];
-static VALUES: [CanonicalScalar; 3] = [
-    CanonicalScalar::Int(1),
-    CanonicalScalar::Int(2),
-    CanonicalScalar::Int(3),
+static VALUES: [CanonicalPropertyValue; 3] = [
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(3)),
 ];
 type Edge = (EId, VId, RelationId, VId);
 fn policy() -> GqlQueryPolicy {
@@ -66,6 +66,7 @@ fn native_and_typed_trails_have_identical_definitions_in_every_direction() {
     ] {
         for captured in [false, true] {
             let mut builder = GraphPatternBuilder::new();
+            builder.match_mode(GraphMatchMode::DifferentEdges);
             builder.vertex("a").unwrap().vertex("b").unwrap();
             builder
                 .trail_walk("a", R, direction, "b", GraphWalkBounds::new(0, 3).unwrap())
@@ -197,9 +198,8 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
     for text in [
         "MATCH TRAIL (a) RETURN a",
         "MATCH TRAIL (a)-[:R]->(b) RETURN b",
-        "MATCH TRAIL (a)-[:R*1..]->(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1025]->(b) RETURN b",
-        "MATCH TRAIL (a)-[:R*3..2]->(b) RETURN b",
+        "MATCH TRAIL (a)-[:R]->{3,2}(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1]->(b)-[:R*1]->(c) RETURN c",
         "MATCH TRAIL (a)-[:R*1]->(b),(c) RETURN b",
         "MATCH ANY SHORTEST TRAIL (a)-[:R*1..3]->(b) RETURN b",
@@ -215,6 +215,8 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
             "{text}"
         );
     }
+    // A TRAIL cannot reuse an edge, so an unbounded one ends by itself.
+    assert!(PreparedGraphText::prepare("MATCH TRAIL (a)-[:R*1..]->(b) RETURN b", symbols).is_ok());
     // Contextual mode words do not prohibit ordinary variable names.
     assert!(PreparedGraphText::prepare("MATCH (trail) RETURN trail", symbols).is_ok());
 }

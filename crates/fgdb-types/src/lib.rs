@@ -13,6 +13,7 @@
 pub mod bytes;
 pub mod context;
 pub mod decimal;
+mod decimal_text;
 pub mod embedded_txn;
 pub mod float_arithmetic;
 pub mod ids;
@@ -35,8 +36,9 @@ pub use decimal::{
     CanonicalDecimal, DecimalDecodeError, DecimalError, DecimalOperation, MAX_DECIMAL_COEFFICIENT,
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
+pub use decimal_text::{DecimalParseError, MAX_DECIMAL_TEXT_BYTES};
 pub use embedded_txn::{EmbeddedTxnCompletion, EmbeddedTxnState};
-pub use float_arithmetic::FloatArithmeticError;
+pub use float_arithmetic::{ExactBinary64Sum, FloatArithmeticError};
 pub use ids::{
     BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
     IssuerId, KeyEpoch, LogicalCommandSeq, ObjectId, PrincipalId, RevocationIndex,
@@ -49,12 +51,15 @@ pub use refs::{
 };
 pub use scalar::{
     CanonicalBytes, CanonicalF64, CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_BYTES,
-    MAX_SCALAR_PAYLOAD, ScalarDecodeError, ScalarEncodeError, ScalarField,
+    MAX_SCALAR_PAYLOAD, ScalarDecodeError, ScalarEncodeError, ScalarField, ScalarProfileVersion,
 };
 pub use temporal::{
-    CanonicalTimestamp, MAX_TIMESTAMP_UTC_NANOS, MAX_UTC_OFFSET_SECONDS, MAX_ZONE_IDENTIFIER_BYTES,
-    MIN_TIMESTAMP_UTC_NANOS, TimestampArtifactError, TimestampConstructionError,
-    TimestampDecodeError, TimestampEncodeError, TimestampZone, TzdbResolver,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalTime,
+    CanonicalTimestamp, DateError, DurationError, DurationUnit, MAX_TIMESTAMP_UTC_NANOS,
+    MAX_UTC_OFFSET_SECONDS, MAX_ZONE_IDENTIFIER_BYTES, MIN_TIMESTAMP_UTC_NANOS, NANOS_PER_DAY,
+    SECONDS_PER_AVERAGE_MONTH, TimeError, TimestampArtifactError, TimestampConstructionError,
+    TimestampDecodeError, TimestampEncodeError, TimestampZone, TzdbResolver, format_utc_offset,
+    parse_utc_offset,
 };
 pub use text::{
     CanonicalText, CanonicalTextError, CollationResolver, CollationResolverError,

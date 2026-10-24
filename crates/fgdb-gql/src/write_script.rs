@@ -42,13 +42,68 @@ pub struct GraphWriteScriptError {
     pub offset: usize,
     pub kind: GraphWriteScriptErrorKind,
 }
+/// The reason alone: the enclosing error already names the statement and the
+/// script-global byte, so a nested statement's local offset is not repeated.
+impl core::fmt::Display for GraphWriteScriptErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use GraphMutationProgramTemplateError as M;
+        use GraphWriteProgramTemplateError as W;
+        match self {
+            Self::DefinitionTooLarge { limit, observed } => {
+                write!(f, "script is {observed} bytes, limit {limit}")
+            }
+            Self::EmptyStatement => f.write_str("empty statement"),
+            Self::TooManyStatements { limit, observed } => {
+                write!(f, "script has {observed} statements, limit {limit}")
+            }
+            Self::Syntax(kind) => kind.fmt(f),
+            Self::Program(W::InsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::VertexMergeBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::VertexUpsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::EdgeMergeBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::EdgeUpsertBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::DeleteBind { source, .. }) => source.kind.fmt(f),
+            Self::Program(W::Program(M::Bind { source, .. })) => source.kind.fmt(f),
+            Self::Program(W::Program(other)) => other.fmt(f),
+        }
+    }
+}
+impl GraphWriteScriptErrorKind {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        use crate::GqlRefusalClass as C;
+        use GraphMutationProgramTemplateError as M;
+        use GraphWriteProgramTemplateError as W;
+        match self {
+            Self::EmptyStatement => C::Syntax,
+            Self::DefinitionTooLarge { .. } | Self::TooManyStatements { .. } => C::Statement,
+            Self::Syntax(kind) => kind.class(),
+            Self::Program(W::InsertBind { source, .. }) => source.class(),
+            Self::Program(W::VertexMergeBind { source, .. }) => source.class(),
+            Self::Program(W::VertexUpsertBind { source, .. }) => source.class(),
+            Self::Program(W::EdgeMergeBind { source, .. }) => source.class(),
+            Self::Program(W::EdgeUpsertBind { source, .. }) => source.class(),
+            Self::Program(W::DeleteBind { source, .. }) => source.class(),
+            Self::Program(W::Program(M::Bind { source, .. })) => source.class(),
+            Self::Program(W::Program(
+                M::ConflictingParameterTypes { .. } | M::UnexpectedArguments,
+            )) => C::InvalidValue,
+            Self::Program(W::Program(M::Definition(_))) => C::Statement,
+        }
+    }
+}
+impl GraphWriteScriptError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphWriteScriptError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph write script")?;
         if let Some(statement) = self.statement {
-            write!(f, " statement {statement}")?;
+            write!(f, "statement {statement}, ")?;
         }
-        write!(f, " at byte {}: {:?}", self.offset, self.kind)
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphWriteScriptError {
@@ -211,18 +266,22 @@ impl PreparedGraphWriteScript {
     }
 
     /// Structural read requirement before parameter binding. Standalone and
-    /// source-free UNWIND INSERT/CREATE need no graph reads; every other current
-    /// statement family may inspect graph state even when its eventual selection is empty. This is
-    /// definition metadata, not a grant or a replacement for source admission.
+    /// source-free WITH/UNWIND INSERT/CREATE need no graph reads. A relational
+    /// input containing MATCH still requires reads, even when its eventual
+    /// selection is empty. This is definition metadata, not a grant or a
+    /// replacement for source admission.
     #[must_use]
     pub fn requires_read(&self) -> bool {
         self.statements().iter().any(|statement| match statement {
-            GraphWriteTemplateStatement::Insert(input) => {
-                matches!(
-                    &input.input,
-                    crate::insertion_text::InsertTextInput::Match(_)
-                )
-            }
+            GraphWriteTemplateStatement::Insert(input) => match &input.input {
+                crate::insertion_text::InsertTextInput::Match(_) => true,
+                crate::insertion_text::InsertTextInput::Relation { input, .. } => {
+                    // Inspect the prepared source, never parameter values,
+                    // source spelling or an assumed empty occurrence bag.
+                    input.selection.is_some()
+                }
+                crate::insertion_text::InsertTextInput::Unit { .. } => false,
+            },
             GraphWriteTemplateStatement::Mutation(_)
             | GraphWriteTemplateStatement::Delete(_)
             | GraphWriteTemplateStatement::VertexMerge(_)
@@ -296,8 +355,8 @@ impl core::error::Error for GraphWriteScriptBatchError {
 #[derive(Debug)]
 pub enum GraphWriteScriptBatchBindError<C> {
     Binding(GraphWriteScriptBatchError),
-    /// Some(i) precedes argument set i. None is the allocation or final
-    /// acceptance boundary and must not be attributed to an input record.
+    /// Some(i) precedes argument set i. None precedes allocation or final
+    /// acceptance and must not be attributed to an input record.
     Interrupted {
         argument_set: Option<usize>,
         source: C,
@@ -310,12 +369,13 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphWriteScriptBatchBindErro
             Self::Interrupted {
                 argument_set,
                 source,
-            } => {
-                write!(
+            } => match argument_set {
+                Some(argument_set) => write!(
                     f,
-                    "graph write batch binding interrupted at {argument_set:?}: {source}"
-                )
-            }
+                    "graph write batch binding interrupted at argument set {argument_set}: {source}"
+                ),
+                None => write!(f, "graph write batch binding interrupted: {source}"),
+            },
         }
     }
 }
@@ -339,6 +399,9 @@ pub struct GraphWriteScriptBatchLocation {
 
 /// All parameter sets have been checked and lowered before this value exists.
 /// Later sets execute after earlier sets in the canonical transaction overlay.
+/// A native UNWIND vertex-update batch can carry frozen input provenance;
+/// program().freezes_vertex_update_input() preserves that distinction even
+/// when this wrapper is consumed with into_program().
 /// Give program() to the ordinary WriteTxn or autocommit program API: one shared
 /// allowance, one rollback boundary, one completion and no partial receipts.
 ///
@@ -363,6 +426,10 @@ impl core::fmt::Debug for BoundGraphWriteScriptBatch {
     }
 }
 impl BoundGraphWriteScriptBatch {
+    pub(crate) fn freeze_vertex_update_input(mut self) -> Option<Self> {
+        self.program.freeze_vertex_update_input().then_some(self)
+    }
+
     #[must_use]
     pub fn program(&self) -> &PreparedGraphWriteProgram {
         &self.program
@@ -543,8 +610,20 @@ impl PreparedGraphWriteScript {
             })?;
             statements.extend(program.into_statements().into_vec());
         }
-        let program = PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
-            .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        let mut program =
+            PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
+                .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        // Physical choices with the sequential answer (fgdb-2l3pt), for every
+        // batch binder: UNWIND, `--rows` and CSV import alike. Each program
+        // check re-proves its profile; this one supplies the template-level
+        // fact that a lone vertex update feeds nothing its own MATCH reads.
+        if matches!(self.statements(), [GraphWriteTemplateStatement::Mutation(mutation)]
+            if mutation.is_vertex_update_only() && !mutation.feeds_own_match())
+        {
+            program.freeze_constant_vertex_update_input();
+        }
+        program.freeze_vertex_upsert_input();
+        program.freeze_edge_merge_input();
         let batch = BoundGraphWriteScriptBatch {
             program,
             argument_sets: arguments.len(),
@@ -562,7 +641,7 @@ impl PreparedGraphWriteScript {
 mod controlled_binding_tests {
     use super::*;
     use crate::{GraphSymbol, GraphSymbolKind};
-    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
     fn script() -> PreparedGraphWriteScript {
         PreparedGraphWriteScript::prepare(
@@ -584,6 +663,12 @@ mod controlled_binding_tests {
         for (text, reads) in [
             ("CREATE (n)", false),
             ("CREATE (n); INSERT (m)", false),
+            ("WITH 1 AS x CREATE (m)", false),
+            ("UNWIND [1,2] AS x CREATE (m)", false),
+            ("UNWIND ['MATCH'] AS x CREATE (m)", false),
+            ("UNWIND [1,2] AS x MATCH (n) CREATE (m)", true),
+            ("UNWIND [] AS x MATCH (n) CREATE (m)", true),
+            ("UNWIND $rows AS x MATCH (n) CREATE (m)", true),
             ("MATCH (n) INSERT (m)", true),
             ("CREATE (n); MATCH (m) DETACH DELETE m", true),
             ("MATCH (n) DELETE n", true),
@@ -766,5 +851,85 @@ mod controlled_binding_tests {
                 .canonical_bytes(),
             baseline
         );
+    }
+
+    #[test]
+    fn every_batch_binder_stages_distinct_upserts_and_constant_updates_once() {
+        // fgdb-2l3pt: `--rows` and CSV batches bind here as UNWIND does, so
+        // their distinct-key upserts and constant updates stage once too.
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        };
+        let rows = |ids: &[i64]| -> Vec<GqlParameters> {
+            ids.iter()
+                .map(|id| {
+                    GqlParameters::new()
+                        .with_int64("id", *id)
+                        .unwrap()
+                        .with_int64("p", id * 10)
+                        .unwrap()
+                })
+                .collect()
+        };
+        let bind = |text: &str, ids: &[i64]| {
+            PreparedGraphWriteScript::prepare(text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameter_sets(&rows(ids))
+                .unwrap()
+        };
+        let upsert = "MERGE (n:Entity {id: $id}) SET n.p = $p";
+        let update = "MATCH (n:Entity {id: $id}) SET n.p = $p";
+        assert!(
+            bind(upsert, &[1, 2, 3])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        // A plain MERGE freezes on the same distinct keys. It reads no $p,
+        // and a batch refuses an argument its statement does not declare.
+        let bind_ids = |text: &str, ids: &[i64]| {
+            let sets: Vec<GqlParameters> = ids
+                .iter()
+                .map(|id| GqlParameters::new().with_int64("id", *id).unwrap())
+                .collect();
+            PreparedGraphWriteScript::prepare(text, RelationId(1), resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameter_sets(&sets)
+                .unwrap()
+        };
+        assert!(
+            bind_ids("MERGE (n:Entity {id: $id})", &[1, 2, 3])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            !bind_ids("MERGE (n:Entity {id: $id})", &[1, 2, 1])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            !bind(upsert, &[1, 1])
+                .program()
+                .freezes_vertex_upsert_input()
+        );
+        assert!(
+            bind(update, &[1, 2, 1])
+                .program()
+                .freezes_vertex_update_input()
+        );
+        for (text, ids) in [
+            (upsert, &[1][..]),
+            (update, &[1][..]),
+            // The right-hand side reads the target.
+            ("MATCH (n:Entity {id: $id}) SET n.p = n.p + $p", &[1, 2][..]),
+            // The assignment feeds the MATCH: a batch keeps sequential rows.
+            ("MATCH (n:Entity) WHERE n.p = $id SET n.p = $p", &[1, 2][..]),
+        ] {
+            let program = bind(text, ids);
+            assert!(!program.program().freezes_vertex_update_input(), "{text}");
+            assert!(!program.program().freezes_vertex_upsert_input(), "{text}");
+        }
     }
 }

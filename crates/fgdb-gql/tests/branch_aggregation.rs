@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Edge = (VId, RelationId, VId);
@@ -156,8 +156,11 @@ fn statement(
     let condition = identity.map_or(String::new(), |(a, b, equal)| {
         format!(" WHERE n{a}{}n{b}", if equal { "=" } else { "<>" })
     });
+    // The oracle counts homomorphisms, as the factorized branch engine
+    // does; repeated atoms of one type may share an edge, so the law asks
+    // for REPEATABLE ELEMENTS, not the DIFFERENT EDGES default (fgdb-vexfr).
     format!(
-        "MATCH {}{condition} RETURN {keys},COUNT(*) AS n,COUNT(n0) AS m,\
+        "MATCH REPEATABLE ELEMENTS {}{condition} RETURN {keys},COUNT(*) AS n,COUNT(n0) AS m,\
         COUNT(DISTINCT n0) AS d,MIN(n0) AS lo,MAX(n0) AS hi GROUP BY {keys}",
         parts.join(",")
     )
@@ -225,6 +228,8 @@ fn nonterminal_branches_cycles_and_observed_ancestors_match_assignment_oracle() 
     }
 }
 
+/// Repeated -[:S]-> branches. The laws that use them count homomorphisms
+/// (REPEATABLE ELEMENTS), as the factorized engine does (fgdb-vexfr).
 fn branches(count: usize) -> String {
     (0..count).map(|at| format!(",(b)-[:S]->(h{at})")).collect()
 }
@@ -238,11 +243,11 @@ fn a_billion_early_assignments_collapse_before_a_returned_cycle_vertex() {
     edges.extend((2..10).map(|id| (VId(1), RelationId(2), VId(id))));
     let tail = " RETURN c,COUNT(*) AS n,COUNT(DISTINCT a) AS d GROUP BY c";
     let early = prepare(&format!(
-        "MATCH (a)-[:R]->(b){},(b)-[:T]->(c)-[:U]->(a){tail}",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b){},(b)-[:T]->(c)-[:U]->(a){tail}",
         branches(10)
     ));
     let late = prepare(&format!(
-        "MATCH (a)-[:R]->(b)-[:T]->(c)-[:U]->(a){}{tail}",
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:T]->(c)-[:U]->(a){}{tail}",
         branches(10)
     ));
     let original = early.canonical_bytes();
@@ -268,7 +273,10 @@ fn maximum_width_overflow_support_and_zero_completion_survive_remapping() {
         .chain(std::iter::once((VId(1), RelationId(4), VId(20))))
         .collect();
     // 64 edge atoms and 65 binding positions; the last one is retained.
-    let head = format!("MATCH (a)-[:R]->(b){},(b)-[:U]->(c)", branches(62));
+    let head = format!(
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b){},(b)-[:U]->(c)",
+        branches(62)
+    );
     let support = prepare(&format!(
         "{head} RETURN COUNT(DISTINCT c) AS n,MIN(c) AS lo,MAX(c) AS hi"
     ));
@@ -292,7 +300,7 @@ fn maximum_width_overflow_support_and_zero_completion_survive_remapping() {
     ));
     // An impossible branch before the retained result annihilates overflow.
     let zero = prepare(&format!(
-        "MATCH (a)-[:R]->(b){},(b)-[:T]->(missing),(b)-[:U]->(c) \
+        "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b){},(b)-[:T]->(missing),(b)-[:U]->(c) \
         RETURN COUNT(c) AS n",
         branches(61)
     ));
@@ -389,7 +397,7 @@ fn observed_branches_keep_per_occurrence_property_errors_even_with_limit_zero() 
         (VId(1), RelationId(2), VId(2)),
         (VId(1), RelationId(3), VId(3)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     for tail in [
         " RETURN c,COUNT(h.n) AS n GROUP BY c LIMIT 0",
         " WHERE h.n=c.n RETURN c,COUNT(*) AS n GROUP BY c LIMIT 0",

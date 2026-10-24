@@ -61,10 +61,27 @@ impl PreparedGraphSet {
             // A set pattern wrapper sorts the already-selected pattern bag,
             // even if the pattern's own output used a different ordering.
             SetNode::Pattern(_) => Some((&[], None)),
-            // Batch grouping is canonical, but no maintained row-domain
-            // conversion contract is admitted by this window profile yet.
-            // A procedure's rows have no standing derivative at all.
-            SetNode::Aggregate(_) | SetNode::ProcedureCall(_) => None,
+            // Intermediate grouping emits complete keys followed by native
+            // summaries, in canonical group-key order. The checked conversion
+            // preserves those keys, so canonical row order is the same order.
+            // A global group emits one row even for empty input. Other groups
+            // cannot outnumber their input occurrences; no data-derived or
+            // u64::MAX stand-in for an unknown bound is introduced.
+            SetNode::Aggregate(summary) => {
+                let bound = if summary.evaluation_key_columns().is_empty() {
+                    Some(1)
+                } else {
+                    summary
+                        .input()
+                        .incremental_result_order()
+                        .and_then(|(_, bound)| bound)
+                };
+                Some((&[], bound))
+            }
+            // admit_source_rows canonically sorts every completed CALL result.
+            // This sequence proof does not admit a procedure derivative.
+            SetNode::ProcedureCall(_) => Some((&[], None)),
+            SetNode::Owned { .. } => None,
             SetNode::Join { left, right, spec } => {
                 use crate::row_join::RowJoinKind;
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);
@@ -110,8 +127,13 @@ impl PreparedGraphSet {
                 input.incremental_result_order()
             }
             SetNode::Project {
-                input, quantifier, ..
-            } if *quantifier == GraphSetQuantifier::Distinct || !input.preserves_row_order() => {
+                input,
+                quantifier,
+                preserve_order,
+                ..
+            } if *quantifier == GraphSetQuantifier::Distinct
+                || (!*preserve_order && !input.preserves_row_order()) =>
+            {
                 let bound = input
                     .incremental_result_order()
                     .and_then(|(_, bound)| bound);

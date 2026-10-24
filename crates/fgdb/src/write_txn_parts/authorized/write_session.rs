@@ -268,6 +268,7 @@ impl<V: Vfs + Clone> Database<V> {
 
 enum Request<'a> {
     Text(&'a str, &'a GqlParameters),
+    TextBatch(&'a str, &'a [GqlParameters]),
     Prepared(&'a AuthorizedPreparedWrite, &'a GqlParameters),
     Batch(&'a AuthorizedPreparedWrite, &'a [GqlParameters]),
     Bound(&'a AuthorizedBoundWriteBatch),
@@ -276,8 +277,8 @@ enum Request<'a> {
 impl<V, R, C> AuthorizedWriteSession<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
-    C: FnMut() -> u64,
+    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    C: FnMut() -> u64 + Send,
 {
     /// Prepare once through this session's fixed resolver, under a live permit.
     /// All sample arguments and operation rights are checked, but there is no
@@ -366,6 +367,36 @@ where
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.run(cx, Request::Text(text, params), false, |stats, _| stats)
             .await
+    }
+
+    /// Prepare native write text once, bind every argument set, then commit
+    /// one stats-only ingestion program under ONE live execution permit.
+    /// Preparation, all record bindings, execution and final admission share
+    /// the signed work/node limits and the host's expanded-statement ceiling.
+    /// The first argument set declares operand types; every set must satisfy
+    /// that same native schema. Empty input, unsupported syntax and a bad final
+    /// record refuse before graph observation or engine identity allocation.
+    ///
+    /// This uses the native write-script compiler, which refuses RETURN;
+    /// it never strips or silently skips a requested projection. Successful
+    /// ingestion exposes no identity receipts, so max_rows=0 is usable. The
+    /// engine allocates identities and publishes at the ordinary single
+    /// Chronicle completion boundary. Repeating this call is a new write,
+    /// never an idempotent retry or a retained multi-request transaction.
+    #[allow(clippy::result_large_err)]
+    pub async fn query_batch_stats(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        arguments: &[GqlParameters],
+    ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
+        self.run(
+            cx,
+            Request::TextBatch(text, arguments),
+            false,
+            |stats, _| stats,
+        )
+        .await
     }
 
     /// Rebind a template from this exact session, then execute one atomic
@@ -567,42 +598,50 @@ where
             .await
     }
 
+    /// Type-erased like the other commit chokepoints (fgdb-a5y6m): every
+    /// authorized execute method ends here, so a caller's `Send` proof stops at
+    /// `dyn Future + Send` instead of descending the whole authorized write
+    /// chain. Without it, `fgdb`'s own lab tests overflowed proving `Send`.
+    /// Boxing as `Send` is why this impl requires a `Send` resolver and clock.
     #[allow(clippy::result_large_err)]
-    async fn run<T>(
-        &mut self,
-        cx: &QueryCx,
-        request: Request<'_>,
+    fn run<'a, T: Send + 'a>(
+        &'a mut self,
+        cx: &'a QueryCx,
+        request: Request<'a>,
         returning: bool,
-        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T,
-    ) -> Result<(T, EmbeddedTxnCompletion), Fault> {
-        // This move is the fail-closed future/unwind guard. The session has no
-        // open state while the operation is pending. Success restores it in a
-        // non-fallible tail; dropping this future drops its private state.
-        let mut state = self.state.take().ok_or_else(stopped)?;
-        let result = state
-            .run(cx, request, &self.owner, returning, receipt)
-            .await;
-        if result.is_ok() {
-            self.state = Some(state);
-        }
-        result
+        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T + Send + 'a,
+    ) -> crate::SendFuture<'a, Result<(T, EmbeddedTxnCompletion), Fault>> {
+        Box::pin(async move {
+            // This move is the fail-closed future/unwind guard. The session has
+            // no open state while the operation is pending. Success restores it
+            // in a non-fallible tail; dropping this future drops its private
+            // state.
+            let mut state = self.state.take().ok_or_else(stopped)?;
+            let result = state
+                .run(cx, request, &self.owner, returning, receipt)
+                .await;
+            if result.is_ok() {
+                self.state = Some(state);
+            }
+            result
+        })
     }
 }
 
 impl<V, R, C> State<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
-    C: FnMut() -> u64,
+    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    C: FnMut() -> u64 + Send,
 {
     #[allow(clippy::result_large_err)]
-    async fn run<T>(
+    async fn run<T: Send>(
         &mut self,
         cx: &QueryCx,
         request: Request<'_>,
         owner: &Arc<()>,
         returning: bool,
-        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T,
+        receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> T + Send,
     ) -> Result<(T, EmbeddedTxnCompletion), Fault> {
         // Split the borrows explicitly. The permit/clock must remain live over
         // native completion without borrowing the database or resolver through
@@ -641,6 +680,19 @@ where
                         *max_statements,
                         resolver,
                     )?,
+                    Request::TextBatch(text, arguments) => {
+                        let first = arguments.first().ok_or(Fault::BatchBinding(
+                            fgdb_gql::GraphWriteScriptBatchError::Empty,
+                        ))?;
+                        let script =
+                            super::prepare(cx, &mut execution, text, first, *relation, resolver)?;
+                        let Bound::Batch(batch) = Input::Batch(&script, arguments, *max_statements)
+                            .bind(cx, capability.predicates(), &mut execution)?
+                        else {
+                            unreachable!("text batch input always returns an owned batch")
+                        };
+                        Bound::Batch(batch)
+                    }
                     Request::Prepared(prepared, params) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
@@ -673,8 +725,11 @@ where
                         )?
                     }
                 };
-                database
-                    .complete_authorized_program(
+                // A second erased boundary under `run`'s (fgdb-a5y6m): one
+                // `Send` proof from the session down to here, another from the
+                // program completion down, so neither descends the whole chain.
+                let completion: crate::SendFuture<'_, _> =
+                    Box::pin(database.complete_authorized_program(
                         txn_cx,
                         cx,
                         commit_cx,
@@ -684,9 +739,8 @@ where
                         &mut execution,
                         returning,
                         receipt,
-                    )
-                    .await
-                    .map_err(|error| bound.error(error))
+                    ));
+                completion.await.map_err(|error| bound.error(error))
                 // Nothing fallible, no authorization sampling, no callback and no
                 // receipt allocation after the existing completion boundary.
             })

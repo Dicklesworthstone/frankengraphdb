@@ -17,7 +17,10 @@ use fgdb_gql::{
 };
 use fgdb_types::CanonicalScalarKind;
 use fgdb_types::CanonicalText;
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -127,21 +130,39 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, kind: Kind) -> Vec<VId> {
         .into_iter()
         .filter(|row| match kind {
             Kind::Int => row.props.iter().any(|(key, value)| {
-                *key == P && matches!(value, CanonicalScalar::Int(actual) if *actual == BOUND)
+                *key == P
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                            if *actual == BOUND
+                    )
             }),
             Kind::Labeled => {
                 row.labels.contains(&L)
                     && row.props.iter().any(|(key, value)| {
                         *key == P
-                            && matches!(value, CanonicalScalar::Int(actual) if *actual == BOUND)
+                            && matches!(
+                                value,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                                    if *actual == BOUND
+                            )
                     })
             }
             Kind::Text => row.props.iter().any(|(key, value)| {
                 *key == Q
-                    && matches!(value, CanonicalScalar::Text(actual) if actual.as_str() == "hit")
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Text(actual))
+                            if actual.as_str() == "hit"
+                    )
             }),
             Kind::Range => row.props.iter().any(|(key, value)| {
-                *key == P && matches!(value, CanonicalScalar::Int(actual) if *actual > BOUND)
+                *key == P
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                            if *actual > BOUND
+                    )
             }),
             Kind::Unbound => true,
         })
@@ -424,11 +445,28 @@ fn equality_lookup_charges_stay_constant_as_vertex_count_grows() {
         assert!(report.lab_test_passed(), "total {total}: {report:?}");
         charged.push((total, result));
     }
-    // Same matching set: only candidate lookups differ, charges must not.
+    // Same matching set: records and rows must not differ. Work may grow
+    // only by the deeper identity-tree descent of each of the ten candidates
+    // (fgdb-bwxsi: seeks are metered per tree node); a scan of the unrelated
+    // vertices would add tens of thousands of units.
     assert_eq!(charged[0].1.0, charged[1].1.0, "snapshot records");
-    assert_eq!(charged[0].1.1, charged[1].1.1, "work units");
     assert_eq!(charged[0].1.2, charged[1].1.2, "result rows");
     assert!(charged[0].1.0 > 0, "equality lookup must admit matches");
+    let (small, large) = (charged[0].1.1, charged[1].1.1);
+    assert!(
+        small <= large && large - small <= 10 * avl_max_height(50_000),
+        "work units {small} -> {large} exceed ten identity descents"
+    );
+}
+
+/// Most nodes a root-to-leaf AVL path over `keys` can hold: the largest h
+/// whose sparsest tree, N(h) = N(h-1) + N(h-2) + 1, still fits.
+fn avl_max_height(keys: u64) -> u64 {
+    let (mut sparser, mut sparsest, mut height) = (0_u64, 1_u64, 1_u64);
+    while sparsest + sparser < keys {
+        (sparser, sparsest, height) = (sparsest, sparsest + sparser + 1, height + 1);
+    }
+    height
 }
 
 /// Chunked commits: exactly the first ten vertices carry BOUND under P;

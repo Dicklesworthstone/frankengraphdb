@@ -6,7 +6,7 @@ use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::VertexScanDomain;
 use fgdb_strata::AdjacencyEntry;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Private statement-lifetime owner. Neither the transaction nor database can
@@ -274,7 +274,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         control: &mut C,
         mut visit: impl FnMut(
             &'s AdjacencyEntry,
-            &'s [(PropertyKeyId, CanonicalScalar)],
+            &'s [(PropertyKeyId, CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Option<Result<(), E>>
@@ -285,15 +285,12 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         // Records `entry` as read when the plan reads its relation.
         let observe = |entry: &AdjacencyEntry| {
             let mut reads = self.transaction.read_set.borrow_mut();
-            match relations {
-                None => {}
-                Some(read) if read.contains(&entry.relation) => {
-                    reads.insert(ElementId::Vertex(entry.dst));
-                }
-                Some(_) => return false,
+            if relations.is_some_and(|read| !read.contains(&entry.relation)) {
+                return false;
             }
             reads.insert(ElementId::Edge(entry.eid));
             reads.insert(ElementId::Vertex(entry.src));
+            reads.insert(ElementId::Vertex(entry.dst));
             true
         };
         Some((|| {
@@ -307,7 +304,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             }
             let mut replacements = edges.iter().peekable();
             let mut emit = |entry: &'s AdjacencyEntry,
-                            properties: &'s [(PropertyKeyId, CanonicalScalar)],
+                            properties: &'s [(PropertyKeyId, CanonicalPropertyValue)],
                             control: &mut C| {
                 if observe(entry) {
                     self.transaction

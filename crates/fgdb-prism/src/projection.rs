@@ -200,6 +200,16 @@ struct Projection {
     outgoing: Rows,
     incoming: Option<Rows>,
     weights: Vec<f64>,
+    // The 1-based row/weight checkpoint of the first negative final CSR
+    // weight. Finite weights are guaranteed by construction. Retaining the
+    // visit ordinal preserves Dijkstra's cancellation/error precedence while
+    // avoiding another immutable weight scan on every source query.
+    first_negative_weight_visit: Option<usize>,
+    // Exact immutable maxima, derived while degree buffers still contain
+    // counts. Weak traversal inspects both faces, including a shared
+    // undirected face twice; no per-CALL degree scan is needed for its bound.
+    max_out_degree: usize,
+    max_weak_degree: usize,
     edges: usize,
     input_edges: usize,
     workspace_bytes: usize,
@@ -284,13 +294,108 @@ fn offsets<C>(
     Ok(result)
 }
 
-/// In-place O(n log n) worst-case sort, with cancellation inside every sift.
-/// Keys here are fixed-width IDs/tuples, so comparisons are bounded. Using the
-/// standard sort with a callback only before/after it leaves an entire O(m log
-/// m) phase uninterruptible. No adjacency-sized merge/sort scratch is hidden.
+/// In-place O(n log n) worst-case introsort, with cancellation inside every
+/// partition, insertion and heap step. Keys here are fixed-width IDs/tuples,
+/// so comparisons are bounded. Using the standard sort with a callback only
+/// before/after it leaves an entire O(m log m) phase uninterruptible. No
+/// adjacency-sized merge/sort scratch is hidden: recursion takes the smaller
+/// side, so at most O(log n) frames are live, and a depth limit falls back to
+/// heap sort. Heap sort alone is 8-14x slower on 0.5-4M edges: each sift step
+/// misses cache, while a partition scans sequentially against one pivot key.
 fn sort_by_key<T, K: Ord, C>(
     values: &mut [T],
     key: impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    poll(checkpoint)?;
+    // Snapshot visitors commonly already emit VId/EId order. Keep that case
+    // linear instead of turning every ordered input into a permutation.
+    let mut ordered = true;
+    for pair in values.windows(2) {
+        poll(checkpoint)?;
+        if key(&pair[0]) > key(&pair[1]) {
+            ordered = false;
+            break;
+        }
+    }
+    if ordered {
+        return Ok(());
+    }
+    let depth = 2 * (usize::BITS - values.len().leading_zeros());
+    introsort(values, &key, depth, checkpoint)
+}
+
+/// Slices this short are insertion sorted: fewer comparisons than another
+/// partition, and each step still polls.
+const INSERTION_SORTED: usize = 16;
+
+fn introsort<T, K: Ord, C>(
+    mut values: &mut [T],
+    key: &impl Fn(&T) -> K,
+    mut depth: u32,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    loop {
+        let n = values.len();
+        if n <= INSERTION_SORTED {
+            for i in 1..n {
+                let mut j = i;
+                while j > 0 {
+                    poll(checkpoint)?;
+                    if key(&values[j - 1]) <= key(&values[j]) {
+                        break;
+                    }
+                    values.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+            return Ok(());
+        }
+        if depth == 0 {
+            return heap_sort(values, key, checkpoint);
+        }
+        depth -= 1;
+        // The median of the first, middle and last keys becomes the pivot,
+        // parked in the last slot. Lomuto partition: keys below it move left.
+        poll(checkpoint)?;
+        let (middle, last) = (n / 2, n - 1);
+        if key(&values[middle]) < key(&values[0]) {
+            values.swap(0, middle);
+        }
+        if key(&values[last]) < key(&values[0]) {
+            values.swap(0, last);
+        }
+        if key(&values[last]) < key(&values[middle]) {
+            values.swap(middle, last);
+        }
+        values.swap(middle, last);
+        let pivot = key(&values[last]);
+        let mut below = 0;
+        for i in 0..last {
+            poll(checkpoint)?;
+            if key(&values[i]) < pivot {
+                values.swap(i, below);
+                below += 1;
+            }
+        }
+        values.swap(below, last);
+        let (left, rest) = values.split_at_mut(below);
+        let right = &mut rest[1..];
+        // Recurse into the smaller side and continue with the larger one.
+        if left.len() < right.len() {
+            introsort(left, key, depth, checkpoint)?;
+            values = right;
+        } else {
+            introsort(right, key, depth, checkpoint)?;
+            values = left;
+        }
+    }
+}
+
+/// The depth-limit fallback: O(n log n) in place for any key order.
+fn heap_sort<T, K: Ord, C>(
+    values: &mut [T],
+    key: &impl Fn(&T) -> K,
     checkpoint: &mut impl FnMut() -> Result<(), C>,
 ) -> Result<(), ProjectionBuildError<C>> {
     fn sift<T, K: Ord, C>(
@@ -315,29 +420,15 @@ fn sort_by_key<T, K: Ord, C>(
         }
         Ok(())
     }
-    poll(checkpoint)?;
     let n = values.len();
-    // Snapshot visitors commonly already emit VId/EId order. Keep that case
-    // linear instead of turning every ordered input into a heap permutation.
-    let mut ordered = true;
-    for pair in values.windows(2) {
-        poll(checkpoint)?;
-        if key(&pair[0]) > key(&pair[1]) {
-            ordered = false;
-            break;
-        }
-    }
-    if ordered {
-        return Ok(());
-    }
     for root in (0..n / 2).rev() {
         poll(checkpoint)?;
-        sift(values, root, n, &key, checkpoint)?;
+        sift(values, root, n, key, checkpoint)?;
     }
     for end in (1..n).rev() {
         poll(checkpoint)?;
         values.swap(0, end);
-        sift(values, 0, end, &key, checkpoint)?;
+        sift(values, 0, end, key, checkpoint)?;
     }
     Ok(())
 }
@@ -353,10 +444,170 @@ fn name(vid: VId) -> [u8; 32] {
 fn canonical_weight(weight: f64) -> f64 {
     if weight == 0.0 { 0.0 } else { weight }
 }
+#[cfg(test)]
 fn ordinal(vertices: &[VId], edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
     vertices
         .binary_search(&vertex)
         .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
+}
+
+/// Allocation-free membership and ordinal lookup over borrowed, sorted vertex
+/// identities. A fixed prefix directory narrows full-width binary searches
+/// without assuming dense, low-bit or allocation-ordered IDs.
+///
+/// The directory uses approximately 2 KiB of fixed storage, independent of the
+/// population size. It does not validate selection, snapshot binding, or access
+/// authority; those remain the caller's responsibility.
+pub struct SortedVertexLookup<'a> {
+    vertices: &'a [VId],
+    prefix: Option<OrdinalPrefix>,
+}
+
+/// Prefix bounds detached from their immutable sorted population. The caller
+/// must include every ordinal, finish the bounds, and retain exactly those
+/// vertex values alongside this metadata before looking anything up.
+#[derive(Debug)]
+pub(crate) struct OrdinalPrefix {
+    boundaries: [usize; 257],
+    shift: u32,
+}
+
+const INDEXED_DIRECTORY_MIN: usize = 512;
+
+impl OrdinalPrefix {
+    fn new(vertices: &[VId]) -> Option<Self> {
+        #[cfg(test)]
+        if tests::incumbent_directory() {
+            return None;
+        }
+        (vertices.len() >= INDEXED_DIRECTORY_MIN).then(|| {
+            // Ignore only the prefix shared by EVERY sorted identity. This
+            // also distributes normal permuted 63-bit engine identities,
+            // whose most significant 65 bits are all zero.
+            let differing = vertices[0].0 ^ vertices[vertices.len() - 1].0;
+            Self {
+                boundaries: [0; 257],
+                shift: (128 - differing.leading_zeros()).saturating_sub(8),
+            }
+        })
+    }
+
+    /// Reserve zero or one unfinished directory within the remaining allowance.
+    /// This optional accelerator must not make an otherwise admissible graph
+    /// fail: small populations, tight quotas and allocation failures all retain
+    /// the ordinary binary-search path. Charge the returned buffer's capacity.
+    pub(crate) fn reserve_retained(vertices: &[VId], max_bytes: usize) -> Vec<Self> {
+        let mut retained = Vec::new();
+        if max_bytes < size_of::<Self>() {
+            return retained;
+        }
+        let Some(prefix) = Self::new(vertices) else {
+            return retained;
+        };
+        if retained.try_reserve_exact(1).is_err() {
+            return retained;
+        }
+        if retained.capacity() > max_bytes / size_of::<Self>() {
+            return Vec::new();
+        }
+        retained.push(prefix);
+        retained
+    }
+
+    /// Above `shift + 8` every member has the same prefix, so buckets are
+    /// monotone. The last member establishes its bucket's exclusive upper bound.
+    pub(crate) fn include(&mut self, vertex: VId, index: usize) {
+        let bucket = ((vertex.0 >> self.shift) & 255) as usize;
+        self.boundaries[bucket + 1] = index + 1;
+    }
+
+    /// Fill empty buckets in at most 257 scalar steps, independent of n/m.
+    pub(crate) fn finish(&mut self) {
+        let mut end = 0;
+        for next in &mut self.boundaries {
+            end = end.max(*next);
+            *next = end;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ordinal(&self, vertices: &[VId], vertex: VId) -> Option<usize> {
+        let bucket = ((vertex.0 >> self.shift) & 255) as usize;
+        let first = self.boundaries[bucket];
+        // A missing ID may differ in the supposedly shared high prefix.
+        // Full-width comparisons within the bucket still reject it exactly.
+        vertices[first..self.boundaries[bucket + 1]]
+            .binary_search(&vertex)
+            .ok()
+            .map(|index| first + index)
+    }
+}
+
+impl<'a> SortedVertexLookup<'a> {
+    /// Borrow identities sorted in ascending `VId` order, as required by
+    /// [`slice::binary_search`]. Unsorted input yields unspecified lookup
+    /// results. Duplicates are allowed; an ordinal may identify any matching
+    /// entry, just as for `binary_search`.
+    ///
+    /// Construction performs at most 255 partition-point searches rather than
+    /// scanning the entire population. It allocates no heap memory and does not
+    /// retain authority over the borrowed vertices.
+    pub fn from_sorted(vertices: &'a [VId]) -> Self {
+        let mut result = Self::new(vertices);
+        if let Some(prefix) = &mut result.prefix {
+            let mut end = 0;
+            for bucket in 1..256 {
+                end += vertices[end..]
+                    .partition_point(|vertex| ((vertex.0 >> prefix.shift) & 255) < bucket as u128);
+                prefix.boundaries[bucket] = end;
+            }
+            prefix.boundaries[256] = vertices.len();
+        }
+        result
+    }
+
+    /// Return an ordinal of this identity in the borrowed sorted slice.
+    #[inline]
+    pub fn ordinal(&self, vertex: VId) -> Option<usize> {
+        match &self.prefix {
+            Some(prefix) => prefix.ordinal(self.vertices, vertex),
+            None => self.vertices.binary_search(&vertex).ok(),
+        }
+    }
+
+    /// Test membership in the borrowed sorted slice.
+    #[inline]
+    pub fn contains(&self, vertex: VId) -> bool {
+        self.ordinal(vertex).is_some()
+    }
+
+    fn new(vertices: &'a [VId]) -> Self {
+        let prefix = OrdinalPrefix::new(vertices);
+        let mut result = Self { vertices, prefix };
+        if result.prefix.is_some() {
+            result.include(0);
+        }
+        result
+    }
+
+    /// Called alongside the existing duplicate-identity validation.
+    fn include(&mut self, index: usize) {
+        if let Some(prefix) = &mut self.prefix {
+            prefix.include(self.vertices[index], index);
+        }
+    }
+
+    /// This bounded stack scratch adds no allocation or per-edge callback.
+    fn finish(&mut self) {
+        if let Some(prefix) = &mut self.prefix {
+            prefix.finish();
+        }
+    }
+
+    fn checked_ordinal(&self, edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
+        self.ordinal(vertex)
+            .ok_or(ProjectionError::MissingEndpoint { edge, vertex })
+    }
 }
 
 impl SnapshotGraphView {
@@ -432,12 +683,15 @@ impl SnapshotGraphView {
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
         sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
-        for pair in vertices.windows(2) {
+        let mut directory = SortedVertexLookup::new(&vertices);
+        for (index, pair) in vertices.windows(2).enumerate() {
             poll(&mut checkpoint)?;
             if pair[0] == pair[1] {
                 return Err(ProjectionError::DuplicateVertex(pair[0]).into());
             }
+            directory.include(index + 1);
         }
+        directory.finish();
         sort_by_key(&mut work, |edge| edge.eid, &mut checkpoint)?;
         for pair in work.windows(2) {
             poll(&mut checkpoint)?;
@@ -447,8 +701,8 @@ impl SnapshotGraphView {
         }
         for edge in &mut work {
             poll(&mut checkpoint)?;
-            ordinal(&vertices, edge.eid, edge.source)?;
-            ordinal(&vertices, edge.eid, edge.target)?;
+            directory.checked_ordinal(edge.eid, edge.source)?;
+            directory.checked_ordinal(edge.eid, edge.target)?;
             if edge.source == edge.target {
                 match spec.self_loops {
                     SelfLoopPolicy::Reject => {
@@ -509,10 +763,14 @@ impl SnapshotGraphView {
         );
         for edge in &work {
             poll(&mut checkpoint)?;
-            hash.update(&edge.eid.0.to_le_bytes());
-            hash.update(&edge.source.0.to_le_bytes());
-            hash.update(&edge.target.0.to_le_bytes());
-            hash.update(&edge.weight.to_bits().to_le_bytes());
+            // Feed one canonical record per call without changing the byte
+            // transcript or moving an edge's cancellation checkpoint.
+            let mut bytes = [0u8; 56];
+            bytes[..16].copy_from_slice(&edge.eid.0.to_le_bytes());
+            bytes[16..32].copy_from_slice(&edge.source.0.to_le_bytes());
+            bytes[32..48].copy_from_slice(&edge.target.0.to_le_bytes());
+            bytes[48..].copy_from_slice(&edge.weight.to_bits().to_le_bytes());
+            hash.update(&bytes);
         }
 
         sort_by_key(
@@ -573,10 +831,11 @@ impl SnapshotGraphView {
         limit("adjacency entries", arcs, limits.max_adjacency_entries)?;
         let faces = if directed { 2 } else { 1 };
         let mut bytes = add(input_bytes, mul(n, size_of::<[u8; 32]>())?)?;
-        // Degree arrays, row offsets and construction cursors for each face.
+        // Degree arrays become construction cursors after prefix sums, so
+        // only one n-element buffer and n+1 offsets are live for each face.
         bytes = add(
             bytes,
-            mul(mul(add(mul(n, 3)?, 1)?, faces)?, size_of::<usize>())?,
+            mul(mul(add(mul(n, 2)?, 1)?, faces)?, size_of::<usize>())?,
         )?;
         bytes = add(bytes, mul(mul(arcs, faces)?, size_of::<usize>())?)?;
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
@@ -588,10 +847,21 @@ impl SnapshotGraphView {
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // The final outgoing array first holds one dense target per reduced
+        // edge. Sources are already ordered, so walk their stable-ID directory
+        // once instead of binary-searching both endpoints in both CSR passes.
+        // Identity hashing and EId-ordered reduction above still use full VIds.
+        let mut out_nodes = filled(arcs, 0usize, &mut checkpoint)?;
+        let mut source = 0;
+        for (index, edge) in work.iter().enumerate() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
-            let t = ordinal(&vertices, edge.eid, edge.target)?;
+            while vertices[source] < edge.source {
+                poll(&mut checkpoint)?;
+                source += 1;
+            }
+            let s = source;
+            let t = directory.checked_ordinal(edge.eid, edge.target)?;
+            out_nodes[index] = t;
             out_counts[s] = add(out_counts[s], 1)?;
             if directed {
                 in_counts[t] = add(in_counts[t], 1)?;
@@ -601,44 +871,78 @@ impl SnapshotGraphView {
         }
         let out_offsets = offsets(&out_counts, &mut checkpoint)?;
         let out_len = *out_offsets.last().expect("initial zero");
-        let mut out_next = clone_slice(&out_offsets[..n], &mut checkpoint)?;
-        let mut out_nodes = filled(out_len, 0usize, &mut checkpoint)?;
+        debug_assert_eq!(out_len, arcs);
+        let mut out_next = out_counts;
+        let mut max_out_degree = 0;
+        let mut max_weak_degree = 0;
+        for (vertex, (next, &end)) in out_next.iter_mut().zip(&out_offsets[1..]).enumerate() {
+            poll(&mut checkpoint)?;
+            max_out_degree = max_out_degree.max(*next);
+            let incoming = if directed { in_counts[vertex] } else { *next };
+            max_weak_degree = max_weak_degree.max(add(*next, incoming)?);
+            *next = end;
+        }
         let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
         let in_offsets = if directed {
             offsets(&in_counts, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        let mut in_next = if directed {
-            clone_slice(&in_offsets[..n], &mut checkpoint)?
-        } else {
-            Vec::new()
-        };
+        let mut in_next = in_counts;
+        for (next, &end) in in_next.iter_mut().zip(in_offsets.iter().skip(1)) {
+            poll(&mut checkpoint)?;
+            *next = end;
+        }
         let mut in_nodes = if directed {
             filled(kept, 0usize, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // Scatter backwards into row ends. Each edge's forward incidence has
+        // the same relative order as the compact input, hence its final slot
+        // is at least its input index. Undirected normalization makes source
+        // <= target: a reciprocal incidence is later still (absent for loops).
+        // Thus neither write can overwrite an unread dense target in the
+        // prefix of out_nodes. Reversing both the traversal and row cursors
+        // leaves neighbors ascending on both faces, without row sorting.
+        let mut first_negative_weight_visit = None;
+        let mut record_weight = |source, slot, weight: f64| {
+            if weight < 0.0 {
+                // Each earlier row and weight contributes one checkpoint.
+                // Observe the reduced weight, never a raw parallel edge.
+                let visit = add(add(source, slot)?, 2)?;
+                first_negative_weight_visit = Some(
+                    first_negative_weight_visit.map_or(visit, |first: usize| first.min(visit)),
+                );
+            }
+            Ok::<(), ProjectionError>(())
+        };
+        for (index, edge) in work.iter().enumerate().rev() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
-            let t = ordinal(&vertices, edge.eid, edge.target)?;
+            while vertices[source] > edge.source {
+                poll(&mut checkpoint)?;
+                source -= 1;
+            }
+            let s = source;
+            let t = out_nodes[index];
+            out_next[s] -= 1;
             let slot = out_next[s];
+            debug_assert!(slot >= index);
             out_nodes[slot] = t;
             weights[slot] = edge.weight;
-            out_next[s] += 1;
+            record_weight(s, slot, edge.weight)?;
             if directed {
+                in_next[t] -= 1;
                 in_nodes[in_next[t]] = s;
-                in_next[t] += 1;
             } else if s != t {
+                out_next[t] -= 1;
                 let slot = out_next[t];
+                debug_assert!(slot >= index);
                 out_nodes[slot] = s;
                 weights[slot] = edge.weight;
-                out_next[t] += 1;
+                record_weight(t, slot, edge.weight)?;
             }
         }
-        // Sorted normalized pairs and source-order scatter produce sorted
-        // rows on BOTH faces. Binary edge lookup therefore needs no hash map.
         let mut names = reserved(n, &mut checkpoint)?;
         for &vertex in &vertices {
             poll(&mut checkpoint)?;
@@ -661,6 +965,9 @@ impl SnapshotGraphView {
             },
             incoming,
             weights,
+            first_negative_weight_visit,
+            max_out_degree,
+            max_weak_degree,
             edges: kept,
             input_edges: e,
             workspace_bytes: bytes,
@@ -691,8 +998,32 @@ impl SnapshotGraphView {
     pub fn input_edge_count(&self) -> usize {
         self.0.input_edges
     }
+    pub(crate) fn first_negative_weight_visit(&self) -> Option<usize> {
+        self.0.first_negative_weight_visit
+    }
+    pub(crate) fn component_degree_bound(&self, weak: bool) -> usize {
+        if weak {
+            self.0.max_weak_degree
+        } else {
+            self.0.max_out_degree
+        }
+    }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes
+    }
+    /// The heap this view keeps while it is held: its vertex, name, row and
+    /// weight vectors, by capacity. The builder's input staging is freed by
+    /// then, so this is below `charged_workspace_bytes`, the build's peak.
+    pub fn charged_resident_bytes(&self) -> usize {
+        let graph = &*self.0;
+        let rows = |rows: &Rows| {
+            (rows.offsets.capacity() + rows.neighbors.capacity()) * size_of::<usize>()
+        };
+        graph.vertices.capacity() * size_of::<VId>()
+            + graph.names.capacity() * size_of::<[u8; 32]>()
+            + rows(&graph.outgoing)
+            + graph.incoming.as_ref().map_or(0, rows)
+            + graph.weights.capacity() * size_of::<f64>()
     }
     pub fn shares_cache_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -710,6 +1041,20 @@ impl SnapshotGraphView {
             self.0.outgoing.neighbors.get(start..end)?,
             self.0.weights.get(start..end)?,
         ))
+    }
+
+    /// The incoming face as one array of sources beside row offsets: target
+    /// `t`'s sources, ascending, are `sources[offsets[t]..offsets[t + 1]]`.
+    /// An undirected view's incoming face is its outgoing one.
+    pub fn incoming_face(&self) -> (&[usize], &[usize]) {
+        let rows = self.0.incoming.as_ref().unwrap_or(&self.0.outgoing);
+        (&rows.offsets, &rows.neighbors)
+    }
+
+    /// Dense row boundaries also supply exact out-degrees without retaining a
+    /// second per-vertex degree vector in an executing kernel.
+    pub(crate) fn outgoing_offsets(&self) -> &[usize] {
+        &self.0.outgoing.offsets
     }
 
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {

@@ -33,8 +33,14 @@ pub enum FrameKind {
     SnapshotResultChunk = 0x0018,
     SnapshotResultEnd = 0x0019,
     WindowUpdate = 0x001a,
+    SubscriptionBatch = 0x001b,
+    SubscriptionReset = 0x001c,
+    ExecutePrepared = 0x001d,
+    ReleasePrepared = 0x001e,
+    PreparedReleased = 0x001f,
     Ping = 0x0020,
     Pong = 0x0021,
+    ExecuteBatch = 0x0022,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -63,8 +69,14 @@ impl TryFrom<u16> for FrameKind {
             0x0018 => Self::SnapshotResultChunk,
             0x0019 => Self::SnapshotResultEnd,
             0x001a => Self::WindowUpdate,
+            0x001b => Self::SubscriptionBatch,
+            0x001c => Self::SubscriptionReset,
+            0x001d => Self::ExecutePrepared,
+            0x001e => Self::ReleasePrepared,
+            0x001f => Self::PreparedReleased,
             0x0020 => Self::Ping,
             0x0021 => Self::Pong,
+            0x0022 => Self::ExecuteBatch,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

@@ -9,7 +9,7 @@ use fgdb_gql::{
     PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText, PreparedGraphWriteScript,
     PreparedTemporalGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -32,6 +32,10 @@ fn ids(statement: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
+    let stored: Vec<Option<CanonicalPropertyValue>> = values
+        .iter()
+        .map(|value| value.clone().map(CanonicalPropertyValue::from))
+        .collect();
     query
         .plan()
         .execute_governed_with_properties(
@@ -39,10 +43,10 @@ fn ids(statement: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
             (0..values.len()).map(|i| VId(i as u128)),
             [],
             |vid, predicates| {
-                let property = values[vid.0 as usize].as_ref().map(|value| (P, value));
+                let property = stored[vid.0 as usize].as_ref().map(|value| (P, value));
                 Ok::<_, ()>(predicates.iter().all(|p| p.matches_borrowed([], property)))
             },
-            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
             wide(),
             || Ok::<_, ()>(()),
         )
@@ -66,13 +70,15 @@ fn quoted_boolean_and_null_operands_follow_independent_value_expectations() {
         Some(text("TRUE")),
         Some(text("")),
     ];
+    // A present value of another domain is unequal (fgdb-v6ku6): `<>` keeps
+    // it, and `=` or an ordering does not.
     for (predicate, expected) in [
         ("n.p = 'ready'", vec![2]),
-        ("n.p != 'ready'", vec![3, 7, 8]),
+        ("n.p != 'ready'", vec![3, 4, 5, 6, 7, 8]),
         ("n.p < 'ready'", vec![3, 7, 8]),
         ("n.p >= 'ready'", vec![2]),
         ("n.p = TRUE", vec![4]),
-        ("n.p <> false", vec![4]),
+        ("n.p <> false", vec![2, 3, 4, 6, 7, 8]),
         ("n.p <= FALSE", vec![5]),
         ("n.p = 'TRUE'", vec![7]),
         ("n.p = ''", vec![8]),
@@ -91,7 +97,7 @@ fn quoted_boolean_and_null_operands_follow_independent_value_expectations() {
 }
 
 #[test]
-fn quoted_payloads_are_not_query_tokens_and_doubled_quotes_are_the_only_escape() {
+fn quoted_payloads_are_not_query_tokens_and_round_trip_through_their_escapes() {
     for value in [
         "O'Reilly",
         "é猫🦀",
@@ -102,13 +108,15 @@ fn quoted_payloads_are_not_query_tokens_and_doubled_quotes_are_the_only_escape()
         "\0",
         "'",
     ] {
-        let encoded = value.replace('\'', "''");
+        // A backslash starts an escape (fgdb-ibczc), so it is escaped first;
+        // the delimiter is then doubled.
+        let encoded = value.replace('\\', "\\\\").replace('\'', "''");
         let statement = format!("MATCH (n) WHERE n.p = '{encoded}' RETURN n");
-        // The same payload double-quoted, where only a doubled " escapes
-        // (fgdb-285i2): the same rows and the same plan bytes.
+        // The same payload double-quoted (fgdb-285i2): the same rows and the
+        // same plan bytes.
         let double = format!(
             "MATCH (n) WHERE n.p = \"{}\" RETURN n",
-            value.replace('"', "\"\"")
+            value.replace('\\', "\\\\").replace('"', "\"\"")
         );
         for statement in [&statement, &double] {
             assert_eq!(
@@ -176,9 +184,147 @@ fn comments_double_quotes_and_delimited_identifiers_prepare_the_plain_plan() {
     assert_eq!(quoted("'say \"hi\"'"), vec![VId(1)]);
     assert_eq!(quoted("\"say \"\"hi\"\"\""), vec![VId(1)]);
     assert_eq!(quoted("\"/* x */\""), vec![VId(2)]);
-    // A backslash is an ordinary byte in both quote styles.
-    assert_eq!(quoted("\"a\\b\""), vec![VId(3)]);
-    assert_eq!(quoted("'a\\b'"), vec![VId(3)]);
+    // A backslash starts an escape in both quote styles, so the text `a\b` is
+    // written with an escaped backslash, and an escaped delimiter does not
+    // close the literal.
+    assert_eq!(quoted("\"a\\\\b\""), vec![VId(3)]);
+    assert_eq!(quoted("'a\\\\b'"), vec![VId(3)]);
+    assert_eq!(quoted("'it\\'s'"), vec![VId(0)]);
+    assert_eq!(quoted("\"say \\\"hi\\\"\""), vec![VId(1)]);
+}
+
+/// openCypher's SchemaName (fgdb-7jja3): a label, relationship type or
+/// property key may spell any reserved word, plain or delimited. `:Order`,
+/// `-[:LIMIT]->`, `n.order` and `{limit: v}` name catalog entries exactly as
+/// `:L`, `-[:R]->`, `n.p` and `{p: v}` do, and no clause scan reads them as
+/// ORDER, LIMIT or MATCH. A variable or an alias still refuses the word.
+#[test]
+fn reserved_words_name_labels_types_and_property_keys() {
+    let reserved = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Property, "order" | "limit" | "MATCH" | "type") => {
+            Some(GraphSymbol::Property(P))
+        }
+        (GraphSymbolKind::Relation, "LIMIT" | "ORDER") => {
+            Some(GraphSymbol::Relation(RelationId(1)))
+        }
+        (GraphSymbolKind::Label, "Order" | "Match") => Some(GraphSymbol::Label(LabelId(1))),
+        _ => symbols(kind, name),
+    };
+    let plan = |statement: &str| {
+        PreparedGraphText::prepare(statement, reserved)
+            .expect(statement)
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    let plain = plan("MATCH (n:L)-[:R]->(m) WHERE n.p = 'a' RETURN n, m.p AS v ORDER BY m.p");
+    for spelling in [
+        "MATCH (n:Order)-[:LIMIT]->(m) WHERE n.order = 'a' RETURN n, m.limit AS v ORDER BY m.limit",
+        "MATCH (n:Match)-[:ORDER]->(m) WHERE n.MATCH = 'a' RETURN n, m.order AS v ORDER BY m.order",
+        "MATCH (n:`Order`)-[:`LIMIT`]->(m) WHERE n.`type` = 'a' \
+         RETURN n, m.`order` AS v ORDER BY m.`order`",
+        "MATCH (n : Order)-[ : LIMIT]->(m) WHERE n . limit = 'a' \
+         RETURN n, m . order AS v ORDER BY m . order",
+    ] {
+        assert_eq!(plan(spelling), plain, "{spelling}");
+    }
+    let mapped = plan("MATCH (n:L {p: 'a'})-[:R]->(m) RETURN n, m");
+    for spelling in [
+        "MATCH (n:Order {limit: 'a'})-[:LIMIT]->(m) RETURN n, m",
+        "MATCH (n:Order {`order`: 'a'})-[:ORDER]->(m) RETURN n, m",
+    ] {
+        assert_eq!(plan(spelling), mapped, "{spelling}");
+    }
+    // The projection and write grammars read a plain reserved spelling as
+    // the same name its delimited spelling is.
+    let set = |statement: &str| {
+        PreparedGraphSetText::prepare(statement, reserved)
+            .expect(statement)
+            .canonical_template_bytes()
+    };
+    assert_eq!(
+        set("MATCH (n:Order) RETURN n.limit AS x, {order: n.order} AS m"),
+        set("MATCH (n:`Order`) RETURN n.`limit` AS x, {`order`: n.`order`} AS m")
+    );
+    let args = GqlParameters::new();
+    let script = |text: &str| {
+        PreparedGraphWriteScript::prepare(text, RelationId(1), reserved)
+            .expect(text)
+            .bind_parameters(&args)
+            .expect(text)
+    };
+    for (plain, delimited) in [
+        (
+            "CREATE (n:Order {limit: 'a'})-[:ORDER]->(:Match {order: 'b'})",
+            "CREATE (n:`Order` {`limit`: 'a'})-[:`ORDER`]->(:`Match` {`order`: 'b'})",
+        ),
+        (
+            "MATCH (n:Order) WHERE n.order = 'a' SET n.limit = 'b'",
+            "MATCH (n:`Order`) WHERE n.`order` = 'a' SET n.`limit` = 'b'",
+        ),
+    ] {
+        assert_eq!(script(plain), script(delimited), "{plain}");
+    }
+    for refused in [
+        "MATCH (order) RETURN order",
+        "MATCH (n) RETURN n AS limit",
+        "MATCH (`limit`) RETURN n",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(refused, reserved).is_err(),
+            "{refused}"
+        );
+    }
+}
+
+/// The openCypher and ISO GQL backslash escapes decode in text literals.
+/// Expectations come from the openCypher grammar's EscapedChar and the TCK
+/// (Literals6 [10] `'\u01FF'`, String8/9/10 [5] `'\n'`). An unknown escape,
+/// a malformed `\u`, a lone or unpaired surrogate and `\U` refuse; Literals6
+/// [13] expects `'\uH'` to fail.
+#[test]
+fn backslash_escapes_decode_and_unknown_escapes_refuse() {
+    let values = [
+        Some(text("line\nbreak")),
+        Some(text("tab\there")),
+        Some(text("\u{1FF}")),
+        Some(text("back\\slash")),
+        Some(text("\u{1F600}")),
+        Some(text("\u{8}\u{c}\r")),
+    ];
+    let matching = |literal: &str| {
+        ids(
+            &format!("MATCH (n) WHERE n.p = {literal} RETURN n"),
+            &values,
+        )
+    };
+    assert_eq!(matching("'line\\nbreak'"), vec![VId(0)]);
+    assert_eq!(matching("\"line\\Nbreak\""), vec![VId(0)]);
+    assert_eq!(matching("'tab\\there'"), vec![VId(1)]);
+    assert_eq!(matching("'\\u01FF'"), vec![VId(2)]);
+    assert_eq!(matching("'\\u01ff'"), vec![VId(2)]);
+    assert_eq!(matching("'back\\\\slash'"), vec![VId(3)]);
+    assert_eq!(matching("'\\uD83D\\uDE00'"), vec![VId(4)]);
+    assert_eq!(matching("'\\b\\f\\r'"), vec![VId(5)]);
+    for refused in [
+        "'\\d'",
+        "'\\uH'",
+        "'\\u12'",
+        "'\\uDE00'",
+        "'\\uD83Dx'",
+        "'\\uD83D\\u0041'",
+        "'\\U0001F600'",
+        "'\\'",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(
+                &format!("MATCH (n) WHERE n.p = {refused} RETURN n"),
+                symbols
+            )
+            .is_err(),
+            "{refused}"
+        );
+    }
 }
 
 /// The temporal root scanner, UNION composition, aggregate text and the
@@ -301,9 +447,18 @@ fn resolved_literals_are_reused_when_numeric_parameters_are_rebound() {
         .unwrap();
     assert_ne!(old, second.canonical_bytes());
     assert_eq!(old, first.canonical_bytes());
-    assert!(matches!(
+    // fgdb-3dnpu: a non-negative Int64 LIMIT is that UInt64; a negative one
+    // still refuses as a type mismatch.
+    assert_eq!(
         template
             .bind_parameters(&GqlParameters::new().with_int64("take", 1).unwrap())
+            .unwrap()
+            .canonical_bytes(),
+        old
+    );
+    assert!(matches!(
+        template
+            .bind_parameters(&GqlParameters::new().with_int64("take", -1).unwrap())
             .unwrap_err()
             .kind,
         GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
@@ -390,7 +545,10 @@ fn optional_and_existential_children_share_scalar_lowering_and_aggregate_null_ru
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap();
-    let values = [Some(CanonicalScalar::Bool(true)), None];
+    let values = [
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(true))),
+        None,
+    ];
     let rows = aggregate
         .execute_governed(
             3,
@@ -428,6 +586,83 @@ fn optional_and_existential_children_share_scalar_lowering_and_aggregate_null_ru
         .unwrap()
         .with_duplicates()
     );
+    // openCypher ExistentialSubquery1 [1] to [4] leave out the body's MATCH:
+    // the same plan as the MATCH spelling.
+    let prepared = |statement: &str| {
+        PreparedGraphText::prepare(statement, symbols)
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    for (bare, spelled) in [
+        (
+            "MATCH (n) WHERE NOT EXISTS { (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n",
+            "MATCH (n) WHERE NOT EXISTS { MATCH (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-[:R]->() } RETURN n",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->() } RETURN n",
+        ),
+    ] {
+        assert_eq!(prepared(bare), prepared(spelled), "{bare}");
+    }
+    assert_eq!(
+        prepared("MATCH (n) WHERE NOT EXISTS { (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n"),
+        absent
+    );
+    // OPTIONAL keeps its MATCH, and an existential body binds no path.
+    for statement in [
+        "MATCH (n) OPTIONAL (n)-[:R]->(c) RETURN n",
+        "MATCH (n) WHERE EXISTS { p = (n)-[:R]->() } RETURN n",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn radix_integers_and_dot_floats_spell_ordinary_values() {
+    let values = [
+        Some(CanonicalScalar::Int(31)),
+        Some(CanonicalScalar::Int(-8)),
+        Some(CanonicalScalar::Int(5)),
+        Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.5))),
+        Some(CanonicalScalar::Int(i64::MIN)),
+        Some(CanonicalScalar::Int(i64::MAX)),
+        Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1e8))),
+    ];
+    for (literal, matched) in [
+        ("0x1F", 0),
+        ("0x1f", 0),
+        ("-0o10", 1),
+        ("0b101", 2),
+        (".5", 3),
+        ("-0x8000000000000000", 4),
+        ("0o777777777777777777777", 5),
+        (".1e9", 6),
+    ] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        assert_eq!(ids(&statement, &values), [VId(matched)], "{statement}");
+    }
+    for literal in ["0x8000000000000000", "0o1000000000000000000000"] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        let error = PreparedGraphText::prepare(&statement, symbols).unwrap_err();
+        assert_eq!(
+            error.kind,
+            GraphPatternTextErrorKind::IntegerOutOfRange,
+            "{statement}"
+        );
+    }
+    // The prefixes are lower case, and a prefix needs a digit of its radix.
+    for literal in ["0X1F", "0O7", "0x", "0o8", "0b2", ". 5"] {
+        let statement = format!("MATCH (n) WHERE n.p = {literal} RETURN n");
+        assert!(
+            PreparedGraphText::prepare(&statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
 }
 
 #[test]

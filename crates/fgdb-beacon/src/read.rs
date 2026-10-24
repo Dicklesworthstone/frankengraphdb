@@ -5,25 +5,76 @@
 //! storage dependency. The embedded adapter instantiates them with the native
 //! PropertyKeyId/LabelId types. Coordinate ORDER is semantic and never sorted.
 
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId};
+
+/// A stored property value that is scalar NULL or absent. A List or Map
+/// (fgdb-k3nub) is present, and an indexed lane refuses it as it refuses any
+/// other value of the wrong kind.
+fn is_null(value: Option<&CanonicalPropertyValue>) -> bool {
+    matches!(
+        value,
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+    )
+}
 
 use crate::{
     BeaconError, ExactHybridHit, ExactHybridQuery, IndexConfig, IndexDocument, IndexSnapshot,
     Neighbor, TextHit, TextMatch, VectorSearch, WorkControl,
 };
 
+mod numeric;
+
 /// Explicit scalar-property projection. Missing/null text omits that lane;
 /// ANY missing/null coordinate omits the vector lane. A present wrong-typed
 /// value refuses the read. Absent lanes are never filled with synthetic zeros.
 ///
-/// Numeric coordinates must be finite and exactly representable as f32. This
-/// is not an encoding for a vector-valued durable property and never silently
-/// rounds a stored f64, integer or Decimal128. Repeated keys deliberately
-/// repeat coordinates. A caller must mask keys BEFORE resolving their values.
+/// Numeric coordinates round once to the nearest f32 by default
+/// (`CoordinatesRoundedF32`, fgdb-ekic6); exact admission requires the explicit
+/// `Coordinates` encoding. Stored values are never changed. Repeated keys
+/// deliberately repeat coordinates. A caller must mask keys BEFORE resolving
+/// their values. `encoding` says how the vector keys hold coordinates.
 #[derive(Clone, Debug)]
 pub struct Projection<K> {
     pub text: Option<K>,
     pub vector: Vec<K>,
+    pub encoding: VectorEncoding,
+}
+
+/// How a vector projection's keys hold its coordinates. Part of the index
+/// definition: the same bytes under another encoding are another vector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VectorEncoding {
+    /// One key per coordinate, each an integer or float exactly
+    /// representable as f32; any other value refuses the read. The explicit
+    /// exact opt-in (`coordinates`); it was the default before fgdb-ekic6.
+    Coordinates,
+    /// Exactly one key whose value is a byte string of `dimensions`
+    /// little-endian IEEE-754 binary32 values (4 bytes each), every one
+    /// finite: an embedding stored as one property. Any other length or a
+    /// non-byte value refuses the read rather than truncating or padding.
+    PackedF32Le,
+    /// One key per coordinate, rounded once to the nearest binary32 (ties to
+    /// even), the default. Integers and finite binary64 values use Rust's
+    /// numeric cast, as `hybrid.search` query vectors do; exact decimals parse
+    /// directly to f32, without an intervening binary64 rounding. Overflow and
+    /// nonfinite input refuse. Underflow to a subnormal or signed zero is allowed.
+    /// Search distances are over these projected f32s, not the original values.
+    /// Every value `Coordinates` admits projects to the same f32 here.
+    #[default]
+    CoordinatesRoundedF32,
+}
+
+impl<K> Projection<K> {
+    /// Whether the vector keys can supply exactly `dimensions` coordinates.
+    #[must_use]
+    pub fn fits(&self, dimensions: usize) -> bool {
+        match self.encoding {
+            VectorEncoding::Coordinates | VectorEncoding::CoordinatesRoundedF32 => {
+                self.vector.len() == dimensions
+            }
+            VectorEncoding::PackedF32Le => self.vector.len() == 1 && dimensions > 0,
+        }
+    }
 }
 
 /// One allowance covers source traversal, scalar projection, construction,
@@ -66,6 +117,7 @@ impl<K, L> ReadOptions<K, L> {
             projection: Projection {
                 text: Some(property),
                 vector: Vec::new(),
+                encoding: VectorEncoding::default(),
             },
             index: IndexConfig::default(),
             policy: ReadPolicy::default(),
@@ -94,7 +146,7 @@ impl<K, L> ReadOptions<K, L> {
                 .vector
                 .as_ref()
                 .ok_or(BeaconError::Disabled("vector"))?;
-            if self.projection.vector.len() != vector.dimensions {
+            if !self.projection.fits(vector.dimensions) {
                 return Err(BeaconError::InvalidConfig(
                     "vector properties must match dimensions",
                 ));
@@ -192,17 +244,33 @@ impl Search<'_> {
         snapshot: &IndexSnapshot,
         work: &mut dyn WorkControl,
     ) -> Result<Rows, BeaconError> {
-        // This adapter accepts an already restricted corpus, not an ACL-shaped
-        // output predicate. Every source lane sees the same entire domain.
+        self.execute_filtered(snapshot, |_| true, work)
+    }
+
+    /// Apply a stable result predicate inside each native candidate search,
+    /// before source depths, rank assignment, and final top-k. Filtering an
+    /// already-truncated `Rows` value can otherwise lose valid matches.
+    ///
+    /// This is not authorization: the snapshot must already contain only the
+    /// admitted corpus, including its statistics and index topology. A result
+    /// predicate does not change BM25 corpus statistics or make ANN exact.
+    /// The native search mode and the caller's work allowance are preserved;
+    /// failures expose no partial `Rows` value.
+    pub fn execute_filtered(
+        self,
+        snapshot: &IndexSnapshot,
+        eligible: impl Fn(VId) -> bool,
+        work: &mut dyn WorkControl,
+    ) -> Result<Rows, BeaconError> {
         match self {
             Self::Text { query, k, mode } => snapshot
-                .text_search(query, k, mode, |_| true, work)
+                .text_search(query, k, mode, eligible, work)
                 .map(Rows::Text),
             Self::Vector { query, k, mode } => snapshot
-                .knn(query, k, mode, |_| true, work)
+                .knn(query, k, mode, eligible, work)
                 .map(Rows::Vector),
             Self::Hybrid(query) => snapshot
-                .hybrid_search_exact_fusion(query, |_| true, work)
+                .hybrid_search_exact_fusion(query, eligible, work)
                 .map(Rows::Hybrid),
         }
     }
@@ -268,14 +336,14 @@ impl<K: Copy> Projection<K> {
         &self,
         id: VId,
         config: &IndexConfig,
-        mut property: impl FnMut(K) -> Option<&'a CanonicalScalar>,
+        mut property: impl FnMut(K) -> Option<&'a CanonicalPropertyValue>,
         work: &mut dyn WorkControl,
     ) -> Result<IndexDocument, BeaconError> {
         work.charge(1)?;
         let text = if config.text.is_some() {
             match self.text.and_then(&mut property) {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(CanonicalScalar::Text(text)) => {
+                None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+                Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Text(text))) => {
                     let text = text.as_str();
                     if text.len() > config.max_text_bytes {
                         return Err(BeaconError::ResourceLimit {
@@ -304,23 +372,26 @@ impl<K: Copy> Projection<K> {
             None
         };
         let vector = if let Some(vector) = &config.vector {
-            if self.vector.len() != vector.dimensions {
+            if !self.fits(vector.dimensions) {
                 return Err(BeaconError::InvalidConfig(
                     "vector properties must match dimensions",
                 ));
             }
-            if self.vector.len() > config.max_vector_values {
+            if vector.dimensions > config.max_vector_values {
                 return Err(BeaconError::ResourceLimit {
                     resource: "staged vector values",
                     limit: config.max_vector_values,
                 });
+            }
+            if self.encoding == VectorEncoding::PackedF32Le {
+                return packed(id, text, self.vector[0], vector.dimensions, property, work);
             }
             // Establish completeness before validating any coordinate. An
             // absent (including capability-masked) lane is uniformly absent.
             let mut complete = true;
             for &key in &self.vector {
                 work.charge(1)?;
-                if matches!(property(key), None | Some(CanonicalScalar::Null)) {
+                if is_null(property(key)) {
                     complete = false;
                 }
             }
@@ -335,7 +406,12 @@ impl<K: Copy> Projection<K> {
                 for &key in &self.vector {
                     work.charge(1)?;
                     let value = match property(key) {
-                        Some(CanonicalScalar::Int(value)) => {
+                        Some(CanonicalPropertyValue::Scalar(value))
+                            if self.encoding == VectorEncoding::CoordinatesRoundedF32 =>
+                        {
+                            numeric::rounded(value, work)?
+                        }
+                        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => {
                             let narrowed = *value as f32;
                             if narrowed as i128 != i128::from(*value) {
                                 return Err(BeaconError::InvalidQuery(
@@ -344,7 +420,7 @@ impl<K: Copy> Projection<K> {
                             }
                             narrowed
                         }
-                        Some(CanonicalScalar::Float(value)) => {
+                        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Float(value))) => {
                             let value = value.get();
                             let narrowed = value as f32;
                             if !narrowed.is_finite() || f64::from(narrowed) != value {
@@ -371,5 +447,190 @@ impl<K: Copy> Projection<K> {
         };
         work.charge(1)?;
         Ok(IndexDocument { id, vector, text })
+    }
+}
+
+/// The document of a packed-vector projection: one byte-string value holding
+/// exactly `dimensions` little-endian binary32 coordinates.
+fn packed<'a, K>(
+    id: VId,
+    text: Option<String>,
+    key: K,
+    dimensions: usize,
+    mut property: impl FnMut(K) -> Option<&'a CanonicalPropertyValue>,
+    work: &mut dyn WorkControl,
+) -> Result<IndexDocument, BeaconError> {
+    work.charge(1)?;
+    let vector = match property(key) {
+        // An absent (including capability-masked) vector omits the lane.
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bytes(bytes))) => {
+            let bytes = bytes.as_slice();
+            if dimensions.checked_mul(4) != Some(bytes.len()) {
+                return Err(BeaconError::InvalidQuery(
+                    "packed vector byte length is not 4 * dimensions",
+                ));
+            }
+            work.charge(dimensions)?;
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(dimensions)
+                .map_err(|_| BeaconError::ResourceLimit {
+                    resource: "vector allocation",
+                    limit: dimensions,
+                })?;
+            for chunk in bytes.as_chunks::<4>().0 {
+                let value = f32::from_le_bytes(*chunk);
+                if !value.is_finite() {
+                    return Err(BeaconError::InvalidQuery(
+                        "packed vector coordinate is not finite",
+                    ));
+                }
+                values.push(value);
+            }
+            Some(values)
+        }
+        Some(_) => {
+            return Err(BeaconError::InvalidQuery(
+                "a packed vector property must be a byte string",
+            ));
+        }
+    };
+    work.charge(1)?;
+    Ok(IndexDocument { id, vector, text })
+}
+
+#[cfg(test)]
+mod filtered_search_tests {
+    use super::*;
+    use crate::{BeaconIndex, DistanceMetric, ExactRrfProfile, HnswConfig, WorkBudget};
+
+    fn index() -> IndexSnapshot {
+        BeaconIndex::build(
+            IndexConfig {
+                vector: Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean)),
+                ..IndexConfig::default()
+            },
+            [
+                IndexDocument {
+                    id: VId(1),
+                    vector: Some(vec![0.0]),
+                    text: Some("red".into()),
+                },
+                IndexDocument {
+                    id: VId(2),
+                    vector: Some(vec![1.0]),
+                    text: Some("red".into()),
+                },
+            ],
+            &mut WorkBudget::new(100_000),
+        )
+        .unwrap()
+        .snapshot()
+    }
+
+    fn queries() -> [Search<'static>; 3] {
+        [
+            Search::Text {
+                query: "red",
+                k: 1,
+                mode: TextMatch::Any,
+            },
+            Search::Vector {
+                query: &[0.0],
+                k: 1,
+                mode: VectorSearch::Exact,
+            },
+            Search::Hybrid(ExactHybridQuery {
+                vector: &[0.0],
+                text: "red",
+                k: 1,
+                vector_candidates: 1,
+                text_candidates: 1,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            }),
+        ]
+    }
+
+    fn ids(rows: &Rows) -> Vec<VId> {
+        match rows {
+            Rows::Text(rows) => rows.iter().map(|hit| hit.id).collect(),
+            Rows::Vector(rows) => rows.iter().map(|hit| hit.id).collect(),
+            Rows::Hybrid(rows) => rows.iter().map(|hit| hit.id).collect(),
+        }
+    }
+
+    #[test]
+    fn all_read_variants_select_eligible_candidates_before_their_limits() {
+        let snapshot = index();
+        for query in queries() {
+            let unfiltered = query
+                .execute(&snapshot, &mut WorkBudget::new(100_000))
+                .unwrap();
+            assert_eq!(ids(&unfiltered), [VId(1)]);
+            let filtered = query
+                .execute_filtered(&snapshot, |id| id == VId(2), &mut WorkBudget::new(100_000))
+                .unwrap();
+            assert_eq!(ids(&filtered), [VId(2)]);
+            if let Rows::Hybrid(hits) = filtered {
+                assert_eq!(hits[0].vector_rank, std::num::NonZeroU32::new(1));
+                assert_eq!(hits[0].text_rank, std::num::NonZeroU32::new(1));
+                assert_eq!(hits[0].score.numerator(), 2);
+                assert_eq!(hits[0].score.denominator(), 61);
+            }
+        }
+    }
+
+    #[test]
+    fn rejecting_every_candidate_returns_an_empty_native_result() {
+        let snapshot = index();
+        for query in queries() {
+            assert!(
+                query
+                    .execute_filtered(&snapshot, |_| false, &mut WorkBudget::new(100_000))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct Count(usize);
+    impl WorkControl for Count {
+        fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+            self.0 += units;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_native_work_cut_refuses_without_a_partial_result() {
+        let snapshot = index();
+        for query in queries() {
+            let mut count = Count::default();
+            let expected = query
+                .execute_filtered(&snapshot, |id| id == VId(2), &mut count)
+                .unwrap();
+            for units in 0..count.0 {
+                assert_eq!(
+                    query
+                        .execute_filtered(
+                            &snapshot,
+                            |id| id == VId(2),
+                            &mut WorkBudget::new(units),
+                        )
+                        .unwrap_err(),
+                    BeaconError::WorkBudgetExceeded
+                );
+            }
+            assert_eq!(
+                query
+                    .execute_filtered(&snapshot, |id| id == VId(2), &mut WorkBudget::new(count.0),)
+                    .unwrap(),
+                expected
+            );
+        }
     }
 }

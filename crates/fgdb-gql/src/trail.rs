@@ -4,9 +4,8 @@
 //! never endpoint settlement or a post-filter over unrestricted WALK results.
 
 use crate::algebra::GraphPath;
-use crate::{GlaExecutionEvent, GraphWalkBounds};
+use crate::{GlaExecutionEvent, GraphWalkBounds, IdentifiedNeighbors};
 use fgdb_types::{EId, VId};
-use std::collections::BTreeMap;
 
 struct Frame<'a> {
     vertex: VId,
@@ -35,16 +34,17 @@ struct Frame<'a> {
 /// the cursor and releases its frontier allocation. Controls are logical work
 /// and scratch events, not allocator-byte or peak-memory measurements.
 pub struct GraphTrailCursor<'a> {
-    adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+    adjacency: Option<&'a dyn IdentifiedNeighbors>,
     bounds: GraphWalkBounds,
     stack: Vec<Frame<'a>>,
+    forbidden: Vec<EId>,
 }
 
 impl<'a> GraphTrailCursor<'a> {
     pub fn new<E>(
         source: VId,
         bounds: GraphWalkBounds,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn IdentifiedNeighbors>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         control(GlaExecutionEvent::ScratchEntry)?;
@@ -52,12 +52,13 @@ impl<'a> GraphTrailCursor<'a> {
             &[][..]
         } else {
             adjacency
-                .and_then(|index| index.get(&source))
-                .map_or(&[][..], Vec::as_slice)
+                .and_then(|index| index.neighbors(&source))
+                .unwrap_or(&[])
         };
         Ok(Self {
             adjacency,
             bounds,
+            forbidden: Vec::new(),
             stack: vec![Frame {
                 vertex: source,
                 incoming: None,
@@ -68,6 +69,13 @@ impl<'a> GraphTrailCursor<'a> {
         })
     }
 
+    /// The GLA owner has already charged and copied earlier clause segments.
+    /// Keep this separate from the live frontier so zero hops consume no edge.
+    pub(crate) fn with_forbidden_edges(mut self, forbidden: Vec<EId>) -> Self {
+        self.forbidden = forbidden;
+        self
+    }
+
     pub fn next_endpoint_with_control<E>(
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -75,6 +83,7 @@ impl<'a> GraphTrailCursor<'a> {
         let result = self.advance(control);
         if result.is_err() || matches!(&result, Ok(None)) {
             self.stack = Vec::new();
+            self.forbidden = Vec::new();
         }
         result
     }
@@ -110,6 +119,7 @@ impl<'a> GraphTrailCursor<'a> {
         })();
         if result.is_err() || matches!(&result, Ok(None)) {
             self.stack = Vec::new();
+            self.forbidden = Vec::new();
         }
         result
     }
@@ -135,6 +145,16 @@ impl<'a> GraphTrailCursor<'a> {
             let (edge, destination) = frame.neighbors[frame.next];
             frame.next += 1;
             let mut repeated = false;
+            for &prior in &self.forbidden {
+                control(GlaExecutionEvent::Work)?;
+                if prior == edge {
+                    repeated = true;
+                    break;
+                }
+            }
+            if repeated {
+                continue;
+            }
             for prior in self.stack.iter().skip(1) {
                 control(GlaExecutionEvent::Work)?;
                 if prior.incoming == Some(edge) {
@@ -152,8 +172,8 @@ impl<'a> GraphTrailCursor<'a> {
                 &[][..]
             } else {
                 self.adjacency
-                    .and_then(|index| index.get(&destination))
-                    .map_or(&[][..], Vec::as_slice)
+                    .and_then(|index| index.neighbors(&destination))
+                    .unwrap_or(&[])
             };
             self.stack.push(Frame {
                 vertex: destination,
@@ -180,7 +200,7 @@ impl core::fmt::Debug for GraphTrailCursor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     type Index = BTreeMap<VId, Vec<(EId, VId)>>;
     type Route = (VId, Vec<(EId, VId)>);

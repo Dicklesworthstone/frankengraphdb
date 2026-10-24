@@ -12,6 +12,8 @@ use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
+mod write_input;
+
 impl PreparedGraphSet {
     /// Join two complete, independently scoped relations with a frozen schema,
     /// kind, equality keys and optional ON predicate. `RowJoinSpec::new` builds
@@ -77,6 +79,14 @@ impl PreparedGraphSet {
     }
 }
 
+impl RowJoinSpec {
+    /// Native multipart templates reuse the bound join's canonical semantics;
+    /// no caller-maintained encoding can omit ON predicates or equality keys.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        append_transcript(self, bytes);
+    }
+}
+
 /// New application-node transcript. Existing node tags and bytes are unchanged.
 /// Explicit tags never depend on enum layout. Predicate bytes come from the
 /// ordinary row predicate transcript, including literal types and payloads.
@@ -93,16 +103,7 @@ pub(super) fn append_transcript(spec: &RowJoinSpec, bytes: &mut Vec<u8>) {
     for types in [spec.left_types(), spec.right_types()] {
         bytes.extend_from_slice(&(types.len() as u64).to_be_bytes());
         for kind in types {
-            bytes.push(match kind {
-                GraphSetColumnType::Vertex => 0,
-                GraphSetColumnType::Scalar => 1,
-                GraphSetColumnType::Path => 2,
-                GraphSetColumnType::Vertices => 3,
-                GraphSetColumnType::Edges => 4,
-                GraphSetColumnType::Edge => 5,
-                GraphSetColumnType::List => 6,
-                GraphSetColumnType::Any => 7,
-            });
+            bytes.push(kind.tag());
         }
     }
     bytes.extend_from_slice(&(spec.keys().len() as u64).to_be_bytes());

@@ -90,7 +90,7 @@ fn statement(
         .map(|s| format!(" FOR SYSTEM_TIME AS OF SEQ {}", s.0))
         .unwrap_or_default();
     format!(
-        "MATCH {root}{at} WHERE {}EXISTS {{ MATCH {mode} ({anchor}){} WHERE x.p > 5 }} RETURN {cols}",
+        "MATCH {root}{at} WHERE {}EXISTS {{ MATCH REPEATABLE ELEMENTS {mode} ({anchor}){} WHERE x.p > 5 }} RETURN {cols}",
         if anti { "NOT " } else { "" },
         atom(d, lo, hi)
     )
@@ -128,7 +128,7 @@ fn property(db: &Database<MemVfs>, cut: CommitSeq, v: VId) -> CanonicalScalar {
         .props
         .iter()
         .find(|(p, _)| *p == P)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
         .unwrap_or(CanonicalScalar::Null)
 }
 fn support(
@@ -370,10 +370,10 @@ fn endpoint_filters_do_not_cut_transit_vertices_and_compound_atoms_reset_history
         seed(&mut db, &c.commit()).await;
         for text in [
             "MATCH (a) WHERE EXISTS { MATCH (a)-[:R*3..3]->(x) WHERE x.p > 5 } RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R*0..2]->(x)-[:R*1..2]->(y) WHERE y.p > 5 } RETURN a",
-            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R*0..2]->(x), (a)-[:R*1..3]->(y) WHERE x <> y AND y.p > 5 } RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (a)-[:R*0..2]->(x)-[:R*1..2]->(y) WHERE y.p > 5 } RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (a)-[:R*0..2]->(x), (a)-[:R*1..3]->(y) WHERE x <> y AND y.p > 5 } RETURN a",
             "MATCH (a) WHERE EXISTS { MATCH (a)-[:R*0..0]->(x) } AND NOT EXISTS { MATCH (a)-[:R*1..4]->(x) WHERE x.p IS NULL } RETURN a",
-            "MATCH (a)-[r:Q]->(b) WHERE EXISTS { MATCH (b)-[:R*2..4]->(x)-[:R]->(y) WHERE x.p IS NULL OR y.p > 5 } RETURN r,a,b",
+            "MATCH (a)-[r:Q]->(b) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (b)-[:R*2..4]->(x)-[:R]->(y) WHERE x.p IS NULL OR y.p > 5 } RETURN r,a,b",
         ] {
             let q = prepare(text);
             let eager = db
@@ -428,7 +428,7 @@ fn proving_absence_is_polynomial_for_walk_ties_and_does_not_scan_unrelated_edges
         db.write_atomic(&commit, vec![r, q]).await.unwrap();
         for mode in &MODES[..3] {
             let text = format!(
-                "MATCH (a)-[r:Q]->(b) WHERE NOT EXISTS {{ MATCH {mode} (b)-[:R*40..40]->(x) WHERE x = a }} RETURN r,a,b LIMIT 1"
+                "MATCH (a)-[r:Q]->(b) WHERE NOT EXISTS {{ MATCH REPEATABLE ELEMENTS {mode} (b)-[:R*40..40]->(x) WHERE x = a }} RETURN r,a,b LIMIT 1"
             );
             let p = GqlParameters::new();
             let n = PreparedNativeRead::prepare(&text, &p, symbols).unwrap();
@@ -446,7 +446,7 @@ fn proving_absence_is_polynomial_for_walk_ties_and_does_not_scan_unrelated_edges
             assert!(refused.next().is_none());
         }
         let q = prepare(
-            "MATCH (a)-[r:Q]->(b) WHERE EXISTS { MATCH (b)-[:R*40..40]->(x) } RETURN r,a,b LIMIT 1",
+            "MATCH (a)-[r:Q]->(b) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (b)-[:R*40..40]->(x) } RETURN r,a,b LIMIT 1",
         );
         let mut s = db
             .stream_graph_edges_governed(&cx, &q, GqlQueryPolicy::new(41, 1, 100_000, 10_000))

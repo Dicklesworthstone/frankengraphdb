@@ -6,9 +6,7 @@ use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, SchemaEpoch};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{GqlQueryPolicy, GraphMutationProgramError, GraphWriteProgramError};
-use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
-};
+use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Rights, Scope};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -141,11 +139,15 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
             )
             .await
             .unwrap();
+        // The first engine allocations on this fresh database: vertex
+        // counters 1 (a, p=1) and 2 (b, p=2), edge counter 1.
+        let a = crate::write_txn::engine_vertex(&keys(), 1);
+        let b = crate::write_txn::engine_vertex(&keys(), 2);
+        assert_eq!(receipt.steps()[0].created_vertices(), Some(&[a, b][..]));
         assert_eq!(
-            receipt.steps()[0].created_vertices(),
-            Some(&[VId(1), VId(2)][..])
+            receipt.steps()[0].created_edges(),
+            Some(&[crate::write_txn::engine_edge(&keys(), 1)][..])
         );
-        assert_eq!(receipt.steps()[0].created_edges(), Some(&[EId(1)][..]));
         assert_eq!(
             completion,
             EmbeddedTxnCompletion::WriteCommitted {
@@ -167,7 +169,7 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
                 .execute(&query, &prepared, &arguments(1, value))
                 .await
                 .unwrap();
-            assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[VId(1)][..]));
+            assert_eq!(receipt.steps()[0].mutation_targets(), Some(&[a][..]));
             assert_eq!(
                 completion,
                 EmbeddedTxnCompletion::WriteCommitted {
@@ -188,8 +190,11 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
         session.close();
         drop(session);
         assert_eq!(
-            db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(20))]
+            db.vertex(a).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(20).into())
+            ]
         );
         assert_eq!(db.edges().unwrap().len(), 1);
         let expected = (
@@ -318,9 +323,14 @@ fn write_only_session_cannot_prepare_selected_writes_or_fall_back_to_raw_reads()
             assert_eq!(authorization(&error), Some(Error::ExecutionStopped));
             drop(session);
             assert_eq!(db.vertices().unwrap().len(), 1);
+            // The one committed CREATE took vertex counter 1 of this fresh
+            // database; the refused second CREATE stopped before allocating.
             assert_eq!(
-                db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(1))]
+                db.vertex(crate::write_txn::engine_vertex(&keys(), 1))
+                    .unwrap()
+                    .unwrap()
+                    .props,
+                vec![(P, CanonicalScalar::Int(1).into())]
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -392,10 +402,12 @@ fn prepared_handle_cannot_cross_sessions_even_with_identical_database_and_creden
         drop(second);
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertices().unwrap().is_empty());
+        // The refused cross-session CREATE reserved nothing: the vertex
+        // counter of this fresh database still issues its first identity.
         assert_eq!(
             db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                 .unwrap(),
-            ElementId::Vertex(VId(1))
+            ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -740,14 +752,17 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
                 commit_seq: CommitSeq(basis.0 + 1)
             }
         );
+        // Record 0's first MERGE creates the shared p:0 vertex from vertex
+        // counter 1; every later record matches it. Each record's
+        // relationship MERGE is the only edge creation, so record r takes
+        // edge counter r + 1.
+        let shared = crate::write_txn::engine_vertex(&keys(), 1);
         for record in 0..24 {
             let steps = batch.record_receipts(&receipt, record).unwrap();
             assert_eq!(steps.len(), 3);
-            assert_eq!(steps[0].merged_vertex().unwrap().vertex(), VId(1));
-            assert_eq!(
-                steps[2].created_edges(),
-                Some(&[EId(record as u128 + 1)][..])
-            );
+            assert_eq!(steps[0].merged_vertex().unwrap().vertex(), shared);
+            let edge = crate::write_txn::engine_edge(&keys(), record as u64 + 1);
+            assert_eq!(steps[2].created_edges(), Some(&[edge][..]));
         }
         assert!(batch.record_receipts(&receipt, 24).is_none());
         let (repeat, completion) = session.execute_bound_batch(&query, &batch).await.unwrap();
@@ -767,7 +782,16 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
             .execute_bound_batch_stats(&query, &batch)
             .await
             .unwrap();
-        assert_eq!(stats, repeat.stats());
+        // A receipt call owns its vertex MERGE outcomes and pays for them
+        // (b16ecd0e): a work unit before and after the transfer and a scratch
+        // entry, itself a work unit, per target. A stats-only call transfers
+        // none. Each record runs two single-target vertex MERGEs; everything
+        // else is the same.
+        let merges = 24 * 2;
+        let mut transferred = repeat.stats();
+        transferred.evaluator.work_units -= 3 * merges;
+        transferred.evaluator.scratch_entries -= merges;
+        assert_eq!(stats, transferred);
         assert!(matches!(
             completion,
             EmbeddedTxnCompletion::ReadClosed { .. }
@@ -885,10 +909,12 @@ fn bound_batches_do_not_outlive_their_owner_or_live_credentials() {
             }
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.vertices().unwrap().is_empty());
+            // Every refusal above precedes reservation: the vertex counter of
+            // this fresh database still issues its first identity.
             assert_eq!(
                 db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
                     .unwrap(),
-                ElementId::Vertex(VId(1))
+                ElementId::Vertex(crate::write_txn::engine_vertex(&keys(), 1))
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -904,7 +930,7 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
         let issuer = authority();
         let args: Vec<_> = (1..=3).map(|key| arguments(key, key + 10)).collect();
         let mut floors = Vec::new();
-        for bound in [false, true] {
+        for phase in 0..3 {
             let (mut low, mut high) = (0_u64, 16384_u64);
             while low < high {
                 let middle = low + (high - low) / 2;
@@ -929,11 +955,17 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
                     )
                     .unwrap();
                 let result = async {
+                    if phase == 2 {
+                        return session.query_batch_stats(&query,
+                            "CREATE (n:Visible {p:$key}); MATCH (n:Visible) WHERE n.p=$key SET n.q=$value",
+                            &args,
+                        ).await;
+                    }
                     let template = session.prepare(&query,
                         "CREATE (n:Visible {p:$key}); MATCH (n:Visible) WHERE n.p=$key SET n.q=$value",
                         &args[0],
                     )?;
-                    if bound {
+                    if phase == 1 {
                         let batch = session.bind_batch(&query, &template, &args)?;
                         session.execute_bound_batch_stats(&query, &batch).await
                     } else {
@@ -968,5 +1000,299 @@ fn batch_binding_and_execution_share_the_exact_signed_work_allowance() {
             floors.push(low);
         }
         assert_eq!(floors[0], floors[1] + 6 + 3 + 1);
+        assert!(
+            floors[2] > floors[0],
+            "text-batch preparation must consume the same allowance as binding and execution"
+        );
+    });
+}
+
+#[test]
+fn text_batches_merge_record_major_with_zero_output_rows_and_reopen_exactly() {
+    lab(0xac15, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut hidden = WriteBatch::new(R);
+        hidden.create_vertex(
+            VId(77),
+            vec![LabelId(2)],
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(999))],
+        );
+        db.write(&commit, hidden).await.unwrap();
+        let before = db.frontier().unwrap();
+        let hidden = db.vertex(VId(77)).unwrap().unwrap();
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "host-branch",
+                symbols,
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .unwrap();
+        let (stats, completion) = session
+            .query_batch_stats(
+                &query,
+                "MERGE (n:Visible {p:$key}) ON CREATE SET n.q=$value ON MATCH SET n.q=n.q+$value",
+                &[arguments(1, 10), arguments(1, 20), arguments(2, 7)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.completed_statements, 3);
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(before.0 + 1)
+            }
+        );
+        assert!(!session.is_closed());
+        drop(session);
+        assert_eq!(db.vertex(VId(77)).unwrap().unwrap(), hidden);
+        let visible: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels.contains(&L))
+            .map(|vertex| vertex.props)
+            .collect();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.contains(&vec![
+            (P, CanonicalScalar::Int(1).into()),
+            (Q, CanonicalScalar::Int(30).into())
+        ]));
+        assert!(visible.contains(&vec![
+            (P, CanonicalScalar::Int(2).into()),
+            (Q, CanonicalScalar::Int(7).into())
+        ]));
+        let expected = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            expected
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn text_batches_refuse_bad_final_arguments_returning_and_execution_without_a_prefix() {
+    lab(0xac16, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let one = |value| GqlParameters::new().with_int64("value", value).unwrap();
+        for (case, text, args, limit) in [
+            (
+                0,
+                "CREATE (:Visible {p:$value})",
+                vec![one(1), GqlParameters::new()],
+                64,
+            ),
+            (
+                1,
+                "CREATE (:Visible {p:10/$value})",
+                vec![one(2), one(0)],
+                64,
+            ),
+            (
+                2,
+                "CREATE (n:Visible {p:$value}) RETURN 1/0 AS invalid LIMIT 0",
+                vec![one(1)],
+                64,
+            ),
+            (
+                3,
+                "CREATE (:Visible {p:$value}); CREATE (:Visible {q:$value})",
+                vec![one(1), one(2)],
+                3,
+            ),
+            (4, "CREATE (:Visible {p:$value})", vec![], 64),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    limit,
+                    || NOW,
+                )
+                .unwrap();
+            let error = session
+                .query_batch_stats(&query, text, &args)
+                .await
+                .unwrap_err();
+            assert!(session.is_closed(), "case {case}");
+            match case {
+                0 => assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::Arguments {
+                        argument_set: 1,
+                        ..
+                    })
+                )),
+                1 => assert!(matches!(error, Fault::BatchProgram { .. })),
+                2 => assert!(matches!(error, Fault::Binding(_))),
+                3 => assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::TooManyStatements {
+                        limit: 3,
+                        observed: 4
+                    })
+                )),
+                4 => assert!(matches!(
+                    error,
+                    Fault::BatchBinding(GraphWriteScriptBatchError::Empty)
+                )),
+                _ => unreachable!(),
+            }
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), before, "case {case}");
+            assert!(db.vertices().unwrap().is_empty(), "case {case}");
+            assert!(db.edges().unwrap().is_empty(), "case {case}");
+            assert_eq!(txn.outstanding_obligations(), 0, "case {case}");
+        }
+    });
+}
+
+#[test]
+fn session_writes_commit_the_capability_decision_digest_and_owner_writes_stay_zero() {
+    // fgdb-g9af0 / FG-INV-20: a session's text and batch writes (the fgdbd
+    // EXECUTE Write and EXECUTE_BATCH paths) run as authorized programs, and
+    // their CommitMarker carries the digest of the decision that admitted
+    // them. Before, only the native staging path bound it; programs
+    // committed zeros.
+    lab(0xac20, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let zero = fgdb_crypto::Digest([0u8; 32]);
+        let mut owner = WriteBatch::new(R);
+        owner.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(0))]);
+        let owner_seq = db.write(&commit, owner).await.unwrap();
+
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let expected = fgdb_crypto::hash(
+            &issuer
+                .verify_at(&token, "host-branch", NOW)
+                .unwrap()
+                .begin_write_at("host-branch", NOW)
+                .unwrap()
+                .canonical_decision_bytes(),
+        );
+        assert_ne!(expected, zero);
+        let attenuated = token
+            .attenuate(fgdb_warden::Restriction::MaxNodes(50))
+            .unwrap();
+        let mut committed = Vec::new();
+        for (token, text, batch) in [
+            (&token, "CREATE (:Visible {p: 1})", false),
+            (
+                &token,
+                "MATCH (n:Visible) WHERE n.p = $key SET n.q = $value",
+                true,
+            ),
+            (&attenuated, "CREATE (:Visible {p: 3})", false),
+        ] {
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    token,
+                    "host-branch",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let (_, completion) = if batch {
+                session
+                    .query_batch_stats(&query, text, &[arguments(0, 5), arguments(1, 6)])
+                    .await
+                    .unwrap()
+            } else {
+                session
+                    .query_stats(&query, text, &GqlParameters::new())
+                    .await
+                    .unwrap()
+            };
+            let EmbeddedTxnCompletion::WriteCommitted { commit_seq } = completion else {
+                panic!("{text} wrote")
+            };
+            drop(session);
+            committed.push(commit_seq);
+        }
+        let digests = |db: &Database<MemVfs>| -> Vec<_> {
+            core::iter::once(owner_seq)
+                .chain(committed.iter().copied())
+                .map(|seq| {
+                    db.commit_authorization_decision_digest(seq)
+                        .unwrap()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let written = digests(&db);
+        // The owner write keeps zeros. One capability gives one digest across
+        // statement kinds and the batch path; attenuation changes it.
+        assert_eq!(written[0], zero);
+        assert_eq!(written[1], expected);
+        assert_eq!(written[2], expected);
+        assert_ne!(written[3], zero);
+        assert_ne!(written[3], expected);
+
+        // Scrub verifies every published capsule, and recovery reads the same
+        // authenticated markers back.
+        let summary = db.scrub(&commit).await.unwrap();
+        assert!(summary.lost.is_empty() && summary.repaired.is_empty());
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(digests(&db), written);
     });
 }

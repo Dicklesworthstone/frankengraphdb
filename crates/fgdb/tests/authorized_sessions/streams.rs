@@ -27,6 +27,385 @@ fn expected_row(id: u128, p: i64) -> GraphValueRow {
 }
 
 #[test]
+fn authorized_equality_streams_seek_only_admitted_candidates_in_both_drivers() {
+    let ((), report) = run_async_under_lab(0x5ec0_6101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..228_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+            // Hidden equality candidates must not spend the native record
+            // allowance or alter the signed visible-node charge.
+            batch.create_vertex(
+                VId(id + 1000),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+        }
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(
+                PropertyKeyId(1),
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0)),
+            )],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new().with_int64("value", 7).unwrap();
+        let text = "MATCH (n) WHERE n.p = $value RETURN n AS id";
+        let eager = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap()
+            .query(&cx, text, &args)
+            .unwrap();
+        let expected = vec![
+            GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(1))]),
+            GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(u128::MAX))]),
+        ];
+        let mut session = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                GqlQueryPolicy::new(2, 2, 1_000_000, 1000),
+                || 100,
+            )
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        // Scoped, not dropped: the local cursor is not Send, and a binding
+        // that outlives an await keeps the lab future from being Send.
+        {
+            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            let columns = cursor.columns().to_vec();
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows, expected);
+            assert_eq!(rows_result(&columns, rows), eager);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        // Root keys are still unresolved, and must resolve against the pin
+        // captured at opening rather than the writer's later index generation.
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        change.delete_vertex(VId(u128::MAX));
+        db.write(&commit, change).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_equality_properties_cannot_change_stream_quota_refusals() {
+    let ((), report) = run_async_under_lab(0x5ec0_6102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for hidden in [55, 99] {
+            let mut db = Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(hidden))],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1, 10, 1_000_000, 1000),
+                    || 100,
+                )
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(&cx, "MATCH (n) WHERE n.hidden = 55 RETURN n AS id", &args)
+                .unwrap();
+            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            assert!(matches!(
+                cursor.next(),
+                Some(Err(QueryError::Stream(GqlQueryError::Rows(error))))
+                    if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                        && error.limit == 1 && error.observed == 2
+            ));
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[path = "streams/ranges.rs"]
+mod ranges;
+
+#[test]
+fn keyed_aggregate_streams_share_candidate_bounds_in_local_send_and_async_drivers() {
+    let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..228_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+            batch.create_vertex(
+                VId(id + 1000),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+        }
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new().with_int64("key", 7).unwrap();
+        let text = "MATCH (n) WHERE n.p = $key RETURN COUNT(*) AS total, SUM(n.p) AS sum";
+        let eager = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap()
+            .query(&cx, text, &args)
+            .unwrap();
+        let mut exact = grant();
+        exact.limits.max_nodes = 2;
+        let token = issuer.issue_at(&exact, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                GqlQueryPolicy::new(2, 1, 1_000_000, 1000),
+                || 100,
+            )
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        for driver in 0..3 {
+            let (columns, rows) = match driver {
+                0 => {
+                    let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+                1 => {
+                    let mut cursor = session
+                        .stream_aggregate_send(&cx, &prepared, &args)
+                        .unwrap();
+                    fn is_send<T: Send>(_: &T) {}
+                    is_send(&cursor);
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+                _ => {
+                    let mut cursor = session
+                        .stream_aggregate_async(&cx, &prepared, &args)
+                        .unwrap();
+                    fn is_send<T: Send>(_: &T) {}
+                    is_send(&cursor);
+                    let columns = cursor.columns().to_vec();
+                    let mut rows = Vec::new();
+                    while let Some(row) = cursor.next_row().await.unwrap() {
+                        rows.push(row);
+                    }
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].values()[0].as_count(), Some(2));
+            assert_eq!(rows[0].values()[1].as_integer(), Some(14));
+            assert_eq!(
+                QueryResult::Rows {
+                    columns,
+                    rows: rows.into_iter().map(|row| row.values().to_vec()).collect(),
+                },
+                eager,
+                "driver {driver}",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_aggregate_equality_keeps_the_same_quota_refusal_in_every_driver() {
+    let ((), report) = run_async_under_lab(0x5ec0_6104, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for hidden in [55, 99] {
+            let mut db = Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(hidden))],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1, 1, 1_000_000, 1000),
+                    || 100,
+                )
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(
+                    &cx,
+                    "MATCH (n) WHERE n.hidden = 55 RETURN COUNT(*) AS total",
+                    &args,
+                )
+                .unwrap();
+            for driver in 0..3 {
+                let error = match driver {
+                    0 => {
+                        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    }
+                    1 => {
+                        let mut cursor = session
+                            .stream_aggregate_send(&cx, &prepared, &args)
+                            .unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    }
+                    _ => {
+                        let mut cursor = session
+                            .stream_aggregate_async(&cx, &prepared, &args)
+                            .unwrap();
+                        let error = cursor.next_row().await.unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next_row().await.unwrap().is_none());
+                        error
+                    }
+                };
+                assert!(matches!(
+                    error,
+                    QueryError::AggregateStream(GqlQueryError::Rows(error))
+                        if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                            && error.limit == 1 && error.observed == 2
+                ));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-7xqxb: a set whose canonical order is its one vertex scan's order
+/// (the vertex first, then columns, constants and parameters) pulls through
+/// that scan's native cursor, projecting each row exactly as the eager set
+/// does. Every other set shape still refuses streaming; nothing falls back
+/// to an eager result.
+#[test]
+fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
+    let ((), report) = run_async_under_lab(0x5ec0_6011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        for text in [
+            "MATCH (n) RETURN n AS id, $value AS value",
+            "MATCH (n) RETURN n AS id, 7 AS seven, n.p AS p, $value AS value",
+        ] {
+            let parse = GqlParameters::new().with_int64("value", 1).unwrap();
+            let prepared = session.prepare(&cx, text, &parse).unwrap();
+            // One prepared set rebinds to each argument without reparsing.
+            for value in [42, -3] {
+                let args = GqlParameters::new().with_int64("value", value).unwrap();
+                let eager = session.execute(&cx, &prepared, &args).unwrap();
+                let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                let columns = cursor.columns().to_vec();
+                let streamed = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert!(!streamed.is_empty(), "{text}");
+                assert!(streamed.iter().all(|row| {
+                    row.values().last() == Some(&GraphValue::Scalar(CanonicalScalar::Int(value)))
+                }));
+                assert_eq!(rows_result(&columns, streamed), eager, "{text}");
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+        }
+        let args = GqlParameters::new().with_int64("value", 1).unwrap();
+        for text in [
+            "MATCH (n) RETURN $value AS value, n AS id",
+            "MATCH (n) RETURN DISTINCT n AS id, $value AS value",
+            "MATCH (n) RETURN n AS id, $value AS value LIMIT 1",
+            "MATCH (n) RETURN n AS id, $value AS value ORDER BY value",
+        ] {
+            let prepared = session.prepare(&cx, text, &args).unwrap();
+            assert!(
+                matches!(
+                    session.stream(&cx, &prepared, &args),
+                    Err(QueryError::StreamingUnsupported { .. })
+                ),
+                "{text}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn streamed_predicates_and_projection_see_masked_fields_with_exact_order_and_pages() {
     let ((), report) = run_async_under_lab(0x5ec0_6001, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
@@ -97,10 +476,9 @@ fn streamed_predicates_and_projection_see_masked_fields_with_exact_order_and_pag
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-// Authorized sessions and cursors are single-task by design (!Send;
-// fgdb-authorized-cursor-send-qbfn1). This law holds a cursor across an
-// .await, so it runs on the real runtime's block_on, which accepts a non-Send
-// future, instead of the Send-only lab runner. The body is unchanged.
+// Keep the actual Send cursor alive across a write suspension. Its compile-time
+// Send proof covers the retained permit/source/pin, while the old Cell clocks
+// in the other laws continue to exercise the thread-local constructor.
 #[test]
 fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() {
     let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
@@ -133,7 +511,9 @@ fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() 
             .unwrap();
         // Eager admission sees more than one permitted vertex before the page.
         assert!(session.execute(&cx, &prepared, &args).is_err());
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
         drop(prepared); // Opening freezes the native physical definition.
         let at = cursor.snapshot_seq();
         let before_pause = calls.load(std::sync::atomic::Ordering::Relaxed);
@@ -165,7 +545,7 @@ fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() 
         let prepared = session
             .prepare(&cx, "MATCH (n) RETURN n AS id", &args)
             .unwrap();
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
         let before_close = calls.load(std::sync::atomic::Ordering::Relaxed);
         cursor.close();
         assert_eq!(cursor.state(), VertexScanState::Closed);
@@ -256,7 +636,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
             let prepared = session
                 .prepare(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &args)
                 .unwrap();
-            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
             assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
             assert!(
                 // ubs:ignore -- test assertion on a limit dimension, not secret material.
@@ -275,13 +655,65 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
                 .unwrap();
             assert_eq!(
                 session
-                    .stream(&cx, &prepared, &args)
+                    .stream_send(&cx, &prepared, &args)
                     .unwrap()
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap(),
                 vec![expected_row(1, 7)]
             );
         }
+        // fgdb-7xqxb: a root costs its node when admitted even if no record is
+        // read, so an identity-only stream cannot bypass max_nodes either.
+        let mut limited = grant();
+        limited.limits.max_nodes = 1;
+        let token = issuer.issue_at(&limited, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN n AS id", &args)
+            .unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            ))))
+        ));
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        // The aggregate cursors admit roots through the cooperative step
+        // (next_vertex_step), which charges the same node. count(*) reads no
+        // record either. Two roots are visible (VId 1 and 3). Under max_nodes
+        // 1 the second refuses before any group is delivered, never a short
+        // count. Under max_nodes 2 the count is exact.
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN count(*) AS n", &args)
+            .unwrap();
+        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            ))))
+        ));
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        let mut exact = grant();
+        exact.limits.max_nodes = 2;
+        let token = issuer.issue_at(&exact, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN count(*) AS n", &args)
+            .unwrap();
+        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+        let row = cursor.next().unwrap().unwrap();
+        assert_eq!(row.get(0).and_then(|value| value.as_count()), Some(2));
+        assert!(cursor.next().is_none());
+        drop(cursor);
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let mut session = db
             .authorized_read_session(
@@ -297,7 +729,7 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
         let prepared = session
             .prepare(&cx, "MATCH (n) RETURN n AS id, n.p AS p", &args)
             .unwrap();
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
         assert_eq!(cursor.next().unwrap().unwrap(), expected_row(1, 7));
         // Candidate id=2 is hidden. Its history still consumes native admission,
         // and that refusal must not become apparent end-of-stream.
@@ -845,3 +1277,389 @@ fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// EXPLAIN through an authorized session (fgdb-ooiik). The listing comes from
+/// the statement text and the session's catalog, so two databases differing
+/// only in records hidden from the token answer byte-identically. The
+/// certificate form, whose digest binds the snapshot sequence that hidden
+/// commits advance, refuses with a public reason.
+#[test]
+fn authorized_explain_lists_the_text_plan_and_cannot_see_hidden_records() {
+    let ((), report) = run_async_under_lab(0x5ec0_6102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let visible_only = stream_database(&c.commit(), false).await;
+        let with_hidden = stream_database(&c.commit(), true).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        fn explain_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                _ => symbols(kind, name),
+            }
+        }
+        let explain = |db: &Database<MemVfs>, text: &str| {
+            db.authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                explain_symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap()
+            .query(&cx, text, &args)
+        };
+        for text in [
+            "MATCH (n) RETURN n AS id, n.p AS p",
+            "MATCH (n:L) RETURN n AS id",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n AS id",
+        ] {
+            let statement = format!("EXPLAIN {text}");
+            let listed = explain(&visible_only, &statement).unwrap();
+            assert_eq!(listed, explain(&with_hidden, &statement).unwrap(), "{text}");
+            assert!(
+                matches!(&listed, QueryResult::Rows { columns, rows }
+                    if *columns == ["operator", "detail"] && !rows.is_empty()),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            explain(
+                &with_hidden,
+                "EXPLAIN (CERTIFICATE) MATCH (n) RETURN n AS id"
+            ),
+            Err(QueryError::Unsupported { .. })
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Capability-scoped reads refuse openCypher id()/elementId() (fgdb-j687q,
+/// owner ruling 2026-09-30): engine identities are not masked, so they would
+/// reveal allocation order across scopes. Every authorized text entry point
+/// refuses typed before preparation; the same word as an alias, a property
+/// key or inside quoted text is not the function and still runs.
+#[test]
+fn authorized_reads_refuse_identity_functions_at_every_text_entry_point() {
+    let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = stream_database(&c.commit(), false).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        let session = || {
+            db.authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+                .unwrap()
+        };
+        let denied = |result: Result<(), QueryError>| {
+            matches!(result, Err(QueryError::Authorization(Error::ScopeDenied)))
+        };
+        for text in [
+            "MATCH (n) RETURN id(n) AS i",
+            "MATCH (n) RETURN elementId(n) AS e",
+            "MATCH (n) RETURN ID /* split */ (n) AS i",
+            "MATCH (n) WITH n RETURN n.p AS p ORDER BY id(n)",
+            "EXPLAIN MATCH (n) RETURN id(n) AS i",
+        ] {
+            assert!(
+                denied(session().query(&cx, text, &args).map(drop)),
+                "query: {text}"
+            );
+            assert!(
+                denied(session().prepare(&cx, text, &args).map(drop)),
+                "prepare: {text}"
+            );
+            assert!(
+                denied(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        text,
+                        &args,
+                        symbols,
+                        policy(),
+                        || 100
+                    )
+                    .map(drop)
+                ),
+                "query_authorized: {text}"
+            );
+        }
+        for text in [
+            "MATCH (n) RETURN n AS id",
+            "MATCH (n) RETURN 'id(n)' AS quoted",
+        ] {
+            assert!(session().query(&cx, text, &args).is_ok(), "{text}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn range_and_prefix_streams_keep_scoped_quotas_across_capacity_and_type_fallbacks() {
+    let ((), report) = run_async_under_lab(0x5ec0_6201, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        for prefix in [false, true] {
+            // Two roots fit. Hidden and stale distinct values cross the fixed
+            // source capacity; a hidden nontext value is independently
+            // UNKNOWN. Neither changes visible candidate cost.
+            for population in [0_u128, 1, 70] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                        .await
+                        .unwrap();
+                let make_value = |number: i64| {
+                    if prefix {
+                        CanonicalScalar::ucs_basic_text(&format!("ok-{number}")).unwrap()
+                    } else {
+                        CanonicalScalar::Int(number)
+                    }
+                };
+                let outside = || {
+                    if prefix {
+                        CanonicalScalar::ucs_basic_text("outside").unwrap()
+                    } else {
+                        CanonicalScalar::Int(0)
+                    }
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.create_vertex(
+                    VId(0),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), outside())],
+                );
+                for (id, value) in [(1, 20), (u128::MAX, 30)] {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), make_value(value))],
+                    );
+                }
+                for id in 0..population {
+                    batch.create_vertex(
+                        VId(100 + id),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), make_value(200 + id as i64))],
+                    );
+                    batch.create_vertex(
+                        VId(1000 + id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), make_value(500 + id as i64))],
+                    );
+                }
+                if prefix && population == 1 {
+                    batch.create_vertex(
+                        VId(999),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(0))],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                if population != 0 {
+                    let mut change = WriteBatch::new(RelationId(1));
+                    for id in 0..population {
+                        change.set_vertex_property(
+                            VId(1000 + id),
+                            PropertyKeyId(1),
+                            Some(outside()),
+                        );
+                    }
+                    db.write(&commit, change).await.unwrap();
+                }
+                let filter = if prefix {
+                    "n.p STARTS WITH 'ok-'"
+                } else {
+                    "n.p >= 10 AND n.p < 1000"
+                };
+                let row_text = format!("MATCH (n) WHERE {filter} RETURN n AS id");
+                let aggregate_text = format!("MATCH (n) WHERE {filter} RETURN COUNT(*) AS total");
+                let args = GqlParameters::new();
+                let broad_token = issuer.issue_at(&grant(), 100).unwrap();
+                let eager = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &broad_token,
+                        "main",
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+                    .query(&cx, &row_text, &args)
+                    .unwrap();
+                let expected = vec![
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(1))]),
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(u128::MAX))]),
+                ];
+                let mut exact = grant();
+                exact.limits.max_nodes = 2;
+                let token = issuer.issue_at(&exact, 100).unwrap();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols,
+                        GqlQueryPolicy::new(2, 2, 1_000_000, 1000),
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, &row_text, &args).unwrap();
+                for send in [false, true] {
+                    let (columns, rows) = if send {
+                        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+                        fn is_send<T: Send>(_: &T) {}
+                        is_send(&cursor);
+                        let columns = cursor.columns().to_vec();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                        (columns, rows)
+                    } else {
+                        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                        let columns = cursor.columns().to_vec();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                        (columns, rows)
+                    };
+                    assert_eq!(
+                        rows, expected,
+                        "prefix={prefix}, population={population}, send={send}"
+                    );
+                    assert_eq!(rows_result(&columns, rows), eager);
+                }
+                let prepared = session.prepare(&cx, &aggregate_text, &args).unwrap();
+                for driver in 0..3 {
+                    let rows = match driver {
+                        0 => {
+                            let mut cursor =
+                                session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                        1 => {
+                            let mut cursor = session
+                                .stream_aggregate_send(&cx, &prepared, &args)
+                                .unwrap();
+                            fn is_send<T: Send>(_: &T) {}
+                            is_send(&cursor);
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                        _ => {
+                            let mut cursor = session
+                                .stream_aggregate_async(&cx, &prepared, &args)
+                                .unwrap();
+                            fn is_send<T: Send>(_: &T) {}
+                            is_send(&cursor);
+                            let mut rows = Vec::new();
+                            while let Some(row) = cursor.next_row().await.unwrap() {
+                                rows.push(row);
+                            }
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                    };
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(
+                        rows[0].values()[0].as_count(),
+                        Some(2),
+                        "prefix={prefix}, population={population}, driver={driver}"
+                    );
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_range_and_prefix_keys_keep_the_same_native_record_refusal() {
+    let ((), report) = run_async_under_lab(0x5ec0_6202, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for prefix in [false, true] {
+            for matches in [false, true] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                        .await
+                        .unwrap();
+                let value = if prefix {
+                    CanonicalScalar::ucs_basic_text(if matches { "Ad" } else { "other" }).unwrap()
+                } else {
+                    CanonicalScalar::Int(if matches { 55 } else { 99 })
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                for id in 1..=2 {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(2), value.clone())],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                let filter = if prefix {
+                    "n.hidden STARTS WITH 'Ad'"
+                } else {
+                    "n.hidden >= 50 AND n.hidden < 60"
+                };
+                let text = format!("MATCH (n) WHERE {filter} RETURN n AS id");
+                let args = GqlParameters::new();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols,
+                        GqlQueryPolicy::new(1, 2, 1_000_000, 1000),
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, &text, &args).unwrap();
+                for send in [false, true] {
+                    let error = if send {
+                        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    } else {
+                        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    };
+                    assert!(
+                        matches!(error,
+                            QueryError::Stream(GqlQueryError::Rows(error))
+                                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                                    && error.limit == 1 && error.observed == 2
+                        ),
+                        "prefix={prefix}, matches={matches}, send={send}"
+                    );
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[path = "streams/prefix_types.rs"]
+mod prefix_types;

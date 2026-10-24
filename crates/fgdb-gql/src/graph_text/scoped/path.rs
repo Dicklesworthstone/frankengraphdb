@@ -7,12 +7,37 @@ use super::*;
 use crate::GraphWalkBounds;
 
 impl Parser<'_> {
+    /// A match mode belongs to the whole graph pattern, including comma
+    /// parts. It is independent of the selected path mode and resets at every
+    /// MATCH or existential pattern. Both language adapters share this bounded
+    /// syntax and lower it into the native relationship-identity constraint.
+    pub(super) fn match_mode(&mut self) -> Result<GraphMatchMode, GraphPatternTextError> {
+        if self.take_word("REPEATABLE")? {
+            if self.take_word("ELEMENT")? {
+                self.take_word("BINDINGS")?;
+            } else {
+                self.word("ELEMENTS")?;
+            }
+            Ok(GraphMatchMode::RepeatableElements)
+        } else if self.take_word("DIFFERENT")? {
+            if self.take_word("EDGE")? || self.take_word("RELATIONSHIP")? {
+                self.take_word("BINDINGS")?;
+            } else if !self.take_word("EDGES")? {
+                self.word("RELATIONSHIPS")?;
+            }
+            Ok(GraphMatchMode::DifferentEdges)
+        } else {
+            Ok(GraphMatchMode::DifferentEdges)
+        }
+    }
+
     /// Select the existing physical search, never enumerate all paths and
     /// post-filter them. ALL is nonselective; ANY may deterministically choose
     /// a shortest admissible occurrence. SHORTEST 1 selects one, whereas
     /// SHORTEST [1] GROUP[S] and ALL SHORTEST retain all tied minima.
     /// Bare SHORTEST is a native shorthand for SHORTEST 1. PATH/PATHS are
-    /// optional selector noise words; the native default mode remains WALK.
+    /// optional selector noise words. The default path mode remains WALK;
+    /// the enclosing match mode independently controls relationship reuse.
     /// Counts beyond one and shortest/repetition-mode combinations need new
     /// logical operators and refuse rather than silently weakening the query.
     pub(super) fn path_search(&mut self) -> Result<GraphWalkSearch, GraphPatternTextError> {
@@ -57,7 +82,9 @@ impl Parser<'_> {
     fn single_path_count(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.current.at;
         match self.current.kind {
-            TokenKind::Digits(digits) if matches!(digits.parse::<u64>(), Ok(1)) => {
+            TokenKind::Digits(digits)
+                if crate::graph_text::integer_magnitude(digits) == Some(1) =>
+            {
                 self.advance()?;
                 Ok(())
             }
@@ -82,9 +109,10 @@ impl Parser<'_> {
         }
     }
 
-    /// Postfix `{m,n}`, `{n}` and `{,n}` follow the complete relationship,
-    /// including its direction. GQL's omitted lower bound is zero, unlike
-    /// Cypher's `*..n` lower bound of one. An upper bound is always required.
+    /// Postfix `{m,n}`, `{n}`, `{,n}` and the unbounded `{m,}` follow the
+    /// complete relationship, including its direction. GQL's omitted lower
+    /// bound is zero, unlike Cypher's `*..n` lower bound of one. An omitted
+    /// upper bound needs a repetition rule that ends (checked by the caller).
     /// A second quantifier refuses even when its interval happens to agree.
     pub(super) fn relationship_walk_bounds(
         &mut self,
@@ -102,27 +130,32 @@ impl Parser<'_> {
         }
         self.advance()?;
         let (minimum, maximum) = if self.take(b',')? {
-            (0, self.walk_hop_literal()?)
+            (0, Some(self.walk_hop_literal()?))
         } else {
             let minimum = self.walk_hop_literal()?;
-            let maximum = if self.take(b',')? {
-                self.walk_hop_literal()?
+            let maximum = if !self.take(b',')? {
+                Some(minimum)
+            } else if self.is_punct(b'}') {
+                None
             } else {
-                minimum
+                Some(self.walk_hop_literal()?)
             };
             (minimum, maximum)
         };
         self.punct(b'}', "}")?;
-        GraphWalkBounds::new(minimum, maximum)
-            .map(Some)
-            .map_err(|_| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected(
-                        "finite ordered WALK bounds within the hop limit",
-                    ),
-                )
-            })
+        match maximum {
+            Some(maximum) => GraphWalkBounds::new(minimum, maximum),
+            None => GraphWalkBounds::unbounded(minimum),
+        }
+        .map(Some)
+        .map_err(|_| {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "finite ordered WALK bounds within the hop limit",
+                ),
+            )
+        })
     }
 }
 
@@ -130,7 +163,7 @@ impl Parser<'_> {
 mod tests {
     use super::*;
     use crate::{GqlQueryPolicy, PreparedGraphWriteScript};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -148,7 +181,12 @@ mod tests {
         // A diamond with a direct edge: three occurrences reach vertex 4,
         // but only the direct edge is shortest. Vertex 5 is an isolate.
         let numbers: BTreeMap<_, _> = (1..=5)
-            .map(|id| (VId(id), CanonicalScalar::Int(id as i64)))
+            .map(|id| {
+                (
+                    VId(id),
+                    CanonicalPropertyValue::from(CanonicalScalar::Int(id as i64)),
+                )
+            })
             .collect();
         let pattern = PreparedGraphText::prepare(text, symbols)
             .unwrap()
@@ -156,15 +194,15 @@ mod tests {
             .unwrap();
         let mut rows: Vec<_> = pattern
             .plan()
-            .execute_governed_with_properties(
+            .execute_governed_with_identified_properties(
                 10,
                 (1..=5).map(VId),
                 [
-                    (VId(1), RelationId(1), VId(2)),
-                    (VId(1), RelationId(1), VId(3)),
-                    (VId(2), RelationId(1), VId(4)),
-                    (VId(3), RelationId(1), VId(4)),
-                    (VId(1), RelationId(1), VId(4)),
+                    (EId(1), VId(1), RelationId(1), VId(2)),
+                    (EId(2), VId(1), RelationId(1), VId(3)),
+                    (EId(3), VId(2), RelationId(1), VId(4)),
+                    (EId(4), VId(3), RelationId(1), VId(4)),
+                    (EId(5), VId(1), RelationId(1), VId(4)),
                 ],
                 |vid, predicates| {
                     let properties: Vec<_> = numbers
@@ -186,6 +224,68 @@ mod tests {
         // Assert bag contents without inventing an implicit ORDER BY contract.
         rows.sort();
         rows
+    }
+
+    #[test]
+    fn match_modes_cover_each_clause_and_reset_for_implicit_pattern_predicates() {
+        for spelling in [
+            "",
+            "DIFFERENT EDGES ",
+            "DIFFERENT EDGE ",
+            "DIFFERENT EDGE BINDINGS ",
+            "DIFFERENT RELATIONSHIPS ",
+            "DIFFERENT RELATIONSHIP BINDINGS ",
+        ] {
+            let text = format!("MATCH {spelling}(a)-[:R]->(b) RETURN a");
+            assert_eq!(parse(&text).match_mode, GraphMatchMode::DifferentEdges);
+        }
+        for spelling in [
+            "REPEATABLE ELEMENTS",
+            "REPEATABLE ELEMENT",
+            "REPEATABLE ELEMENT BINDINGS",
+        ] {
+            let text = format!("MATCH {spelling} p = WALK (a)-[:R*0..2]->(b) RETURN p");
+            assert_eq!(parse(&text).match_mode, GraphMatchMode::RepeatableElements);
+        }
+        let syntax = parse(
+            "MATCH REPEATABLE ELEMENTS (a) WHERE (a)-[:R*2]-() \
+             OPTIONAL MATCH REPEATABLE ELEMENTS (a)-[:R*2]-(c) \
+             MATCH (c)-[:R]->(d) RETURN a,d",
+        );
+        assert_eq!(syntax.match_mode, GraphMatchMode::RepeatableElements);
+        assert_eq!(
+            syntax.scopes[0].body.match_mode,
+            GraphMatchMode::DifferentEdges
+        );
+        assert_eq!(
+            syntax.scopes[1].body.match_mode,
+            GraphMatchMode::RepeatableElements
+        );
+        assert_eq!(
+            syntax.scopes[2].body.match_mode,
+            GraphMatchMode::DifferentEdges
+        );
+    }
+
+    #[test]
+    fn malformed_match_modes_refuse_before_catalog_resolution() {
+        for mode in [
+            "DIFFERENT",
+            "DIFFERENT ELEMENTS",
+            "REPEATABLE",
+            "REPEATABLE EDGES",
+            "DIFFERENT EDGES REPEATABLE ELEMENTS",
+            "REPEATABLE ELEMENTS DIFFERENT EDGES",
+        ] {
+            let text = format!("MATCH {mode} (a)-[:R]->(b) RETURN a LIMIT 0");
+            assert!(
+                PreparedGraphText::prepare(&text, |_, _| {
+                    panic!("invalid match mode must be rejected before name resolution")
+                })
+                .is_err(),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -302,7 +402,9 @@ mod tests {
         for relationship in [
             "-[:R]->{}",
             "-[:R]->{,}",
-            "-[:R]->{1,}",
+            // `{1,}` is unbounded and valid under the default DIFFERENT EDGES
+            // (match_modes unbounded_quantifiers_end_by_their_repetition_rule
+            // keeps its REPEATABLE ELEMENTS refusal).
             "-[:R]->{3,2}",
             "-[:R]->{1,1025}",
             "-[:R]->{4294967296}",
@@ -313,7 +415,6 @@ mod tests {
             "-[:R]->{1,2",
             "-[:R*1..2]->{1,2}",
             "-[:R]->{1,2}{1,2}",
-            "<-[:R]->{1,2}",
         ] {
             let text = format!("MATCH (a){relationship}(b) RETURN b LIMIT 0");
             let mut resolutions = 0;

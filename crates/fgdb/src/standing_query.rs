@@ -14,8 +14,8 @@ mod joins;
 mod kcore;
 mod native;
 pub use native::{
-    NativeSubscription, StandingNativeCursor, StandingNativeDeltaCursor, SubscribeError,
-    SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
+    NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
+    SubscribeError, SubscriptionBatch, SubscriptionError, SubscriptionReceipt,
 };
 mod output;
 mod projection;
@@ -24,12 +24,17 @@ mod reduction;
 mod replay;
 pub use replay::{StandingReplayBatch, StandingReplayWindow};
 mod sets;
+mod triangle_counts;
 mod triangles;
 mod window;
 // Reuse the concurrently introduced row-output file as one registry sink.
 #[path = "standing_query/output/values.rs"]
 mod row;
 mod sink;
+
+#[cfg(test)]
+#[path = "standing_query/typed_group_tests.rs"]
+mod typed_group_tests;
 
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
@@ -57,6 +62,11 @@ pub struct StandingQueryStats {
     /// Parallel edges count separately; a self-loop counts once.
     /// Recursive/triangle views report work/scratch and delta_rows only;
     /// their affected_vertices/affected_edges counters remain zero.
+    ///
+    /// A relational circuit node (set, join, projection, filter, reduction,
+    /// window, group, replay) reads no graph. Both affected counters are then
+    /// the sum over its distinct graph sources that maintained the same tick,
+    /// each counted once however many paths reach it.
     pub affected_edges: u64,
     pub work_units: u64,
     pub scratch_entries: u64,
@@ -269,6 +279,9 @@ impl<Row: Ord> StandingQueryView<'_, Row> {
 }
 
 pub(crate) enum StandingQuery {
+    /// An explicitly released PRIVATE registration slot. No handle escaped
+    /// its owner. Keep later indices stable; release trims a vacant suffix.
+    Released,
     Aggregate(Box<aggregate::StandingQuery>),
     /// The same complete-group producer with a prepared downstream result stage.
     ProjectedAggregate {
@@ -284,6 +297,7 @@ pub(crate) enum StandingQuery {
     /// Recursive endpoint closure of a complete maintained row relation.
     Closure(Box<closure::State>),
     Triangles(Box<triangles::State>),
+    TriangleCounts(Box<triangle_counts::State>),
     Components(Box<components::State>),
     CoreNumbers(Box<kcore::State>),
     /// Dependencies name only earlier registry entries, so the append order
@@ -303,14 +317,60 @@ pub(crate) enum StandingQuery {
 }
 
 impl StandingQuery {
+    /// The earlier registry entries a relational node reads. Graph engines
+    /// read the commit delta itself and return None.
+    fn relational_inputs(&self) -> Option<Vec<usize>> {
+        match self {
+            Self::Set(query) => Some(query.inputs.to_vec()),
+            Self::Join(query) => Some(query.inputs.to_vec()),
+            Self::Projection(query) => Some(vec![query.input]),
+            Self::Filter(query) => Some(vec![query.input]),
+            Self::Reduction(query) => Some(vec![query.input]),
+            Self::Window(query) => Some(vec![query.input]),
+            Self::Group(query) => Some(vec![query.input]),
+            Self::Replay(query) => Some(vec![query.source.index]),
+            _ => None,
+        }
+    }
+
+    fn maintained(&self) -> Option<(CommitSeq, &StandingQueryStats)> {
+        Some(match self {
+            Self::Released => return None,
+            Self::Aggregate(query)
+            | Self::ProjectedAggregate { source: query, .. }
+            | Self::Rows { source: query, .. } => (query.frontier, &query.stats),
+            Self::Reachability(query) => (query.frontier, &query.stats),
+            Self::Closure(query) => (query.frontier, &query.stats),
+            Self::Triangles(query) => (query.frontier, &query.stats),
+            Self::TriangleCounts(query) => (query.frontier, &query.stats),
+            Self::Components(query) => (query.frontier, &query.stats),
+            Self::CoreNumbers(query) => (query.frontier, &query.stats),
+            Self::Set(query) => (query.frontier, &query.stats),
+            Self::Join(query) => (query.frontier, &query.stats),
+            Self::Projection(query) => (query.frontier, &query.stats),
+            Self::Filter(query) => (query.frontier, &query.stats),
+            Self::Reduction(query) => (query.frontier, &query.stats),
+            Self::Window(query) => (query.frontier, &query.stats),
+            Self::Group(query) => (query.frontier, &query.stats),
+            Self::Constant(query) => (query.frontier, &query.stats),
+            Self::Replay(query) => (query.frontier, &query.stats),
+        })
+    }
+
     fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
         match self {
+            Self::Released => (
+                GqlQueryPolicy::new(0, 0, 0, 0),
+                CommitSeq::ORIGIN,
+                Some(StandingQueryFailure::DependencyUnavailable),
+            ),
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
             Self::Closure(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
+            Self::TriangleCounts(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
             Self::Set(query) => (query.policy, query.frontier, query.failure),
@@ -332,6 +392,7 @@ impl StandingQuery {
         stats: StandingQueryStats,
     ) {
         let (frontier, failure, observed) = match self {
+            Self::Released => return,
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => {
@@ -342,6 +403,9 @@ impl StandingQuery {
             }
             Self::Closure(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Triangles(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::TriangleCounts(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
             Self::Components(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::CoreNumbers(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Set(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
@@ -415,20 +479,39 @@ impl<V: Vfs + Clone> Database<V> {
     /// that prefix; unbounded ranking materializes the complete ordered result.
     /// Use ordered_rows() for query order and rows() for its selected Z-set bag.
     ///
-    /// A definition with a relational input owns the complete maintained input
+    /// Eligible numeric and collection definitions use the same complete-row
+    /// circuit as native text registration, chosen from the definition before
+    /// reading data. SUM/AVG retain exact mixed integer/binary64 support and
+    /// retract back to integer/rational results when the last float disappears.
+    /// COLLECT retains its separately proved occurrence order. Count/extremum-
+    /// only definitions keep the direct source engine; no runtime error retries
+    /// through a different engine or treats an unsupported source as empty.
+    ///
+    /// A relational or normalized definition owns the COMPLETE maintained input
     /// circuit, not only its first graph leaf. Its final row allowance applies
-    /// to group outputs; private input nodes retain source/work/scratch limits.
-    /// standing_group_delta exposes its latest accepted final-output change.
+    /// to group outputs; each private node retains source/work/scratch limits.
+    /// These are per-node logical budgets, not a combined byte-memory ceiling.
+    /// Maintenance stats describe the selected result owner. standing_query_delta
+    /// exposes its accepted final-output change; rebuild repairs the whole owned
+    /// circuit, including a failed private source, without changing the handle.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
         if definition.input_relation().is_some() {
             let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(definition)
                 .ok_or(StandingQueryError::Unsupported)?;
             return self.register_standing_relation_aggregate(cx, &definition, policy);
+        }
+        if let Some(relation) = definition.incremental_group_relation() {
+            // Reuse the ordinary all-or-nothing registry transaction. Keeping
+            // its owned-circuit handle is essential for whole-circuit rebuild;
+            // publishing just the group node would orphan its private sources.
+            return self.register_standing_relation_aggregate(cx, &relation, policy);
         }
         let query = self.prepare_registered_aggregate(cx, definition, policy)?;
         Ok(self.store_standing_query(query))
@@ -578,6 +661,7 @@ impl<V: Vfs + Clone> Database<V> {
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
+            StandingQuery::Released => return Err(StandingQueryError::UnknownHandle),
             StandingQuery::Replay(query) => StandingQuery::Replay(Box::new(
                 self.prepare_standing_replay(cx, &query.source, query.limits, policy)?,
             )),
@@ -608,12 +692,20 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),
+            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
+                self.prepare_standing_triangle_counts(cx, query.relation, query.output(), policy)?,
+            )),
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
-            StandingQuery::CoreNumbers(query) => StandingQuery::CoreNumbers(Box::new(
-                self.prepare_standing_core_numbers(cx, query.relation, policy)?,
-            )),
+            StandingQuery::CoreNumbers(query) => {
+                StandingQuery::CoreNumbers(Box::new(self.prepare_standing_core_numbers(
+                    cx,
+                    query.relation,
+                    policy,
+                    query.has_value_rows(),
+                )?))
+            }
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
                 cx,
                 query.inputs,
@@ -697,6 +789,9 @@ impl<V: Vfs + Clone> Database<V> {
             .standing_queries
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
+        if matches!(query, StandingQuery::Released) {
+            return Err(StandingQueryError::UnknownHandle);
+        }
         let (_, frontier, failure) = query.status();
         if let Some(reason) = failure {
             return Err(StandingQueryError::Unavailable { frontier, reason });
@@ -708,6 +803,50 @@ impl<V: Vfs + Clone> Database<V> {
             });
         }
         Ok(query)
+    }
+
+    /// Borrow the latest maintenance statistics of every node owned by this
+    /// handle, in dependency order with the result owner last. A direct view
+    /// has one node; a native circuit includes its private sources and stages.
+    /// Separately registered dependencies keep their own handles and policies.
+    ///
+    /// Work and scratch limits apply independently to each node. Their maxima
+    /// give the observed per-node requirements of this maintenance operation;
+    /// result-owner statistics alone cannot establish a whole-circuit bound.
+    /// Snapshot/result quotas and future ticks require their own admission.
+    /// Owner, database health, cancellation and freshness checks precede access.
+    pub fn standing_query_node_stats<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<impl DoubleEndedIterator<Item = &'a StandingQueryStats>, StandingQueryError> {
+        self.admitted_standing_query(cx, handle)?;
+        let first = match handle.native.as_deref() {
+            Some(
+                native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. },
+            ) => *first,
+            _ => handle.index,
+        };
+        let nodes = self
+            .standing_queries
+            .get(first..=handle.index)
+            .ok_or(StandingQueryError::UnknownHandle)?;
+        for node in nodes {
+            cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+            let (_, frontier, failure) = node.status();
+            if let Some(reason) = failure {
+                return Err(StandingQueryError::Unavailable { frontier, reason });
+            }
+            if frontier != self.snapshot.frontier || node.maintained().is_none() {
+                return Err(StandingQueryError::Unavailable {
+                    frontier,
+                    reason: StandingQueryFailure::InvalidDelta,
+                });
+            }
+        }
+        Ok(nodes
+            .iter()
+            .filter_map(|node| node.maintained().map(|(_, stats)| stats)))
     }
 
     /// Read a native aggregate result. Its bag and optional ordered page share
@@ -737,6 +876,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Rows { .. }
             | StandingQuery::Constant(_)
             | StandingQuery::Triangles(_)
+            | StandingQuery::TriangleCounts(_)
             | StandingQuery::Components(_)
             | StandingQuery::CoreNumbers(_)
             | StandingQuery::Set(_)
@@ -745,6 +885,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_)
             | StandingQuery::Replay(_)
+            | StandingQuery::Released
             | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
@@ -813,6 +954,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
         // operands and one exclusive consumer; no cursor can skip a tick.
         let (prior, remaining) = queries.split_at_mut(index);
         let query = &mut remaining[0];
+        if matches!(query, StandingQuery::Released) {
+            continue;
+        }
         let (policy, _, failure) = query.status();
         if failure.is_some() {
             continue;
@@ -827,6 +971,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             checkpoint: &mut checkpoint,
         };
         let result = match query {
+            StandingQuery::Released => continue,
             StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
             StandingQuery::ProjectedAggregate { source, output } => {
                 source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
@@ -837,6 +982,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::TriangleCounts(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => {
                 query.maintain_with_sources(cx, batch, prior, &mut meter)
             }
@@ -851,6 +997,37 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
             StandingQuery::Replay(query) => query.maintain(batch, prior, &mut meter),
         };
+        // A relational node reads no graph: its affected identities are the
+        // ones its graph sources re-derived in this tick.
+        if result.is_ok()
+            && let Some(inputs) = query.relational_inputs()
+        {
+            let (vertices, edges) = source_affected(prior, inputs, batch.commit_seq());
+            meter.stats.affected_vertices = vertices;
+            meter.stats.affected_edges = edges;
+        }
         query.record(batch.commit_seq(), result, meter.stats);
     }
+}
+
+/// The affected counters of the distinct graph sources under `inputs` that
+/// maintained tick `at`. Every input names an earlier entry, so the walk ends.
+fn source_affected(queries: &[StandingQuery], inputs: Vec<usize>, at: CommitSeq) -> (u64, u64) {
+    let mut pending = inputs;
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut vertices, mut edges) = (0_u64, 0_u64);
+    while let Some(index) = pending.pop() {
+        let Some(query) = queries.get(index).filter(|_| seen.insert(index)) else {
+            continue;
+        };
+        if let Some(inputs) = query.relational_inputs() {
+            pending.extend(inputs);
+        } else if let Some((frontier, stats)) = query.maintained()
+            && frontier == at
+        {
+            vertices = vertices.saturating_add(stats.affected_vertices);
+            edges = edges.saturating_add(stats.affected_edges);
+        }
+    }
+    (vertices, edges)
 }

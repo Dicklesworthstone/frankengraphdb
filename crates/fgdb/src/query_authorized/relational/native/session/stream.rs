@@ -3,24 +3,58 @@
 //! the native physical operator. No source table or result set is collected.
 
 use super::*;
-use fgdb_gql::GlaExecutionEvent;
-use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
+use fgdb_gql::algebra::{EdgeRelation, GlaOperator, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanPlan, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
     VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
 };
+use fgdb_gql::{GlaExecutionEvent, GraphSetExecutionError, GraphSetRowPull};
 use fgdb_types::EId;
 use std::iter::FusedIterator;
-use std::rc::Rc;
+use std::marker::PhantomData;
+use std::sync::{Mutex, MutexGuard};
 
 #[path = "stream/aggregate.rs"]
 mod aggregate;
-pub use aggregate::AuthorizedAggregateCursor;
+pub use aggregate::{
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedSendAggregateCursor,
+};
 
-type Shared<'q> = Rc<RefCell<Execution<'q, 'q, Box<dyn FnMut() -> u64 + 'q>>>>;
+#[path = "stream/ordered.rs"]
+mod ordered;
+pub use ordered::{
+    AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor,
+};
+
+// Synchronization is local to ONE cursor's sequential callbacks. No guard is
+// held across a source call or suspension. Keeping the actual borrowed clock
+// permits both existing thread-local clocks and Send task-owned cursors.
+struct Shared<'q, Clock>(Arc<Mutex<Execution<'q, 'q, &'q mut Clock>>>);
+impl<Clock> Clone for Shared<'_, Clock> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+impl<'q, Clock> Shared<'q, Clock> {
+    fn borrow(&self) -> MutexGuard<'_, Execution<'q, 'q, &'q mut Clock>> {
+        self.0.lock().expect("authorized cursor callback unwound")
+    }
+    fn borrow_mut(&self) -> MutexGuard<'_, Execution<'q, 'q, &'q mut Clock>> {
+        self.borrow()
+    }
+}
 type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;
-type Opened<'q, Row, Metadata> = Result<(AuthorizedRowCursor<'q, Row>, Metadata), QueryError>;
+type SendPull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + Send + 'q>;
+type Opened<'q, Row, Metadata, Driver = Pull<'q, Row>> =
+    Result<(AuthorizedRowCursor<'q, Row, Driver>, Metadata), QueryError>;
+
+/// The same native row cursor with a Send driver. It remains exclusively
+/// borrowed from its session; moving between runtime workers does not create
+/// a second permit, snapshot, source position, or concurrent reader.
+pub type AuthorizedSendRowCursor<'q> =
+    AuthorizedRowCursor<'q, GraphValueRow, SendPull<'q, GraphValueRow>>;
 
 // The bound GLA root chooses one physical source before any candidate read.
 // Failure in that profile cannot fall back to a different or eager executor.
@@ -64,23 +98,33 @@ impl Drop for PinGuard<'_> {
 /// its accumulation/support/collection storage is not bounded by the root-row
 /// profile above. See stream_aggregate for its first-pull and storage contract.
 ///
-/// Single-task by design: the cursor is `!Send`, because it shares its
-/// session's live permit through `Rc<RefCell<..>>`, and authorized sessions do
-/// not require a `Send` clock. Drive it on the task that opened it (a runtime's
-/// `block_on` accepts it; a `Send`-only spawner does not).
+/// The ordinary constructor preserves support for thread-local host clocks.
+/// `stream_send` produces the same native cursor with a Send driver when the
+/// session clock is Send, for a task that may move between runtime workers.
 ///
 /// This borrows the session and QueryCx until dropped, not the database writer,
 /// token bytes or prepared template. Credential invalidation or a host callback
 /// unwind closes the session; ordinary cursor errors do not widen its policy.
 /// No restart token, durable lease, spill, or physical noninterference is claimed.
-pub struct AuthorizedRowCursor<'q, Row = GraphValueRow> {
-    driver: Option<Pull<'q, Row>>,
+pub struct AuthorizedRowCursor<'q, Row = GraphValueRow, Driver = Pull<'q, Row>> {
+    driver: Option<Driver>,
     guard: Option<PinGuard<'q>>,
     columns: Vec<String>,
     snapshot_seq: CommitSeq,
     state: VertexScanState,
+    row: PhantomData<fn() -> Row>,
 }
-impl<Row> AuthorizedRowCursor<'_, Row> {
+impl<Row, Driver> AuthorizedRowCursor<'_, Row, Driver> {
+    fn new(driver: Driver, columns: Vec<String>, at: CommitSeq) -> Self {
+        Self {
+            driver: Some(driver),
+            guard: None,
+            columns,
+            snapshot_seq: at,
+            state: VertexScanState::Open,
+            row: PhantomData,
+        }
+    }
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -104,7 +148,10 @@ impl<Row> AuthorizedRowCursor<'_, Row> {
         self.guard.take();
     }
 }
-impl<Row> Iterator for AuthorizedRowCursor<'_, Row> {
+impl<Row, Driver> Iterator for AuthorizedRowCursor<'_, Row, Driver>
+where
+    Driver: FnMut() -> Result<(Option<Row>, bool), QueryError>,
+{
     type Item = Result<Row, QueryError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.state != VertexScanState::Open {
@@ -146,8 +193,11 @@ impl<Row> Iterator for AuthorizedRowCursor<'_, Row> {
         (0, (self.state != VertexScanState::Open).then_some(0))
     }
 }
-impl<Row> FusedIterator for AuthorizedRowCursor<'_, Row> {}
-impl<Row> core::fmt::Debug for AuthorizedRowCursor<'_, Row> {
+impl<Row, Driver> FusedIterator for AuthorizedRowCursor<'_, Row, Driver> where
+    Driver: FnMut() -> Result<(Option<Row>, bool), QueryError>
+{
+}
+impl<Row, Driver> core::fmt::Debug for AuthorizedRowCursor<'_, Row, Driver> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedRowCursor")
             .field("state", &self.state)
@@ -156,9 +206,9 @@ impl<Row> core::fmt::Debug for AuthorizedRowCursor<'_, Row> {
     }
 }
 
-struct ScopedSource<'q, S> {
+struct ScopedSource<'q, S, Clock> {
     inner: S,
-    execution: Shared<'q>,
+    execution: Shared<'q, Clock>,
 }
 // Every history lookup here runs under a poll-only control (FG-INV-20), whose
 // own refusal/cancellation is carried as a source error because the executor's
@@ -192,11 +242,11 @@ fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
     }
 }
 
-impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
+impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> ScopedSource<'_, S, Clock> {
     /// Whether this capability may see `vid` at the cut, decided with a
     /// poll-only lookup: skipping a candidate is never charged (FG-INV-20).
     fn visible<C>(&self, vid: VId) -> Result<bool, VertexScanSourceError<QueryError, C>> {
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
         let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
             return Ok(false);
@@ -207,6 +257,29 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
             .permit
             .predicates()
             .allows_vertex(row.labels))
+    }
+
+    // Resolve the historical winner once, admit its scope, and recheck the
+    // selected equality before charging a root. Historical index membership is
+    // only a candidate superset; stale or private rows spend no allowance.
+    fn visible_root<C>(&self, vid: VId) -> Result<bool, VertexScanSourceError<QueryError, C>> {
+        let execution = self.execution.clone();
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
+            return Ok(false);
+        };
+        let admitted = self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_vertex(row.labels);
+        if !admitted {
+            return Ok(false);
+        }
+        self.inner
+            .root_is_candidate(&row, &mut poll)
+            .map_err(scoped_error)
     }
 
     // This is private source admission, not a caller-visible raw record route.
@@ -220,7 +293,7 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         // FG-INV-20: the history lookup polls cancellation only, and nothing is
         // charged until the vertex is admitted; then one unit plus one per label
         // the capability may see. A forbidden or absent vertex costs nothing.
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
         let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
             return Ok(None);
@@ -248,7 +321,7 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         }
         self.execution
             .borrow_mut()
-            .node()
+            .vertex_node(vid)
             .map_err(VertexScanSourceError::Source)?;
         Ok(Some(row))
     }
@@ -261,7 +334,7 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
         let Some(edge) = self
             .inner
@@ -305,7 +378,9 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         Ok(Some(edge))
     }
 }
-impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'_, S> {
+impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSource
+    for ScopedSource<'_, S, Clock>
+{
     type Error = QueryError;
     fn snapshot_seq(&self) -> CommitSeq {
         self.inner.snapshot_seq()
@@ -319,15 +394,46 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         // so neither the cursor's native meter nor the signed allowance ever
         // counts them. A refusal or cancellation seen while skipping surfaces
         // as a source error, which the stream reports exactly as a control one.
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
         loop {
             let Some(vid) = self.inner.next_vertex(&mut poll).map_err(scoped_error)? else {
                 return Ok(None);
             };
-            if self.visible(vid)? {
+            if self.visible_root(vid)? {
+                // An admitted root costs its node before any row can use it.
+                self.execution
+                    .borrow_mut()
+                    .root_node(vid)
+                    .map_err(VertexScanSourceError::Source)?;
                 return Ok(Some(vid));
             }
+        }
+    }
+
+    fn next_vertex_step<C>(
+        &mut self,
+        _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<VId>, VertexScanSourceError<QueryError, C>> {
+        use fgdb_gql::scan_stream::SourceStep;
+        let execution = self.execution.clone();
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        match self
+            .inner
+            .next_vertex_step(&mut poll)
+            .map_err(scoped_error)?
+        {
+            SourceStep::Item(vid) if self.visible_root(vid)? => {
+                // The cooperative step admits a root exactly as next_vertex
+                // does, so its node is charged before any row can use it.
+                self.execution
+                    .borrow_mut()
+                    .root_node(vid)
+                    .map_err(VertexScanSourceError::Source)?;
+                Ok(SourceStep::Item(vid))
+            }
+            SourceStep::Item(vid) | SourceStep::Skipped(vid) => Ok(SourceStep::Skipped(vid)),
+            SourceStep::Exhausted => Ok(SourceStep::Exhausted),
         }
     }
     fn vertex<'a, C>(
@@ -376,7 +482,10 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, VertexScanSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        VertexScanSourceError<QueryError, C>,
+    > {
         let Some(row) = self.admitted_vertex(vid, control)? else {
             return Ok(None); // Missing vertex is NOT a present vertex with SQL NULL.
         };
@@ -427,7 +536,7 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         // Independent scopes get their own caller-owned position and the same
         // immutable generation. Forbidden and absent candidates are skipped
         // here, unmetered, exactly as next_vertex does (FG-INV-20).
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
         let mut after = after;
         loop {
@@ -448,7 +557,7 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
     fn next_probe_edge_for_relation<C>(
         &self,
         endpoint: VId,
-        relation: RelationId,
+        relation: EdgeRelation,
         direction: fgdb_gql::algebra::GlaDirection,
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -457,13 +566,13 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         // This check precedes both endpoint resolution and incidence access.
         // The outer control is the SAME live permit even for a denied relation.
-        if !self
-            .execution
-            .borrow()
-            .permit
-            .predicates()
-            .allows_relation(relation)
-        {
+        if relation.relations().is_some_and(|members| {
+            let execution = self.execution.borrow();
+            let predicates = execution.permit.predicates();
+            members
+                .iter()
+                .all(|member| !predicates.allows_relation(*member))
+        }) {
             return Ok(None);
         }
         let vertex = self
@@ -479,7 +588,7 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         // endpoint this capability cannot see, is not part of its graph: skip
         // it here, unmetered, so no count of such edges reaches a charge
         // (FG-INV-20). probe_edge still re-admits every edge returned.
-        let execution = Rc::clone(&self.execution);
+        let execution = self.execution.clone();
         let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
         let mut after = after;
         loop {
@@ -498,7 +607,14 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             else {
                 continue;
             };
-            if edge.relation != relation {
+            if !relation.matches(edge.relation)
+                || !self
+                    .execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_relation(edge.relation)
+            {
                 continue;
             }
             let far = if edge.source == endpoint {
@@ -535,7 +651,10 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeExpansionSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeExpansionSourceError<QueryError, C>,
+    > {
         let Some(edge) = self.admitted_probe_edge(eid, control)? else {
             return Ok(None);
         };
@@ -625,22 +744,32 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
             {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }
+            // A pattern comprehension (fgdb-7nwox) is not admitted under a
+            // capability: its collected elements would need their own
+            // admission before any value reads them.
+            GlaOperator::Collect { .. } | GlaOperator::CollectEnd { .. } => {
+                return Err(plan_error(VertexScanBuildError { operator }));
+            }
             _ => {}
         }
     }
     Ok(())
 }
+/// A bound row plan: the physical plan, its cut, the output columns and,
+/// for a set that pulls row by row, the projection each source row takes.
+type BoundRows = (RowPlan, CommitSeq, Vec<String>, Option<GraphSetRowPull>);
+
 fn bind(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
-) -> Result<(RowPlan, CommitSeq, Vec<String>), QueryError> {
+) -> Result<BoundRows, QueryError> {
     match prepared {
         PreparedNativeRead::Pattern(prepared) => {
             let query = prepared
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)?;
-            Ok((compile(&query)?, default, query.columns().to_vec()))
+            Ok((compile(&query)?, default, query.columns().to_vec(), None))
         }
         PreparedNativeRead::TemporalPattern(prepared) => {
             let query = prepared
@@ -650,6 +779,25 @@ fn bind(
                 compile(query.pattern())?,
                 query.as_of(),
                 query.pattern().columns().to_vec(),
+                None,
+            ))
+        }
+        // `MATCH (n) RETURN n AS id, $value AS value` (fgdb-7xqxb): a set
+        // whose canonical order is its one vertex scan's order pulls through
+        // that scan's native cursor, projecting each row as the eager path.
+        PreparedNativeRead::Set(set) => {
+            let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
+            let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
+                facade: prepared.facade_class(),
+            })?;
+            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+                unreachable!("a row pull is rooted at its one vertex scan")
+            };
+            Ok((
+                RowPlan::Vertex(plan),
+                default,
+                query.columns().to_vec(),
+                Some(pull),
             ))
         }
         _ => Err(QueryError::StreamingUnsupported {
@@ -664,6 +812,9 @@ fn scan_error(error: GqlQueryError<VertexScanError<QueryError>, QueryError>) -> 
         GqlQueryError::Source(VertexScanError::Plan(error)) => plan_error(error),
         GqlQueryError::Source(VertexScanError::NonIncreasingIdentity) => QueryError::Stream(
             GqlQueryError::Source(VertexScanError::NonIncreasingIdentity),
+        ),
+        GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission) => QueryError::Stream(
+            GqlQueryError::Source(VertexScanError::InvalidCandidateAdmission),
         ),
         GqlQueryError::Source(VertexScanError::CounterExhausted) => {
             QueryError::Stream(GqlQueryError::Source(VertexScanError::CounterExhausted))
@@ -683,6 +834,7 @@ fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
         EdgeScanError::Source(error) => return error,
         EdgeScanError::Plan(error) => EdgeScanError::Plan(error),
         EdgeScanError::NonIncreasingIdentity => EdgeScanError::NonIncreasingIdentity,
+        EdgeScanError::InvalidCandidateAdmission => EdgeScanError::InvalidCandidateAdmission,
         EdgeScanError::DanglingEndpoint => EdgeScanError::DanglingEndpoint,
         EdgeScanError::CounterExhausted => EdgeScanError::CounterExhausted,
         EdgeScanError::ExpansionUnavailable => EdgeScanError::ExpansionUnavailable,
@@ -692,7 +844,7 @@ fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
+fn open<'q, C: FnMut() -> u64, Plan, Output>(
     view: &EmbeddedReadView,
     capability: &'q VerifiedCapability<'_>,
     clock: &'q mut C,
@@ -708,10 +860,10 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
         Plan,
         &EmbeddedReadView,
         &'q QueryCx,
-        Shared<'q>,
+        Shared<'q, C>,
         GqlQueryPolicy,
-    ) -> Opened<'q, Row, Metadata>,
-) -> Opened<'q, Row, Metadata> {
+    ) -> Result<Output, QueryError>,
+) -> Result<Output, QueryError> {
     let now = clock();
     if now < *last_now_ms {
         return Err(QueryError::Authorization(
@@ -722,12 +874,12 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
     let permit = capability
         .begin_read_at(branch, now)
         .map_err(QueryError::Authorization)?;
-    let tracked_clock: Box<dyn FnMut() -> u64 + 'q> = Box::new(move || {
-        let now = clock();
-        *last_now_ms = (*last_now_ms).max(now);
-        now
-    });
-    let execution = Rc::new(RefCell::new(Execution::new(cx, permit, tracked_clock)));
+    let execution = Shared(Arc::new(Mutex::new(Execution::tracking(
+        cx,
+        permit,
+        clock,
+        last_now_ms,
+    ))));
     execution.borrow_mut().checkpoint()?;
     let selected = (|| {
         if !Arc::ptr_eq(owner, &prepared.owner) {
@@ -746,61 +898,104 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
     build(selected?, view, cx, execution, policy)
 }
 
-fn build_rows<'q>(
-    selected: (RowPlan, CommitSeq, Vec<String>),
+fn build_rows<'q, C: FnMut() -> u64>(
+    selected: BoundRows,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
-    execution: Shared<'q>,
+    execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphValueRow, ()> {
-    let (plan, at, columns) = selected;
-    let plan = match plan {
-        RowPlan::Edge(plan) => {
-            return AuthorizedRowCursor::from_edge_plan(
-                (plan, at, columns),
-                view,
-                cx,
-                execution,
-                policy,
-            );
+    let (plan, at, columns, pull) = selected;
+    let driver: Pull<'q, GraphValueRow> = match plan {
+        RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
+            plan, at, view, cx, execution, policy,
+        )?),
+        RowPlan::Vertex(plan) => {
+            Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
         }
-        RowPlan::Vertex(plan) => plan,
     };
-    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    Ok((AuthorizedRowCursor::new(driver, columns, at), ()))
+}
+
+fn build_send_rows<'q, C: FnMut() -> u64 + Send>(
+    selected: BoundRows,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Opened<'q, GraphValueRow, (), SendPull<'q, GraphValueRow>> {
+    let (plan, at, columns, pull) = selected;
+    // Only erasure differs from the local factory. Both use the exact same
+    // native physical driver, source masks, signed permit and terminal guard.
+    let driver: SendPull<'q, GraphValueRow> = match plan {
+        RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
+            plan, at, view, cx, execution, policy,
+        )?),
+        RowPlan::Vertex(plan) => {
+            Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
+        }
+    };
+    Ok((AuthorizedRowCursor::new(driver, columns, at), ()))
+}
+
+/// One step of a native row driver: the row it delivered, if any, and
+/// whether its cursor has finished.
+type DriverStep = Result<(Option<GraphValueRow>, bool), QueryError>;
+
+fn vertex_driver<'q, C: FnMut() -> u64>(
+    plan: VertexScanPlan<GraphValueRow>,
+    pull: Option<GraphSetRowPull>,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
+    let inner = view
+        .vertex_scan_source(cx, at)
+        .map_err(QueryError::Read)?
+        .with_root_equality(&plan, |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        });
     let source = ScopedSource {
         inner,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
-    let control = Rc::clone(&execution);
+    let control = execution.clone();
     let mut cursor = VertexScanCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver = Box::new(move || {
-        let row = cursor.next().transpose().map_err(scan_error)?;
+    Ok(move || {
+        // The projection runs inside the same native meter as its source.
+        // Every work/scratch event also reaches the existing signed checkpoint;
+        // no private source row counts as delivered before projection succeeds.
+        let row = if let Some(pull) = &pull {
+            cursor.next_projected(pull, scan_error, |ordinal, column, error| {
+                QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                    column,
+                    error,
+                }))
+            })
+        } else {
+            cursor.next().map(|row| row.map_err(scan_error))
+        }
+        .transpose()?;
         // A row remains private until live signed delivery admission succeeds.
         // The extra terminal check also covers a natural EOF or LIMIT 0.
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
-    });
-    Ok((
-        AuthorizedRowCursor {
-            driver: Some(driver),
-            guard: None,
-            columns,
-            snapshot_seq: at,
-            state: VertexScanState::Open,
-        },
-        (),
-    ))
+    })
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     /// Open a prepared vertex or fixed-edge stream under this session's policy
-    /// and capability. Vertex projection must lead with its unique VId. Edge
-    /// projection must lead with the captured root EId and root-source VId;
-    /// connected fixed joins then name each appended EId in traversal order.
+    /// and capability. Vertex projection must lead with its unique VId. Directed
+    /// edge projection must lead with the captured root EId; undirected roots
+    /// also require the root-source VId to distinguish orientations. Connected
+    /// fixed joins then name each appended EId in traversal order.
     /// These prefixes prove native canonical ordering and ALL/DISTINCT semantics
     /// without a result bag or seen-set. Remaining edge columns may project
     /// endpoints, masked vertex/edge properties and admitted fixed-path values.
@@ -837,10 +1032,28 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             .map(|(cursor, ())| cursor)
     }
 
+    /// Open the same source-native row plan with a Send driver, suitable for
+    /// a task that suspends between pulls and moves between runtime workers.
+    /// Only the clock gains a Send bound; non-Send clocks can still use stream.
+    /// No background task, row queue, extra permit or eager fallback is created.
+    /// Admission, ordering, source profile and error semantics equal stream().
+    pub fn stream_send<'q>(
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> Result<AuthorizedSendRowCursor<'q>, QueryError>
+    where
+        C: Send,
+    {
+        self.open_cursor(cx, prepared, params, bind, build_send_rows)
+            .map(|(cursor, ())| cursor)
+    }
+
     // The same authenticated open/pin guard serves rows and aggregates. Each
     // factory receives only the fixed view and live permit; none can obtain a
     // Database, refresh a generation or independently authorize a source.
-    fn open_cursor<'q, Plan, Row: 'q, Metadata>(
+    fn open_cursor<'q, Plan, Row: 'q, Metadata, Driver>(
         &'q mut self,
         cx: &'q QueryCx,
         prepared: &AuthorizedPreparedRead,
@@ -854,10 +1067,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             Plan,
             &EmbeddedReadView,
             &'q QueryCx,
-            Shared<'q>,
+            Shared<'q, C>,
             GqlQueryPolicy,
-        ) -> Opened<'q, Row, Metadata>,
-    ) -> Opened<'q, Row, Metadata> {
+        ) -> Opened<'q, Row, Metadata, Driver>,
+    ) -> Opened<'q, Row, Metadata, Driver> {
         let owner = &self.owner;
         let state = self.state.as_mut().ok_or(QueryError::Authorization(
             AuthorizationError::ExecutionStopped,
@@ -915,3 +1128,282 @@ mod probe_tests;
 #[cfg(test)]
 #[path = "stream/edge_property_tests.rs"]
 mod edge_property_tests;
+
+#[cfg(test)]
+mod projected_budget_tests {
+    use super::*;
+    use crate::{Database, DatabaseKeys, MemVfs, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use asupersync::security::key::AuthKey;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind, GraphSymbol, GraphSymbolKind};
+    use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts};
+    use fgdb_warden::{Authority, Grant, QueryLimits, Rights, Scope};
+
+    const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x8b; 32]);
+    const LABEL: LabelId = LabelId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const R: RelationId = RelationId(1);
+
+    async fn database(cx: &CommitCx) -> Database<MemVfs> {
+        let mut db = Database::open_memory(cx, DatabaseKeys::new([0x8a; 32], NS, [0x8c; 32]))
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, label, value) in [(1, LABEL, 2), (2, LabelId(2), 0), (3, LABEL, 0)] {
+            batch.create_vertex(VId(id), vec![label], vec![(P, CanonicalScalar::Int(value))]);
+        }
+        db.write(cx, batch).await.unwrap();
+        db
+    }
+
+    fn authority() -> Authority {
+        Authority::new(AuthKey::from_seed(0x8b00), NS, "graph", SchemaEpoch(1), 1).unwrap()
+    }
+
+    fn grant() -> Grant {
+        Grant {
+            branch: "main".into(),
+            labels: Scope::only([LABEL]),
+            relations: Scope::only([R]),
+            properties: Scope::only([P]),
+            rights: Rights::Read,
+            limits: QueryLimits {
+                max_nodes: 1000,
+                max_work: 100_000_000,
+                max_rows: 1000,
+            },
+            expires_at_ms: 10_000,
+        }
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn denied<Driver>(
+        mut cursor: AuthorizedRowCursor<'_, GraphValueRow, Driver>,
+        dimension: GlaLimitDimension,
+    ) where
+        Driver: FnMut() -> DriverStep,
+    {
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Stream(GqlQueryError::Evaluator(error))))
+                if error.dimension == dimension
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert_eq!(cursor.size_hint(), (0, Some(0)));
+        assert!(cursor.next().is_none());
+        cursor.close();
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+    }
+
+    #[test]
+    fn authorized_local_and_send_projections_cannot_bypass_native_limits() {
+        let ((), report) = run_async_under_lab(0x8b00_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let args = GqlParameters::new()
+                .with_scalar(
+                    "value",
+                    CanonicalScalar::ucs_basic_text(&"x".repeat(32_768)).unwrap(),
+                )
+                .unwrap();
+            for (text, policy, dimension) in [
+                (
+                    "MATCH (n) RETURN n AS id, $value AS value",
+                    GqlQueryPolicy::new(1000, 1000, u64::MAX, 128),
+                    GlaLimitDimension::ScratchEntries,
+                ),
+                (
+                    "MATCH (n) RETURN n AS id, toUpper($value) AS value",
+                    GqlQueryPolicy::new(1000, 1000, 256, u64::MAX),
+                    GlaLimitDimension::WorkUnits,
+                ),
+            ] {
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                    .unwrap();
+                // The entire native source fits this policy. Only the actual
+                // projection can exhaust it; signed allowances are generous.
+                let empty = GqlParameters::new();
+                let scan = session
+                    .prepare(&cx, "MATCH (n) RETURN n AS id", &empty)
+                    .unwrap();
+                let rows = session
+                    .stream(&cx, &scan, &empty)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].values(), &[GraphValue::Vertex(VId(1))]);
+                assert_eq!(rows[1].values(), &[GraphValue::Vertex(VId(3))]);
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                // Both open lazily. The first credited pull must refuse with
+                // the native evaluator error, not a successful unmetered row.
+                denied(session.stream(&cx, &prepared, &args).unwrap(), dimension);
+                denied(
+                    session.stream_send(&cx, &prepared, &args).unwrap(),
+                    dimension,
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    fn late_error<Driver>(mut cursor: AuthorizedRowCursor<'_, GraphValueRow, Driver>)
+    where
+        Driver: FnMut() -> DriverStep,
+    {
+        let first = cursor.next().unwrap().unwrap();
+        assert_eq!(
+            first.values(),
+            &[
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(5))
+            ]
+        );
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Set(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { row: 1, column: 1, error }
+            )))) if error.kind == GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    }
+
+    #[test]
+    fn authorized_projection_errors_keep_the_visible_row_ordinal_and_native_cause() {
+        let ((), report) = run_async_under_lab(0x8b00_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let policy = GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000);
+            let mut session = db
+                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(&cx, "MATCH (n) RETURN n AS id, 10 / n.p AS value", &args)
+                .unwrap();
+            // Hidden VId(2) has the same bad divisor but is not a source row.
+            // The failure remains row one of the visible execution in both
+            // driver variants; an earlier successful row remains delivered.
+            late_error(session.stream(&cx, &prepared, &args).unwrap());
+            late_error(session.stream_send(&cx, &prepared, &args).unwrap());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn authorized_equality_streams_hide_private_candidates_and_recheck_historical_membership() {
+        let ((), report) = run_async_under_lab(0x8b00_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let issuer = authority();
+            let empty = GqlParameters::new();
+            let policy = GqlQueryPolicy::new(2, 2, 100_000, 100_000);
+            let mut allowance = grant();
+            allowance.limits.max_nodes = 2;
+            allowance.limits.max_rows = 2;
+            let token = issuer.issue_at(&allowance, 100).unwrap();
+            let mut answers = Vec::new();
+            for private_history in [false, true] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([0x8a; 32], NS, [0x8c; 32]))
+                        .await
+                        .unwrap();
+                let mut batch = WriteBatch::new(R);
+                batch.create_vertex(VId(1), vec![LABEL], vec![(P, CanonicalScalar::Int(7))]);
+                batch.create_vertex(
+                    VId(2),
+                    vec![LABEL],
+                    vec![(P, CanonicalScalar::Int(if private_history { 7 } else { 9 }))],
+                );
+                batch.create_vertex(VId(3), vec![LABEL], vec![(P, CanonicalScalar::Int(7))]);
+                for id in 10..=138 {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LABEL],
+                        vec![(P, CanonicalScalar::Int(id as i64 + 100))],
+                    );
+                    if private_history {
+                        batch.create_vertex(
+                            VId(1000 + id),
+                            vec![LabelId(2)],
+                            vec![(P, CanonicalScalar::Int(7))],
+                        );
+                    }
+                }
+                db.write(&commit, batch).await.unwrap();
+                let mut edits = WriteBatch::new(R);
+                edits.set_vertex_property(
+                    VId(1),
+                    P,
+                    Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0))),
+                );
+                edits.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(9)));
+                db.write(&commit, edits).await.unwrap();
+
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
+                    .unwrap();
+                let prepared = session
+                    .prepare(&cx, "MATCH (n {p: 7.0}) RETURN n AS id, n.p AS p", &empty)
+                    .unwrap();
+                let rows = session
+                    .stream(&cx, &prepared, &empty)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].values()[0], GraphValue::Vertex(VId(1)));
+                assert_eq!(rows[1].values()[0], GraphValue::Vertex(VId(3)));
+                assert_eq!(
+                    session
+                        .stream_send(&cx, &prepared, &empty)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                    rows
+                );
+                answers.push(rows);
+                drop(session);
+
+                // A denied property cannot steer candidate seeks. Its masked
+                // predicate is still evaluated on the ordinary visible domain,
+                // whose third row exceeds this native record allowance.
+                let mut masked = grant();
+                masked.properties = Scope::only(std::iter::empty::<PropertyKeyId>());
+                let masked = issuer.issue_at(&masked, 100).unwrap();
+                let mut session = db
+                    .authorized_read_session(&cx, &issuer, &masked, "main", symbols, policy, || 100)
+                    .unwrap();
+                let prepared = session
+                    .prepare(&cx, "MATCH (n {p: 7.0}) RETURN n AS id", &empty)
+                    .unwrap();
+                assert!(
+                    session
+                        .stream(&cx, &prepared, &empty)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .is_err()
+                );
+            }
+            assert_eq!(answers[0], answers[1]);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

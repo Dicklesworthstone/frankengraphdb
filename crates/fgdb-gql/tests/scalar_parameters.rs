@@ -6,7 +6,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -68,6 +68,10 @@ fn run(
     pattern: &PreparedGraphPattern<GraphValueRow>,
     values: &[Option<CanonicalScalar>],
 ) -> Vec<VId> {
+    let stored: Vec<Option<CanonicalPropertyValue>> = values
+        .iter()
+        .map(|value| value.clone().map(CanonicalPropertyValue::from))
+        .collect();
     pattern
         .plan()
         .execute_governed_with_properties(
@@ -75,14 +79,14 @@ fn run(
             (0..values.len()).map(|at| VId(at as u128)),
             [],
             |vid, predicates| {
-                let property = values[vid.0 as usize].as_ref().map(|value| (P, value));
+                let property = stored[vid.0 as usize].as_ref().map(|value| (P, value));
                 Ok::<_, ()>(
                     predicates
                         .iter()
                         .all(|predicate| predicate.matches_borrowed([], property)),
                 )
             },
-            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
             wide(),
             || Ok::<_, ()>(()),
         )
@@ -141,7 +145,8 @@ fn scalar_bindings_match_independent_encoded_order_for_every_supported_compariso
                         return None;
                     }
                     // Int and Float compare exactly across kinds; any other
-                    // pair of unequal kinds is UNKNOWN.
+                    // pair of unequal kinds is of different domains
+                    // (fgdb-v6ku6): only `<>` holds, every ordering UNKNOWN.
                     let order = match numeric_order(actual, expected) {
                         Some(order) => order,
                         None if CanonicalScalarKind::of(actual)
@@ -149,7 +154,7 @@ fn scalar_bindings_match_independent_encoded_order_for_every_supported_compariso
                         {
                             actual.encode().unwrap().cmp(&expected.encode().unwrap())
                         }
-                        None => return None,
+                        None => return (operator == "<>").then_some(VId(at as u128)),
                     };
                     let accepts = if ["<>", "<=", ">="].contains(&operator) {
                         order != comparison
@@ -371,8 +376,8 @@ fn scoped_scalar_arguments_compose_with_null_extension_existence_and_group_ranki
     )
     .unwrap();
     let query = template.bind_parameters(&arguments).unwrap();
-    let ready = text("ready");
-    let banned = CanonicalScalar::Bool(true);
+    let ready = CanonicalPropertyValue::from(text("ready"));
+    let banned = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     let edges = [
         (VId(1), RelationId(1), VId(10)),
         (VId(1), RelationId(1), VId(10)),
@@ -495,6 +500,7 @@ fn scalar_bindings_keep_exact_limits_and_every_interruption_boundary() {
                 .unwrap(),
         )
         .unwrap();
+    let value = CanonicalPropertyValue::from(value);
     let mut checkpoints = 0;
     let full = query
         .plan()
@@ -612,16 +618,69 @@ fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
     // Independent: 0.75, 1.0 and the Int 1 exceed 0.5; the absent row never does.
     assert_eq!(run(&literal(">"), &values), [VId(2), VId(3), VId(4)]);
     assert_eq!(run(&literal("<"), &values), [VId(0)]);
-    // Not decimals: a trailing or leading point, and a magnitude with no
-    // finite f64, refuse.
+    // openCypher's `.5` (fgdb-yyygp) is the same literal as `0.5`.
+    let dot = PreparedGraphText::prepare("MATCH (n) WHERE n.p > .5 RETURN n", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(run(&dot, &values), run(&literal(">"), &values));
+    // Not decimals: a trailing point, a point apart from its digits, and a
+    // magnitude with no finite f64, refuse.
     for text in [
         "MATCH (n) WHERE n.p > 1. RETURN n".to_owned(),
-        "MATCH (n) WHERE n.p > .5 RETURN n".to_owned(),
+        "MATCH (n) WHERE n.p > . 5 RETURN n".to_owned(),
         format!("MATCH (n) WHERE n.p > {}.0 RETURN n", "9".repeat(400)),
     ] {
         assert!(
             PreparedGraphText::prepare(&text, symbols).is_err(),
             "{text}"
         );
+    }
+}
+
+/// fgdb-3dnpu: openCypher and Bolt clients send SKIP and LIMIT arguments as
+/// signed integers. A non-negative Int64 binds exactly as the same UInt64,
+/// to an identical bound plan, in the pattern, set and WITH pipeline
+/// facades. A negative one still refuses as a type mismatch.
+#[test]
+fn signed_page_arguments_bind_as_the_same_unsigned_values() {
+    let arguments = |skip: GqlParameterValue, limit: GqlParameterValue| {
+        let mut parameters = GqlParameters::new();
+        parameters.insert("s", skip).unwrap();
+        parameters.insert("l", limit).unwrap();
+        parameters
+    };
+    let signed = arguments(GqlParameterValue::Int64(1), GqlParameterValue::Int64(2));
+    let unsigned = arguments(GqlParameterValue::UInt64(1), GqlParameterValue::UInt64(2));
+    let negative = arguments(GqlParameterValue::Int64(-1), GqlParameterValue::UInt64(2));
+    let text = "MATCH (n) RETURN n ORDER BY n.p ASC SKIP $s LIMIT $l";
+    let pattern = PreparedGraphText::prepare(text, symbols).unwrap();
+    assert_eq!(
+        pattern.bind_parameters(&signed).unwrap().canonical_bytes(),
+        pattern
+            .bind_parameters(&unsigned)
+            .unwrap()
+            .canonical_bytes()
+    );
+    assert!(matches!(
+        pattern.bind_parameters(&negative).unwrap_err().kind,
+        GraphPatternTextErrorKind::ParameterTypeMismatch {
+            expected: GqlParameterType::UInt64,
+            found: GqlParameterType::Int64,
+        }
+    ));
+    for text in [
+        text,
+        "MATCH (n) WITH n ORDER BY n.p ASC SKIP $s LIMIT $l RETURN n",
+        "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x SKIP $s LIMIT $l",
+    ] {
+        let set = fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(
+            set.bind_parameters(&signed).unwrap().canonical_bytes(),
+            set.bind_parameters(&unsigned).unwrap().canonical_bytes(),
+            "{text}"
+        );
+        assert!(set.bind_parameters(&negative).is_err(), "{text}");
     }
 }

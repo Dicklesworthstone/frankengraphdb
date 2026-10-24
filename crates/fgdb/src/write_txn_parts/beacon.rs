@@ -9,7 +9,7 @@ use asupersync::fs::Vfs;
 use fgdb_beacon::read::{ReadError, ReadOptions, Rows, Search};
 use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, IndexSnapshot, WorkBudget, WorkControl};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
-use fgdb_types::{CanonicalScalar, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -19,7 +19,17 @@ mod graph;
 type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
 /// A vertex created in this transaction, borrowed: its labels and properties.
-type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)]);
+type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalPropertyValue)]);
+
+/// The native query host observes the existing engine's actual admissions.
+/// Work and source events share one allowance; a record is a surviving
+/// canonical vertex/edge, before explicit corpus or relation selection.
+#[derive(Clone, Copy)]
+enum AdmissionEvent {
+    Work(usize),
+    Source(SourceEvent),
+}
+type Observer<'a> = &'a dyn Fn(AdmissionEvent) -> Result<(), BeaconError>;
 
 /// All source metadata admissions, including new read witnesses, use the
 /// same conservative per-call scratch counter. It counts admissions, not RSS.
@@ -29,32 +39,59 @@ struct Control<'a> {
     scratch: usize,
     limit: usize,
     interrupted: Option<Cancel>,
+    observer: Option<Observer<'a>>,
+    refusal: Option<BeaconError>,
 }
 
 impl WorkControl for Control<'_> {
     fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
-        if self.interrupted.is_some() {
-            return Err(BeaconError::Cancelled);
-        }
-        if let Err(error) = self.cx.checkpoint() {
-            self.interrupted = Some(error);
-            return Err(BeaconError::Cancelled);
-        }
-        self.budget.charge(units)
+        self.admit(units, AdmissionEvent::Work(units))
     }
 }
 
 impl Control<'_> {
+    /// Stop before any later observer/clock/work callback. A bool-only search
+    /// predicate may carry a failure outside its return value; later smaller
+    /// charges must not revive the operation or replace its first cause.
+    fn refuse(&mut self, error: BeaconError) -> BeaconError {
+        self.refusal.get_or_insert(error).clone()
+    }
+
+    fn admit(&mut self, units: usize, event: AdmissionEvent) -> Result<(), BeaconError> {
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
+        }
+        if let Err(error) = self.cx.checkpoint() {
+            self.interrupted = Some(error);
+            return Err(self.refuse(BeaconError::Cancelled));
+        }
+        if let Some(observer) = self.observer {
+            observer(event).map_err(|error| self.refuse(error))?;
+        }
+        self.budget
+            .charge(units)
+            .map_err(|error| self.refuse(error))
+    }
+
     fn source(&mut self, event: SourceEvent) -> Result<(), BeaconError> {
-        self.charge(1)?;
+        self.admit(1, AdmissionEvent::Source(event))?;
         if matches!(event, SourceEvent::ScratchEntry) {
             if self.scratch == self.limit {
-                return Err(BeaconError::ResourceLimit {
+                return Err(self.refuse(BeaconError::ResourceLimit {
                     resource: "transaction search source scratch entries",
                     limit: self.limit,
-                });
+                }));
             }
             self.scratch += 1;
+        }
+        Ok(())
+    }
+
+    /// Standalone reads retain their existing charge trace. Native CALL
+    /// additionally admits source records to the enclosing GQL allowance.
+    fn record(&mut self) -> Result<(), BeaconError> {
+        if self.observer.is_some() {
+            self.source(SourceEvent::SnapshotRecord)?;
         }
         Ok(())
     }
@@ -75,7 +112,7 @@ struct Overlay<'a> {
     created: Option<CreatedContents<'a>>,
     deleted: bool,
     labels: BTreeMap<LabelId, bool>,
-    properties: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+    properties: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
 }
 
 impl<'a> Overlay<'a> {
@@ -161,33 +198,201 @@ impl WriteTxn {
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_filtered(database, cx, options, query, |_| true)
+    }
+
+    /// Restrict result endpoints before text/vector candidate limits and
+    /// fusion. Eligibility does not remove documents from BM25 statistics or
+    /// ANN routing, and every corpus observation remains a read dependency.
+    /// Derive data-dependent eligibility from this same transaction overlay.
+    /// The predicate must be stable, bounded computation over IDs, not I/O or
+    /// an authorization check. Reject-all retains validation and source limits.
+    pub fn beacon_search_filtered<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, ReadError<WriteTxnError, Cancel>> {
         self.beacon_read(
             database,
             cx,
             options,
+            None,
             |work| {
                 let config = options.config_for(query)?;
                 query.validate(&config, &mut Shared(work))?;
-                Ok(config)
+                Ok(Some(config))
             },
             |_, _| Ok(()),
-            |index, _, work| query.execute(index, &mut Shared(work)),
+            |index, _, work| {
+                query.execute_filtered(
+                    index.ok_or(BeaconError::Invariant(
+                        "requested search index was not constructed",
+                    ))?,
+                    eligible,
+                    &mut Shared(work),
+                )
+            },
         )
     }
 
-    // The two- and three-lane reads share owner/frontier admission, the exact
-    // same prepared vertex overlay, one work/scratch allowance and the final
-    // live gate. `selected` sees every selected vertex, including graph-only
-    // transit vertices that have neither a text nor a vector document.
+    /// Native `CALL hybrid.search` over this same canonical search engine.
+    /// Source admission, every retrieval lane and output conversion spend
+    /// the enclosing query's remaining allowance. Only complete rows escape;
+    /// neither a filtered result nor a failed call discards read witnesses.
+    pub(in crate::write_txn) fn execute_hybrid_procedure_governed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        call: &fgdb_gql::PreparedProcedureCall,
+        arguments: &[fgdb_gql::algebra::GraphValue],
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<WriteTxnError, Cancel>,
+    > {
+        use crate::gql_exec::AdmissionUsage;
+        use crate::query::{EndpointFilter, HybridSearch, hybrid_refusal};
+        use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution};
+
+        let (search, eligible) =
+            HybridSearch::bind_filtered(call, arguments, self.basis, policy)
+                .map_err(|error| hybrid_refusal(error).map_source(WriteTxnError::Gql))?;
+        let usage = RefCell::new(AdmissionUsage::default());
+        let failure = RefCell::new(None);
+        let filter = RefCell::new(None::<EndpointFilter>);
+        let result = {
+            let observe = |event| {
+                if failure.borrow().is_some() {
+                    return Err(BeaconError::Cancelled);
+                }
+                let result = match event {
+                    AdmissionEvent::Work(units) => usage
+                        .borrow_mut()
+                        .charge_work(policy, u64::try_from(units).unwrap_or(u64::MAX)),
+                    AdmissionEvent::Source(event) => usage.borrow_mut().observe(policy, event),
+                };
+                result.map_err(|error| {
+                    *failure.borrow_mut() = Some(error);
+                    BeaconError::Cancelled
+                })
+            };
+            let prepare_filter = |work: &RefCell<Control<'_>>| {
+                let source_scratch = {
+                    let control = work.borrow();
+                    u64::try_from(control.limit.saturating_sub(control.scratch)).unwrap_or(u64::MAX)
+                };
+                let prepared = EndpointFilter::prepare_with_admission(
+                    eligible,
+                    search.query().retrieval.k,
+                    policy.evaluator.max_scratch_entries.min(source_scratch),
+                    &mut Shared(work),
+                    || work.borrow_mut().source(SourceEvent::ScratchEntry),
+                )?;
+                // Bound input occurrences and result capacity up front.
+                // Each unique ID spends the same source/enclosing scratch
+                // allowance BEFORE retention, not after allocation.
+                *filter.borrow_mut() = Some(prepared);
+                Ok(())
+            };
+            let eligible_id = |id, work: &RefCell<Control<'_>>| {
+                filter
+                    .borrow()
+                    .as_ref()
+                    .expect("endpoint filter prepared before retrieval")
+                    .admits(id, work)
+            };
+            let finish_filter = |result| {
+                filter
+                    .borrow()
+                    .as_ref()
+                    .expect("endpoint filter prepared before retrieval")
+                    .finish(result)
+            };
+            // Both physical profiles use this same filter and enclosing meter.
+            // Select before source access, never after a failed eager attempt.
+            if search.uses_demand_graph() {
+                self.beacon_search_graph_demand_observed(
+                    database,
+                    cx,
+                    search.options(),
+                    search.query(),
+                    search.expansion(),
+                    Some(&observe),
+                    prepare_filter,
+                    eligible_id,
+                    finish_filter,
+                )
+            } else {
+                self.beacon_search_graph_with_access_observed(
+                    database,
+                    cx,
+                    search.options(),
+                    search.query(),
+                    search.expansion(),
+                    search.uses_indexed_graph(),
+                    Some(&observe),
+                    prepare_filter,
+                    eligible_id,
+                    finish_filter,
+                )
+            }
+        };
+        if let Some(error) = failure.into_inner() {
+            return Err(error);
+        }
+        let hits = result.map_err(|error| match error {
+            ReadError::Interrupted(cancel) => GqlQueryError::Interrupted(cancel),
+            ReadError::Read(error) => GqlQueryError::Source(error),
+            ReadError::Index(error) => hybrid_refusal(crate::query::HybridCallError::Index(error))
+                .map_source(WriteTxnError::Gql),
+        })?;
+        let mut usage = usage.into_inner();
+        // Reserve every output row and cell before allocating the conversion.
+        // These private source rows spend scratch, not the final result page.
+        for _ in &hits {
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe(policy, SourceEvent::ScratchEntry)?;
+            for _ in call.outputs() {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe(policy, SourceEvent::ScratchEntry)?;
+            }
+        }
+        let value = search.rows(hits);
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        usage.finish(
+            policy,
+            Ok(GqlQueryExecution {
+                rows: GqlExecutionStats {
+                    snapshot_records: usage.snapshot_records(),
+                    result_rows: value.len() as u64,
+                },
+                evaluator: GlaExecutionStats::default(),
+                value,
+            }),
+        )
+    }
+
+    // Indexed and topology-only reads share owner/frontier admission, the
+    // exact same prepared vertex overlay, one work/scratch allowance and final
+    // live gate. `selected` sees every selected vertex even without an index.
+    // None is an explicit request, never a substitute for a failed index build.
     #[allow(clippy::too_many_arguments)]
     fn beacon_read<V: Vfs + Clone, T>(
         &self,
         database: &Database<V>,
         cx: &QueryCx,
         options: &Options,
-        configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<IndexConfig, BeaconError>,
+        observer: Option<Observer<'_>>,
+        configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<Option<IndexConfig>, BeaconError>,
         mut selected: impl FnMut(VId, &RefCell<Control<'_>>) -> Result<(), BeaconError>,
-        finish: impl FnOnce(&IndexSnapshot, &Snapshot, &RefCell<Control<'_>>) -> Result<T, BeaconError>,
+        finish: impl FnOnce(
+            Option<&IndexSnapshot>,
+            &Snapshot,
+            &RefCell<Control<'_>>,
+        ) -> Result<T, BeaconError>,
     ) -> Result<T, ReadError<WriteTxnError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(ReadError::Interrupted)?;
@@ -209,6 +414,8 @@ impl WriteTxn {
                 scratch: 0,
                 limit: options.policy.max_source_scratch,
                 interrupted: None,
+                observer,
+                refusal: None,
             });
             let result = (|| {
                 work.borrow_mut().charge(1)?;
@@ -274,6 +481,9 @@ impl WriteTxn {
                         Ok(())
                     },
                 )?;
+                let max_documents = config
+                    .as_ref()
+                    .map_or(options.index.max_documents, |config| config.max_documents);
                 let mut staged = 0usize;
                 let projected = rows.into_iter().filter_map(|(vid, overlay)| {
                     (|| {
@@ -281,6 +491,7 @@ impl WriteTxn {
                         let Some((labels, props)) = overlay.contents() else {
                             return Ok(None);
                         };
+                        work.borrow_mut().record()?;
                         work.borrow_mut().charge(labels.len())?;
                         if options.vertex_label.is_some_and(|label| {
                             !overlay
@@ -291,7 +502,7 @@ impl WriteTxn {
                         }) {
                             return Ok(None);
                         }
-                        let limit = options.policy.max_staging_rows.min(config.max_documents);
+                        let limit = options.policy.max_staging_rows.min(max_documents);
                         if staged == limit {
                             return Err(BeaconError::ResourceLimit {
                                 resource: "staged vertices",
@@ -300,11 +511,16 @@ impl WriteTxn {
                         }
                         staged += 1;
                         selected(vid, &work)?;
+                        let Some(config) = config.as_ref() else {
+                            // The selected vertex already entered the graph.
+                            // A topology-only request has no document to build.
+                            return Ok(None);
+                        };
                         options
                             .projection
                             .project(
                                 vid,
-                                &config,
+                                config,
                                 |key| {
                                     overlay.properties.get(&key).copied().unwrap_or_else(|| {
                                         props
@@ -319,8 +535,24 @@ impl WriteTxn {
                     })()
                     .transpose()
                 });
-                let index = BeaconIndex::try_build(config.clone(), projected, &mut Shared(&work))?;
-                let result = finish(&index.snapshot(), &view.snapshot, &work)?;
+                let index = match config.as_ref() {
+                    Some(config) => Some(BeaconIndex::try_build(
+                        config.clone(),
+                        projected,
+                        &mut Shared(&work),
+                    )?),
+                    None => {
+                        // Drive the complete source even with no index. Lazy
+                        // selection, errors and witnesses must not disappear
+                        // because every successful row projects no document.
+                        for document in projected {
+                            document?;
+                        }
+                        None
+                    }
+                };
+                let index_snapshot = index.as_ref().map(BeaconIndex::snapshot);
+                let result = finish(index_snapshot.as_ref(), &view.snapshot, &work)?;
                 // Native empty and zero-k paths still have a final live gate.
                 work.borrow_mut().charge(1)?;
                 Ok(result)
@@ -334,6 +566,114 @@ impl WriteTxn {
 }
 
 #[cfg(test)]
+mod control_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+    use std::cell::Cell;
+
+    #[test]
+    fn work_scratch_and_observer_refusals_stop_before_later_callbacks() {
+        let ((), report) = run_async_under_lab(0xbeac_3505, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            for case in 0..3 {
+                let calls = Cell::new(0);
+                let observe = |_: AdmissionEvent| {
+                    calls.set(calls.get() + 1);
+                    if case == 2 {
+                        Err(BeaconError::InvalidQuery("observer refused"))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let mut control = Control {
+                    cx: &cx,
+                    budget: WorkBudget::new(if case == 0 { 1 } else { 100 }),
+                    scratch: 0,
+                    limit: 0,
+                    interrupted: None,
+                    observer: Some(&observe),
+                    refusal: None,
+                };
+                let first = if case == 1 {
+                    control.source(SourceEvent::ScratchEntry).unwrap_err()
+                } else {
+                    control.charge(2).unwrap_err()
+                };
+                assert_eq!(calls.get(), 1);
+                assert_eq!(control.charge(0).unwrap_err(), first);
+                assert_eq!(control.charge(1).unwrap_err(), first);
+                assert_eq!(
+                    control.source(SourceEvent::SnapshotRecord).unwrap_err(),
+                    first
+                );
+                assert_eq!(
+                    calls.get(),
+                    1,
+                    "a refusal cannot be retried as a smaller charge"
+                );
+                assert_eq!(control.scratch, 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn filtered_lookup_refusal_prevents_later_observer_failure_replacement() {
+        let ((), report) = run_async_under_lab(0xbeac_3506, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let values = [
+                fgdb_gql::algebra::GraphValue::Vertex(VId(1)),
+                fgdb_gql::algebra::GraphValue::Vertex(VId(2)),
+            ];
+            let filter = crate::query::EndpointFilter::prepare(
+                Some(&values),
+                1,
+                3,
+                &mut WorkBudget::new(100),
+            )
+            .unwrap();
+            let calls = Cell::new(0);
+            let observe = |_: AdmissionEvent| {
+                calls.set(calls.get() + 1);
+                if calls.get() > 1 {
+                    Err(BeaconError::InvalidQuery("later observer refusal"))
+                } else {
+                    Ok(())
+                }
+            };
+            let work = RefCell::new(Control {
+                cx: &cx,
+                budget: WorkBudget::new(1),
+                scratch: 0,
+                limit: 100,
+                interrupted: None,
+                observer: Some(&observe),
+                refusal: None,
+            });
+            // The bool return cannot carry the error; retain it before another
+            // charge reaches the enclosing query's observer.
+            assert!(!filter.admits(VId(1), &work));
+            assert_eq!(calls.get(), 1);
+            for units in [0, 1] {
+                assert_eq!(
+                    work.borrow_mut().charge(units).unwrap_err(),
+                    BeaconError::WorkBudgetExceeded
+                );
+            }
+            assert_eq!(calls.get(), 1);
+            assert!(matches!(
+                filter.finish(Ok(vec![VId(1)])),
+                Err(BeaconError::WorkBudgetExceeded)
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{DatabaseKeys, WriteBatch, WriteError};
@@ -342,6 +682,7 @@ mod tests {
         DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
     };
     use fgdb_delta_types::RelationId;
+    use fgdb_types::CanonicalScalar;
     use fgdb_types::{CanonicalText, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
     const LABEL: LabelId = LabelId(1);

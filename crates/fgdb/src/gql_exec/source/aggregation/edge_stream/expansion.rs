@@ -3,12 +3,11 @@
 
 use super::*;
 use crate::Snapshot;
-use crate::gql_exec::source::{AdjacencyIndex, IndexMap};
+use crate::gql_exec::source::{AdjacencyIndex, Face, HistoryRef, IndexMap, balanced_middle};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
 use fgdb_strata::AdjacencyEntry;
-use fgdb_types::CanonicalScalar;
 
 pub(super) fn next<C>(
     source: &SnapshotEdgeSource<'_>,
@@ -49,29 +48,20 @@ impl AdjacencyIndex {
     /// authorized callers must poll physical work without billing hidden rows.
     pub(crate) fn statement_at_controlled<E>(
         &self,
-        blocks: &[Vec<AdjacencyEntry>],
+        blocks: &[impl AsRef<[AdjacencyEntry]>],
         eid: EId,
         as_of: CommitSeq,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<(usize, usize)>, E> {
         control(SourceEvent::Work)?;
-        let mut node = self.histories.0.as_deref();
-        while let Some(current) = node {
-            control(SourceEvent::Work)?;
-            match eid.cmp(&current.key) {
-                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
-                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                core::cmp::Ordering::Equal => {
-                    let coordinate = history_coordinate(&current.value, as_of, control)?;
-                    // The newest statement can be a retirement. Never search
-                    // backwards again to substitute an older live statement.
-                    return Ok(
-                        coordinate.filter(|&(block, row)| blocks[block][row].visible_at(as_of))
-                    );
-                }
-            }
-        }
-        Ok(None)
+        let mut charge = || control(SourceEvent::Work);
+        let Some(history) = self.history_charged(eid, &mut charge)? else {
+            return Ok(None);
+        };
+        let coordinate = history.latest_charged(as_of, &mut charge)?;
+        // The newest statement can be a retirement. Never search backwards
+        // again to substitute an older live statement.
+        Ok(coordinate.filter(|&(block, row)| blocks[block].as_ref()[row].visible_at(as_of)))
     }
 
     /// Visit exact-cut winners directly from the admitted historical index.
@@ -81,7 +71,7 @@ impl AdjacencyIndex {
     /// This is an internal source primitive, not snapshot/visibility authority.
     fn visit_all_coordinates<'a, E, C>(
         &'a self,
-        blocks: &'a [Vec<AdjacencyEntry>],
+        blocks: &'a [impl AsRef<[AdjacencyEntry]>],
         as_of: CommitSeq,
         control: &mut C,
         mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
@@ -90,15 +80,40 @@ impl AdjacencyIndex {
         C: FnMut(SourceEvent) -> Result<(), E>,
     {
         control(SourceEvent::Work)?;
-        // Reserve the maximum live cursor depth BEFORE iter() allocates its
-        // initial stack. Subsequent descent reuses those logical slots.
-        for _ in 0..self.histories.height() {
+        // Reserve the maximum live cursor depth up front, as a descent of
+        // the identity trees would hold it.
+        for _ in 0..self.identity_height() {
             control(SourceEvent::ScratchEntry)?;
         }
-        for (_, history) in self.histories.iter() {
+        let mut overlay = self.histories.iter().peekable();
+        let mut at = 0;
+        loop {
+            // The lower identity of the base and the overlay; the overlay
+            // carries the whole history of an identity both hold.
+            let base = self.base.ids.get(at).copied();
+            let history = match (base, overlay.peek()) {
+                (Some(eid), Some(&(&tree, history))) if tree <= eid => {
+                    overlay.next();
+                    if tree == eid {
+                        at += 1;
+                    }
+                    HistoryRef::Tree(history)
+                }
+                (Some(_), _) => {
+                    at += 1;
+                    HistoryRef::Flat(self.base.history(at - 1))
+                }
+                (None, Some(_)) => {
+                    let (_, history) = overlay.next().expect("peeked");
+                    HistoryRef::Tree(history)
+                }
+                (None, None) => break,
+            };
             control(SourceEvent::Work)?;
-            if let Some((block, row)) = history_coordinate(history, as_of, control)? {
-                let entry = &blocks[block][row];
+            if let Some((block, row)) =
+                history.latest_charged(as_of, &mut || control(SourceEvent::Work))?
+            {
+                let entry = &blocks[block].as_ref()[row];
                 if entry.visible_at(as_of) {
                     visit(entry, block, row, control)?;
                 }
@@ -122,11 +137,11 @@ impl AdjacencyIndex {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, C> {
         match direction {
-            GlaDirection::Forward => successor(&self.outgoing, endpoint, after, control),
-            GlaDirection::Reverse => successor(&self.incoming, endpoint, after, control),
+            GlaDirection::Forward => self.face_successor(Face::Outgoing, endpoint, after, control),
+            GlaDirection::Reverse => self.face_successor(Face::Incoming, endpoint, after, control),
             GlaDirection::Undirected => {
-                let left = successor(&self.outgoing, endpoint, after, control)?;
-                let right = successor(&self.incoming, endpoint, after, control)?;
+                let left = self.face_successor(Face::Outgoing, endpoint, after, control)?;
+                let right = self.face_successor(Face::Incoming, endpoint, after, control)?;
                 // Strict > after on both sides deduplicates the same EId in
                 // both faces (self loops) without suppressing parallel edges.
                 Ok(match (left, right) {
@@ -138,26 +153,53 @@ impl AdjacencyIndex {
     }
 }
 
-/// The point and whole-index scans use the same exact-cut predecessor rule.
-/// Compare the sequence without constructing as_of + 1 (the maximum sequence
-/// is valid). Descending right on equality retains the latest block/row tie.
-fn history_coordinate<E>(
-    history: &IndexMap<(CommitSeq, usize, usize), ()>,
-    as_of: CommitSeq,
-    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Option<(usize, usize)>, E> {
-    let mut node = history.0.as_deref();
-    let mut winner = None;
-    while let Some(current) = node {
-        control(SourceEvent::Work)?;
-        if current.key.0 <= as_of {
-            winner = Some((current.key.1, current.key.2));
-            node = current.right.0.as_deref();
-        } else {
-            node = current.left.0.as_deref();
+impl AdjacencyIndex {
+    /// The least identity above `after` in `face` at `endpoint`: the
+    /// overlay's descent, then the base's (each balanced level one Work).
+    fn face_successor<C>(
+        &self,
+        face: Face,
+        endpoint: VId,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, C> {
+        let (base, overlay) = match face {
+            Face::Outgoing => (&self.base.outgoing, &self.outgoing),
+            Face::Incoming => (&self.base.incoming, &self.incoming),
+        };
+        let mut next = successor(overlay, endpoint, after, control)?;
+        let (mut low, mut high) = (0, base.vertices.len());
+        let mut found = None;
+        while low < high {
+            control(GlaExecutionEvent::Work)?;
+            let middle = balanced_middle(low, high);
+            match endpoint.cmp(&base.vertices[middle]) {
+                core::cmp::Ordering::Less => high = middle,
+                core::cmp::Ordering::Greater => low = middle + 1,
+                core::cmp::Ordering::Equal => {
+                    found = Some(middle);
+                    break;
+                }
+            }
         }
+        let Some(at) = found else {
+            return Ok(next);
+        };
+        let (members, _) = base.members_at(at);
+        let (mut low, mut high) = (0, members.len());
+        while low < high {
+            control(GlaExecutionEvent::Work)?;
+            let middle = balanced_middle(low, high);
+            let eid = members[middle];
+            if after.is_none_or(|after| eid > after) {
+                next = Some(next.map_or(eid, |next: EId| next.min(eid)));
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        Ok(next)
     }
-    Ok(winner)
 }
 
 impl Snapshot {
@@ -171,7 +213,7 @@ impl Snapshot {
         control: &mut C,
         mut visit: impl FnMut(
             &'a AdjacencyEntry,
-            &'a [(PropertyKeyId, CanonicalScalar)],
+            &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Result<(), E>
@@ -193,8 +235,9 @@ impl Snapshot {
     }
 }
 
-fn successor<C>(
-    face: &IndexMap<VId, IndexMap<EId, ()>>,
+/// Only a face's identities are read; each entry's carried history is not.
+fn successor<V, C>(
+    face: &IndexMap<VId, IndexMap<EId, V>>,
     endpoint: VId,
     after: Option<EId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -263,7 +306,7 @@ mod tests {
                 view: db.read_session().unwrap(),
                 cx: &cx,
                 as_of: db.frontier().unwrap(),
-                after: None,
+                scan: IdentityScanCursor::default(),
             };
             for direction in [
                 GlaDirection::Forward,
@@ -295,9 +338,9 @@ mod tests {
                             .unwrap(),
                             expected
                         );
-                        assert_eq!(
-                            source.after, None,
-                            "nested seeks cannot advance the root cursor"
+                        assert!(
+                            !source.scan.initialized,
+                            "nested seeks cannot initialize or advance the root cursor"
                         );
                     }
                 }
@@ -376,6 +419,7 @@ mod indexed_scan_tests {
     use super::*;
     use crate::gql_exec::source;
     use fgdb_delta_types::RelationId;
+    use fgdb_types::CanonicalScalar;
 
     fn histories(count: u128) -> Vec<Vec<AdjacencyEntry>> {
         let mut blocks = Vec::new();
@@ -409,6 +453,114 @@ mod indexed_scan_tests {
         blocks
     }
 
+    /// A built generation charges exactly what the balanced trees the flat
+    /// base replaced charged: a point lookup, one Work, the identity tree,
+    /// then the history tree; an incidence seek, the endpoint tree, then the
+    /// incidence tree. The trees are rebuilt here from the same sorted items
+    /// with the same constructor, and descended as the old lookups did.
+    #[test]
+    fn a_built_index_charges_exactly_what_its_balanced_trees_did() {
+        for count in [0, 1, 6, 31, 200] {
+            let blocks = histories(count);
+            let index = AdjacencyIndex::build(&blocks);
+            let mut work = 0;
+            let statements = source::edge_statements(&blocks);
+            let trees: IndexMap<EId, IndexMap<(CommitSeq, usize, usize), ()>> =
+                IndexMap::from_sorted(
+                    statements
+                        .chunk_by(|a, b| a.0 == b.0)
+                        .map(|group| (group[0].0, source::statement_history(group, &mut work)))
+                        .collect(),
+                    &mut work,
+                );
+            let face = |end: fn(&AdjacencyEntry) -> VId| {
+                let mut pairs: Vec<(VId, EId)> = blocks
+                    .iter()
+                    .flatten()
+                    .map(|entry| (end(entry), entry.eid))
+                    .collect();
+                pairs.sort_unstable();
+                pairs.dedup();
+                let mut work = 0;
+                let vertices = pairs
+                    .chunk_by(|a, b| a.0 == b.0)
+                    .map(|group| {
+                        let ids = group.iter().map(|&(_, eid)| (eid, ())).collect();
+                        (group[0].0, IndexMap::from_sorted(ids, &mut work))
+                    })
+                    .collect();
+                IndexMap::<VId, IndexMap<EId, ()>>::from_sorted(vertices, &mut work)
+            };
+            let (outgoing, incoming) = (face(|entry| entry.src), face(|entry| entry.dst));
+
+            for cut in [0, 1, 2, 3, 4, u64::MAX] {
+                let at = CommitSeq(cut);
+                for id in (0..=count + 1).chain([u128::MAX - 1, u128::MAX]) {
+                    let eid = EId(id);
+                    // The old lookup: one Work, then each node of each descent.
+                    let mut expected = 1;
+                    let mut node = trees.0.as_deref();
+                    while let Some(current) = node {
+                        expected += 1;
+                        match eid.cmp(&current.key) {
+                            core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                            core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                            core::cmp::Ordering::Equal => {
+                                let mut node = current.value.0.as_deref();
+                                while let Some(current) = node {
+                                    expected += 1;
+                                    node = if current.key.0 <= at {
+                                        current.right.0.as_deref()
+                                    } else {
+                                        current.left.0.as_deref()
+                                    };
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    let mut charged = 0;
+                    index
+                        .statement_at_controlled(&blocks, eid, at, &mut |_| {
+                            charged += 1;
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                    assert_eq!(charged, expected, "count={count} cut={cut} eid={id}");
+                }
+            }
+            for vertex in 0..13 {
+                for after in [
+                    None,
+                    Some(EId(0)),
+                    Some(EId(count / 2)),
+                    Some(EId(u128::MAX)),
+                ] {
+                    for (direction, tree) in [
+                        (GlaDirection::Forward, &outgoing),
+                        (GlaDirection::Reverse, &incoming),
+                    ] {
+                        let mut expected = 0;
+                        let old = successor(tree, VId(vertex), after, &mut |_| {
+                            expected += 1;
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                        let mut charged = 0;
+                        let new = index
+                            .next_incident_edge(VId(vertex), direction, after, &mut |_| {
+                                charged += 1;
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap();
+                        assert_eq!(new, old, "count={count} vertex={vertex} {after:?}");
+                        assert_eq!(charged, expected, "count={count} vertex={vertex} {after:?}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn controlled_point_history_agrees_with_independent_scan_and_legacy_lookup() {
         for count in [0, 1, 7, 31] {
@@ -439,9 +591,9 @@ mod indexed_scan_tests {
                         assert!(std::ptr::eq(actual, wanted));
                     }
                     assert_eq!(coordinate, index.statement_at(&blocks, eid, at));
-                    let history_height = index.histories.get(&eid).map_or(0, IndexMap::height);
+                    let history_height = index.history_height(eid);
                     assert!(work > 0);
-                    assert!(work <= 1 + index.histories.height() + history_height);
+                    assert!(work <= 1 + index.identity_height() + history_height);
                 }
             }
         }
@@ -487,9 +639,10 @@ mod indexed_scan_tests {
                 assert_eq!(run(usize::MAX), (expected, total));
             }
         }
-        let empty = AdjacencyIndex::build(&[]);
+        let empty_blocks: &[Vec<AdjacencyEntry>] = &[];
+        let empty = AdjacencyIndex::build(empty_blocks);
         assert_eq!(
-            empty.statement_at_controlled(&[], EId(0), CommitSeq(0), &mut |_| Err(7)),
+            empty.statement_at_controlled(empty_blocks, EId(0), CommitSeq(0), &mut |_| Err(7)),
             Err(7)
         );
     }
@@ -609,9 +762,15 @@ mod indexed_scan_tests {
             }
         }
         assert_eq!(run(usize::MAX), (Ok(()), total, rows));
-        let empty = AdjacencyIndex::build(&[]);
+        let empty_blocks: &[Vec<AdjacencyEntry>] = &[];
+        let empty = AdjacencyIndex::build(empty_blocks);
         assert_eq!(
-            empty.visit_all_coordinates(&[], CommitSeq(0), &mut |_| Err(19), |_, _, _, _| Ok(())),
+            empty.visit_all_coordinates(
+                empty_blocks,
+                CommitSeq(0),
+                &mut |_| Err(19),
+                |_, _, _, _| Ok(())
+            ),
             Err(19)
         );
     }

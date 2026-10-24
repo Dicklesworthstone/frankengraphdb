@@ -3,7 +3,10 @@
 //! authorization grant. Cursor sources can instead supply admitted neighbors
 //! on demand. Both use the same multi-source BFS and canonical rank reduction.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::collections::BTreeSet;
+
+mod cursor;
+pub use cursor::{ExpansionCursor, ExpansionRequest};
 
 use fgdb_types::VId;
 
@@ -220,6 +223,31 @@ impl ExpansionGraph {
         )
     }
 
+    /// Select eligible endpoints BEFORE the graph candidate limit. A rejected
+    /// endpoint remains available for traversal: this is a result predicate,
+    /// not vertex membership, edge selection, or an authorization boundary.
+    /// The predicate shares the original work control and may refuse; a late
+    /// refusal discards every candidate, even after the heap has filled.
+    pub fn expand_filtered(
+        &self,
+        seeds: &[VId],
+        max_hops: u32,
+        include_seeds: bool,
+        candidates: u32,
+        eligible: impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+        work: &mut dyn WorkControl,
+    ) -> Result<Vec<GraphHit>, BeaconError> {
+        self.expand_from_source_filtered(
+            seeds,
+            max_hops,
+            include_seeds,
+            candidates,
+            &mut ResidentNeighbors(&self.arcs),
+            eligible,
+            work,
+        )
+    }
+
     /// Explore a source without constructing resident adjacency. This object's
     /// selected vertex corpus still governs seeds and every transit vertex;
     /// its stored arcs are NOT consulted. An out-of-corpus neighbor is a source
@@ -244,6 +272,34 @@ impl ExpansionGraph {
         source: &mut impl ExpansionNeighbors,
         work: &mut dyn WorkControl,
     ) -> Result<Vec<GraphHit>, BeaconError> {
+        self.expand_from_source_filtered(
+            seeds,
+            max_hops,
+            include_seeds,
+            candidates,
+            source,
+            |_, _| Ok(true),
+            work,
+        )
+    }
+
+    /// Demand-driven adjacency with endpoint filtering before top-k. The
+    /// selected corpus still governs EVERY transit vertex. The predicate runs
+    /// once per reached endpoint after complete exploration, in VId order;
+    /// excluded seeds are not inspected. It must use the same pinned snapshot
+    /// as membership and adjacency, and charge any additional property work.
+    /// Zero candidates never evaluate the predicate or demand adjacency.
+    #[allow(clippy::too_many_arguments)]
+    pub fn expand_from_source_filtered(
+        &self,
+        seeds: &[VId],
+        max_hops: u32,
+        include_seeds: bool,
+        candidates: u32,
+        source: &mut impl ExpansionNeighbors,
+        mut eligible: impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+        work: &mut dyn WorkControl,
+    ) -> Result<Vec<GraphHit>, BeaconError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -253,12 +309,14 @@ impl ExpansionGraph {
             include_seeds,
             candidates,
             self.limits,
-            &mut |id, entries, work| {
-                // Preserve the resident profile's existing combined charge.
-                work.charge(tree_work(self.vertices.len()) + tree_work(entries))?;
+            &mut |id, work| {
+                // The shared cursor admits its own distance-map work before
+                // this source probe; the directory pays only its lookup.
+                work.charge(tree_work(self.vertices.len()))?;
                 Ok(self.contains(id))
             },
             source,
+            &mut eligible,
             work,
         )
     }
@@ -312,17 +370,46 @@ pub fn expand_from_membership(
     source: &mut impl ExpansionNeighbors,
     work: &mut dyn WorkControl,
 ) -> Result<Vec<GraphHit>, BeaconError> {
+    expand_from_membership_filtered(
+        seeds,
+        max_hops,
+        include_seeds,
+        candidates,
+        limits,
+        membership,
+        source,
+        |_, _| Ok(true),
+        work,
+    )
+}
+
+/// Demand-driven membership and adjacency with a separate, fallible endpoint
+/// predicate. Filtering happens after COMPLETE bounded traversal and before
+/// candidate truncation. It never changes reachability or the minimum hop
+/// distance, and cannot hide a source, membership, work, or visited refusal.
+/// Predicate work uses the original allowance; no successful prefix escapes.
+/// As with `ExpansionGraph::expand_filtered`, this is not an ACL mechanism.
+#[allow(clippy::too_many_arguments)]
+pub fn expand_from_membership_filtered(
+    seeds: &[VId],
+    max_hops: u32,
+    include_seeds: bool,
+    candidates: u32,
+    limits: ExpansionLimits,
+    membership: &impl ExpansionMembership,
+    source: &mut impl ExpansionNeighbors,
+    mut eligible: impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+    work: &mut dyn WorkControl,
+) -> Result<Vec<GraphHit>, BeaconError> {
     expand_controlled(
         seeds,
         max_hops,
         include_seeds,
         candidates,
         limits,
-        &mut |id, entries, work| {
-            work.charge(tree_work(entries))?;
-            membership.contains_vertex(id, work)
-        },
+        &mut |id, work| membership.contains_vertex(id, work),
         source,
+        &mut eligible,
         work,
     )
 }
@@ -334,98 +421,38 @@ fn expand_controlled(
     include_seeds: bool,
     candidates: u32,
     limits: ExpansionLimits,
-    contains: &mut impl FnMut(VId, usize, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+    contains: &mut impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
     source: &mut impl ExpansionNeighbors,
+    eligible: &mut impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
     work: &mut dyn WorkControl,
 ) -> Result<Vec<GraphHit>, BeaconError> {
-    work.charge(1)?;
-    if seeds.len() > limits.max_seed_ids {
-        return Err(BeaconError::ResourceLimit {
-            resource: "expansion seed IDs",
-            limit: limits.max_seed_ids,
-        });
-    }
-    let k = usize::try_from(candidates)
-        .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?;
-    if k == 0 {
-        return Ok(Vec::new());
-    }
-    let mut distance = BTreeMap::new();
-    let mut frontier = VecDeque::new();
-    for &id in seeds {
-        if contains(id, distance.len(), work)? && !distance.contains_key(&id) {
-            admit_visit(distance.len(), limits)?;
-            distance.insert(id, 0_u32);
-            frontier.push_back((id, 0_u32));
-        }
-    }
-    while let Some((id, hops)) = frontier.pop_front() {
-        work.charge(1)?;
-        if hops == max_hops {
-            continue;
-        }
-        // Keep the first refusal even if a defective source swallows a
-        // visitor error and continues. It cannot publish a partial search.
-        let mut failure: Option<BeaconError> = None;
-        let result = source.visit_neighbors(id, work, &mut |next, work| {
-            if let Some(error) = &failure {
-                return Err(error.clone());
+    let mut cursor =
+        ExpansionCursor::new(seeds, max_hops, include_seeds, candidates, limits, work)?;
+    loop {
+        match cursor.request(work)? {
+            ExpansionRequest::Seed(id) => {
+                let present = contains(id, work)?;
+                // The cursor invokes admission only for a NEW present visit,
+                // after its visit limit and before distance/queue allocation.
+                cursor.resolve_membership(present, || work.reserve_scratch(2))?;
             }
-            let result: Result<(), BeaconError> = (|| {
-                if !contains(next, distance.len(), work)? {
-                    return Err(BeaconError::InvalidQuery(
-                        "expansion endpoint outside selected corpus",
-                    ));
+            ExpansionRequest::Neighbors(id) => {
+                let result = source.visit_neighbors(id, work, &mut |next, work| {
+                    cursor.prepare_neighbor(next, work)?;
+                    let present = contains(next, work).map_err(|error| cursor.refuse(error))?;
+                    cursor.resolve_membership(present, || work.reserve_scratch(2))
+                });
+                if let Err(error) = result {
+                    return Err(cursor.refuse(error));
                 }
-                if distance.contains_key(&next) {
-                    return Ok(());
-                }
-                admit_visit(distance.len(), limits)?;
-                // hops < max_hops <= u32::MAX.
-                let next_hops = hops + 1;
-                distance.insert(next, next_hops);
-                frontier.push_back((next, next_hops));
-                Ok(())
-            })();
-            if let Err(error) = &result {
-                failure = Some(error.clone());
+                // Also observes a swallowed visitor failure before allowing
+                // another source or a final result. There is only one BFS.
+                cursor.finish_neighbors()?;
             }
-            result
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        result?;
-    }
-    let mut best = BinaryHeap::new();
-    for (id, hops) in distance {
-        work.charge(2 * tree_work(best.len()))?;
-        if hops == 0 && !include_seeds {
-            continue;
-        }
-        let candidate = (hops, id);
-        if best.len() < k {
-            best.push(candidate);
-        } else if best.peek().is_some_and(|worst| candidate < *worst) {
-            best.pop();
-            best.push(candidate);
+            ExpansionRequest::Complete => break,
         }
     }
-    let mut rows = Vec::new();
-    while !best.is_empty() {
-        work.charge(tree_work(best.len()))?;
-        let (hops, id) = best
-            .pop()
-            .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
-        rows.push(GraphHit { id, hops });
-    }
-    for i in 0..rows.len() / 2 {
-        work.charge(1)?;
-        let other = rows.len() - i - 1;
-        rows.swap(i, other);
-    }
-    work.charge(1)?;
-    Ok(rows)
+    cursor.finish(eligible, work)
 }
 
 fn admit_visit(count: usize, limits: ExpansionLimits) -> Result<(), BeaconError> {
@@ -944,6 +971,349 @@ mod source_tests {
             let (result, seen) = run(stop);
             assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}");
             assert_eq!(seen, stop);
+        }
+    }
+
+    #[test]
+    fn endpoint_filter_preserves_transit_vertices_and_refills_top_k() {
+        let ids = [VId(1), VId(2), VId(3)];
+        let arcs = vec![(ids[0], ids[1]), (ids[1], ids[2])];
+        let mut graph = corpus(&ids, ExpansionLimits::default());
+        let mut work = WorkBudget::new(100_000);
+        for &(from, to) in &arcs {
+            graph
+                .insert_edge(from, to, ExpansionDirection::Outgoing, &mut work)
+                .unwrap();
+        }
+        let expected = vec![GraphHit {
+            id: ids[2],
+            hops: 2,
+        }];
+        for include in [false, true] {
+            assert_eq!(
+                graph
+                    .expand_filtered(
+                        &[ids[0]],
+                        2,
+                        include,
+                        1,
+                        |id, _| Ok(id == ids[2]),
+                        &mut work,
+                    )
+                    .unwrap(),
+                expected
+            );
+            let mut input = source(arcs.clone());
+            let mut observed = Vec::new();
+            assert_eq!(
+                graph
+                    .expand_from_source_filtered(
+                        &[ids[0], ids[0]],
+                        2,
+                        include,
+                        1,
+                        &mut input,
+                        |id, work| {
+                            work.charge(1)?;
+                            observed.push(id);
+                            Ok(id == ids[2])
+                        },
+                        &mut work,
+                    )
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(input.calls, [ids[0], ids[1]]);
+            assert_eq!(
+                observed,
+                if include {
+                    ids.to_vec()
+                } else {
+                    ids[1..].to_vec()
+                }
+            );
+            let mut input = source(arcs.clone());
+            assert_eq!(
+                expand_from_membership_filtered(
+                    &[ids[0]],
+                    2,
+                    include,
+                    1,
+                    ExpansionLimits::default(),
+                    &graph,
+                    &mut input,
+                    |id, _| Ok(id == ids[2]),
+                    &mut work,
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_filter_refusal_cannot_publish_an_earlier_winner() {
+        let graph = corpus(&[VId(1), VId(2), VId(3)], ExpansionLimits::default());
+        let mut input = source(vec![(VId(1), VId(2)), (VId(2), VId(3))]);
+        let mut observed = Vec::new();
+        let result = graph.expand_from_source_filtered(
+            &[VId(1)],
+            2,
+            true,
+            1,
+            &mut input,
+            |id, work| {
+                work.charge(1)?;
+                observed.push(id);
+                if id == VId(3) {
+                    Err(BeaconError::InvalidQuery("injected endpoint refusal"))
+                } else {
+                    Ok(true)
+                }
+            },
+            &mut WorkBudget::new(10_000),
+        );
+        assert!(matches!(
+            result,
+            Err(BeaconError::InvalidQuery("injected endpoint refusal"))
+        ));
+        assert_eq!(observed, [VId(1), VId(2), VId(3)]);
+        assert_eq!(input.calls, [VId(1), VId(2)]);
+    }
+
+    #[test]
+    fn zero_candidates_do_not_evaluate_membership_adjacency_or_predicate() {
+        let mut domain = membership();
+        domain.refused = Some(VId(1));
+        let mut input = source(vec![]);
+        input.fail_at = Some(VId(1));
+        let rows = expand_from_membership_filtered(
+            &[VId(1)],
+            u32::MAX,
+            true,
+            0,
+            ExpansionLimits::default(),
+            &domain,
+            &mut input,
+            |_, _| panic!("zero candidates must not evaluate endpoint properties"),
+            &mut WorkBudget::new(1000),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(domain.calls.get(), 0);
+        assert!(input.calls.is_empty());
+    }
+
+    #[test]
+    fn rejecting_every_endpoint_does_not_hide_invalid_transit_or_visit_overflow() {
+        for (ids, limit) in [(&[VId(1)][..], 10), (&[VId(1), VId(2)][..], 1)] {
+            let graph = corpus(
+                ids,
+                ExpansionLimits {
+                    max_visited_vertices: limit,
+                    ..ExpansionLimits::default()
+                },
+            );
+            let mut input = source(vec![(VId(1), VId(2))]);
+            input.swallow = true;
+            let mut observed = 0;
+            let result = graph.expand_from_source_filtered(
+                &[VId(1)],
+                1,
+                true,
+                1,
+                &mut input,
+                |_, _| {
+                    observed += 1;
+                    Ok(false)
+                },
+                &mut WorkBudget::new(1000),
+            );
+            assert!(result.is_err());
+            assert_eq!(observed, 0, "incomplete traversal must not reach ranking");
+        }
+    }
+
+    #[test]
+    fn every_endpoint_work_cut_discards_the_private_result() {
+        struct Cut {
+            calls: usize,
+            stop: usize,
+        }
+        impl WorkControl for Cut {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.calls == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let run = |stop| {
+            let mut work = Cut { calls: 0, stop };
+            let domain = membership();
+            let mut input = source(vec![(VId(0), VId(1)), (VId(1), VId(2))]);
+            let result = expand_from_membership_filtered(
+                &[VId(0)],
+                2,
+                true,
+                1,
+                ExpansionLimits::default(),
+                &domain,
+                &mut input,
+                |id, work| {
+                    work.charge(7)?;
+                    Ok(id == VId(2))
+                },
+                &mut work,
+            );
+            (result, work.calls)
+        };
+        let (result, count) = run(usize::MAX);
+        assert_eq!(
+            result.unwrap(),
+            [GraphHit {
+                id: VId(2),
+                hops: 2
+            }]
+        );
+        for stop in 1..=count {
+            let (result, seen) = run(stop);
+            assert_eq!(result.unwrap_err(), BeaconError::Cancelled);
+            assert_eq!(seen, stop);
+        }
+    }
+
+    #[test]
+    fn filtered_expansion_composes_with_all_hybrid_candidate_lanes() {
+        use crate::{BeaconIndex, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery};
+        use crate::{IndexConfig, IndexDocument, TextMatch, VectorSearch};
+
+        let mut work = WorkBudget::new(100_000);
+        let mut graph = corpus(&[VId(1), VId(2), VId(3)], ExpansionLimits::default());
+        for (from, to) in [(VId(1), VId(2)), (VId(2), VId(3))] {
+            graph
+                .insert_edge(from, to, ExpansionDirection::Outgoing, &mut work)
+                .unwrap();
+        }
+        let index = BeaconIndex::build(
+            IndexConfig::default(),
+            (1..=3).map(|id| IndexDocument {
+                id: VId(id),
+                vector: None,
+                text: Some("red".into()),
+            }),
+            &mut work,
+        )
+        .unwrap();
+        let eligible = |id| id == VId(3);
+        let candidates = graph
+            .expand_filtered(&[VId(1)], 2, false, 1, |id, _| Ok(eligible(id)), &mut work)
+            .unwrap();
+        let rows = index
+            .snapshot()
+            .hybrid_search_graph_filtered(
+                GraphHybridQuery {
+                    retrieval: ExactHybridQuery {
+                        vector: &[],
+                        text: "red",
+                        k: 1,
+                        vector_candidates: 0,
+                        text_candidates: 1,
+                        vector_mode: VectorSearch::Exact,
+                        text_mode: TextMatch::Any,
+                        profile: ExactRrfProfile::new(60, 0, 1).unwrap(),
+                    },
+                    graph_candidates: 1,
+                    graph_weight: 100,
+                },
+                &candidates,
+                eligible,
+                &mut work,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, VId(3));
+        assert_eq!(rows[0].graph_hops, Some(2));
+        assert_eq!(rows[0].graph_rank, std::num::NonZeroU32::new(1));
+        assert_eq!(rows[0].text_rank, std::num::NonZeroU32::new(1));
+        assert_eq!(rows[0].vector_rank, None);
+        assert_eq!(rows[0].score.numerator(), 101);
+        assert_eq!(rows[0].score.denominator(), 61);
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn exhaustive_endpoint_filters_match_min_plus_distances_and_canonical_limits() {
+        let ids = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
+        for bits in 0_u16..512 {
+            let mut distance = [[99_u32; 3]; 3];
+            let mut graph = corpus(&ids, ExpansionLimits::default());
+            let mut work = WorkBudget::new(usize::MAX);
+            for from in 0..3 {
+                distance[from][from] = 0;
+                for to in 0..3 {
+                    if bits & (1 << (from * 3 + to)) != 0 {
+                        distance[from][to] = distance[from][to].min(1);
+                        graph
+                            .insert_edge(
+                                ids[from],
+                                ids[to],
+                                ExpansionDirection::Outgoing,
+                                &mut work,
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+            for via in 0..3 {
+                for from in 0..3 {
+                    for to in 0..3 {
+                        distance[from][to] =
+                            distance[from][to].min(distance[from][via] + distance[via][to]);
+                    }
+                }
+            }
+            for filter in 0_u8..8 {
+                for hops in 0..=3 {
+                    for include in [false, true] {
+                        let mut expected: Vec<_> = (0..3)
+                            .filter_map(|to| {
+                                let d = distance[0][to];
+                                (filter & (1 << to) != 0 && d <= hops && (include || d != 0))
+                                    .then_some((d, ids[to]))
+                            })
+                            .collect();
+                        expected.sort();
+                        for k in 0..=3 {
+                            let rows = graph
+                                .expand_filtered(
+                                    &[ids[0], ids[0], VId(99)],
+                                    hops,
+                                    include,
+                                    k,
+                                    |id, _| {
+                                        Ok(ids.iter().enumerate().any(|(i, &candidate)| {
+                                            candidate == id && filter & (1 << i) != 0
+                                        }))
+                                    },
+                                    &mut work,
+                                )
+                                .unwrap();
+                            let expected: Vec<_> = expected
+                                .iter()
+                                .take(k as usize)
+                                .map(|&(hops, id)| GraphHit { id, hops })
+                                .collect();
+                            assert_eq!(
+                                rows, expected,
+                                "graph={bits}, filter={filter}, hops={hops}, seeds={include}, k={k}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

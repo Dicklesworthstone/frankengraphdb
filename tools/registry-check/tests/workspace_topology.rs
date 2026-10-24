@@ -65,8 +65,12 @@ const ID_TABLE_PIN: &str = "fnv1a64:038e596f60f3489a";
 // 5 once unnecessary_literal_unwrap was, 4 once type_complexity was, 3 once
 // result_large_err was, 2 once rustc recursion_depth_exceeding_limit was (the
 // two kept 088e510f allows), 3 with the rust::unnameable_types deny
-// (fgdb-8m1in), a strengthening rather than an allowance.
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:9fcb6c08eb39d100";
+// (fgdb-8m1in), a strengthening rather than an allowance. Then two
+// activations moved only the registry-side pin, each verified by
+// topology-check: 492f280d activated fgdb-server and made the server posture
+// live (9fcb6c08eb39d100 -> 714ca6dea8bd6d6b), and 9bea2ebe activated
+// fgdb-bolt (714ca6dea8bd6d6b -> fcb90ac21a190481). This constant follows.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:fcb90ac21a190481";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -214,8 +218,8 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        29,
-        "twenty-six ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
+        31,
+        "twenty-eight ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's \
          BLAKE3/AEAD kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's \
          §5.1 identity pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's \
          semantics oracle, fgdb-sim by fgdb-verif-sim-q97e's \
@@ -229,7 +233,11 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
          a topology violation, and fgdb-bench by fgdb-p95p's §17 adversarial \
          benchmark harness; then fgdb-protocol by 1167eab2, and by 1207516b \
          fgdb-policy, fgdb-order, fgdb-prism, fgdb-warden, fgdb-repl, fgdb-cli \
-         and the new fgdb-beacon) plus all three landed islands: \
+         and the new fgdb-beacon; then fgdb-server by fgdb-w10-server-rte's \
+         fgdbd daemon in 492f280d, which turns the server posture live, and \
+         fgdb-bolt by fgdb-w10-bolt-a0s's Bolt compatibility profile in \
+         9bea2ebe) plus \
+         all three landed islands: \
          fgdb-unsafe-simd, fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
@@ -854,7 +862,9 @@ fn topology_posture_closure_accepts_the_declared_embedded_facade() {
 
 #[test]
 fn topology_neg_posture_consumption_must_name_another_existing_posture() {
-    let cli = "status = \"live\"\ndeferred_to = \"\"\nconsumes_entries = [\"embedded\"]";
+    // The plan anchor makes the block unique: since 492f280d the server
+    // posture ends with the same status/deferred_to/consumes_entries lines.
+    let cli = "plan_anchor = \"§1 constraint 5(c)\"\nstatus = \"live\"\ndeferred_to = \"\"\nconsumes_entries = [\"embedded\"]";
     for (consumes, why) in [
         ("[\"embeded\"]", "a typo names no posture"),
         ("[\"cli\"]", "a posture cannot consume itself"),

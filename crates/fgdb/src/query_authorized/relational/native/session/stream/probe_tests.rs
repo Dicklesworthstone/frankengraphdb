@@ -2,7 +2,7 @@
 use super::*;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::SchemaEpoch;
-use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{CanonicalPropertyValue, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
 
 struct NoReads;
@@ -69,11 +69,13 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
-    let execution: Shared<'_> =
-        Rc::new(RefCell::new(Execution::new(&cx, permit, Box::new(|| 100))));
+    let mut clock = || 100;
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(
+        &cx, permit, &mut clock,
+    ))));
     let source = ScopedSource {
         inner: NoReads,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut control = |_| execution.borrow_mut().checkpoint();
     for direction in [
@@ -86,7 +88,7 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
                 source
                     .next_probe_edge_for_relation(
                         VId(u128::MAX),
-                        RelationId(7),
+                        EdgeRelation::One(RelationId(7)),
                         direction,
                         after,
                         &mut control
@@ -101,7 +103,7 @@ fn deny_before_endpoint_and_incidence_still_checks_the_live_permit() {
     assert!(matches!(
         source.next_probe_edge_for_relation(
             VId(0),
-            RelationId(7),
+            EdgeRelation::One(RelationId(7)),
             fgdb_gql::algebra::GlaDirection::Forward,
             None,
             &mut control
@@ -152,7 +154,7 @@ fn probe_error_translation_preserves_source_authority_and_structural_causes() {
 // lends an already-selected historical row; masking remains the product code's
 // responsibility, not the fixture's. No raw payload is copied by field lookup.
 struct PropertyRow {
-    fields: Vec<(PropertyKeyId, CanonicalScalar)>,
+    fields: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 impl VertexScanSource for PropertyRow {
     type Error = ReadError;
@@ -183,12 +185,12 @@ impl VertexScanSource for PropertyRow {
 fn property_observation(
     cx: &QueryCx,
     issuer: &Authority,
-    fields: &[(PropertyKeyId, CanonicalScalar)],
+    fields: &[(PropertyKeyId, CanonicalPropertyValue)],
     vid: VId,
     key: PropertyKeyId,
     limit: u64,
 ) -> (
-    Result<Option<Option<CanonicalScalar>>, QueryError>,
+    Result<Option<Option<CanonicalPropertyValue>>, QueryError>,
     u64,
     u64,
     u64,
@@ -208,12 +210,13 @@ fn property_observation(
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, "branch", 100).unwrap();
     let permit = verified.begin_read_at("branch", 100).unwrap();
-    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
+    let mut clock = || 100;
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
     let source = ScopedSource {
         inner: PropertyRow {
             fields: fields.to_vec(),
         },
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut work = 0;
     let mut scratch = 0;
@@ -249,15 +252,15 @@ fn field_probe_usage_and_exact_refusal_threshold_ignore_hidden_key_population() 
         1,
     )
     .unwrap();
-    let visible = vec![
-        (PropertyKeyId(17), CanonicalScalar::Int(7)),
-        (PropertyKeyId(33), CanonicalScalar::Int(9)),
+    let visible: Vec<(PropertyKeyId, CanonicalPropertyValue)> = vec![
+        (PropertyKeyId(17), CanonicalScalar::Int(7).into()),
+        (PropertyKeyId(33), CanonicalScalar::Int(9).into()),
     ];
     for size in [0, 1, 8, 32, 64, 128] {
         let mut hidden = visible.clone();
         for key in 1..=size {
             if ![17, 25, 33].contains(&key) {
-                hidden.push((PropertyKeyId(key), CanonicalScalar::Int(-1)));
+                hidden.push((PropertyKeyId(key), CanonicalScalar::Int(-1).into()));
             }
         }
         hidden.sort_by_key(|(key, _)| *key);

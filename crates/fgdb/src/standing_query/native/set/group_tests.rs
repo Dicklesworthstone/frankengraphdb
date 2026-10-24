@@ -14,7 +14,9 @@ use fgdb_gql::{
     GraphIntegerOp, GraphSetProjection, GraphSetValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphPipelineAggregateText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const B: PropertyKeyId = PropertyKeyId(1);
@@ -34,6 +36,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "bucket") => Some(GraphSymbol::Property(B)),
         (GraphSymbolKind::Property, "amount") => Some(GraphSymbol::Property(N)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
     }
 }
@@ -211,8 +214,8 @@ fn independent<V: Vfs + Clone>(
     let mut source = BTreeMap::new();
     for vertex in db.vertices_at(db.frontier().unwrap()).unwrap() {
         let get = |key| match vertex.props.iter().find(|(k, _)| *k == key).map(|(_, v)| v) {
-            Some(CanonicalScalar::Int(n)) => Some(*n),
-            None | Some(CanonicalScalar::Null) => None,
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) => Some(*n),
+            None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
             _ => panic!("integer fixture"),
         };
         *source.entry((get(B), get(N))).or_insert(0_usize) += 1;
@@ -688,6 +691,144 @@ fn every_group_circuit_admission_and_rebuild_checkpoint_preserves_the_old_regist
             snapshot(&db, &cx, &def)
         );
         db.standing_native_query(&cx, &sibling, policy()).unwrap();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_collection_admission_and_rebuild_keep_budget_and_cancellation_atomic() {
+    let ((), report) = run_async_under_lab(0x6772_1025, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut edges = WriteBatch::new(RelationId(1));
+        for (id, source, destination) in [(1, 1, 4), (2, 1, 4), (3, 4, 2), (4, 2, 2)] {
+            edges.add_edge(fgdb_types::EId(id), VId(source), VId(destination), vec![]);
+        }
+        db.write(&commit, edges).await.unwrap();
+        let args = GqlParameters::new();
+        for (text, width) in [
+            (
+                "MATCH (n) RETURN collect(n.amount) AS values,collect(DISTINCT n.amount) AS unique,COUNT(*) AS count",
+                1,
+            ),
+            (
+                "MATCH (n) RETURN collect([n.amount,n.bucket]) AS pairs,reduce(total=0,x IN collect(n.amount) | total+x) AS total",
+                1,
+            ),
+            (
+                "MATCH (a)-[:R]->(b) RETURN collect(b.amount) AS values,collect(DISTINCT b.amount) AS unique,COUNT(*) AS count",
+                2,
+            ),
+            (
+                "MATCH (a)-[:R]-(b) RETURN collect(-b.amount) AS values,collect([a.amount,b.amount]) AS pairs",
+                2,
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+            let PreparedNativeRead::Aggregate(template) = &prepared else {
+                panic!("native graph collection template")
+            };
+            let definition = template
+                .bind_parameters(&args)
+                .unwrap()
+                .incremental_collection_relation()
+                .unwrap();
+            let mut calls = 0;
+            let handle = register_group_checked(
+                &mut db,
+                &cx,
+                &definition,
+                template.columns(),
+                template.output_slots(),
+                policy(),
+                &mut || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let first = match handle.native.as_deref().unwrap() {
+                Layout::GroupCircuit { first, .. } => *first,
+                _ => unreachable!(),
+            };
+            let footprint = prepared.subscription_footprint(&cx, &args).unwrap();
+            assert_eq!(footprint, ((handle.index - first + 1) as u64, width));
+            assert_eq!(footprint.0, 3);
+            let accepted = saved(&db.standing_queries);
+            for limit in [
+                GqlQueryPolicy::new(100_000, 100_000, 0, 50_000_000),
+                GqlQueryPolicy::new(100_000, 100_000, 50_000_000, 0),
+                GqlQueryPolicy::new(0, 100_000, 50_000_000, 50_000_000),
+                GqlQueryPolicy::new(100_000, 0, 50_000_000, 50_000_000),
+            ] {
+                assert!(
+                    prepared
+                        .register_standing(&mut db, &cx, &args, limit)
+                        .is_err()
+                );
+                assert_eq!(saved(&db.standing_queries), accepted);
+                assert!(db.rebuild_standing_query(&cx, &handle, limit).is_err());
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(
+                    register_group_checked(
+                        &mut db,
+                        &cx,
+                        &definition,
+                        template.columns(),
+                        template.output_slots(),
+                        policy(),
+                        &mut || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(StandingQueryError::Maintenance(
+                                    StandingQueryFailure::Interrupted,
+                                ))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .is_err()
+                );
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            let mut calls = 0;
+            rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+            let accepted = saved(&db.standing_queries);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(
+                    rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryError::Maintenance(
+                                StandingQueryFailure::Interrupted,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+                );
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            assert_eq!(
+                db.standing_native_query(&cx, &handle, policy()).unwrap().1,
+                db.query(&cx, text, &args, symbols, policy()).unwrap()
+            );
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

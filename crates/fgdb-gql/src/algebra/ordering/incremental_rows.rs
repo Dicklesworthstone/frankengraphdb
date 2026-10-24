@@ -6,8 +6,8 @@
 //! original result window. Executing the carrier as the user query is incorrect.
 
 use crate::algebra::{
-    GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern,
-    ValueProjection,
+    GlaOperator, GraphPathFunction, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES,
+    PreparedGraphPattern, ValueProjection,
 };
 use crate::{
     GlaExecutionEvent, GraphAggregate, GraphAggregateColumn, GraphAggregateOrder,
@@ -51,7 +51,13 @@ impl PreparedGraphPattern<GraphValueRow> {
             || columns.iter().any(|column| {
                 !matches!(
                     column,
-                    ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Property { .. }
+                        | ValueProjection::EdgeProperty { .. }
+                        | ValueProjection::Path {
+                            function: GraphPathFunction::Edge,
+                            ..
+                        }
                 )
             })
             || order.iter().any(|order| order.column >= columns.len())
@@ -85,7 +91,7 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// The caller MUST retain this original pattern and apply its quantifier,
     /// ordering and window downstream. Source topology is admitted separately
     /// by the standing-query engine; this method is not an authority grant.
-    /// Up to MAX_PATTERN_VERTICES - 1 scalar/vertex columns are admitted.
+    /// Up to MAX_PATTERN_VERTICES - 1 scalar/vertex/edge columns are admitted.
     #[must_use]
     pub fn incremental_row_source_definition(&self) -> Option<PreparedGraphAggregate> {
         let output = self.incremental_rows_output()?;
@@ -165,10 +171,16 @@ impl PreparedGraphPattern<GraphValueRow> {
         for (projection, value) in output.columns.iter().zip(counted.keys()) {
             control(GlaExecutionEvent::Work)?;
             let valid = match projection {
-                ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
+                ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => {
+                    matches!(value, GraphValue::Scalar(_))
+                }
                 ValueProjection::Vertex { .. } => {
                     matches!(value, GraphValue::Vertex(_)) || value.is_null()
                 }
+                ValueProjection::Path {
+                    function: GraphPathFunction::Edge,
+                    ..
+                } => matches!(value, GraphValue::Edge(_)) || value.is_null(),
                 _ => false,
             };
             if !valid {
@@ -191,7 +203,7 @@ mod tests {
     use crate::GqlQueryPolicy;
     use crate::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder};
     use fgdb_delta_types::{PropertyKeyId, RelationId};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
     use std::cmp::Ordering;
 
     fn definition(
@@ -232,7 +244,8 @@ mod tests {
             CanonicalScalar::Int(7),
             CanonicalScalar::Null,
             CanonicalScalar::Bool(true),
-        ];
+        ]
+        .map(CanonicalPropertyValue::Scalar);
         let edges = [
             (VId(9), RelationId(1), VId(0)),
             (VId(9), RelationId(1), VId(0)),
@@ -434,5 +447,91 @@ mod tests {
             .prepare_values(&columns[..MAX_PATTERN_VERTICES - 1], 0, None)
             .unwrap();
         assert!(supported.incremental_row_source_definition().is_some());
+    }
+
+    #[test]
+    fn edge_field_tuples_keep_scalar_domains_and_checked_multiplicity() {
+        use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+        let text = PreparedGraphText::prepare(
+            "MATCH (a)-[r:R]->(b) RETURN r.p AS p",
+            |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let pattern = text.bind_parameters(&GqlParameters::new()).unwrap();
+        let source = pattern.incremental_row_source_definition().unwrap();
+        assert!(source.supports_incremental_maintenance_with_having());
+        for value in [CanonicalScalar::Int(7), CanonicalScalar::Null] {
+            let value = GraphValue::Scalar(value);
+            let counted = source
+                .materialize_incremental_row(
+                    vec![value.clone()],
+                    vec![GraphAggregateValue::Count(3)],
+                )
+                .unwrap();
+            let (row, count) = pattern
+                .materialize_incremental_values(&counted, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.values(), &[value]);
+            assert_eq!(count, 3);
+        }
+        assert!(
+            source
+                .materialize_incremental_row(
+                    vec![GraphValue::Vertex(VId(u128::MAX))],
+                    vec![GraphAggregateValue::Count(1)],
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn edge_identity_tuples_preserve_ids_and_refuse_other_domains() {
+        use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+        use fgdb_types::EId;
+        let text = PreparedGraphText::prepare(
+            "MATCH (a)-[r:R]->(b) RETURN r AS edge,r.p AS p",
+            |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let pattern = text.bind_parameters(&GqlParameters::new()).unwrap();
+        let source = pattern.incremental_row_source_definition().unwrap();
+        assert!(source.supports_incremental_maintenance_with_having());
+        for id in [0, u128::MAX] {
+            let values = vec![
+                GraphValue::Edge(EId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+            ];
+            let counted = source
+                .materialize_incremental_row(values.clone(), vec![GraphAggregateValue::Count(2)])
+                .unwrap();
+            let (row, count) = pattern
+                .materialize_incremental_values(&counted, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.values(), values);
+            assert_eq!(count, 2);
+        }
+        for wrong in [
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Int(7)),
+        ] {
+            assert!(
+                source
+                    .materialize_incremental_row(
+                        vec![wrong, GraphValue::Scalar(CanonicalScalar::Int(7))],
+                        vec![GraphAggregateValue::Count(1)],
+                    )
+                    .is_none()
+            );
+        }
     }
 }

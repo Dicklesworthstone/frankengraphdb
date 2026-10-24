@@ -169,12 +169,12 @@ fn input(shape: usize, d: GlaDirection, anti: bool, edge: bool, skip: u64, count
 fn witnesses(f: &Fixture, shape: usize, d: GlaDirection, root: VId) -> usize {
     let pairs: Vec<_> = f
         .edges
-        .values()
-        .flat_map(|&(a, b)| match d {
-            GlaDirection::Forward => vec![(a, b)],
-            GlaDirection::Reverse => vec![(b, a)],
-            GlaDirection::Undirected if a != b => vec![(a, b), (b, a)],
-            _ => vec![(a, b)],
+        .iter()
+        .flat_map(|(&id, &(a, b))| match d {
+            GlaDirection::Forward => vec![(id, a, b)],
+            GlaDirection::Reverse => vec![(id, b, a)],
+            GlaDirection::Undirected if a != b => vec![(id, a, b), (id, b, a)],
+            _ => vec![(id, a, b)],
         })
         .collect();
     match shape {
@@ -185,15 +185,22 @@ fn witnesses(f: &Fixture, shape: usize, d: GlaDirection, root: VId) -> usize {
             .count(),
         1 => pairs
             .iter()
-            .filter(|(_, b)| matches!(f.value(*b), CanonicalScalar::Int(n) if n > 5))
+            .filter(|(_, _, b)| matches!(f.value(*b), CanonicalScalar::Int(n) if n > 5))
             .count(),
+        // DIFFERENT EDGES, the textual MATCH default: the two :R atoms of the
+        // EXISTS body never bind one edge, so an undirected edge does not go
+        // out and back over itself (fgdb-vexfr).
         2 => pairs
             .iter()
-            .flat_map(|&(a, b)| pairs.iter().filter(move |&&(x, y)| x == b && y == a))
+            .flat_map(|&(id, a, b)| {
+                pairs
+                    .iter()
+                    .filter(move |&&(other, x, y)| x == b && y == a && other != id)
+            })
             .count(),
         _ => pairs
             .iter()
-            .filter(|(a, _)| match (f.value(*a), f.value(root)) {
+            .filter(|(_, a, _)| match (f.value(*a), f.value(root)) {
                 (CanonicalScalar::Int(a), CanonicalScalar::Int(b)) => a == b,
                 _ => false,
             })
@@ -348,7 +355,7 @@ fn unavailable_bad_order_and_failed_reads_are_not_successful_absence() {
     f.source.vertices = BTreeSet::from([VId(0)]);
     f.source
         .props
-        .insert(VId(0), vec![(P, CanonicalScalar::Int(1))]);
+        .insert(VId(0), vec![(P, CanonicalScalar::Int(1).into())]);
     let c = VertexScanCursor::new(
         f,
         VertexScanPlan::compile(q.plan()).unwrap(),

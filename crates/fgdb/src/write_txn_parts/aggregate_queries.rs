@@ -42,16 +42,49 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let result = aggregate.execute_governed_with_element_properties(
+            let names = source.catalog_names();
+            let maps = source.property_maps(
+                &mut |event| {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe(policy, event)
+                },
+                |error| {
+                    GqlQueryError::Source(GraphAggregateError::Source(WriteTxnError::Read(error)))
+                },
+            )?;
+            let element_failure = std::cell::RefCell::new(None);
+            let result = aggregate.execute_governed_with_element_maps_and_reads(
                 source.snapshot_records as u64,
                 source.vertex_ids(),
                 source.identified_edges(),
                 |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                 |vid, key| Ok(source.property(vid, key)),
                 |eid, key| Ok(source.edge_property(eid, key)),
+                |vid| names.labels(vid),
+                |eid| names.edge_type(eid),
+                |vid| Ok(maps.vertices.get(&vid)),
+                |eid| Ok(maps.edges.get(&eid)),
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
                 usage.remaining(policy),
-                || cx.checkpoint(),
+                || {
+                    let stopped = element_failure.borrow_mut().take();
+                    match stopped {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    }
+                },
             );
+            if let Some(error) = element_failure.into_inner() {
+                return Err(GqlQueryError::Interrupted(error));
+            }
             let result = usage.finish(policy, result)?;
             source.accept_observations();
             Ok(result)
@@ -63,6 +96,8 @@ impl WriteTxn {
     /// Both positive and negative domains use the ordinary overlay read/scan
     /// tracking, even for an empty set or LIMIT 0. A later set-stage refusal
     /// never erases observations already retained by an operand.
+    /// Properties of carried vertex/edge values use that same basis and staged
+    /// effects, retaining their selected-field and element-lifetime witnesses.
     pub fn execute_graph_set_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -83,13 +118,36 @@ impl WriteTxn {
             let _ = self
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
-            query.execute_governed(
+            let element_failure = std::cell::RefCell::new(None);
+            let result = query.execute_governed_with_elements(
                 policy,
                 |pattern, allowance| {
                     self.execute_graph_pattern_governed(database, cx, pattern, allowance)
                 },
-                || cx.checkpoint(),
-            )
+                |call, arguments, allowance| {
+                    self.execute_procedure_governed(database, cx, call, arguments, allowance)
+                },
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+                || {
+                    let stopped = element_failure.borrow_mut().take();
+                    match stopped {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    }
+                },
+            );
+            match element_failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => result,
+            }
         })
     }
 

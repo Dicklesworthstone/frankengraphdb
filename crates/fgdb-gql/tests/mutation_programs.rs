@@ -15,7 +15,7 @@ fn statement(value: i64, relation: u64) -> PreparedGraphMutation {
     PreparedGraphMutationText::prepare(
         &format!("MATCH (n) SET n.p={value}"),
         RelationId(relation),
-        |kind, name| match (kind, name) {
+        |kind, name: &str| match (kind, name) {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             _ => None,
         },

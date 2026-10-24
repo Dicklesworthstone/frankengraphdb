@@ -4,7 +4,9 @@ use fgdb::{Database, DatabaseKeys, PreparedNativeRead, QueryError, QueryResult, 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, RelationBind};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 #[path = "native_aggregate_stream/extended.rs"]
 mod extended;
@@ -55,6 +57,99 @@ fn seed() -> WriteBatch {
         );
     }
     batch
+}
+
+#[test]
+fn keyed_count_and_sum_streams_read_only_equality_candidates() {
+    let ((), report) = run_async_under_lab(0xa66e_1101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..356_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![
+                    (SCORE, CanonicalScalar::Int(id as i64)),
+                    (TAG, CanonicalScalar::Int(id as i64)),
+                ],
+            );
+        }
+        for (id, key, score) in [
+            (0, CanonicalScalar::Int(7), -9),
+            (
+                u128::MAX,
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0)),
+                14,
+            ),
+        ] {
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![(SCORE, CanonicalScalar::Int(score)), (TAG, key)],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let text = "MATCH (n:L) WHERE n.tag = $key RETURN COUNT(*) AS total, SUM(n.score) AS sum";
+        for (key, records, total, sum) in [(7, 2, 2, Some(5)), (999, 0, 0, None)] {
+            let args = GqlParameters::new().with_int64("key", key).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                db.query(&cx, text, &args, symbols(), wide()).unwrap()
+            else {
+                panic!("aggregate returned a write");
+            };
+            let mut cursor = db
+                .query_aggregate_stream(
+                    &cx,
+                    text,
+                    &args,
+                    symbols(),
+                    GqlQueryPolicy::new(records, 1, 1_000_000, 1000),
+                )
+                .unwrap();
+            assert_eq!(cursor.columns(), columns);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            let row = cursor.next().unwrap().unwrap();
+            assert_eq!(row.values()[0].as_count(), Some(total));
+            assert_eq!(row.values()[1].as_integer(), sum);
+            assert_eq!(rows, vec![row.values().to_vec()]);
+            assert_eq!(cursor.row_stats().snapshot_records, records);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn aggregate_equality_cannot_hide_an_earlier_fallible_filter() {
+    let ((), report) = run_async_under_lab(0xa66e_1102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(0),
+            vec![LABEL],
+            vec![
+                (SCORE, CanonicalScalar::Int(0)),
+                (TAG, CanonicalScalar::Int(0)),
+            ],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let text = "MATCH (n:L) WHERE 10 / n.score > 0 AND n.tag = 7 RETURN COUNT(*) AS total";
+        let mut cursor = db
+            .query_aggregate_stream(&cx, text, &GqlParameters::new(), symbols(), wide())
+            .unwrap();
+        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Data(_)))));
+        assert_eq!(cursor.row_stats().snapshot_records, 1);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -215,40 +310,54 @@ fn temporal_rebinding_stays_at_the_exact_cut_and_refuses_future_view_reads() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// WITH-pipeline aggregates over a vertex scan or one directed edge stream
+/// natively (they were refused before the native aggregate cursors, 9f9019dc
+/// and d395d42c; fgdb-4wrnd): each streams exactly the eager answer under the
+/// same columns. A plain row scan is still refused rather than run eagerly
+/// behind a stream.
 #[test]
-fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
+fn with_pipeline_aggregates_stream_the_eager_answer_and_plain_scans_still_refuse() {
     let ((), report) = run_async_under_lab(0xa66e_1004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
-        let db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut edges = WriteBatch::new(RelationId(1));
+        for (eid, from, to) in [
+            (10, 0, 1),
+            (11, 1, u128::MAX),
+            (12, 2, 0),
+            (13, 0, u128::MAX),
+        ] {
+            edges.add_edge(EId(eid), VId(from), VId(to), vec![]);
+        }
+        db.write(&commit, edges).await.unwrap();
+        let args = GqlParameters::new();
         for text in [
             "MATCH (n:L) WITH n.score AS score RETURN COUNT(*) AS count",
             "MATCH (n:L) WITH n.score AS score RETURN SUM(score) AS total",
             "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN SUM(s) AS total",
             "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN COUNT(*) AS count",
         ] {
-            // Ensure a valid native definition, not a vacuous syntax refusal.
-            let prepared =
-                PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-            assert!(
-                matches!(
-                    prepared.stream_aggregate(
-                        &db,
-                        &cx,
-                        &GqlParameters::new(),
-                        GqlQueryPolicy::new(0, 0, 0, 0),
-                    ),
-                    Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))
-                ),
-                "{text}"
-            );
+            let prepared = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                prepared.execute(&db, &cx, &args, wide()).unwrap()
+            else {
+                panic!("{text}: not rows")
+            };
+            assert!(!rows.is_empty(), "{text}: a vacuous comparison");
+            let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            assert_eq!(cursor.columns(), columns, "{text}");
+            let streamed: Vec<_> = cursor
+                .by_ref()
+                .map(|row| row.unwrap().values().to_vec())
+                .collect();
+            assert_eq!(streamed, rows, "{text}");
         }
-        let scan =
-            PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &GqlParameters::new(), symbols())
-                .unwrap();
+        let scan = PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &args, symbols()).unwrap();
         assert!(matches!(
-            scan.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()),
+            scan.stream_aggregate(&db, &cx, &args, wide()),
             Err(QueryError::StreamingUnsupported { .. })
         ));
     });
@@ -317,6 +426,81 @@ fn native_streams_keep_exact_budgets_typed_late_failures_and_nondraining_close()
         assert_eq!(invalid.state(), VertexScanState::Failed);
         assert!(!format!("{invalid:?}").contains("private incompatible operand"));
         assert!(invalid.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn range_and_prefix_aggregate_streams_bound_count_and_sum_inputs() {
+    let ((), report) = run_async_under_lab(0xa66e_1201, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for prefix in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 100..356_u128 {
+                let tag = if prefix {
+                    CanonicalScalar::ucs_basic_text(&format!("z{id}")).unwrap()
+                } else {
+                    CanonicalScalar::Int(id as i64)
+                };
+                batch.create_vertex(
+                    VId(id),
+                    vec![LABEL],
+                    vec![(SCORE, CanonicalScalar::Int(id as i64)), (TAG, tag)],
+                );
+            }
+            for (id, value, score) in [(0, 7, -9), (u128::MAX, 8, 14)] {
+                let tag = if prefix {
+                    CanonicalScalar::ucs_basic_text(&format!("Ad{value}")).unwrap()
+                } else {
+                    CanonicalScalar::Int(value)
+                };
+                batch.create_vertex(
+                    VId(id),
+                    vec![LABEL],
+                    vec![(SCORE, CanonicalScalar::Int(score)), (TAG, tag)],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            for absent in [false, true] {
+                let filter = match (prefix, absent) {
+                    (false, false) => "n.tag >= 7 AND n.tag < 9",
+                    (false, true) => "n.tag >= 50 AND n.tag < 51",
+                    (true, false) => "n.tag STARTS WITH 'Ad'",
+                    (true, true) => "n.tag STARTS WITH 'absent'",
+                };
+                let text = format!(
+                    "MATCH (n:L) WHERE {filter} RETURN COUNT(*) AS total, SUM(n.score) AS sum"
+                );
+                let args = GqlParameters::new();
+                let records = if absent { 0 } else { 2 };
+                let QueryResult::Rows { columns, rows } =
+                    db.query(&cx, &text, &args, symbols(), wide()).unwrap()
+                else {
+                    panic!("aggregate returned a write");
+                };
+                let mut cursor = db
+                    .query_aggregate_stream(
+                        &cx,
+                        &text,
+                        &args,
+                        symbols(),
+                        GqlQueryPolicy::new(records, 1, 1_000_000, 1000),
+                    )
+                    .unwrap();
+                assert_eq!(cursor.columns(), columns);
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+                let row = cursor.next().unwrap().unwrap();
+                assert_eq!(row.values()[0].as_count(), Some(records));
+                assert_eq!(row.values()[1].as_integer(), (!absent).then_some(5));
+                assert_eq!(rows, vec![row.values().to_vec()]);
+                assert_eq!(cursor.row_stats().snapshot_records, records);
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -272,7 +272,7 @@ fn later_having_and_projection_errors_are_not_hidden_by_a_full_or_empty_page() {
         let mut s = source(0);
         s.edges.insert(
             EId(1),
-            (VId(0), R, VId(0), vec![(P, CanonicalScalar::Int(1))]),
+            (VId(0), R, VId(0), vec![(P, CanonicalScalar::Int(1).into())]),
         );
         s.edges.insert(
             EId(2),
@@ -282,7 +282,9 @@ fn later_having_and_projection_errors_are_not_hidden_by_a_full_or_empty_page() {
                 VId(1),
                 vec![(
                     P,
-                    CanonicalScalar::ucs_basic_text("private operand").unwrap(),
+                    CanonicalScalar::ucs_basic_text("private operand")
+                        .unwrap()
+                        .into(),
                 )],
             ),
         );
@@ -356,7 +358,7 @@ fn legacy_filters_and_false_having_preserve_eager_numeric_domain_checks() {
         )
         .unwrap();
     let mut s = source(63);
-    s.edges.get_mut(&EId(1)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+    s.edges.get_mut(&EId(1)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
     let mut cursor = run(&q, s, wide());
     assert!(matches!(
         cursor.next(),
@@ -499,12 +501,23 @@ fn close_discards_validated_pages_without_more_demand_and_other_profiles_remain_
             .unwrap(),
         expected
     );
-    assert!(
-        EdgeAggregatePlan::compile(&prepare(
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values"
-        ))
-        .is_err()
-    );
+    // Plain edge collections stream natively now (fgdb-dvtfk): each streams
+    // the eager collection.
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
+    ] {
+        let collect = prepare(text);
+        let s = source(63);
+        let expected = eager(&collect, &s);
+        assert_eq!(
+            run(&collect, s, wide())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
     assert!(
         EdgeAggregatePlan::compile(&prepare(
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n"
@@ -681,7 +694,9 @@ fn rank_selection_cannot_conceal_late_source_having_or_output_expression_errors(
         let mut s = source(63);
         s.edges.get_mut(&EId(1)).unwrap().3 = vec![(
             P,
-            CanonicalScalar::ucs_basic_text("private sort operand").unwrap(),
+            CanonicalScalar::ucs_basic_text("private sort operand")
+                .unwrap()
+                .into(),
         )];
         let mut cursor = run(&q, s, wide());
         assert!(matches!(

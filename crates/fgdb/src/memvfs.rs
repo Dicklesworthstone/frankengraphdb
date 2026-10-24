@@ -743,8 +743,9 @@ impl Vfs for MemVfs {
 
     async fn remove_file(&self, path: &Path) -> io::Result<()> {
         let target = self.resolve(path)?;
-        // Real-first: removing a directory path fails with IsADirectory and
-        // a missing one with NotFound, both before memory is touched.
+        // Real-first: removing a directory path fails with the host's errno
+        // (IsADirectory on Linux, PermissionDenied on Apple platforms) and a
+        // missing one with NotFound, both before memory is touched.
         let target_for_io = target.clone();
         spawn_blocking_io(move || std::fs::remove_file(target_for_io)).await?;
         match self.lock_nodes()?.remove(&target) {
@@ -1153,7 +1154,14 @@ mod tests {
                 .remove_file(Path::new("people"))
                 .await
                 .expect_err("unlink on a directory");
-            assert_eq!(dir_as_file.kind(), io::ErrorKind::IsADirectory);
+            // POSIX lets unlink(2) on a directory fail with EPERM; Apple
+            // platforms do, Linux reports EISDIR. MemVfs passes the host's.
+            let unlink_dir = if cfg!(target_vendor = "apple") {
+                io::ErrorKind::PermissionDenied
+            } else {
+                io::ErrorKind::IsADirectory
+            };
+            assert_eq!(dir_as_file.kind(), unlink_dir);
 
             vfs.write(Path::new("people/a"), b"1").await.expect("entry");
             let non_empty = vfs

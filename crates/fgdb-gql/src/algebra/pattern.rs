@@ -2,14 +2,20 @@
 //! Projection may return vertex IDs, correlated bindings or canonical values.
 //! Captured chains preserve ordered routes; uncaptured WALKs retain endpoints.
 
+mod factors;
 mod property_comparison;
 mod value_projection;
 
+pub use factors::PreparedGraphPatternFactors;
+
 use super::{
-    BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphPathFunction,
-    GraphWalkSearch, IntegerComparison, VertexPredicate,
+    BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,
+    GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
 };
-use fgdb_delta_types::{LabelId, RelationId};
+use crate::GraphSetColumnType;
+#[cfg(test)]
+use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
 
@@ -49,6 +55,9 @@ pub enum PatternBuildError {
     InvalidColumnName,
     RequiresValueProjection,
     InvalidPathCapture,
+    /// A quantified atom with no upper hop bound whose repetition rule does
+    /// not end it: a WALK that may repeat edges and selects every walk.
+    UnboundedWalk,
     LimitExceeded {
         dimension: PatternLimitDimension,
         limit: usize,
@@ -72,9 +81,10 @@ impl core::fmt::Display for PatternBuildError {
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
             Self::InvalidColumnName => f.write_str("invalid graph-pattern column name"),
             Self::RequiresValueProjection => f.write_str(
-                "binding property comparisons and path captures require prepare_values or its scoped variants",
+                "binding property comparisons, path captures and relationship uniqueness require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
+            Self::UnboundedWalk => f.write_str("an unbounded quantified atom requires TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES"),
             Self::LimitExceeded {
                 dimension,
                 limit,
@@ -98,7 +108,7 @@ struct Variable {
 struct Edge {
     source: usize,
     destination: usize,
-    relation: RelationId,
+    relation: EdgeRelation,
     direction: GlaDirection,
     walk: Option<crate::GraphWalkBounds>,
     search: GraphWalkSearch,
@@ -154,6 +164,7 @@ enum PathPredicate {
 /// Bounded definition metadata. Mutators validate before changing the builder.
 #[derive(Clone, Default)]
 pub struct GraphPatternBuilder {
+    match_mode: GraphMatchMode,
     variables: Vec<Variable>,
     edges: Vec<Edge>,
     identities: Vec<Identity>,
@@ -169,6 +180,7 @@ impl core::fmt::Debug for GraphPatternBuilder {
             .field("edges", &self.edges.len())
             .field("predicates", &self.predicate_count)
             .field("identities", &self.identities.len())
+            .field("match_mode", &self.match_mode)
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -219,6 +231,15 @@ impl<Row> PreparedGraphPattern<Row> {
     }
 }
 
+/// A result column name: nonempty, at most [`MAX_PATTERN_NAME_BYTES`], and
+/// free of control characters. Identifiers are not the only spelling: a
+/// delimited identifier (`` `total due` ``) and an openCypher derived name
+/// (`a.title`, `count(b)`) are column names too, and every consumer carries
+/// names as length-delimited or escaped text.
+pub(crate) fn valid_column_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_PATTERN_NAME_BYTES && !name.chars().any(char::is_control)
+}
+
 fn check_next(
     count: usize,
     limit: usize,
@@ -238,6 +259,44 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
         GlaDirection::Forward => GlaDirection::Reverse,
         GlaDirection::Reverse => GlaDirection::Forward,
         GlaDirection::Undirected => GlaDirection::Undirected,
+    }
+}
+
+fn relations_overlap(left: EdgeRelation, right: EdgeRelation) -> bool {
+    match (left.relations(), right.relations()) {
+        (Some(left), Some(right)) => left
+            .iter()
+            .any(|relation| right.binary_search(relation).is_ok()),
+        // An untyped atom overlaps every relation.
+        _ => true,
+    }
+}
+
+/// Whether DIFFERENT EDGES must check this atom against itself: a quantified
+/// atom whose own search can repeat an edge (fgdb-vexfr). Several searches
+/// cannot, so the check adds nothing there and its absence keeps the
+/// factorized engines eligible:
+/// - TRAIL never repeats an EId, by definition;
+/// - ACYCLIC repeats no vertex, and a repeated edge repeats its endpoints;
+/// - directed SIMPLE repeats no vertex except a closing return to the
+///   first, and a repeated edge repeats its source at a non-final position;
+/// - a directed shortest walk of minimum at most one is a simple path or a
+///   simple cycle (cutting a repeat would leave a shorter admitted walk).
+///
+/// An undirected SIMPLE or shortest walk can return over the edge it came
+/// by (a-b-a), and an unrestricted walk can repeat anything: both keep it.
+fn walk_can_repeat_an_edge(edge: Edge) -> bool {
+    let Some(bounds) = edge.walk else {
+        return false;
+    };
+    let directed = edge.direction != GlaDirection::Undirected;
+    match edge.search {
+        GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => false,
+        GraphWalkSearch::Simple => !directed,
+        GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest => {
+            !directed || bounds.minimum() > 1
+        }
+        GraphWalkSearch::All => true,
     }
 }
 
@@ -264,6 +323,100 @@ impl GraphPatternBuilder {
         Self::default()
     }
 
+    /// Select relationship reuse for this complete positive pattern. The
+    /// generic default is REPEATABLE ELEMENTS; textual MATCH selects DIFFERENT
+    /// EDGES. Use value preparation and an identified source when the latter
+    /// constrains a quantified atom or more than one fixed atom.
+    pub fn match_mode(&mut self, mode: GraphMatchMode) -> &mut Self {
+        self.match_mode = mode;
+        self
+    }
+
+    fn constrains_edges(&self) -> bool {
+        self.match_mode == GraphMatchMode::DifferentEdges
+            && self.edges.iter().enumerate().any(|(at, edge)| {
+                walk_can_repeat_an_edge(*edge)
+                    || self.edges[..at]
+                        .iter()
+                        .any(|previous| relations_overlap(previous.relation, edge.relation))
+            })
+    }
+
+    /// A valid identified graph assigns each EId one concrete relationship
+    /// type; callers of raw identified-source APIs must preserve that invariant.
+    /// Different explicit types therefore cannot refer to the same graph EId.
+    /// Keep proven-disjoint fixed atoms on their existing physical paths;
+    /// an untyped atom overlaps every relation and a walk checks itself.
+    fn constrain_edge(
+        &self,
+        edge: Edge,
+        appended: BindingSlot,
+        previous: &mut Vec<(EdgeRelation, BindingSlot)>,
+        operators: &mut Vec<GlaOperator>,
+    ) {
+        if self.match_mode != GraphMatchMode::DifferentEdges {
+            return;
+        }
+        let mut segments: Vec<_> = previous
+            .iter()
+            .filter(|(relation, _)| relations_overlap(*relation, edge.relation))
+            .map(|(_, slot)| *slot)
+            .collect();
+        if !segments.is_empty() || walk_can_repeat_an_edge(edge) {
+            segments.push(appended);
+            operators.push(GlaOperator::DifferentEdges { segments });
+        }
+        previous.push((edge.relation, appended));
+    }
+
+    /// A deletion of the sole matched vertex cannot remove another binding
+    /// that a later input row needs. Edges and additional variables can.
+    pub(crate) fn is_single_vertex_selection(&self) -> bool {
+        self.variables.len() == 1 && self.edges.is_empty()
+    }
+
+    /// Inspect the bounded selection footprint without compiling or binding
+    /// the pattern. Alias names cannot establish disjoint element identities,
+    /// so a caller compares fields across every variable in this scope.
+    /// Boolean operands retain their property keys and vertex/edge domains;
+    /// identity operands do not read mutable properties or labels.
+    pub(crate) fn selects_on_any_field(
+        &self,
+        mut property: impl FnMut(GraphSetColumnType, PropertyKeyId) -> bool,
+        mut label: impl FnMut(LabelId) -> bool,
+    ) -> bool {
+        self.variables.iter().any(|variable| {
+            variable.predicates.iter().any(|predicate| match predicate {
+                VertexPredicate::HasLabel(value) => label(*value),
+                VertexPredicate::IntegerProperty { key, .. }
+                | VertexPredicate::ScalarProperty { key, .. }
+                | VertexPredicate::PropertyNull { key, .. } => {
+                    property(GraphSetColumnType::Vertex, *key)
+                }
+            })
+        }) || self
+            .property_comparisons
+            .iter()
+            .any(|comparison| match comparison {
+                PropertyComparison::Properties {
+                    left_key,
+                    right_key,
+                    ..
+                } => {
+                    property(GraphSetColumnType::Vertex, *left_key)
+                        || property(GraphSetColumnType::Vertex, *right_key)
+                }
+                PropertyComparison::Boolean(expression) => {
+                    expression
+                        .referenced_vertex_properties()
+                        .any(|(_, key)| property(GraphSetColumnType::Vertex, key))
+                        || expression
+                            .referenced_edge_properties()
+                            .any(|(_, key)| property(GraphSetColumnType::Edge, key))
+                }
+            })
+    }
+
     /// Encode the resolved definition without compiling a scope or supplying
     /// parameter values. Declaration ordinals retain topology and correlations.
     pub(crate) fn canonical_template_bytes(&self) -> Vec<u8> {
@@ -274,7 +427,23 @@ impl GraphPatternBuilder {
             ordinal(bytes, value.len());
             bytes.extend_from_slice(value.as_bytes());
         }
-        let mut bytes = b"fgdb:gql:pattern-template:v1\0".to_vec();
+        let untyped = self
+            .edges
+            .iter()
+            .any(|edge| edge.relation == EdgeRelation::Any);
+        // A type alternation gets its own version; v1 and v2 templates keep
+        // their bytes.
+        let alternation = self
+            .edges
+            .iter()
+            .any(|edge| matches!(edge.relation, EdgeRelation::Set(_)));
+        let mut bytes = if alternation {
+            b"fgdb:gql:pattern-template:v3\0".to_vec()
+        } else if untyped {
+            b"fgdb:gql:pattern-template:v2\0".to_vec()
+        } else {
+            b"fgdb:gql:pattern-template:v1\0".to_vec()
+        };
         ordinal(&mut bytes, self.variables.len());
         for variable in &self.variables {
             name(&mut bytes, &variable.name);
@@ -313,7 +482,29 @@ impl GraphPatternBuilder {
         for edge in &self.edges {
             ordinal(&mut bytes, edge.source);
             ordinal(&mut bytes, edge.destination);
-            bytes.extend_from_slice(&edge.relation.0.to_be_bytes());
+            if alternation {
+                match edge.relation {
+                    EdgeRelation::One(relation) => {
+                        bytes.push(0);
+                        bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    }
+                    EdgeRelation::Any => bytes.push(1),
+                    EdgeRelation::Set(set) => {
+                        bytes.push(2);
+                        ordinal(&mut bytes, set.relations().len());
+                        for relation in set.relations() {
+                            bytes.extend_from_slice(&relation.0.to_be_bytes());
+                        }
+                    }
+                }
+            } else {
+                if untyped {
+                    bytes.push(u8::from(edge.relation == EdgeRelation::Any));
+                }
+                if let EdgeRelation::One(relation) = edge.relation {
+                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                }
+            }
             bytes.push(super::direction_tag(edge.direction));
             bytes.push(u8::from(edge.walk.is_some()));
             if let Some(bounds) = edge.walk {
@@ -393,6 +584,11 @@ impl GraphPatternBuilder {
                 }
             }
         }
+        if self.match_mode == GraphMatchMode::DifferentEdges {
+            // Preserve every existing generic definition byte-for-byte while
+            // ensuring rebinding cannot reuse a template with another mode.
+            bytes.extend_from_slice(b"fgdb:gql:different-edges:v1\0");
+        }
         bytes
     }
 
@@ -409,12 +605,20 @@ impl GraphPatternBuilder {
                 operators.push("Select");
             }
         }
-        for edge in &self.edges {
+        for (at, edge) in self.edges.iter().enumerate() {
             operators.push(if edge.walk.is_some() {
                 "VarLengthExpand"
             } else {
                 "Expand"
             });
+            if self.match_mode == GraphMatchMode::DifferentEdges
+                && (walk_can_repeat_an_edge(*edge)
+                    || self.edges[..at]
+                        .iter()
+                        .any(|previous| relations_overlap(previous.relation, edge.relation)))
+            {
+                operators.push("DifferentEdges");
+            }
         }
         operators.extend(std::iter::repeat_n("VertexIdentity", self.identities.len()));
         for comparison in &self.property_comparisons {
@@ -517,13 +721,23 @@ impl GraphPatternBuilder {
         if self.variables.is_empty() {
             return Err(PatternBuildError::EmptyPattern);
         }
-        if self.variables.iter().any(|variable| variable.outer)
-            || (self.edges.len() > 1 && self.edges.iter().any(|edge| edge.walk.is_some()))
-        {
+        // A path may revisit a vertex and chain walks (openCypher): the
+        // executor reads a segment backwards when its expansion began at the
+        // far end (fgdb-tk2u6). It must still be one connected chain over the
+        // pattern's own vertices. An outer capture is a clause predicate's
+        // read of a containing value, never a vertex of this path.
+        let Some(first) = self.variables.iter().position(|variable| !variable.outer) else {
+            return Err(PatternBuildError::InvalidPathCapture);
+        };
+        let start = self.edges.first().map_or(first, |edge| edge.source);
+        let mut visited: Vec<bool> = self
+            .variables
+            .iter()
+            .map(|variable| variable.outer)
+            .collect();
+        if visited[start] {
             return Err(PatternBuildError::InvalidPathCapture);
         }
-        let start = self.edges.first().map_or(0, |edge| edge.source);
-        let mut visited = vec![false; self.variables.len()];
         visited[start] = true;
         let mut endpoint = start;
         for edge in &self.edges {
@@ -534,9 +748,6 @@ impl GraphPatternBuilder {
             } else {
                 return Err(PatternBuildError::InvalidPathCapture);
             };
-            if visited[endpoint] && self.edges.len() > 1 {
-                return Err(PatternBuildError::InvalidPathCapture);
-            }
             visited[endpoint] = true;
         }
         if visited.iter().any(|visited| !visited) {
@@ -667,7 +878,7 @@ impl GraphPatternBuilder {
     pub fn edge(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
     ) -> Result<&mut Self, PatternBuildError> {
@@ -684,7 +895,7 @@ impl GraphPatternBuilder {
         self.edges.push(Edge {
             source,
             destination,
-            relation,
+            relation: relation.into(),
             direction,
             walk: None,
             search: GraphWalkSearch::All,
@@ -705,7 +916,7 @@ impl GraphPatternBuilder {
     pub fn walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -727,10 +938,12 @@ impl GraphPatternBuilder {
     /// The existing breadth-first cursor executes the atom under the same
     /// work/scratch controls, slot mapping and snapshot admission as WALK.
     /// Capturing this atom additionally exposes its selected traversal as a path.
+    /// Unbounded bounds are admitted: the search ends once its layers reach
+    /// no new vertex (GraphWalkSearch::ends_unbounded, fgdb-20foe).
     pub fn shortest_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -744,7 +957,7 @@ impl GraphPatternBuilder {
     }
 
     /// Add an ANY SHORTEST WALK atom: one endpoint occurrence per pair within
-    /// the finite interval. Equal-depth prefixes coalesce before expansion, so
+    /// the interval, bounded or not. Equal-depth prefixes coalesce before expansion, so
     /// this does not enumerate every tied route before deduplicating output.
     /// Each incoming binding occurrence executes independently. Endpoint
     /// predicates, scopes and outer multiplicities retain their ordinary laws.
@@ -752,7 +965,7 @@ impl GraphPatternBuilder {
     pub fn any_shortest_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -773,7 +986,7 @@ impl GraphPatternBuilder {
     pub fn acyclic_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -792,7 +1005,7 @@ impl GraphPatternBuilder {
     pub fn simple_walk(
         &mut self,
         source: &str,
-        relation: RelationId,
+        relation: impl Into<EdgeRelation>,
         direction: GlaDirection,
         destination: &str,
         bounds: crate::GraphWalkBounds,
@@ -943,6 +1156,14 @@ impl GraphPatternBuilder {
         &self,
         root: Option<usize>,
     ) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
+        // Only a repetition rule that ends may leave the hop count open; the
+        // text parsers refuse the same shapes before any catalog call.
+        if self.edges.iter().any(|edge| {
+            edge.walk.is_some_and(|bounds| !bounds.is_bounded())
+                && !edge.search.ends_unbounded(self.match_mode)
+        }) {
+            return Err(PatternBuildError::UnboundedWalk);
+        }
         let first_local = self
             .variables
             .iter()
@@ -951,6 +1172,7 @@ impl GraphPatternBuilder {
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
         let mut consumed = vec![false; self.edges.len()];
+        let mut distinct_segments = Vec::new();
         let mut path_segments = if self.path_captures.is_empty() {
             Vec::new()
         } else {
@@ -974,6 +1196,12 @@ impl GraphPatternBuilder {
             let first = self.edges[0];
             if first.walk.is_some() {
                 operators.push(GlaOperator::ScanVertices);
+                // Filter the walk's start vertices before expanding from them.
+                // The source's own predicates commute with the per-row
+                // expansion, which never rebinds slot 0 and keeps row order,
+                // and a Select directly after ScanVertices is what source
+                // admission narrows by index (fgdb-mdkfb).
+                self.select(first.source, BindingSlot(0), &mut operators);
                 operators.push(first.expansion(BindingSlot(0), first.direction));
             } else {
                 operators.push(GlaOperator::ScanEdges {
@@ -981,6 +1209,12 @@ impl GraphPatternBuilder {
                     direction: first.direction,
                 });
             }
+            self.constrain_edge(
+                first,
+                BindingSlot(1),
+                &mut distinct_segments,
+                &mut operators,
+            );
             slots[first.source] = Some(BindingSlot(0));
             if first.source == first.destination {
                 operators.push(GlaOperator::VertexIdentity {
@@ -992,7 +1226,9 @@ impl GraphPatternBuilder {
                 slots[first.destination] = Some(BindingSlot(1));
             }
             self.identities(&slots, &mut emitted, &mut operators);
-            self.select(first.source, BindingSlot(0), &mut operators);
+            if first.walk.is_none() {
+                self.select(first.source, BindingSlot(0), &mut operators);
+            }
             if first.source != first.destination {
                 self.select(first.destination, BindingSlot(1), &mut operators);
             }
@@ -1021,6 +1257,7 @@ impl GraphPatternBuilder {
                 let appended = BindingSlot(next_slot);
                 next_slot += 1;
                 operators.push(edge.expansion(source, direction));
+                self.constrain_edge(edge, appended, &mut distinct_segments, &mut operators);
                 if !path_segments.is_empty() {
                     path_segments[at] = Some(appended);
                     edge_starts[at] = Some(source);
@@ -1133,7 +1370,7 @@ mod tests {
         let baseline = original.canonical_template_bytes();
         assert_eq!(baseline, original.clone().canonical_template_bytes());
         let mut changed = original.clone();
-        changed.edges[0].relation = RelationId(2);
+        changed.edges[0].relation = EdgeRelation::One(RelationId(2));
         assert_ne!(baseline, changed.canonical_template_bytes());
         changed = original.clone();
         changed.edges[0].destination = 0;
@@ -1221,7 +1458,7 @@ mod tests {
                 .all(|test| (assignment[test.left] == assignment[test.right]) == test.equal);
             let matches = b.edges.iter().all(|atom| {
                 edges.iter().any(|&(s, r, d)| {
-                    if r != atom.relation {
+                    if !atom.relation.matches(r) {
                         return false;
                     }
                     let left = assignment[atom.source];

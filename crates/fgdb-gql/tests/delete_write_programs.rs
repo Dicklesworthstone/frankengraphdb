@@ -193,10 +193,11 @@ fn empty_delete_continues_and_plain_delete_has_a_distinct_canonical_tag() {
         || Ok(()),
     );
     assert_eq!(result.unwrap().mutation_effects, 1);
-    let detach = PreparedGraphMutationText::prepare("MATCH (n) DETACH DELETE n", R, |_, _| None)
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
+    let detach =
+        PreparedGraphMutationText::prepare("MATCH (n) DETACH DELETE n", R, |_, _: &str| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
     let detach = PreparedGraphWriteProgram::prepare(vec![detach.into()]).unwrap();
     let plain = PreparedGraphWriteProgram::prepare(vec![deletion()]).unwrap();
     assert_ne!(plain.canonical_bytes(), detach.canonical_bytes());

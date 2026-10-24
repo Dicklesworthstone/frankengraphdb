@@ -11,13 +11,18 @@ mod branch_text;
 mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
+mod construct;
 pub mod csv_parameters;
 pub mod csv_records;
+pub mod csv_write_chain;
 pub mod csv_write_script;
 mod deletion;
 mod edge_merge;
+mod edge_merge_query;
 pub mod edge_stream;
 mod edge_upsert;
+mod edge_upsert_query;
+mod edge_upsert_rows;
 mod edge_upsert_text;
 mod evidence_artifact;
 mod evidence_cursor;
@@ -25,6 +30,9 @@ mod evidence_limits;
 mod evidence_page;
 pub mod free_join;
 mod graph_text;
+pub mod id_hash;
+pub mod id_sort;
+mod identified;
 pub mod insertion;
 pub mod insertion_query;
 mod insertion_query_text;
@@ -40,6 +48,7 @@ mod parameters;
 mod parser;
 mod pipeline_aggregate_text;
 mod prepared;
+pub mod query_write;
 pub mod regex;
 pub mod result_diff;
 pub mod row_aggregate;
@@ -50,7 +59,10 @@ pub mod scan_stream;
 mod set_ops;
 mod set_text;
 mod shortest_walk;
+pub mod spill_aggregate;
+pub mod spill_set;
 pub mod stream;
+pub mod symbol_bindings;
 mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
@@ -60,6 +72,7 @@ mod vertex_merge;
 mod vertex_upsert;
 mod vertex_upsert_text;
 mod walk;
+mod write_chain;
 mod write_query;
 mod write_receipt;
 mod write_script;
@@ -79,9 +92,14 @@ pub use cheapest_path_text::{
     BoundGraphCheapestPathQuery, GraphCheapestPathTextError, GraphCheapestPathTextErrorKind,
     PreparedGraphCheapestPathText,
 };
+pub use construct::{GqlUnsupportedConstruct, GqlUnsupportedConstructKind};
 pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
     PreparedGraphPipelineAggregateText,
+};
+pub use write_chain::{
+    GraphWriteChainError, GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
 };
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
@@ -92,13 +110,16 @@ pub use write_script::{
 pub use aggregation::{
     BoundAggregate, GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn,
     GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
-    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
-    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
-    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
+    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphCountSource,
+    GraphExactAverage, GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    GraphNullPlacement, MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge,
+    PositionedGraph, PreparedGraphAggregate, PreparedGraphCount,
 };
+pub use algebra::{GraphMatchMode, PreparedGraphPatternFactors};
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy,
 };
 pub use deletion::{
     GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
@@ -109,13 +130,26 @@ pub use edge_merge::{
     GraphEdgeMergeRequest, GraphEdgeMergeStats, MAX_GRAPH_EDGE_MERGE_PROPERTIES,
     PreparedGraphEdgeMerge,
 };
+pub use edge_merge_query::{
+    GraphEdgeMergeBinding, GraphEdgeMergeQueryBuildError, GraphEdgeMergeQueryError,
+    PreparedGraphEdgeMergeQuery,
+};
 pub use edge_upsert::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertError,
     GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, GraphEdgeUpsertValue,
     MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeUpsert,
 };
+pub use edge_upsert_query::{
+    GraphEdgeReturnBinding, GraphEdgeUpsertBatchStats, GraphEdgeUpsertQueryBuildError,
+    GraphEdgeUpsertQueryError, PreparedGraphEdgeUpsertQuery,
+};
+pub use edge_upsert_rows::{
+    GraphEdgeMergeRowAction, GraphEdgeMergeRowActions, GraphEdgeMergeRowComputed,
+    GraphEdgeMergeRowInput, PreparedGraphEdgeUpsertRows,
+};
 pub use edge_upsert_text::{
-    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,
+    PreparedGraphEdgeUpsertText,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
@@ -134,10 +168,12 @@ pub use evidence_page::{
     GqlEvidencePageToken, GqlEvidencePageTokenDecodeError,
 };
 pub use graph_text::{
-    GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
-    GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog,
+    GqlRefusalClass, GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind,
+    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
+    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
+    starts_fnx_graph_projection,
 };
+pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
     PreparedGraphInsertQuery,
@@ -147,12 +183,13 @@ pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, Prepare
 pub use integer_expression::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,
     GraphIntegerEvaluationError, GraphIntegerExpression, GraphIntegerOp, GraphIntegerUnary,
-    MAX_GRAPH_INTEGER_INSTRUCTIONS,
+    GraphNumericFunction, MAX_GRAPH_INTEGER_INSTRUCTIONS,
 };
 pub use mutation::{
-    GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
-    GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
-    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
+    GraphMutationAction, GraphMutationBatch, GraphMutationBinding, GraphMutationBuildError,
+    GraphMutationError, GraphMutationIntent, GraphMutationPolicy, GraphMutationQueryBatch,
+    GraphMutationQueryBuildError, GraphMutationQueryError, GraphMutationStats, GraphMutationValue,
+    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationQuery,
 };
 pub use mutation_program::mixed::{
     GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
@@ -173,13 +210,14 @@ pub use mutation_text::{
     GraphDeleteTextError, GraphDeleteTextErrorKind, GraphEdgeMergeTextError,
     GraphEdgeMergeTextErrorKind, GraphMutationTextError, GraphMutationTextErrorKind,
     GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphDeleteText,
-    PreparedGraphEdgeMergeText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
+    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText, PreparedGraphMutationQueryText,
+    PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
 pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
-    GqlListParameter, GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,
-    GqlParameters, GqlScalarParameter, PreparedGqlTemplate,
+    GqlListParameter, GqlMapParameter, GqlParameterError, GqlParameterSpec, GqlParameterType,
+    GqlParameterValue, GqlParameters, GqlScalarParameter, PreparedGqlTemplate,
 };
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,
@@ -190,11 +228,14 @@ pub use prepared::{
 };
 pub use set_ops::row_filter;
 pub use set_ops::{
-    GraphListQuantifier, GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError,
-    GraphSetFilterError, GraphSetOperand, GraphSetOperation, GraphSetPredicateOp,
-    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetSource, GraphSetValue,
-    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
-    PreparedProcedureCall, WithProcedures,
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphPatternFactorExecution,
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
+    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
+    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementReads, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
@@ -212,15 +253,20 @@ pub use temporal_text::{
 pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
-    GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
+    GraphVertexMergePolicy, GraphVertexMergeRowAction, GraphVertexMergeRowActions,
+    GraphVertexMergeRowComputed, GraphVertexMergeRowInput, GraphVertexMergeRowsBinding,
+    GraphVertexMergeRowsQueryBuildError, GraphVertexMergeRowsQueryError, GraphVertexMergeStats,
+    PreparedGraphVertexMerge, PreparedGraphVertexMergeRows, PreparedGraphVertexMergeRowsQuery,
 };
 pub use vertex_upsert::{
-    GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
-    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
-    MAX_GRAPH_VERTEX_UPSERT_ACTIONS, PreparedGraphVertexUpsert,
+    GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,
+    GraphVertexUpsertBuildError, GraphVertexUpsertError, GraphVertexUpsertPolicy,
+    GraphVertexUpsertQueryBuildError, GraphVertexUpsertStats, MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
+    PreparedGraphVertexUpsert, PreparedGraphVertexUpsertQuery,
 };
 pub use vertex_upsert_text::{
-    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
+    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertQueryText,
+    PreparedGraphVertexUpsertText,
 };
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
 pub use write_query::GraphWriteQueryError;

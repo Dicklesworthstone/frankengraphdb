@@ -8,14 +8,19 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphMutationText,
     PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -105,6 +110,9 @@ fn first_true_branch_and_first_nonnull_equality_have_lazy_defaults() {
         ),
         ("CASE NULL WHEN NULL THEN 1 ELSE 2 END", Some(2)),
         ("CASE 3 WHEN 1 THEN 4 END", None),
+        // A WHEN value of another domain is unequal (fgdb-v6ku6): no match.
+        ("CASE 1 WHEN TRUE THEN 2 END", None),
+        ("CASE 1 WHEN 'a' THEN 1/0 WHEN 1 THEN 3 ELSE 4 END", Some(3)),
         ("COALESCE(CASE WHEN NULL THEN 1 END, 5)+2", Some(7)),
         (
             "CASE WHEN (2+3)*4=20 AND NOT (NULL IS NOT NULL OR FALSE) THEN -7 ELSE 1/0 END",
@@ -139,11 +147,11 @@ fn nullable_numeric_conditions_and_parentheses_match_an_independent_oracle() {
         for q in [None, Some(-2), Some(0), Some(2)] {
             let mut props = Props::new();
             if let Some(p) = p {
-                props.insert((VId(1), P), CanonicalScalar::Int(p));
+                props.insert((VId(1), P), CanonicalScalar::Int(p).into());
             }
             props.insert(
                 (VId(1), Q),
-                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
             );
             let selected = p.zip(q).is_some_and(|(p, q)| p + 1 > q) || (p.is_none() && q.is_some());
             let expected = if selected {
@@ -164,9 +172,9 @@ fn nullable_numeric_conditions_and_parentheses_match_an_independent_oracle() {
 #[test]
 fn conditional_aggregation_groups_computed_values_and_retains_exact_averages() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(-2)),
-        ((VId(2), P), CanonicalScalar::Int(0)),
-        ((VId(3), P), CanonicalScalar::Int(3)),
+        ((VId(1), P), CanonicalScalar::Int(-2).into()),
+        ((VId(2), P), CanonicalScalar::Int(0).into()),
+        ((VId(3), P), CanonicalScalar::Int(3).into()),
     ]);
     let text = "MATCH (n) RETURN COUNT(*) AS rows, SUM(CASE WHEN n.p>=0 THEN n.p ELSE 0 END) AS total, \
         COUNT(CASE WHEN n.p>=0 THEN 1 END) AS selected, \
@@ -229,7 +237,7 @@ fn walk_occurrences_and_optional_nulls_survive_conditional_projection() {
     ];
     for (quantifier, count) in [("", 11), ("DISTINCT", 1)] {
         let query = prepare(&format!(
-            "MATCH WALK (a)-[:R*0..2]->(b) RETURN {quantifier} CASE WHEN TRUE THEN 7 ELSE 1/0 END AS value"
+            "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) RETURN {quantifier} CASE WHEN TRUE THEN 7 ELSE 1/0 END AS value"
         ));
         let result = run(
             &query,
@@ -266,14 +274,14 @@ fn walk_occurrences_and_optional_nulls_survive_conditional_projection() {
 
 #[test]
 fn conditional_mutations_reuse_frozen_assignments_and_conflict_reduction() {
-    let props = Props::from([((VId(1), P), CanonicalScalar::Int(2))]);
+    let props = Props::from([((VId(1), P), CanonicalScalar::Int(2).into())]);
     let edges = [
         (VId(1), R, VId(1)),
         (VId(1), R, VId(1)),
         (VId(1), R, VId(2)),
     ];
     let query = PreparedGraphMutationText::prepare(
-        "MATCH WALK (a)-[:R*0..2]->(b) \
+        "MATCH REPEATABLE ELEMENTS WALK (a)-[:R*0..2]->(b) \
         SET a.p=CASE WHEN a.p IS NULL THEN 1 ELSE a.p+1 END",
         R,
         symbols,
@@ -304,12 +312,12 @@ fn conditional_mutations_reuse_frozen_assignments_and_conflict_reduction() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Int(3))
+                value: stored(CanonicalScalar::Int(3))
             },
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: P,
-                value: Some(CanonicalScalar::Int(1))
+                value: stored(CanonicalScalar::Int(1))
             },
         ]
     );
@@ -393,7 +401,6 @@ fn malformed_branches_and_excessive_definitions_refuse_before_catalog_callbacks(
         "CASE WHEN TRUE THEN END",
         "CASE WHEN 1 THEN 2 END",
         "CASE WHEN TRUE THEN 2 ELSE 'text' END",
-        "CASE 1 WHEN TRUE THEN 2 END",
         "CASE WHEN n.p=1 THEN 2",
         "CASE WHEN TRUE THEN 2 ELSE 3 WHEN FALSE THEN 4 END",
         "CASE WHEN TRUE THEN 1 ELSE missing.p END",
@@ -451,7 +458,7 @@ fn lazy_values_never_suppress_source_failures_or_selected_errors_under_limit_zer
                 [VId(1)],
                 [],
                 |_, _| Ok::<_, &str>(true),
-                |_, _| Err::<Option<&CanonicalScalar>, _>("unreadable input"),
+                |_, _| Err::<Option<&CanonicalPropertyValue>, _>("unreadable input"),
                 allowance,
                 || Ok::<_, ()>(()),
             )
@@ -465,8 +472,8 @@ fn lazy_values_never_suppress_source_failures_or_selected_errors_under_limit_zer
         )))
     ));
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(0)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(0).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     let query =
         prepare("MATCH (n) RETURN CASE WHEN n.p=0 THEN 7 ELSE 1/(n.p-2) END AS value LIMIT 0");
@@ -483,8 +490,8 @@ fn exact_query_limits_and_each_conditional_checkpoint_refuse_without_output() {
         "MATCH (n) RETURN CASE n.p WHEN 1 THEN 7 WHEN 2 THEN 8 ELSE 9 END AS value ORDER BY value LIMIT 2",
     );
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     let vertices = [VId(1), VId(2), VId(3)];
     let mut events = 0;
@@ -533,4 +540,94 @@ fn exact_query_limits_and_each_conditional_checkpoint_refuse_without_output() {
     ] {
         assert!(run(&query, &vertices, &[], &props, refusal, || Ok::<_, ()>(())).is_err());
     }
+}
+
+#[test]
+fn mixed_numeric_branches_keep_each_rows_type_and_integer_roots_stay_strict() {
+    // openCypher lets one CASE yield an Int on some rows and a Float on
+    // others (fgdb-0g2ou). Independent expectation over p = 1..=4: even p
+    // gives Int 1 and odd p gives Float 1.0. 1 and 1.0 are different DISTINCT
+    // members (aggregate_text pins that), and a SUM over them is a Float.
+    let props: Props = (1..=4)
+        .map(|p| ((VId(p), P), CanonicalScalar::Int(p as i64).into()))
+        .collect();
+    let vertices: Vec<VId> = (1..=4).map(VId).collect();
+    let int = CanonicalScalar::Int;
+    let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+    let projected = |text: &str| -> Vec<CanonicalScalar> {
+        run(&prepare(text), &vertices, &[], &props, policy(), || {
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .value
+        .iter()
+        .map(|row| row.values()[0].as_scalar().unwrap().clone())
+        .collect()
+    };
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END AS value, n.p AS p ORDER BY p"
+        ),
+        [float(1.0), int(1), float(1.0), int(1)]
+    );
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN CASE n.p WHEN 1 THEN 0.5 WHEN 2 THEN 2 END AS value, n.p AS p \
+             ORDER BY p"
+        ),
+        [
+            float(0.5),
+            int(2),
+            CanonicalScalar::Null,
+            CanonicalScalar::Null
+        ]
+    );
+    assert_eq!(
+        projected(
+            "MATCH (n) RETURN COALESCE(CASE WHEN n.p>2 THEN n.p*10 END, 0.5) AS value, n.p AS p \
+             ORDER BY p"
+        ),
+        [float(0.5), float(0.5), int(30), int(40)]
+    );
+    let text = "MATCH (n) RETURN COUNT(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS unique, \
+        SUM(CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS total, \
+        SUM(DISTINCT CASE WHEN n.p%2=0 THEN 1 ELSE 1.0 END) AS distinct_total";
+    let result = PreparedGraphAggregateText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed(
+            4,
+            (1..=4).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok(props.get(&(vid, key))),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let values = result.value[0].values();
+    assert_eq!(values[0].as_count(), Some(2));
+    for (at, total) in [(1, 4.0), (2, 2.0)] {
+        assert_eq!(
+            values[at].as_value().and_then(GraphValue::as_scalar),
+            Some(&float(total)),
+            "{text}"
+        );
+    }
+    // A non-numeric branch still refuses.
+    let text = "MATCH (n) RETURN CASE WHEN n.p>0 THEN 1.0 ELSE 'text' END AS value";
+    assert!(PreparedGraphSetText::prepare(text, symbols).is_err());
+    // The same CASE compiles as a scalar root, while an integer root (the
+    // strict contract) still admits no Float branch.
+    use fgdb_gql::algebra::{IntegerComparison, ScalarPredicate};
+    use fgdb_gql::{GraphIntegerExpression, GraphIntegerOp};
+    let ops = [
+        GraphIntegerOp::Truth(Some(true)),
+        GraphIntegerOp::Literal(Some(1)),
+        GraphIntegerOp::Scalar(ScalarPredicate::new(float(1.0), IntegerComparison::Equal).unwrap()),
+        GraphIntegerOp::Case,
+    ];
+    assert!(GraphIntegerExpression::prepare_scalar(&ops).is_ok());
+    assert!(GraphIntegerExpression::prepare(&ops).is_err());
 }

@@ -6,7 +6,9 @@
 //! computed projections, ordering and pagination retain their existing parser
 //! and diagnostics. Every set operand executes against the same selected snapshot.
 
-use crate::temporal_text::{TemplateSequenceSelector, append_template_sequence_selector};
+use crate::temporal_text::{
+    SelectorRefusal, TemplateSequenceSelector, append_template_sequence_selector,
+};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
     GraphPatternTextErrorKind, GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind,
@@ -32,13 +34,45 @@ pub struct GraphTemporalSetTextError {
     pub offset: usize,
     pub kind: GraphTemporalSetTextErrorKind,
 }
+impl GraphTemporalSetTextErrorKind {
+    fn selector(&self) -> Result<SelectorRefusal, &GraphSetTextErrorKind> {
+        Ok(match self {
+            Self::Set(kind) => return Err(kind),
+            Self::MissingSystemTimeClause => SelectorRefusal::Missing,
+            Self::DuplicateSystemTimeClause => SelectorRefusal::Duplicate,
+            Self::InvalidSystemTimePosition => SelectorRefusal::Position,
+            Self::InvalidSequenceSelector => SelectorRefusal::Sequence,
+            Self::ConflictingParameterType => SelectorRefusal::ConflictingParameterType,
+            Self::MissingParameter => SelectorRefusal::MissingParameter,
+            Self::ParameterTypeMismatch { found } => SelectorRefusal::ParameterTypeMismatch(*found),
+            Self::UnexpectedArguments => SelectorRefusal::UnexpectedArguments,
+        })
+    }
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self.selector() {
+            Ok(refusal) => refusal.class(),
+            Err(set) => set.class(),
+        }
+    }
+}
+impl core::fmt::Display for GraphTemporalSetTextErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.selector() {
+            Ok(refusal) => refusal.fmt(f),
+            Err(set) => set.fmt(f),
+        }
+    }
+}
+impl GraphTemporalSetTextError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        self.kind.class()
+    }
+}
 impl core::fmt::Display for GraphTemporalSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "temporal graph set text error at byte {}: {:?}",
-            self.offset, self.kind
-        )
+        write!(f, "byte {}: {}", self.offset, self.kind)
     }
 }
 impl core::error::Error for GraphTemporalSetTextError {}
@@ -298,10 +332,11 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetT
             GraphTemporalSetTextErrorKind::InvalidSystemTimePosition,
         ));
     }
-    if !tokens
-        .get(at + 6)
-        .is_some_and(|next| next.word("WHERE") || next.word("OPTIONAL") || next.word("RETURN"))
-    {
+    // The clause closes the first MATCH, as in the aggregate facade: a WITH
+    // stage may follow it, and the set facade runs the stages at the cut.
+    if !tokens.get(at + 6).is_some_and(|next| {
+        next.word("WHERE") || next.word("OPTIONAL") || next.word("WITH") || next.word("RETURN")
+    }) {
         return Err(fail(
             end,
             GraphTemporalSetTextErrorKind::InvalidSystemTimePosition,
@@ -336,8 +371,21 @@ impl PreparedTemporalGraphSetText {
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphTemporalSetTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, &mut resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], keeping the resolver's
+    /// reverse catalog for `labels(n)` and `type(r)` columns.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphTemporalSetTextError>
+    where
+        R: crate::graph_text::GraphSymbolResolver + ?Sized,
+    {
         let (start, end, selector) = locate(statement)?;
         let selector_offset = match &selector {
             Selector::Parameter { offset, .. } => *offset,
@@ -376,10 +424,10 @@ impl PreparedTemporalGraphSetText {
             .copied()
             .filter(|(name, _)| names.contains(*name))
             .collect::<Vec<_>>();
-        let inner = PreparedGraphSetText::prepare_with_parameter_types(&blanked, &local, resolve)
-            .map_err(|error| {
-            fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind))
-        })?;
+        let inner = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            &blanked, &local, resolve,
+        )
+        .map_err(|error| fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind)))?;
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {

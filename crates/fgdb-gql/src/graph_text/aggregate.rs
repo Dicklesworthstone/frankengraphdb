@@ -7,6 +7,7 @@ mod having;
 
 use super::boolean::{append_number, comparison_tag};
 use super::*;
+use crate::algebra::GraphValueOrder;
 use crate::set_text::{ReadProjectionTemplate, ReadValueTemplate};
 use crate::{
     GraphAggregate, GraphAggregateColumn, GraphAggregateFilter, GraphAggregateFunction,
@@ -23,13 +24,7 @@ pub enum GraphAggregateTextSlot {
 }
 
 fn column_path(syntax: &Syntax<'_>, variable: Name<'_>) -> Option<GraphPathFunction> {
-    if syntax.path.is_some_and(|path| path.text == variable.text) {
-        Some(GraphPathFunction::Value)
-    } else if syntax.visible_edge(variable.text).is_some() {
-        Some(GraphPathFunction::Edge)
-    } else {
-        None
-    }
+    syntax.bare_path_function(variable.text)
 }
 
 #[derive(Clone)]
@@ -37,6 +32,14 @@ struct Summary {
     function: GraphAggregateFunction,
     column: Option<usize>,
     alias: String,
+}
+
+// Parse-time ORDER BY addresses either the original evaluation schema or a
+// computed RETURN slot. Execution receives only one validated ordering owner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultOrderColumn {
+    Evaluation(GraphAggregateColumn),
+    Projected(usize),
 }
 
 #[derive(Clone)]
@@ -90,13 +93,16 @@ impl Summary {
 /// Projected aliases resolve to the original expression, not a new key.
 /// Operands occurring only inside aggregate output expressions never create
 /// implicit grouping keys. The bounded profile still requires an aggregate
-/// somewhere in RETURN, HAVING or ORDER BY, not a grouping-only statement.
+/// somewhere in RETURN, HAVING or ORDER BY, not a grouping-only statement,
+/// and ORDER BY never groups by itself: an aggregate only there needs GROUP
+/// BY, HAVING or a RETURN aggregate.
 /// SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments; argument DISTINCT
 /// follows expression evaluation. AVG returns an exact reduced fraction.
 ///
 /// Arguments and grouping keys support the same literals, typed parameters,
 /// checked i64 arithmetic, ABS, NULLIF and COALESCE as computed read projections.
-/// A computed nonaggregate RETURN key requires AS. Repeated expressions share
+/// An unaliased RETURN item is named by its source text, as in openCypher
+/// (`n.p`, `count(*)`, `n.p + 1`). Repeated expressions share
 /// a projection slot; repeated aggregate calls share their existing summary.
 /// Plain column inputs retain the ordinary streaming path and transcript.
 /// Computed inputs use bounded materialization, not spill or numeric coercion.
@@ -105,6 +111,8 @@ impl Summary {
 /// and summaries retain all reads, errors and resource costs. ALL preserves
 /// distinct groups with equal visible cells; DISTINCT removes duplicate visible
 /// rows after filtering/ranking and before pagination, never from child matches.
+/// ORDER BY also accepts computed RETURN aliases. When one is used, every
+/// ordering key must address the returned tuple, not a hidden evaluation cell.
 #[derive(Clone)]
 pub struct PreparedGraphAggregateText {
     child: PreparedGraphText,
@@ -122,6 +130,7 @@ pub struct PreparedGraphAggregateText {
     having: Vec<Having>,
     having_expression: Option<having::HavingTemplate>,
     ordering: Vec<GraphAggregateOrder>,
+    projected_ordering: Vec<GraphValueOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -151,6 +160,17 @@ impl PreparedGraphAggregateText {
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphPatternTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, resolve)
+    }
+
+    /// As [`Self::prepare_with_parameter_types`] with a host resolver: one
+    /// with a reverse catalog names `type(r)` and `labels(n)` keys whose
+    /// symbols the statement text never spells.
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphPatternTextError> {
         // Generated names live until from_syntax has made the child owned.
         // They are private metadata, never inserted into statement text or
         // the namespace used to resolve HAVING/ORDER BY aliases.
@@ -159,7 +179,8 @@ impl PreparedGraphAggregateText {
         let mut source_aliases: Vec<String> = Vec::new();
         let mut computed = ComputedInputs::default();
         let mut output_leaves = Vec::new();
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         parser.parse_head()?;
         let distinct = parser.take_word("DISTINCT")?;
         if !distinct {
@@ -188,7 +209,8 @@ impl PreparedGraphAggregateText {
             }
         }
         let mut groups = Vec::new();
-        if parser.take_word("GROUP")? {
+        let explicit_groups = parser.take_word("GROUP")?;
+        if explicit_groups {
             parser.word("BY")?;
             loop {
                 parser.capacity(
@@ -323,27 +345,62 @@ impl PreparedGraphAggregateText {
         }
         let (having, having_expression) =
             having::parse(&mut parser, &returned, &groups, &mut hidden, &mut computed)?;
-        let mut ordering: Vec<GraphAggregateOrder> = Vec::new();
+        // ORDER BY sorts the rows RETURN produces and never changes them. An
+        // aggregate there needs a statement already grouped by GROUP BY, a
+        // RETURN aggregate or HAVING; otherwise it would silently turn one
+        // row per match into one row per key (openCypher InvalidAggregation).
+        let grouped = explicit_groups
+            || visible > 0
+            || !hidden.is_empty()
+            || !having.is_empty()
+            || having_expression.is_some();
+        let mut result_order: Vec<(ResultOrderColumn, bool, GraphNullPlacement, usize)> =
+            Vec::new();
         if parser.take_word("ORDER")? {
             parser.word("BY")?;
             loop {
                 parser.capacity(
-                    ordering.len(),
+                    result_order.len(),
                     MAX_PATTERN_VERTICES,
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = parser.current.at;
-                let column =
-                    parser.result_column(&returned, &groups, &mut hidden, &mut computed)?;
-                if ordering.iter().any(|previous| previous.column == column) {
+                let projected = if let TokenKind::Word(word) = parser.current.kind
+                    && !matches!(
+                        parser.lexer.clone().next()?.kind,
+                        TokenKind::Punct(b'.' | b'(')
+                    ) {
+                    returned
+                        .iter()
+                        .position(|item| item.output.is_some() && item.alias.text == word)
+                } else {
+                    None
+                };
+                let column = if let Some(column) = projected {
+                    // The alias addresses its existing computed result. Never
+                    // parse its source again or register its parameters twice.
+                    parser.advance()?;
+                    ResultOrderColumn::Projected(column)
+                } else {
+                    ResultOrderColumn::Evaluation(parser.result_column(
+                        &returned,
+                        &groups,
+                        &mut hidden,
+                        &mut computed,
+                    )?)
+                };
+                if result_order
+                    .iter()
+                    .any(|(previous, _, _, _)| *previous == column)
+                {
                     return Err(error(
                         at,
                         GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
                     ));
                 }
-                let descending = parser.take_word("DESC")?;
-                if !descending {
-                    parser.take_word("ASC")?;
+                let descending = parser.take_word("DESC")? || parser.take_word("DESCENDING")?;
+                if !descending && !parser.take_word("ASC")? {
+                    parser.take_word("ASCENDING")?;
                 }
                 let nulls = if parser.take_word("NULLS")? {
                     if parser.take_word("FIRST")? {
@@ -355,15 +412,84 @@ impl PreparedGraphAggregateText {
                 } else {
                     GraphNullPlacement::Last
                 };
+                result_order.push((column, descending, nulls, at));
+                if !parser.take(b',')? {
+                    break;
+                }
+            }
+        }
+        let mut ordering = Vec::new();
+        let mut projected_ordering = Vec::new();
+        if result_order
+            .iter()
+            .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)))
+        {
+            // A computed alias selects the existing post-group projection
+            // owner. Other keys must be in that same returned tuple; hidden
+            // evaluation keys cannot masquerade as projected positions.
+            for (column, descending, nulls, at) in result_order {
+                let column = match column {
+                    ResultOrderColumn::Projected(column) => Some(column),
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(key)) => {
+                        returned.iter().position(|item| {
+                            item.function.is_none()
+                                && item.output.is_none()
+                                && item.expression.is_some_and(|expr| expr.same(groups[key]))
+                        })
+                    }
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(summary)) => {
+                        returned
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| item.function.is_some())
+                            .nth(summary)
+                            .map(|(column, _)| column)
+                    }
+                }
+                .ok_or_else(|| {
+                    error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "returned ORDER BY column when ordering a computed aggregate alias",
+                        ),
+                    )
+                })?;
+                if projected_ordering
+                    .iter()
+                    .any(|key: &GraphValueOrder| key.column == column)
+                {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
+                    ));
+                }
+                projected_ordering.push(GraphValueOrder {
+                    column,
+                    descending,
+                    nulls_first: nulls == GraphNullPlacement::First,
+                });
+            }
+        } else {
+            // Unchanged column-only queries keep their evaluation owner and
+            // exact previous template and bound-plan transcripts.
+            for (column, descending, nulls, _) in result_order {
+                let ResultOrderColumn::Evaluation(column) = column else {
+                    unreachable!("projected ordering was selected above");
+                };
                 ordering.push(GraphAggregateOrder {
                     column,
                     descending,
                     nulls,
                 });
-                if !parser.take(b',')? {
-                    break;
-                }
             }
+        }
+        if !grouped && let Some(first) = hidden.first() {
+            return Err(error(
+                first.at,
+                GraphPatternTextErrorKind::Expected(
+                    "GROUP BY, HAVING or a RETURN aggregate before an ORDER BY aggregate",
+                ),
+            ));
         }
         parser.parse_pagination()?;
         parser.end()?;
@@ -435,8 +561,9 @@ impl PreparedGraphAggregateText {
             parser.syntax.columns.push(Column {
                 variable: group.variable,
                 property: group.property,
-                path: column_path(&parser.syntax, group.variable),
+                path: group.path,
                 alias,
+                collect: None,
             });
         }
         let keys = (0..groups.len()).collect();
@@ -469,8 +596,9 @@ impl PreparedGraphAggregateText {
                     parser.syntax.columns.push(Column {
                         variable: expression.variable,
                         property: expression.property,
-                        path: column_path(&parser.syntax, expression.variable),
+                        path: expression.path,
                         alias: item.alias,
+                        collect: None,
                     });
                     at
                 });
@@ -528,8 +656,9 @@ impl PreparedGraphAggregateText {
                 parser.syntax.columns.push(Column {
                     variable: expression.variable,
                     property: expression.property,
-                    path: column_path(&parser.syntax, expression.variable),
+                    path: expression.path,
                     alias,
+                    collect: None,
                 });
                 at
             });
@@ -550,10 +679,11 @@ impl PreparedGraphAggregateText {
                         let index = computed
                             .sources
                             .iter()
-                            .position(|(variable, property)| {
+                            .position(|(variable, property, path)| {
                                 variable.text == expression.variable.text
                                     && property.map(|name| name.text)
                                         == expression.property.map(|name| name.text)
+                                    && *path == expression.path
                             })
                             .expect("every plain argument registered its source");
                         ReadValueTemplate::Column(index)
@@ -567,7 +697,10 @@ impl PreparedGraphAggregateText {
             if computed.sources.is_empty() {
                 // SUM(1), COUNT(NULL), and constant grouping still visit every
                 // match, including isolates and duplicate WALK occurrences.
-                computed.sources.push((parser.syntax.variables[0], None));
+                let variable = parser.syntax.variables[0];
+                computed
+                    .sources
+                    .push((variable, None, column_path(&parser.syntax, variable)));
             }
             source_aliases.extend(
                 (0..computed.sources.len()).map(|index| format!("__aggregate_source_{index}")),
@@ -576,14 +709,15 @@ impl PreparedGraphAggregateText {
                 .sources
                 .iter()
                 .zip(&source_aliases)
-                .map(|(&(variable, property), alias)| Column {
+                .map(|(&(variable, property, path), alias)| Column {
                     variable,
                     property,
                     alias: Name {
                         text: alias.as_str(),
                         at: variable.at,
                     },
-                    path: column_path(&parser.syntax, variable),
+                    path,
+                    collect: None,
                 })
                 .collect();
             Some(projection)
@@ -600,6 +734,7 @@ impl PreparedGraphAggregateText {
                     text: "__count_source",
                     at: variable.at,
                 },
+                collect: None,
             });
         }
         let offset = core::mem::replace(
@@ -608,6 +743,17 @@ impl PreparedGraphAggregateText {
         );
         let count = parser.syntax.count.take();
         parser.syntax.distinct = false;
+        // Every `x.key` an output reads binds its key now, as a pipeline's
+        // do (fgdb-xnd7x): an element of a collected list then reads that
+        // stored property, and a key the catalog lacks reads NULL.
+        for (key, slot) in &parser.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let child = PreparedGraphText::from_syntax(statement, parser.syntax, resolve)?;
         Ok(Self {
             child,
@@ -625,6 +771,7 @@ impl PreparedGraphAggregateText {
             having,
             having_expression,
             ordering,
+            projected_ordering,
         })
     }
 
@@ -768,6 +915,15 @@ impl PreparedGraphAggregateText {
                 item.append_template_transcript(&mut bytes);
             }
         }
+        if !self.projected_ordering.is_empty() {
+            bytes.extend_from_slice(b"fgdb:gql:aggregate-projected-order:v1\0");
+            ordinal(&mut bytes, self.projected_ordering.len());
+            for order in &self.projected_ordering {
+                ordinal(&mut bytes, order.column);
+                bytes.push(u8::from(order.descending));
+                bytes.push(u8::from(order.nulls_first));
+            }
+        }
         bytes
     }
 
@@ -787,7 +943,7 @@ impl PreparedGraphAggregateText {
         if self.output_projection.is_some() {
             operators.push("ProjectValues");
         }
-        if !self.ordering.is_empty() {
+        if !self.ordering.is_empty() || !self.projected_ordering.is_empty() {
             operators.push("OrderByAggregate");
         }
         if self.output_distinct {
@@ -865,7 +1021,7 @@ impl PreparedGraphAggregateText {
             Some(expression) => expression.attach(aggregate, &values)?,
             None => aggregate,
         };
-        match &self.output_projection {
+        let aggregate = match &self.output_projection {
             Some(projection) => aggregate
                 .with_output_projection(Self::bind_input_projection(projection, &values)?)
                 .map_err(|kind| {
@@ -873,8 +1029,20 @@ impl PreparedGraphAggregateText {
                         self.child.return_at,
                         GraphPatternTextErrorKind::AggregateBuild(kind),
                     )
-                }),
-            None => Ok(aggregate),
+                })?,
+            None => aggregate,
+        };
+        if self.projected_ordering.is_empty() {
+            Ok(aggregate)
+        } else {
+            aggregate
+                .with_projected_order_by(&self.projected_ordering)
+                .map_err(|kind| {
+                    error(
+                        self.child.return_at,
+                        GraphPatternTextErrorKind::AggregateBuild(kind),
+                    )
+                })
         }
     }
 }
@@ -884,7 +1052,8 @@ impl PreparedGraphAggregateText {
 /// interning programs; parameters retain their actual explicit-use counts.
 #[derive(Default)]
 pub(in crate::graph_text) struct ComputedInputs<'a> {
-    pub(in crate::graph_text) sources: Vec<(Name<'a>, Option<Name<'a>>)>,
+    /// Each read source with its path function: `type(r)` is not a `r`.
+    pub(in crate::graph_text) sources: Vec<(Name<'a>, Option<Name<'a>>, Option<GraphPathFunction>)>,
     pub(in crate::graph_text) operands: Vec<ReadValueTemplate>,
 }
 
@@ -892,6 +1061,9 @@ pub(in crate::graph_text) struct ComputedInputs<'a> {
 pub(in crate::graph_text) struct Expression<'a> {
     pub(in crate::graph_text) variable: Name<'a>,
     pub(in crate::graph_text) property: Option<Name<'a>>,
+    /// The projected function of the variable, e.g. `type(r)` or `labels(n)`,
+    /// or the variable's own identity (an edge, a path) for a bare reference.
+    pub(in crate::graph_text) path: Option<GraphPathFunction>,
     pub(in crate::graph_text) computed: Option<usize>,
 }
 impl Expression<'_> {
@@ -901,6 +1073,7 @@ impl Expression<'_> {
             (None, None) => {
                 self.variable.text == other.variable.text
                     && self.property.map(|name| name.text) == other.property.map(|name| name.text)
+                    && self.path == other.path
             }
             _ => false,
         }
@@ -925,7 +1098,10 @@ enum OutputLeaf<'a> {
     Group(Expression<'a>),
 }
 
-fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
+pub(in crate::graph_text) fn remap_output_columns(
+    value: &mut ReadValueTemplate,
+    columns: &[usize],
+) {
     match value {
         ReadValueTemplate::Column(index) => *index = columns[*index],
         ReadValueTemplate::List(items) => {
@@ -942,11 +1118,19 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             remap_output_columns(value, columns);
             remap_output_columns(list, columns);
         }
+        ReadValueTemplate::Equal { left, right }
+        | ReadValueTemplate::Ordered { left, right, .. } => {
+            remap_output_columns(left, columns);
+            remap_output_columns(right, columns);
+        }
+        ReadValueTemplate::Temporal { argument, .. }
+        | ReadValueTemplate::Function { argument, .. } => remap_output_columns(argument, columns),
         ReadValueTemplate::Integer { program, .. } => {
             for op in program {
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
                     crate::GraphIntegerOp::Column(index)
-                    | crate::GraphIntegerOp::ScalarColumn(index),
+                    | crate::GraphIntegerOp::ScalarColumn(index)
+                    | crate::GraphIntegerOp::IdentityColumn { column: index, .. },
                 ) = op
                 {
                     *index = columns[*index];
@@ -994,9 +1178,31 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
         ReadValueTemplate::MapGet { map, .. } | ReadValueTemplate::Keys(map) => {
             remap_output_columns(map, columns);
         }
+        ReadValueTemplate::MapOverlay { base, values, .. } => {
+            remap_output_columns(base, columns);
+            for value in values {
+                remap_output_columns(value, columns);
+            }
+        }
+        ReadValueTemplate::Let { values, body } => {
+            for value in values {
+                remap_output_columns(value, columns);
+            }
+            remap_output_columns(body, columns);
+        }
+        ReadValueTemplate::Case { arms, otherwise } => {
+            for (condition, value) in arms {
+                remap_output_columns(condition, columns);
+                remap_output_columns(value, columns);
+            }
+            if let Some(otherwise) = otherwise {
+                remap_output_columns(otherwise, columns);
+            }
+        }
         ReadValueTemplate::Literal(_)
         | ReadValueTemplate::Parameter { .. }
-        | ReadValueTemplate::Local(_) => {}
+        | ReadValueTemplate::Local(_)
+        | ReadValueTemplate::Random { .. } => {}
     }
 }
 
@@ -1005,7 +1211,44 @@ impl<'a> Parser<'a> {
         &mut self,
         computed: &mut ComputedInputs<'a>,
     ) -> Result<Expression<'a>, GraphPatternTextError> {
-        self.aggregate_scalar_expression(computed)
+        self.aggregate_scalar_expression(computed, false)
+    }
+
+    /// A RETURN item's grouping key: a whole expression, so `n.p > 1 AS big`
+    /// groups by its three-valued Boolean.
+    fn aggregate_item_key(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<Expression<'a>, GraphPatternTextError> {
+        self.aggregate_scalar_expression(computed, true)
+    }
+
+    /// Whether the aggregate argument starting here calls rand() anywhere
+    /// before the call's closing parenthesis, at any nesting.
+    fn argument_calls_random(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        loop {
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    if depth == 0 {
+                        return Ok(false);
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("RAND")
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            token = lexer.next()?;
+        }
     }
 
     fn starts_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
@@ -1041,10 +1284,21 @@ impl<'a> Parser<'a> {
                 continued = true;
             }
             let next = lexer.next()?;
+            // A percentile is an aggregate that the value reader applies
+            // after aggregation (fgdb-qbaex), never a direct call.
             if let TokenKind::Word(word) = token.kind
                 && matches!(next.kind, TokenKind::Punct(b'('))
                 && [
-                    "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+                    "COUNT",
+                    "SUM",
+                    "SUM_INT",
+                    "AVG",
+                    "AVG_INT",
+                    "MIN",
+                    "MAX",
+                    "COLLECT",
+                    "PERCENTILEDISC",
+                    "PERCENTILECONT",
                 ]
                 .iter()
                 .any(|name| word.eq_ignore_ascii_case(name))
@@ -1052,8 +1306,8 @@ impl<'a> Parser<'a> {
                 aggregate = true;
             }
             match token.kind {
-                TokenKind::Punct(b'(' | b'[') => depth += 1,
-                TokenKind::Punct(b')' | b']') => {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 && direct {
                         direct_closed = true;
@@ -1074,9 +1328,28 @@ impl<'a> Parser<'a> {
     ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let value = self
-            .read_resolved_value(
+            .read_resolved_item(
                 &mut |parser| {
-                    let leaf = if parser.starts_aggregate_call()? {
+                    // Identity functions resolve their argument directly here.
+                    // A scoped element must never fall back to a same-named
+                    // graph binding while that element shadows it.
+                    if matches!(parser.current.kind, TokenKind::Word(word)
+                        if parser.elements.contains(&word))
+                        && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    {
+                        return Ok(None);
+                    }
+                    let leaf = if core::mem::take(&mut parser.percentile_leaf) {
+                        // A percentile's first argument is a hidden collect,
+                        // which the value reader applies the percentile to
+                        // (fgdb-qbaex).
+                        let at = parser.current.at;
+                        OutputLeaf::Aggregate(HiddenSummary {
+                            expression: Some(parser.aggregate_argument_expression(computed)?),
+                            function: GraphAggregateFunction::Collect,
+                            at,
+                        })
+                    } else if parser.starts_aggregate_call()? {
                         let name = parser.name()?;
                         parser.punct(b'(', "(")?;
                         // Arguments use the input compiler, which cannot resolve an
@@ -1087,18 +1360,57 @@ impl<'a> Parser<'a> {
                             function,
                             at: name.at,
                         })
+                    } else if (parser.is_word("PROPERTIES") || parser.is_word("KEYS"))
+                        && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                        && {
+                            let mut lookahead = parser.lexer.clone();
+                            lookahead.next()?;
+                            matches!(lookahead.next()?.kind, TokenKind::Word(word)
+                                if parser.syntax.variables.iter().any(|name| name.text == word)
+                                    || parser.syntax.visible_edge(word).is_some())
+                                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                        }
+                    {
+                        parser.advance()?;
+                        parser.punct(b'(', "(")?;
+                        let variable = parser.property_variable()?;
+                        parser.punct(b')', ")")?;
+                        OutputLeaf::Group(Expression {
+                            variable,
+                            property: None,
+                            path: Some(GraphPathFunction::Properties),
+                            computed: None,
+                        })
+                    } else if matches!(parser.current.kind, TokenKind::Word(word)
+                        if parser.syntax.visible_edge(word)
+                            .is_some_and(|(edge, _)| edge.walk.is_none()))
+                        && !matches!(
+                            parser.lexer.clone().next()?.kind,
+                            TokenKind::Punct(b'.' | b'(')
+                        )
+                    {
+                        // A bare relationship groups by its identity, so
+                        // `r IS NULL` after an OPTIONAL MATCH is a key.
+                        let variable = parser.edge_variable()?;
+                        OutputLeaf::Group(Expression {
+                            variable,
+                            property: None,
+                            path: column_path(&parser.syntax, variable),
+                            computed: None,
+                        })
                     } else if matches!(parser.current.kind, TokenKind::Word(word)
                 if parser.syntax.variables.iter().any(|variable| variable.text == word))
                     {
                         let variable = parser.variable()?;
                         let property = if parser.take(b'.')? {
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };
                         OutputLeaf::Group(Expression {
                             variable,
                             property,
+                            path: column_path(&parser.syntax, variable),
                             computed: None,
                         })
                     } else {
@@ -1124,18 +1436,12 @@ impl<'a> Parser<'a> {
                 };
                 error(source.offset, kind)
             })?;
-        // The aggregate-output evaluator binds no element scope (fgdb-20foe):
-        // collect first with WITH, then comprehend the collected list.
-        if value.binds_elements() {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Expected(
-                    "a list comprehension over a WITH-carried list, not an aggregate output",
-                ),
-            ));
-        }
-        self.word("AS")?;
-        let alias = self.name()?;
+        let end = self.current.at;
+        let alias = if self.take_word("AS")? {
+            self.name()?
+        } else {
+            self.source_name(at, end)
+        };
         Ok(ReturnItem {
             expression: None,
             function: None,
@@ -1153,49 +1459,21 @@ impl<'a> Parser<'a> {
         if self.return_contains_aggregate()? {
             return self.aggregate_output_item(computed, output_leaves);
         }
-        let (expression, function, default_alias) = if self.starts_aggregate_call()? {
+        let (expression, function) = if self.starts_aggregate_call()? {
             let name = self.name()?;
             self.punct(b'(', "(")?;
             let (expression, function) = self.aggregate_call(name, computed)?;
-            let alias = match function {
-                GraphAggregateFunction::CountRows
-                | GraphAggregateFunction::Count
-                | GraphAggregateFunction::CountDistinct => "count",
-                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => "sum",
-                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    "avg"
-                }
-                GraphAggregateFunction::Min => "min",
-                GraphAggregateFunction::Max => "max",
-                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
-                    "collect"
-                }
-            };
-            (
-                expression,
-                Some(function),
-                Some(Name {
-                    text: alias,
-                    at: name.at,
-                }),
-            )
+            (expression, Some(function))
         } else {
-            let expression = self.aggregate_expression(computed)?;
-            let default = expression
-                .computed
-                .is_none()
-                .then_some(expression.property.unwrap_or(expression.variable));
-            (Some(expression), None, default)
+            (Some(self.aggregate_item_key(computed)?), None)
         };
+        let end = self.current.at;
+        // An unaliased item is named by its exact source text, as in
+        // openCypher (`count(*)`, `a.title`, `type(r)`).
         let alias = if self.take_word("AS")? {
             self.name()?
         } else {
-            default_alias.ok_or_else(|| {
-                error(
-                    at,
-                    GraphPatternTextErrorKind::Expected("AS alias for computed grouping output"),
-                )
-            })?
+            self.source_name(at, end)
         };
         Ok(ReturnItem {
             expression,
@@ -1276,10 +1554,36 @@ impl<'a> Parser<'a> {
                 }
                 (function, false) => function,
             };
-            (Some(self.aggregate_expression(computed)?), function)
+            (
+                Some(self.aggregate_argument_expression(computed)?),
+                function,
+            )
         };
         self.punct(b')', ")")?;
         Ok(result)
+    }
+
+    /// An aggregate call's own argument, not a grouping key. A percentile's
+    /// first argument reads here too, up to its comma (fgdb-qbaex).
+    fn aggregate_argument_expression(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<Expression<'a>, GraphPatternTextError> {
+        // rand() anywhere in the argument is a non-constant expression
+        // (Return6 [15]). This reader's own grammar would otherwise read
+        // `rand(` as a path function, so look for it first.
+        if self.argument_calls_random()? {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a deterministic aggregate argument: rand() inside an aggregate is a non-constant expression",
+                ),
+            ));
+        }
+        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let argument = self.aggregate_expression(computed);
+        self.aggregate_argument = outer;
+        argument
     }
 
     /// Resolve public aliases and expressions. Explicit aggregate calls first

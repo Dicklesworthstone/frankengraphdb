@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphNullPlacement, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     MAX_AGGREGATE_FILTERS, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -123,7 +123,8 @@ fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
     for tail in [
         "HAVING missing > 0",
         "HAVING MIN(*) > 0",
-        "HAVING total > 1.5",
+        // A finite decimal compares since ad2a4059; a non-finite one refuses.
+        "HAVING total > 1e309",
         "HAVING total IS TRUE",
         "HAVING total IS NOT",
         "HAVING total > 0 OR OR n > 0",
@@ -176,7 +177,8 @@ fn filtering_and_ranking_use_complete_aggregates_before_pagination() {
         CanonicalScalar::Int(10),
         CanonicalScalar::Int(9),
         CanonicalScalar::Int(i64::MAX),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(1), RelationId(1), VId(10)),
         (VId(1), RelationId(1), VId(11)),
@@ -287,7 +289,9 @@ fn ranked_execution_shares_every_budget_and_interruption_checkpoint() {
     let edges: Vec<_> = (1..=8)
         .map(|id| (VId(id), RelationId(1), VId(id)))
         .collect();
-    let scalars: Vec<_> = (1..=8).map(CanonicalScalar::Int).collect();
+    let scalars: Vec<_> = (1..=8)
+        .map(|n| CanonicalPropertyValue::from(CanonicalScalar::Int(n)))
+        .collect();
     let run = |policy| {
         aggregate.execute_governed(
             8,
@@ -348,7 +352,7 @@ fn ranked_execution_shares_every_budget_and_interruption_checkpoint() {
         assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
         assert_eq!(at, stop);
     }
-    let boolean = CanonicalScalar::Bool(true);
+    let boolean = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     let invalid = PreparedGraphAggregateText::prepare(
         "MATCH (x) RETURN MIN(x.p) AS least HAVING least > 0 ORDER BY least LIMIT 0",
         symbols,

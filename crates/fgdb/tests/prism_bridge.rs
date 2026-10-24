@@ -9,6 +9,18 @@ use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 
+/// The owner-path projection cache is process-wide and small, and these
+/// tests fill it and observe reuse. Under the parallel test runner another
+/// test's live snapshots can fill it or hold its lock, so a lawful rebuild
+/// looked like a missing reuse (fgdb-7fqu6). Each test runs alone; a finished
+/// test's entries die with its database.
+static CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x31; 32],
@@ -93,6 +105,7 @@ fn call() -> FnxCallSpec {
 
 #[test]
 fn database_calls_select_real_multigraph_rows_without_losing_isolates() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -149,6 +162,7 @@ fn database_calls_select_real_multigraph_rows_without_losing_isolates() {
 
 #[test]
 fn retained_view_historical_cut_and_shared_cache_survive_writer_progress_and_drop() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -232,6 +246,7 @@ fn retained_view_historical_cut_and_shared_cache_survive_writer_progress_and_dro
 
 #[test]
 fn excluded_properties_and_explicit_discard_laws_cannot_change_answers() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -285,6 +300,7 @@ fn excluded_properties_and_explicit_discard_laws_cannot_change_answers() {
 
 #[test]
 fn relation_filter_and_selection_recipe_are_bound_even_when_rows_coincide() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -317,6 +333,7 @@ fn relation_filter_and_selection_recipe_are_bound_even_when_rows_coincide() {
 
 #[test]
 fn source_cache_algorithm_and_frontier_limits_preserve_typed_refusals() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -373,6 +390,7 @@ fn source_cache_algorithm_and_frontier_limits_preserve_typed_refusals() {
 
 #[test]
 fn property_successors_and_retirements_resolve_at_the_selected_cut() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -423,6 +441,7 @@ fn property_successors_and_retirements_resolve_at_the_selected_cut() {
 
 #[test]
 fn every_source_and_adapter_checkpoint_can_cancel_without_publishing_results() {
+    let _cache = exclusive();
     use fgdb_types::context::SimulationCheckpointProbe;
     use std::sync::Arc;
     let runtime = RuntimeBuilder::new().build().unwrap();
@@ -431,29 +450,52 @@ fn every_source_and_adapter_checkpoint_can_cancel_without_publishing_results() {
     runtime.block_on(async {
         let commit = contexts.commit();
         let query = contexts.query();
+        // A generation's first call builds its projection and later calls
+        // reuse it (fgdb-0tbrz), so the two paths have different checkpoints.
+        // Count each on its own path, and stop each at every one of them.
+        let counted = |view: &fgdb::EmbeddedReadView| {
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = query.with_checkpoint_probe(Arc::clone(&probe));
+            let rows = view.execute_fnx(&observed, &call(), options()).unwrap();
+            (rows, probe.calls())
+        };
+        let stopped = |view: &fgdb::EmbeddedReadView, stop| {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let controlled = query.with_checkpoint_probe(probe);
+            matches!(
+                view.execute_fnx(&controlled, &call(), options()),
+                Err(FnxReadError::Cancelled(_))
+                    | Err(FnxReadError::Execution(FnxExecutionError::Cancelled(_)))
+            )
+        };
         let mut db = Database::<MemVfs>::open_memory(&commit, keys())
             .await
             .unwrap();
         db.write(&commit, fixture()).await.unwrap();
         let view = db.read_session().unwrap();
-        let probe = Arc::new(SimulationCheckpointProbe::new(None));
-        let observed = query.with_checkpoint_probe(Arc::clone(&probe));
-        let expected = view.execute_fnx(&observed, &call(), options()).unwrap();
-        let count = probe.calls();
-        assert!(count > 10);
-        for stop in 1..=count {
-            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-            let controlled = query.with_checkpoint_probe(probe);
-            assert!(matches!(
-                view.execute_fnx(&controlled, &call(), options()),
-                Err(FnxReadError::Cancelled(_))
-                    | Err(FnxReadError::Execution(FnxExecutionError::Cancelled(_)))
-            ));
-        }
-        assert_eq!(
-            view.execute_fnx(&query, &call(), options()).unwrap(),
-            expected
+        let (expected, building) = counted(&view);
+        let (again, reusing) = counted(&view);
+        assert_eq!(again, expected);
+        assert!(building > 10);
+        assert!(
+            reusing < building,
+            "a reused projection skips the build's checkpoints"
         );
+        for stop in 1..=reusing {
+            assert!(stopped(&view, stop), "reusing, stop={stop}");
+        }
+        assert_eq!(counted(&view), (expected.clone(), reusing));
+        // A building call needs a generation nothing has projected yet. An
+        // interrupted one publishes nothing: the next call still answers.
+        for stop in 1..=building {
+            let mut fresh = Database::<MemVfs>::open_memory(&commit, keys())
+                .await
+                .unwrap();
+            fresh.write(&commit, fixture()).await.unwrap();
+            let view = fresh.read_session().unwrap();
+            assert!(stopped(&view, stop), "building, stop={stop}");
+            assert_eq!(counted(&view).0, expected, "after stop={stop}");
+        }
         assert_eq!(contexts.outstanding_obligations(), 0);
         // The pinned upstream fnx iteration loop has no internal checkpoint;
         // this covers the actual available source and adapter boundaries only.

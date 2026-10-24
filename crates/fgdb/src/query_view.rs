@@ -22,7 +22,12 @@ use fgdb_types::{CommitSeq, QueryCx};
 mod branch;
 #[path = "query_spool.rs"]
 mod spool;
-pub use spool::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
+pub use spool::{
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
+    NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
+};
+pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input};
 
 impl EmbeddedReadView {
     /// Execute a native read at this view's immutable frontier. The same native
@@ -45,13 +50,32 @@ impl EmbeddedReadView {
         resolver: impl GraphSymbolResolver,
         policy: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        self.query_with_snapshot(cx, text, params, resolver, policy)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute a read and return its actual snapshot alongside its rows.
+    /// Temporal reads report the bound AS OF cut, not this view's frontier.
+    /// The same bound plan supplies execution and metadata: no second parse,
+    /// parameter binding, graph read or certificate construction is performed.
+    /// A refusal returns neither rows nor successful snapshot metadata.
+    /// EXPLAIN remains a template listing at the view's frontier, not execution
+    /// of the explained statement. This adds no history lease or authority.
+    pub fn query_with_snapshot(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        policy: GqlQueryPolicy,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
         if let Some(explain) = explain_prefix(text) {
             let (statement, certificate) = explain?;
             let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
-            return explain_result(listing, certificate);
+            return explain_result(listing, certificate).map(|result| (result, self.frontier()));
         }
         PreparedNativeRead::prepare(text, params, resolver)?
-            .execute_in_view(self, cx, params, policy)
+            .execute_in_view_with_snapshot(self, cx, params, policy)
     }
 }
 
@@ -71,6 +95,20 @@ impl PreparedNativeRead {
         self.execute_in_view_at_seq(view, cx, params, policy, view.frontier())
     }
 
+    /// As execute_in_view, retaining the successful execution's selected cut.
+    /// The immutable view supplies the default; a temporal plan supplies its
+    /// own cut after binding. Native execution validates retained history and
+    /// budgets before the pair is returned, including for empty results.
+    pub fn execute_in_view_with_snapshot(
+        &self,
+        view: &EmbeddedReadView,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
+        self.execute_in_view_with_snapshot_at_seq(view, cx, params, policy, view.frontier())
+    }
+
     // Shared by native snapshot entrypoints. Only non-temporal plans use the
     // supplied default; temporal plans bind and validate their own exact cut.
     pub(super) fn execute_in_view_at_seq(
@@ -81,7 +119,20 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
         as_of: CommitSeq,
     ) -> Result<QueryResult, QueryError> {
-        match self {
+        self.execute_in_view_with_snapshot_at_seq(view, cx, params, policy, as_of)
+            .map(|(result, _)| result)
+    }
+
+    fn execute_in_view_with_snapshot_at_seq(
+        &self,
+        view: &EmbeddedReadView,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        as_of: CommitSeq,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
+        let mut snapshot_seq = as_of;
+        let result = match self {
             Self::Pattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
@@ -89,7 +140,7 @@ impl PreparedNativeRead {
                 let result = view
                     .execute_graph_pattern_governed_at(cx, &query, as_of, policy)
                     .map_err(QueryError::Pattern)?;
-                Ok(values(query.columns().to_vec(), result.value))
+                values(query.columns().to_vec(), result.value)
             }
             Self::Aggregate(prepared) => {
                 let query = prepared
@@ -98,11 +149,11 @@ impl PreparedNativeRead {
                 let result = view
                     .execute_graph_aggregate_governed_at(cx, &query, as_of, policy)
                     .map_err(QueryError::Aggregate)?;
-                Ok(aggregates(
+                aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),
                     result.value,
-                ))
+                )
             }
             Self::PipelineAggregate(prepared) => {
                 // Select from the admitted definition, never from source data
@@ -121,11 +172,11 @@ impl PreparedNativeRead {
                     view.execute_graph_aggregate_governed_at(cx, &query, as_of, policy)
                         .map_err(QueryError::Aggregate)?
                 };
-                Ok(aggregates(
+                aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),
                     result.value,
-                ))
+                )
             }
             Self::Set(prepared) => {
                 let query = prepared
@@ -134,40 +185,44 @@ impl PreparedNativeRead {
                 let result = view
                     .execute_graph_set_governed_at(cx, &query, as_of, policy)
                     .map_err(QueryError::Set)?;
-                Ok(values(prepared.columns().to_vec(), result.value))
+                values(prepared.columns().to_vec(), result.value)
             }
             Self::TemporalPattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalText)?;
+                snapshot_seq = query.as_of();
                 let result = view
-                    .execute_graph_pattern_governed_at(cx, query.pattern(), query.as_of(), policy)
+                    .execute_graph_pattern_governed_at(cx, query.pattern(), snapshot_seq, policy)
                     .map_err(QueryError::Pattern)?;
-                Ok(values(query.pattern().columns().to_vec(), result.value))
+                values(query.pattern().columns().to_vec(), result.value)
             }
             Self::TemporalAggregate(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalText)?;
+                snapshot_seq = query.as_of();
                 let result = view
                     .execute_temporal_graph_aggregate_text_governed(cx, &query, policy)
                     .map_err(QueryError::Aggregate)?;
-                Ok(aggregates(
+                aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),
                     result.value,
-                ))
+                )
             }
             Self::TemporalSet(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalSetText)?;
+                snapshot_seq = query.as_of();
                 let result = view
-                    .execute_graph_set_governed_at(cx, query.query(), query.as_of(), policy)
+                    .execute_graph_set_governed_at(cx, query.query(), snapshot_seq, policy)
                     .map_err(QueryError::Set)?;
-                Ok(values(prepared.columns().to_vec(), result.value))
+                values(prepared.columns().to_vec(), result.value)
             }
-        }
+        };
+        Ok((result, snapshot_seq))
     }
 }
 
@@ -181,7 +236,10 @@ impl PreparedNativeRead {
     /// scan with leading edge/source identities. The existing physical compiler
     /// checks predicates, projections, canonical order and SKIP/LIMIT. The first
     /// GLA operator selects the lane before source execution; runtime errors do
-    /// not trigger another lane. Temporal patterns use their exact bound cut.
+    /// not trigger another lane. Identity-leading, unpaged vertex Set
+    /// projections use the same governed row projection as authorized streams;
+    /// bound constants and integer expressions run once per source row.
+    /// Temporal patterns and admitted Sets use their exact bound cut.
     /// Unsupported classes/operators refuse rather than falling back to eager
     /// execution. The source generation is in memory; this does not add spill.
     ///
@@ -240,23 +298,56 @@ impl PreparedNativeRead {
         ),
         QueryError,
     > {
-        match self {
+        let (pull, columns, as_of) = match self {
             Self::Pattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::PatternText)?;
-                open_pattern_stream(view, cx, &query, view.frontier(), policy)
+                return open_pattern_stream(view, cx, &query, view.frontier(), policy);
             }
             Self::TemporalPattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalText)?;
-                open_pattern_stream(view, cx, query.pattern(), query.as_of(), policy)
+                return open_pattern_stream(view, cx, query.pattern(), query.as_of(), policy);
             }
-            _ => Err(QueryError::StreamingUnsupported {
+            Self::Set(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::SetText)?;
+                let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
+                    facade: self.facade_class(),
+                })?;
+                (pull, query.columns().to_vec(), view.frontier())
+            }
+            Self::TemporalSet(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalSetText)?;
+                let pull = query
+                    .query()
+                    .row_pull()
+                    .ok_or(QueryError::StreamingUnsupported {
+                        facade: self.facade_class(),
+                    })?;
+                (pull, query.query().columns().to_vec(), query.as_of())
+            }
+            _ => {
+                return Err(QueryError::StreamingUnsupported {
+                    facade: self.facade_class(),
+                });
+            }
+        };
+        let (_, cursor) = open_pattern_stream(view, cx, pull.pattern(), as_of, policy)?;
+        let ScanCursor::Vertex(cursor) = cursor else {
+            return Err(QueryError::StreamingUnsupported {
                 facade: self.facade_class(),
-            }),
-        }
+            });
+        };
+        Ok((
+            columns,
+            ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
+        ))
     }
 }
 
@@ -286,10 +377,10 @@ fn open_pattern_stream<'q>(
         query.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
     ) {
-        ScanCursor::Edge(
+        ScanCursor::Edge(Box::new(
             view.stream_graph_edges_governed_at(cx, query, as_of, policy)
                 .map_err(QueryError::EdgeStream)?,
-        )
+        ))
     } else {
         ScanCursor::Vertex(
             view.stream_graph_values_governed_at(cx, query, as_of, policy)

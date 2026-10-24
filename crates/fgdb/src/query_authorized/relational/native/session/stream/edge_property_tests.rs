@@ -3,12 +3,12 @@ use super::super::failure_tests::{BRANCH, grant, issuer, policy};
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::LabelId;
-use fgdb_types::PurposeContexts;
+use fgdb_types::{CanonicalPropertyValue, PurposeContexts};
 use fgdb_warden::{LimitDimension, Scope};
 use std::cell::Cell;
 
 struct Raw {
-    fields: Vec<(PropertyKeyId, CanonicalScalar)>,
+    fields: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     relation: RelationId,
     hidden_target: bool,
     self_loop: bool,
@@ -17,7 +17,10 @@ struct Raw {
 impl Raw {
     fn new(fields: Vec<(PropertyKeyId, CanonicalScalar)>) -> Self {
         Self {
-            fields,
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| (key, value.into()))
+                .collect(),
             relation: RelationId(1),
             hidden_target: false,
             self_loop: false,
@@ -70,7 +73,7 @@ impl VertexScanSource for Raw {
 }
 #[derive(Debug, PartialEq)]
 struct Observation {
-    result: Result<Option<Option<CanonicalScalar>>, AuthorizationError>,
+    result: Result<Option<Option<CanonicalPropertyValue>>, AuthorizationError>,
     native_work: u64,
     signed_work: u64,
     nodes: u64,
@@ -95,15 +98,18 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
     let token = issuer.issue_at(&grant, 100).unwrap();
     let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
     let permit = verified.begin_read_at(BRANCH, 100).unwrap();
-    let samples = Cell::new(0);
-    let clock = || {
-        samples.set(samples.get() + 1);
+    // An atomic, not a Cell: the clock rides in the production Shared
+    // (Arc<Mutex<..>>), and a closure over a Cell would be neither Send nor
+    // Sync (clippy::arc_with_non_send_sync).
+    let samples = std::sync::atomic::AtomicUsize::new(0);
+    let mut clock = || {
+        samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         100
     };
-    let execution: Shared<'_> = Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(clock))));
+    let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
     let source = ScopedSource {
         inner: raw,
-        execution: Rc::clone(&execution),
+        execution: execution.clone(),
     };
     let mut work = 0;
     let result = source
@@ -124,7 +130,7 @@ fn observe(cx: &QueryCx, raw: Raw, id: EId, key: PropertyKeyId, limit: u64) -> O
         native_work: work,
         signed_work: used.work,
         nodes: used.nodes,
-        clock_samples: samples.get(),
+        clock_samples: samples.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 fn with_query(test: impl FnOnce(&QueryCx)) {
@@ -208,7 +214,7 @@ fn relation_and_both_endpoints_are_admitted_before_charging_or_lending_a_field()
         let mut raw = Raw::new(fields.clone());
         raw.self_loop = true;
         let value = observe(cx, raw, EId(7), PropertyKeyId(17), u64::MAX);
-        assert_eq!(value.result, Ok(Some(Some(CanonicalScalar::Int(7)))));
+        assert_eq!(value.result, Ok(Some(Some(CanonicalScalar::Int(7).into()))));
         assert_eq!(value.nodes, 1, "a self-loop has one unique endpoint");
         assert_eq!(
             observe(cx, Raw::new(fields), EId(7), PropertyKeyId(7), u64::MAX).result,
@@ -227,11 +233,11 @@ fn repeated_edge_fields_share_a_single_terminal_node_allowance() {
         let token = issuer.issue_at(&grant, 100).unwrap();
         let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
         let permit = verified.begin_read_at(BRANCH, 100).unwrap();
-        let execution: Shared<'_> =
-            Rc::new(RefCell::new(Execution::new(cx, permit, Box::new(|| 100))));
+        let mut clock = || 100;
+        let execution = Shared(Arc::new(Mutex::new(Execution::new(cx, permit, &mut clock))));
         let source = ScopedSource {
             inner: Raw::new(vec![(PropertyKeyId(17), CanonicalScalar::Int(7))]),
-            execution: Rc::clone(&execution),
+            execution: execution.clone(),
         };
         let mut control = |_| execution.borrow_mut().checkpoint();
         let value = source

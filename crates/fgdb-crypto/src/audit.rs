@@ -17,6 +17,7 @@
 use crate::aead::REGISTERED_OBJECT_AEAD_PROFILES;
 use crate::argon2id::{REGISTERED_PASSPHRASE_KDF_PROFILES, Variant};
 use crate::blake3::{Hasher, hash};
+use crate::signature::REGISTERED_SIGNATURE_PROFILES;
 use crate::{
     SYMBOL_AUTH_DOMAIN, SYMBOL_AUTH_KEY_BYTES, SYMBOL_AUTH_PROFILE_BLAKE3_128,
     SYMBOL_AUTH_TAG_BYTES,
@@ -40,6 +41,7 @@ pub const REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION: u16 = 1;
 /// Exact number of V1 crypto profiles bound into release-audit evidence.
 pub const REGISTERED_CRYPTO_PROFILE_COUNT: u16 = REGISTERED_OBJECT_AEAD_PROFILES.len() as u16
     + REGISTERED_PASSPHRASE_KDF_PROFILES.len() as u16
+    + REGISTERED_SIGNATURE_PROFILES.len() as u16
     + 1;
 
 /// Stable registered engagement-plan identity.
@@ -67,7 +69,7 @@ pub enum AuditMethod {
     Zeroization = 1 << 4,
     /// Production entropy separation and incident-artifact redaction.
     EntropyAndRedaction = 1 << 5,
-    /// End-to-end identity/AEAD/FEC-symbol/key-lifecycle composition review.
+    /// Identity/AEAD/FEC-symbol/signature transcripts and key-lifecycle review.
     CompositionAndKeyLifecycle = 1 << 6,
 }
 
@@ -165,9 +167,13 @@ pub fn external_crypto_audit_plan_digest() -> [u8; 32] {
 /// than supplied by a release caller. Numeric profile lookup and this
 /// transcript consume the same authoritative ordered inventories. Changing an
 /// algorithm, parameter, width, domain, profile ID, row order, or row count
-/// therefore invalidates old external-audit evidence. The three V1 rows are
-/// object AEAD, passphrase KDF, and symbol authentication; a future signing
-/// profile must be added here and necessarily changes this digest.
+/// therefore invalidates old external-audit evidence. The four V1 classes are
+/// object AEAD, passphrase KDF, symbol authentication, and signatures. Signature
+/// rows also bind the exact verification policy: an audit of a permissive or
+/// cofactored verifier cannot authorize the strict prime-subgroup profile.
+/// The required methodology applies to SHA-512 and the complete signing path,
+/// including field/scalar bounds, compiled secret control flow, timing, seed
+/// expansion, nonce/prefix lifetime, and caller transcript domain separation.
 #[must_use]
 pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
     let mut hasher = Hasher::new();
@@ -213,6 +219,19 @@ pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
     update_len_prefixed(&mut hasher, SYMBOL_AUTH_DOMAIN.as_bytes());
     hasher.update(&SYMBOL_AUTH_KEY_BYTES.to_le_bytes());
     hasher.update(&SYMBOL_AUTH_TAG_BYTES.to_le_bytes());
+
+    for profile in REGISTERED_SIGNATURE_PROFILES {
+        update_profile_header(
+            &mut hasher,
+            4,
+            profile.id(),
+            profile.algorithm_name().as_bytes(),
+        );
+        hasher.update(&profile.seed_len().to_le_bytes());
+        hasher.update(&profile.public_key_len().to_le_bytes());
+        hasher.update(&profile.signature_len().to_le_bytes());
+        update_len_prefixed(&mut hasher, profile.verification_policy().as_bytes());
+    }
 
     hasher.finalize().0
 }

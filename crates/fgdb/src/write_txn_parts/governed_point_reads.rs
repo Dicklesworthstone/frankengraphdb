@@ -20,7 +20,37 @@ impl Drop for ProjectionReadAttempt<'_> {
     }
 }
 
+/// Admit a stored value before it is copied: a scalar's payload units, and for
+/// a List or Map one scratch entry per element plus every key's and nested
+/// value's payload (fgdb-k3nub).
 fn point_payload_admission<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    use crate::gql_exec::source::SourceEvent::ScratchEntry;
+    use fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => point_scalar_payload_admission(scalar, control),
+        CanonicalPropertyValue::List(list) => list.values().iter().try_for_each(|value| {
+            control(ScratchEntry)?;
+            point_payload_admission(value, &mut *control)
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+            control(ScratchEntry)?;
+            for _ in 0..entry
+                .key()
+                .as_str()
+                .len()
+                .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+            {
+                control(ScratchEntry)?;
+            }
+            point_payload_admission(entry.value(), &mut *control)
+        }),
+    }
+}
+
+fn point_scalar_payload_admission<E>(
     value: &CanonicalScalar,
     control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -42,7 +72,12 @@ fn point_payload_admission<E>(
         | CanonicalScalar::Bool(_)
         | CanonicalScalar::Int(_)
         | CanonicalScalar::Decimal(_)
-        | CanonicalScalar::Float(_) => [0, 0],
+        | CanonicalScalar::Float(_)
+        | CanonicalScalar::Date(_)
+        | CanonicalScalar::LocalTime(_)
+        | CanonicalScalar::Time(_)
+        | CanonicalScalar::LocalDateTime(_)
+        | CanonicalScalar::Duration(_) => [0, 0],
     };
     for bytes in sizes {
         for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
@@ -55,6 +90,54 @@ fn point_payload_admission<E>(
 }
 
 impl WriteTxn {
+    // A carried identity reads the same borrowed historical winner and prepared
+    // NET effects as explicit point projections. The relational engine already
+    // charges the expression's work and copied payload; physical lookup and
+    // overlay traversal poll here without inventing another pattern source or
+    // resetting the statement's allowance. Only the selected scalar is owned.
+    //
+    // The point witness includes absent elements/properties and edge retirement
+    // through a vertex cascade. If lookup or witness admission is interrupted,
+    // the existing guard retains its conservative ALL-CHANGE witness. Successful
+    // retry and savepoint rollback cannot erase either kind of observation.
+    fn element_property_with_checkpoint<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        failure: &std::cell::RefCell<Option<Box<asupersync::error::Error>>>,
+        element: ElementId,
+        property: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError> {
+        if let Some(error) = failure.borrow().as_ref() {
+            return Err(WriteTxnError::Interrupted(error.clone()));
+        }
+        let _ = self.query_snapshot(database)?;
+        let mut control = |_: crate::gql_exec::source::SourceEvent| {
+            cx.checkpoint().map_err(|error| {
+                // The source callback carries a typed copy while the enclosing
+                // governed call restores the original control error before
+                // returning. No further source or evaluator checkpoint runs.
+                let mut failure = failure.borrow_mut();
+                WriteTxnError::Interrupted(failure.get_or_insert(error).clone())
+            })
+        };
+        control(crate::gql_exec::source::SourceEvent::Work)?;
+        let mut attempt = ProjectionReadAttempt {
+            reads: &self.point_reads,
+            element,
+            accepted: false,
+        };
+        let field = PointReadField::Property(property);
+        let projected =
+            self.point_projection_with_control(database, element, field, &mut control, &|error| {
+                error
+            })?;
+        self.point_reads.borrow_mut().record(element, field);
+        let value = projected.property.cloned();
+        attempt.accepted = true;
+        Ok(value)
+    }
+
     /// Project one vertex property under a shared source/work/scratch allowance.
     ///
     /// A successful execution contains exactly ONE optional-value row: None
@@ -88,8 +171,10 @@ impl WriteTxn {
         vertex: VId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
-    {
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<Option<CanonicalPropertyValue>>,
+        TxnGqlError<WriteTxnError>,
+    > {
         cx.with_restriction(|| {
             self.point_governed_with_checkpoint(
                 database,
@@ -112,8 +197,10 @@ impl WriteTxn {
         edge: EId,
         property: fgdb_delta_types::PropertyKeyId,
         policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<fgdb_gql::GqlQueryExecution<Option<CanonicalScalar>>, TxnGqlError<WriteTxnError>>
-    {
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<Option<CanonicalPropertyValue>>,
+        TxnGqlError<WriteTxnError>,
+    > {
         cx.with_restriction(|| {
             self.point_governed_with_checkpoint(
                 database,
