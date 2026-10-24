@@ -131,8 +131,10 @@ LANDING_EVIDENCE=""
 # _ll_starttime <pid> — kernel process birth identity. Exit 1 means the
 # kernel proved the PID absent; exit 2 means identity is unavailable. Only
 # the former permits reclamation. Linux uses field 22 of /proc/<pid>/stat;
-# macOS uses PROC_PIDTBSDINFO's microsecond birth time, never ps text or kill -0.
-# Python is optional on macOS: its absence makes the lease indeterminate.
+# macOS uses PROC_PIDTBSDINFO's microsecond birth time, never ps text. A
+# missing Linux proc entry also needs errno-aware confirmation: hidepid can
+# conceal a live foreign holder. Python is optional; its absence or an EPERM
+# makes that case indeterminate, never dead.
 # token.sh sources this implementation so publisher and reader cannot drift.
 #
 # The comm field (2) is parenthesised and MAY CONTAIN SPACES AND PARENTHESES, so
@@ -188,7 +190,23 @@ PY
     Linux) [ -r /proc/self/stat ] || return 2 ;;
     *) return 2 ;;
   esac
-  [ -d "/proc/$pid" ] || return 1
+  if [ ! -d "/proc/$pid" ]; then
+    command -v python3 >/dev/null 2>&1 || return 2
+    python3 - "$pid" <<'PY'
+import os
+import sys
+
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(1)
+except (OSError, OverflowError):
+    sys.exit(2)
+# A live but procfs-hidden process cannot supply a readable birth identity.
+sys.exit(2)
+PY
+    return "$?"
+  fi
   [ -r "/proc/$pid/stat" ] || return 2
   stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 2
   rest="${stat##*) }"
