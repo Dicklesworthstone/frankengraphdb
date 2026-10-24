@@ -1014,6 +1014,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether a row of `width` carries a hidden boundary read of `alias.key`,
+    /// the key being the name after the `.` that follows the current token,
+    /// which boundary_read then takes. Nothing is consumed.
+    pub(in crate::graph_text) fn boundary_carries(
+        &self,
+        width: usize,
+        alias: &str,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        lexer.next()?;
+        let (TokenKind::Word(key) | TokenKind::DelimitedKeyword(key)) = lexer.next()?.kind else {
+            return Ok(false);
+        };
+        Ok(self.boundary_reads.as_ref().is_some_and(|boundary| {
+            boundary.width == width
+                && ((boundary.reads.iter()).any(|&(read, name, _)| read == alias && name.text == key)
+                    || (boundary.grouped.iter())
+                        .any(|&(read, _, name, _)| read == alias && name.text == key))
+        }))
+    }
+
     /// Resolve a carried property or native metadata function to its hidden
     /// source column when `width` is the boundary row. The complete expression
     /// is consumed on success; `None` consumes nothing.
