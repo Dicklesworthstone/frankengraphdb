@@ -534,13 +534,20 @@ impl WriteTxn {
                 }
                 Ok(returning)
             })().map_err(|error| error.map_source(chained))?;
-            query
-                .finish_governed(
+            let failure = std::cell::RefCell::new(None);
+            let result = query
+                .finish_governed_reading(
                     returning,
                     stats.selection,
                     stats.evaluator,
                     policy.query,
-                    || cx.checkpoint(),
+                    |element, key| {
+                        self.element_property_with_checkpoint(database, cx, &failure, element, key)
+                    },
+                    || match failure.borrow_mut().take() {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    },
                 )
                 .map_err(|error| {
                     error.map_source(|error| {
@@ -548,7 +555,11 @@ impl WriteTxn {
                             error,
                         ))
                     })
-                })?
+                });
+            match failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => result,
+            }?
         } else {
             let mut continued = Vec::new();
             for (at, edge, _) in pairs {

@@ -384,13 +384,26 @@ impl WriteTxn {
                 .ok_or_else(|| edge_upsert_batch_invalid::<A>().map_source(GraphEdgeUpsertQueryError::Upsert))?;
             let result_rows = u64::try_from(rows.len())
                 .map_err(|_| edge_upsert_batch_invalid::<A>().map_source(GraphEdgeUpsertQueryError::Upsert))?;
-            let returning = query.project_rows_governed(
+            let failure = std::cell::RefCell::new(None);
+            let returning = query.project_rows_governed_reading(
                 rows,
                 GqlExecutionStats { snapshot_records, result_rows },
                 evaluator,
                 policy.merge.query,
-                || cx.checkpoint(),
-            ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))?;
+                |element, key| {
+                    workspace.txn.element_property_with_checkpoint(
+                        database, cx, &failure, element, key,
+                    )
+                },
+                || match failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
+            ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning));
+            let returning = match failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => returning,
+            }?;
             workspace.accept();
             Ok((stats, returning))
         })

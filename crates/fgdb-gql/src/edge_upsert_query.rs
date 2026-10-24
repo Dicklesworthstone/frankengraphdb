@@ -248,6 +248,30 @@ impl PreparedGraphEdgeUpsertQuery {
         )
     }
 
+    /// Finalize one chosen relationship with reads of computed identities in
+    /// its final private overlay. The host retains authorization and rollback.
+    pub fn project_governed_reading<E, C>(
+        &self,
+        row: Option<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_rows_governed_reading(
+            row.into_iter().collect(),
+            selection,
+            evaluator,
+            policy,
+            elements,
+            checkpoint,
+        )
+    }
+
     /// Finalize the complete ordered occurrence bag, not one projection per
     /// relationship. The write host must have admitted all input ownership and
     /// read each field from the final staged graph. Duplicate identities remain
@@ -258,8 +282,52 @@ impl PreparedGraphEdgeUpsertQuery {
         &self,
         rows: Vec<Vec<GraphValue>>,
         selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_final_rows(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |_, _| None,
+            checkpoint,
+        )
+    }
+
+    /// Evaluate the complete output bag using final staged graph point reads.
+    /// This includes grouping and every WITH stage, without resetting budgets
+    /// or weakening the original occurrence and input-cell validation.
+    pub fn project_rows_governed_reading<E, C>(
+        &self,
+        rows: Vec<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_final_rows(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |element, key| Some(elements(element, key)),
+            checkpoint,
+        )
+    }
+
+    fn project_final_rows<E, C>(
+        &self,
+        rows: Vec<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
         mut evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
         let mut work = || -> Result<(), GqlQueryError<GraphSetExecutionError<E>, C>> {
@@ -313,21 +381,29 @@ impl PreparedGraphEdgeUpsertQuery {
             policy
         };
         if let Some(grouping) = &self.grouping {
-            returning =
-                crate::set_ops::finish_owned_aggregate(returning, head, grouping, &mut checkpoint)?;
+            returning = crate::set_ops::finish_owned_aggregate_reading(
+                returning,
+                head,
+                grouping,
+                elements,
+                &mut checkpoint,
+            )?;
         }
-        let returning = crate::set_ops::finish_owned_projection(
+        let returning = crate::set_ops::finish_owned_projection_reading(
             returning,
             head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
+            elements,
             &mut checkpoint,
         )?;
         match &self.tail {
             None => Ok(returning),
-            Some(tail) => crate::set_ops::finish_owned_tail(returning, tail, policy, checkpoint),
+            Some(tail) => crate::set_ops::finish_owned_tail_reading(
+                returning, tail, policy, elements, checkpoint,
+            ),
         }
     }
 

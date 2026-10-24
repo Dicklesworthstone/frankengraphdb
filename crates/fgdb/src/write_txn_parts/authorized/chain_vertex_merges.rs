@@ -784,11 +784,22 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let evaluator = evaluator.into_inner();
         let result = if let GraphWriteChainStep::VertexMergeQuery(query) = step {
             query
-                .finish_governed::<WriteTxnError, WriteTxnError>(
+                .finish_governed_reading::<WriteTxnError, WriteTxnError>(
                     returning,
                     selection,
                     evaluator,
                     policy.query,
+                    |element, key| {
+                        selection::returning_element_property(
+                            transaction,
+                            database,
+                            cx,
+                            element,
+                            key,
+                            scope,
+                            &controls,
+                        )
+                    },
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

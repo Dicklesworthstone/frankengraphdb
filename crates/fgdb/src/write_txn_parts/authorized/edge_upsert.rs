@@ -255,6 +255,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
                 let result = query_cx.with_restriction(|| {
                     let controls = RefCell::new(&mut execution);
+                    let transaction = &*workspace.transaction();
                     edge_upsert_returning::<WriteTxnError, WriteTxnError, _>(
                         query,
                         stats,
@@ -273,7 +274,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 return Ok(fgdb_types::CanonicalScalar::Null);
                             }
                             selection::property(
-                                workspace.transaction(),
+                                transaction,
                                 self,
                                 ElementId::Edge(edge),
                                 key,
@@ -292,6 +293,17 @@ impl<V: Vfs + Clone> Database<V> {
                                 source,
                             )
                             .and_then(selection::scalar)
+                        },
+                        |element, key| {
+                            selection::returning_element_property(
+                                transaction,
+                                self,
+                                query_cx,
+                                element,
+                                key,
+                                verified.predicates(),
+                                &controls,
+                            )
                         },
                     )
                 })?;

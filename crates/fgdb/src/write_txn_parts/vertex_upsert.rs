@@ -95,12 +95,16 @@ impl WriteTxn {
             allocate,
         )?;
         let rows = cx.with_restriction(|| {
-            vertex_upsert_returning(
+            let failure = std::cell::RefCell::new(None);
+            let result = vertex_upsert_returning(
                 query,
                 stats,
                 outcome,
                 policy,
-                || cx.checkpoint(),
+                || match failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
                 |key, control| {
                     vertex_upsert_returned_property(
                         &*workspace.txn,
@@ -138,7 +142,16 @@ impl WriteTxn {
                         control,
                     )
                 },
-            )
+                |element, key| {
+                    workspace
+                        .txn
+                        .element_property_with_checkpoint(database, cx, &failure, element, key)
+                },
+            );
+            match failure.into_inner() {
+                Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+                None => result,
+            }
         })?;
         workspace.accept();
         Ok((stats, outcome, rows))
@@ -200,6 +213,10 @@ fn vertex_upsert_returning<E, A, C>(
     mut labels: impl FnMut(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+    elements: impl FnMut(
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
 ) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
 {
     use fgdb_gql::algebra::GraphValue;
@@ -248,11 +265,12 @@ fn vertex_upsert_returning<E, A, C>(
         }
     }
     query
-        .project_governed(
+        .project_governed_reading(
             row,
             stats.merge.match_selection,
             evaluator,
             policy.merge.query,
+            elements,
             checkpoint,
         )
         .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))

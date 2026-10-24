@@ -243,6 +243,17 @@ impl<V: Vfs + Clone> Database<V> {
                                 control,
                             )
                         },
+                        |element, key| {
+                            selection::returning_element_property(
+                                transaction,
+                                self,
+                                query_cx,
+                                element,
+                                key,
+                                verified.predicates(),
+                                &controls,
+                            )
+                        },
                     )
                 })?;
                 let rows = u64::try_from(result.value.len())
@@ -865,15 +876,27 @@ mod all_targets {
             }
             rows
         };
+        let controls = RefCell::new(execution);
         let result = query
-            .project_rows_governed(
+            .project_rows_governed_reading(
                 rows,
                 stats.merge.match_selection,
                 evaluator,
                 policy.merge.query,
+                |element, key| {
+                    selection::returning_element_property(
+                        transaction,
+                        database,
+                        cx,
+                        element,
+                        key,
+                        scope,
+                        &controls,
+                    )
+                },
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
+                    controls.borrow_mut().checkpoint()
                 },
             )
             .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;

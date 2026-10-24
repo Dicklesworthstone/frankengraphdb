@@ -670,13 +670,22 @@ impl WriteTxn {
                             created_vertices: stats.created_vertices,
                             created_edges: 0,
                         };
+                        let failure = std::cell::RefCell::new(None);
                         let returning = query
-                            .finish_governed(
+                            .finish_governed_reading(
                                 returned,
                                 stats.selection,
                                 stats.evaluator,
                                 allowance.query,
-                                || cx.checkpoint(),
+                                |element, key| {
+                                    workspace.txn.element_property_with_checkpoint(
+                                        database, cx, &failure, element, key,
+                                    )
+                                },
+                                || match failure.borrow_mut().take() {
+                                    Some(error) => Err(error),
+                                    None => cx.checkpoint(),
+                                },
                             )
                             .map_err(|error| {
                                 error.map_source(|error| {
@@ -684,7 +693,11 @@ impl WriteTxn {
                                         GraphVertexMergeRowsQueryError::Returning(error),
                                     )
                                 })
-                            })?;
+                            });
+                        let returning = match failure.into_inner() {
+                            Some(error) => Err(GqlQueryError::Interrupted(error)),
+                            None => returning,
+                        }?;
                         (stats, returning)
                     }
                     GraphWriteChainStep::EdgeMergeQuery(query) => {

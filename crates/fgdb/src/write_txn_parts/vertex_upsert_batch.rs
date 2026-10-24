@@ -328,15 +328,28 @@ impl WriteTxn {
                     }
                     rows
                 };
+                let failure = std::cell::RefCell::new(None);
                 let returning = query
-                    .project_rows_governed(
+                    .project_rows_governed_reading(
                         rows,
                         stats.merge.match_selection,
                         evaluator,
                         policy.merge.query,
-                        || cx.checkpoint(),
+                        |element, key| {
+                            transaction.element_property_with_checkpoint(
+                                database, cx, &failure, element, key,
+                            )
+                        },
+                        || match failure.borrow_mut().take() {
+                            Some(error) => Err(error),
+                            None => cx.checkpoint(),
+                        },
                     )
-                    .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;
+                    .map_err(|error| error.map_source(GraphVertexUpsertError::Returning));
+                let returning = match failure.into_inner() {
+                    Some(error) => Err(GqlQueryError::Interrupted(error)),
+                    None => returning,
+                }?;
                 Ok((stats, returning))
             },
         )

@@ -15,8 +15,52 @@ impl PreparedGraphVertexUpsertQuery {
         &self,
         rows: Vec<Vec<GraphValue>>,
         selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_final_rows(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |_, _| None,
+            checkpoint,
+        )
+    }
+
+    /// Finish the whole bag with a reader over all privately staged effects.
+    /// Computed identities do not inherit authority from their input column;
+    /// the host checks each requested element and property before observation.
+    pub fn project_rows_governed_reading<E, C>(
+        &self,
+        rows: Vec<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        mut elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_final_rows(
+            rows,
+            selection,
+            evaluator,
+            policy,
+            &mut |element, key| Some(elements(element, key)),
+            checkpoint,
+        )
+    }
+
+    fn project_final_rows<E, C>(
+        &self,
+        rows: Vec<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
         mut evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
         let invalid = || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
@@ -100,10 +144,11 @@ impl PreparedGraphVertexUpsertQuery {
             evaluator,
         };
         if let Some(grouping) = &self.grouping {
-            returning = crate::set_ops::finish_owned_aggregate(
+            returning = crate::set_ops::finish_owned_aggregate_reading(
                 returning,
                 policy,
                 grouping,
+                elements,
                 &mut checkpoint,
             )?;
         }
@@ -112,18 +157,21 @@ impl PreparedGraphVertexUpsertQuery {
         } else {
             policy
         };
-        let returning = crate::set_ops::finish_owned_projection(
+        let returning = crate::set_ops::finish_owned_projection_reading(
             returning,
             head_policy,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
+            elements,
             &mut checkpoint,
         )?;
         match &self.tail {
             None => Ok(returning),
-            Some(tail) => crate::set_ops::finish_owned_tail(returning, tail, policy, checkpoint),
+            Some(tail) => crate::set_ops::finish_owned_tail_reading(
+                returning, tail, policy, elements, checkpoint,
+            ),
         }
     }
 }

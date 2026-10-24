@@ -648,15 +648,28 @@ impl WriteTxn {
                     GraphEdgeMergeQueryError::Merge(GraphEdgeMergeError::Source(error))
                 })
             })?;
+            let failure = std::cell::RefCell::new(None);
             let returning = query
-                .finish_governed(
+                .finish_governed_reading(
                     rows,
                     stats.match_selection,
                     stats.evaluator,
                     policy.query,
-                    || cx.checkpoint(),
+                    |element, key| {
+                        workspace
+                            .txn
+                            .element_property_with_checkpoint(database, cx, &failure, element, key)
+                    },
+                    || match failure.borrow_mut().take() {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    },
                 )
-                .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))?;
+                .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning));
+            let returning = match failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => returning,
+            }?;
             // Keep the guard through projection, aggregation, ordering and the
             // last governed checkpoint. No successful write prefix may escape
             // merely because the relationship itself was staged successfully.

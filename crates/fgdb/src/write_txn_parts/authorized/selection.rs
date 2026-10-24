@@ -230,6 +230,7 @@ fn mutation_edge_topology<V: Vfs + Clone>(
 /// Absent and hidden inputs read as NULL. The shared expression evaluator meters
 /// its logical copy; physical searches only poll, and the same signed permit
 /// admits selected payload before cloning it. All reads use the frozen overlay.
+/// The mutation entry point has already required Read authority.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
@@ -306,6 +307,25 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
         core::convert::identity,
     )
     .map(Some)
+}
+
+/// A computed MERGE output may name any identity, including a parameter's.
+/// Require Read before applying the existing masked point-read contract;
+/// carrying an identity through a write never confers observation authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn returning_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    element: ElementId,
+    key: PropertyKeyId,
+    scope: &PlannerPredicates,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
+    if !scope.rights().can_read() {
+        return Err(WriteTxnError::Authorization(Error::PermissionDenied));
+    }
+    mutation_element_property(transaction, database, cx, element, key, scope, execution)
 }
 
 /// A [`property`] value for a consumer that holds only a scalar: a stored
