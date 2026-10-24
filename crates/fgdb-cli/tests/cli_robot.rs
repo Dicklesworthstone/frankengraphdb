@@ -3192,6 +3192,14 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
             "directed",
             "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
         ),
+        (
+            "directed",
+            "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+        ),
+        (
+            "directed",
+            "CALL fnx.directed_clustering_coefficient() YIELD vertex,score",
+        ),
         ("directed", dijkstra),
         (
             "directed",
@@ -3213,6 +3221,10 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
         (
             "undirected",
             "CALL fnx.eigenvector_centrality() YIELD score AS rank,node AS id",
+        ),
+        (
+            "undirected",
+            "CALL fnx.betweenness_centrality() YIELD score AS centrality,node AS id",
         ),
     ] {
         let mut args = projection.to_vec();
@@ -3385,7 +3397,7 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "--sealed",
                 "--graph-relation",
                 "KNOWS",
-                "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+                "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
             ],
             3,
             "query",
@@ -3491,6 +3503,36 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     for (args, code, class) in cases {
         db.command("query", args).failure(*code, class);
         assert!(!std::path::Path::new(&db.db).exists(), "{args:?}");
+    }
+    // These registered compressed procedures pass graph-kind preflight and
+    // reach the read-only open. A missing database still must not be created.
+    for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+        ),
+        (
+            "reversed",
+            "CALL fnx.directed_clustering_coefficient() YIELD vertex,score",
+        ),
+        (
+            "undirected",
+            "CALL fnx.betweenness_centrality() YIELD vertex,score",
+        ),
+    ] {
+        db.command(
+            "query",
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--direction",
+                direction,
+                call,
+            ],
+        )
+        .failure(4, "open");
+        assert!(!std::path::Path::new(&db.db).exists(), "{call}");
     }
     db.command("create", &["--sealed"]).failure(2, "usage");
     assert!(!std::path::Path::new(&db.db).exists());

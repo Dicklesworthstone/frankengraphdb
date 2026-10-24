@@ -626,6 +626,324 @@ fn sealed_directed_clustering_live_guards_preserve_both_faces_after_every_refusa
     });
 }
 
+const BETWEENNESS: &str = "CALL fnx.betweenness_centrality() YIELD score,vertex";
+
+#[test]
+fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.set_edge_property(EId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(4)));
+        update.add_edge(
+            EId(3000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let view = db.read_session().unwrap();
+        let procedure = call(BETWEENNESS);
+        assert!(procedure.supports_sealed_execution());
+        for at in [original, current] {
+            for reduction in [
+                ParallelEdgePolicy::Sum,
+                ParallelEdgePolicy::Minimum,
+                ParallelEdgePolicy::Maximum,
+                ParallelEdgePolicy::CollapseUnit,
+            ] {
+                let mut opt = options(Directedness::Undirected);
+                opt.as_of = Some(at);
+                opt.projection.parallel_edges = reduction;
+                opt.projection.self_loops = SelfLoopPolicy::Drop;
+                let graph = project(&db, &query, opt).await;
+                assert!(graph.scan_incidence_bound() > 8);
+                let expected = view.execute_fnx(&query, &procedure, opt).unwrap();
+                let actual = procedure
+                    .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                assert_eq!(actual.columns, expected.analytics.columns);
+                assert_eq!(actual.rows, expected.analytics.rows, "{at:?} {reduction:?}");
+                for (actual, expected) in actual.rows.iter().zip(&expected.analytics.rows) {
+                    match (&actual[0], &expected[0]) {
+                        (FnxValue::Score(actual), FnxValue::Score(expected)) => {
+                            assert_eq!(actual.to_bits(), expected.to_bits());
+                        }
+                        _ => panic!("betweenness must return a score in its first column"),
+                    }
+                }
+                assert_eq!(
+                    actual.certificate.result_digest,
+                    expected.analytics.certificate.result_digest
+                );
+                assert!(actual.rows.iter().any(|row| {
+                    matches!(row.first(), Some(FnxValue::Score(score)) if *score > 0.0)
+                }));
+                assert_eq!(
+                    actual.rows.last().unwrap()[1],
+                    FnxValue::Vertex(VId(u128::MAX))
+                );
+                assert_eq!(actual.rows.len(), graph.node_count());
+                if at == current {
+                    assert!(
+                        actual
+                            .rows
+                            .contains(&vec![FnxValue::Score(0.0), FnxValue::Vertex(VId(40)),])
+                    );
+                }
+                assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+                assert_eq!(actual.certificate.snapshot, graph.binding());
+                assert_eq!(actual.certificate.snapshot.as_of, at);
+                assert_eq!(
+                    actual.certificate.execution_kernel,
+                    "fgdb-prism/sealed-betweenness-brandes-v1"
+                );
+                exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+                let hosted = db
+                    .call_fnx_sealed(
+                        &query,
+                        BETWEENNESS,
+                        &FnxParameters::new(),
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(hosted.analytics, actual);
+
+                // The catalog refuses a retained loop even though weights
+                // are ignored and every non-loop parallel group is reduced.
+                opt.projection.self_loops = SelfLoopPolicy::Keep;
+                let with_loop = project(&db, &query, opt).await;
+                assert!(matches!(
+                    procedure.execute_sealed(&query, &with_loop, opt.execution_limits, memory(),),
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::SelfLoopRefused
+                    ))
+                ));
+                assert!(matches!(
+                    db.call_fnx_sealed(
+                        &query,
+                        BETWEENNESS,
+                        &FnxParameters::new(),
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                    )
+                    .await,
+                    Err(FnxSealedReadError::Execution(
+                        FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused)
+                    ))
+                ));
+            }
+        }
+
+        // An empty selected population still binds the authenticated image.
+        // Derive the exact work ceiling from the kernel's public certificate:
+        // scalar admission and output metadata may have a fixed nonzero cost.
+        let mut opt = options(Directedness::Undirected);
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        opt.selection.vertex_label = Some(LabelId(999));
+        opt.execution_limits.max_result_rows = 0;
+        let graph = project(&db, &query, opt).await;
+        assert_eq!(graph.node_count(), 0);
+        assert!(graph.scan_incidence_bound() > 8);
+        let decoded = view.execute_fnx(&query, &procedure, opt).unwrap();
+        let empty = procedure
+            .execute_sealed(&query, &graph, opt.execution_limits, memory())
+            .unwrap();
+        assert_eq!(empty.columns, decoded.analytics.columns);
+        assert_eq!(empty.rows, decoded.analytics.rows);
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            empty.certificate.result_digest,
+            decoded.analytics.certificate.result_digest
+        );
+        assert_eq!(empty.certificate.snapshot, graph.binding());
+        assert_eq!(empty.certificate.kernel_workspace_bytes, 0);
+        assert_eq!(empty.certificate.witness.nodes_touched, 0);
+        assert_eq!(empty.certificate.witness.edges_scanned, 0);
+        let result_bytes = procedure.outputs().len() * size_of::<String>()
+            + procedure
+                .outputs()
+                .iter()
+                .map(|column| column.name.len())
+                .sum::<usize>();
+        opt.execution_limits.max_estimated_work = empty.certificate.estimated_work;
+        let empty_memory = FnxMemoryLimits {
+            max_kernel_workspace_bytes: 0,
+            max_result_bytes: result_bytes,
+        };
+        assert_eq!(
+            procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, empty_memory)
+                .unwrap(),
+            empty
+        );
+        if opt.execution_limits.max_estimated_work != 0 {
+            let mut short = opt.execution_limits;
+            short.max_estimated_work -= 1;
+            assert!(matches!(
+                procedure.execute_sealed(&query, &graph, short, empty_memory),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        ..
+                    }
+                ))
+            ));
+        }
+        assert!(matches!(
+            procedure.execute_sealed(
+                &query,
+                &graph,
+                opt.execution_limits,
+                FnxMemoryLimits {
+                    max_result_bytes: result_bytes - 1,
+                    ..empty_memory
+                },
+            ),
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::LimitExceeded {
+                    resource: "result bytes",
+                    ..
+                }
+            ))
+        ));
+        let hosted = db
+            .call_fnx_sealed(
+                &query,
+                BETWEENNESS,
+                &FnxParameters::new(),
+                opt,
+                empty_memory,
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hosted.analytics, empty);
+
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let mut invalid = options(direction);
+            invalid.projection.self_loops = SelfLoopPolicy::Drop;
+            let graph = project(&db, &query, invalid).await;
+            invalid.source_limits.max_work_units = 0;
+            invalid.projection_limits.max_workspace_bytes = 0;
+            invalid.execution_limits.max_estimated_work = 0;
+            invalid.execution_limits.max_result_rows = 0;
+            let no_memory = FnxMemoryLimits {
+                max_kernel_workspace_bytes: 0,
+                max_result_bytes: 0,
+            };
+            assert!(matches!(
+                procedure.execute_sealed(&query, &graph, invalid.execution_limits, no_memory),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::GraphKind {
+                        required: FnxGraphKind::Undirected
+                    }
+                ))
+            ));
+            assert!(matches!(
+                db.call_fnx_sealed(
+                    &query,
+                    BETWEENNESS,
+                    &FnxParameters::new(),
+                    invalid,
+                    no_memory,
+                    SealedLimits::default(),
+                )
+                .await,
+                Err(FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                        required: FnxGraphKind::Undirected
+                    })
+                ))
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn sealed_betweenness_live_guards_preserve_the_source_after_every_refusal() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let mut opt = options(Directedness::Undirected);
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        let graph = project(&db, &query, opt).await;
+        let procedure = call(BETWEENNESS);
+        let before = graph.digest();
+        let binding = graph.binding();
+        let steps = std::cell::Cell::new(0usize);
+        let expected = procedure
+            .execute_sealed_with_checkpoint(&query, &graph, opt.execution_limits, memory(), || {
+                steps.set(steps.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            expected
+                .rows
+                .iter()
+                .any(|row| { matches!(row.first(), Some(FnxValue::Score(score)) if *score > 0.0) })
+        );
+        let total = steps.get();
+        assert!(total > graph.scan_incidence_bound());
+        // Cover initialization, each source BFS, reverse dependencies,
+        // source-ordered accumulation, normalization and public row encoding.
+        for stop in 1..=total {
+            steps.set(0);
+            assert!(
+                procedure
+                    .execute_sealed_with_checkpoint(
+                        &query,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        || {
+                            steps.set(steps.get() + 1);
+                            if steps.get() == stop {
+                                Err(SealedProjectionError::UnknownOrdinal(usize::MAX))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .is_err(),
+                "guard at {stop}/{total} must prevent publication"
+            );
+            assert_eq!(steps.get(), stop);
+            assert_eq!(graph.digest(), before);
+            assert_eq!(graph.binding(), binding);
+        }
+        assert_eq!(
+            procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 #[test]
 fn all_directions_reductions_loops_and_full_width_seeks_match_decoded_rows() {
     let runtime = RuntimeBuilder::new().build().unwrap();
