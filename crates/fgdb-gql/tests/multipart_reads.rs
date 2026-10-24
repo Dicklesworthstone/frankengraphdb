@@ -1271,3 +1271,53 @@ fn pattern_counts_read_witness_list_sizes() {
         );
     }
 }
+
+/// `x IN <computed list>` in a WHERE: a list comprehension (`[x IN list |
+/// e]`, TCK List12 [6]) or a pattern comprehension after IN is one list
+/// value, never a literal of members, at a root MATCH's WHERE (its implicit
+/// `WITH *`) and after a WITH.
+#[test]
+fn a_where_membership_reads_a_computed_list() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    // n.p is m.p or twice m.p, edge by edge.
+    let pairs = sorted(
+        EDGES
+            .iter()
+            .filter(|&&(n, _, m)| [p(m.0), 2 * p(m.0)].contains(&p(n.0)))
+            .map(|&(n, _, m)| vertices(&[n.0, m.0]))
+            .collect(),
+    );
+    assert!(!pairs.is_empty());
+    for text in [
+        "MATCH (n)-->(m) WHERE n.p IN [x IN [1, 2] | x * m.p] RETURN n, m",
+        "MATCH (n)-->(m) WITH n, m WHERE n.p IN [x IN [1, 2] | x * m.p] RETURN n, m",
+    ] {
+        assert_eq!(sorted(execute(text)), pairs, "{text}");
+    }
+    // A pattern comprehension: the vertices with an out-neighbour of p 2.
+    let expected = sorted(
+        (1..=4)
+            .filter(|&n| {
+                EDGES
+                    .iter()
+                    .any(|&(from, _, to)| from == VId(n) && p(to.0) == 2)
+            })
+            .map(|n| vertices(&[n]))
+            .collect(),
+    );
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n WHERE 2 IN [(n)-->(m) | m.p] RETURN n"
+        )),
+        expected
+    );
+    // A literal list keeps its member-by-member reading.
+    assert_eq!(
+        sorted(execute("MATCH (n) WITH n WHERE n.p IN [1, 3] RETURN n")),
+        vec![vertices(&[1]), vertices(&[4])]
+    );
+}

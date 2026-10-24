@@ -374,6 +374,30 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether the `[` after the current IN opens a computed list rather than
+    /// a literal of members: a list comprehension (`[x IN labels(b) |
+    /// toLower(x)]`, TCK List12 [6]) or a pattern comprehension, read as one
+    /// list value (selection_list_membership). Only lexical lookahead.
+    fn computed_in_list(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'[')) {
+            return Ok(false);
+        }
+        let mut first = lexer.next()?;
+        if matches!(first.kind, TokenKind::Word(_)) {
+            match lexer.clone().next()?.kind {
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN") => return Ok(true),
+                // `[p = (n)-->() | p]`: a named pattern comprehension.
+                TokenKind::Punct(b'=') => {
+                    lexer.next()?;
+                    first = lexer.next()?;
+                }
+                _ => return Ok(false),
+            }
+        }
+        crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)
+    }
+
     fn selection_membership(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
@@ -382,7 +406,9 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphSetTextError> {
         let negate = self.take_word("NOT")?;
-        if self.is_word("IN") && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+        if self.is_word("IN")
+            && (!matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'['))
+                || self.computed_in_list()?)
         {
             self.advance()?;
             return self.selection_list_membership(schema, selection, left, negate, at);
