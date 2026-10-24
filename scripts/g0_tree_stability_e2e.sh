@@ -880,6 +880,80 @@ run_scope_case() {
 }
 run_scope_case
 
+# P: actual kernel identity, shared by token publication and lease reading.
+# Only status/read operations run against these private records: no steal,
+# release, cleanup, or mutation of the real token directory is involved.
+run_kernel_identity_cases() {
+  local birth stale label pid recorded expected_state expected_liveness
+  local d state liveness status ok
+  if ! birth="$(_ll_starttime "$$")"; then
+    gate_unrun "P: kernel identity for the running gate could not be read"
+    return
+  fi
+  case "$birth" in darwin:*) stale=darwin:1:0 ;; *) stale=1 ;; esac
+  for label in live reused legacy absent; do
+    d="$RUN_DIR/P_kernel_$label"
+    mkdir -p "$d/tokens/landing.lock"
+    pid="$$"; recorded="$birth"; expected_state=BINDING; expected_liveness=alive
+    case "$label" in
+      reused) recorded="$stale"; expected_state=BREAKABLE; expected_liveness=dead ;;
+      legacy) recorded=""; expected_liveness=indeterminate ;;
+      absent) pid=2147483647; expected_state=BREAKABLE; expected_liveness=dead ;;
+    esac
+    printf 'kernel-fixture\n%s\n45\n%s\n%s\n' "$(date +%s)" "$pid" "$recorded" \
+      >"$d/tokens/landing.lock/holder"
+    (
+      LANDING_LOCK="$d/tokens/landing.lock"; LANDING_META="$LANDING_LOCK/holder"
+      export LANDING_LOCK LANDING_META
+      landing_lease_state >/dev/null
+      printf '%s %s\n' "$LANDING_STATE" "$LANDING_LIVENESS"
+    ) >"$d/lease.out"
+    read -r state liveness <"$d/lease.out"
+    ok=1
+    [ "$state" = "$expected_state" ] && [ "$liveness" = "$expected_liveness" ] || ok=0
+    if FGDB_TOKEN_DIR="$d/tokens" bash "$ROOT/scripts/token.sh" status landing \
+      >"$d/token.out" 2>"$d/token.err"; then
+      status="$(cat "$d/token.out")"
+      case "$expected_liveness:$status" in
+        alive:*"pid $pid alive"*|dead:*"pid $pid DEAD"*|indeterminate:*"liveness indeterminate"*) ;;
+        *) ok=0 ;;
+      esac
+    else
+      ok=0
+    fi
+    if [ "$ok" -eq 1 ]; then
+      gate_pass "P_$label: kernel lease=$state/$liveness and token status agrees"
+    else
+      gate_fail "P_$label: wanted $expected_state/$expected_liveness; got $state/$liveness"
+      gate_diag "  token: $(cat "$d/token.out" "$d/token.err")"
+    fi
+  done
+  d="$RUN_DIR/P_kernel_live"
+  if (
+    LANDING_LOCK="$d/tokens/landing.lock"; LANDING_META="$LANDING_LOCK/holder"
+    export LANDING_LOCK LANDING_META
+    _ll_starttime() { return 2; }
+    landing_lease_state >/dev/null
+    [ "$LANDING_STATE:$LANDING_LIVENESS" = BINDING:indeterminate ]
+  ); then
+    gate_pass "P_unknown: unavailable birth identity never proves death"
+  else
+    gate_fail "P_unknown: unavailable birth identity permitted reclamation"
+  fi
+  if (
+    LANDING_LOCK="$d/tokens/landing.lock"; LANDING_META="$LANDING_LOCK/holder"
+    export LANDING_LOCK LANDING_META
+    _ll_starttime() { return 1; }
+    landing_lease_state >/dev/null
+    [ "$LANDING_STATE:$LANDING_LIVENESS" = BREAKABLE:dead ]
+  ); then
+    gate_pass "P_mutant: the always-absent probe restores the forbidden live-holder classification"
+  else
+    gate_fail "P_mutant: the absence mutant did not reach the live-holder predicate"
+  fi
+}
+run_kernel_identity_cases
+
 # --- the zero is licensed by accounting, not by finding nothing --------------
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"

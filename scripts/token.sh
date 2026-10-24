@@ -67,6 +67,11 @@
 
 set -uo pipefail
 
+# One kernel birth-identity implementation for publishers and lease readers.
+# This library only defines functions and defaults; sourcing it acquires no lock.
+# shellcheck source=lib/landing_lease.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/landing_lease.sh" || exit 2
+
 # CI run 33285320157: the default token dir used to live under /data/tmp, which
 # GitHub runners cannot create, so every gate run under check.sh (which exports
 # FGDB_LANDING_LEASE=1) failed its landing-lease acquire on CI and the
@@ -87,26 +92,6 @@ lock="$DIR/$tok.lock"
 meta="$lock/holder"
 
 now() { date +%s; }
-
-# pid_starttime <pid> — field 22 of /proc/<pid>/stat: process start time in
-# clock ticks since boot. Constant for the life of a process, so pid+starttime
-# is an exact identity. Twin of _ll_starttime in scripts/lib/landing_lease.sh;
-# the two implementations must stay identical.
-#
-# The comm field (2) is parenthesised and MAY CONTAIN SPACES AND PARENTHESES,
-# so `awk '{print $22}'` is wrong for any process whose name has one. Cut
-# through the LAST ')' and count from there: start time is field 20 of the
-# remainder.
-pid_starttime() {
-  local pid="$1" stat rest
-  [ -r "/proc/$pid/stat" ] || return 1
-  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
-  rest="${stat##*) }"
-  # shellcheck disable=SC2086
-  set -- $rest
-  [ "$#" -ge 20 ] || return 1
-  printf '%s\n' "${20}"
-}
 
 # read_meta — load the holder file of $lock into M_WHO/M_EPOCH/M_TTL/M_PID/
 # M_START. Missing fields read empty; a legacy three-line hold yields an empty
@@ -153,7 +138,7 @@ write_meta() {
   local tmp
   tmp="$meta.$$.tmp"
   if ! printf '%s\n%s\n%s\n%s\n%s\n' \
-      "$who" "$(now)" "$ttl" "$holder_pid" "$(pid_starttime "$holder_pid")" \
+      "$who" "$(now)" "$ttl" "$holder_pid" "$(_ll_starttime "$holder_pid")" \
       >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
     return 1
@@ -197,26 +182,29 @@ verdict() {
       return 0
       ;;
   esac
-  # Existence must be uid-independent: kill -0 fails EPERM for a process that
-  # EXISTS under another uid, and reading that as ESRCH would reap a LIVE
-  # foreign-owned holder — the catastrophic direction for a lock. /proc
-  # answers existence regardless of ownership.
-  if [ ! -d "/proc/$M_PID" ]; then
+  local cur probe_rc
+  if cur="$(_ll_starttime "$M_PID" 2>/dev/null)"; then
+    probe_rc=0
+  else
+    probe_rc=$?
+  fi
+  if [ "$probe_rc" -eq 1 ]; then
     LIVENESS=dead
-    EVIDENCE="/proc/$M_PID does not exist: the holder's process is gone"
+    EVIDENCE="kernel process probe proves pid $M_PID absent"
     return 0
   fi
-  if [ -n "$M_START" ]; then
-    local cur
-    cur="$(pid_starttime "$M_PID" 2>/dev/null)"
-    if [ -n "$cur" ] && [ "$cur" != "$M_START" ]; then
+  if [ "$probe_rc" -ne 0 ] || ! _ll_identity_comparable "$M_START" "$cur"; then
+    LIVENESS=indeterminate
+    EVIDENCE="kernel birth identity unavailable or incompatible for pid $M_PID; absence is not proven"
+    return 0
+  fi
+  if [ "$cur" != "$M_START" ]; then
       LIVENESS=dead
       EVIDENCE="pid $M_PID exists but its start time is $cur, not the recorded $M_START — the pid was REUSED"
       return 0
-    fi
   fi
   LIVENESS=alive
-  EVIDENCE="/proc/$M_PID exists (ownership-independent) and its start time matches the recording"
+  EVIDENCE="kernel birth identity of pid $M_PID matches the recording"
   return 0
 }
 

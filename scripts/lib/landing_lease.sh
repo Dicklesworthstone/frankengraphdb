@@ -128,22 +128,95 @@ LANDING_PID=""
 LANDING_LIVENESS=""
 LANDING_EVIDENCE=""
 
-# _ll_starttime <pid> — field 22 of /proc/<pid>/stat: process start time in clock
-# ticks since boot. Constant for the life of a process, so pid+starttime is an
-# exact identity.
+# _ll_starttime <pid> — kernel process birth identity. Exit 1 means the
+# kernel proved the PID absent; exit 2 means identity is unavailable. Only
+# the former permits reclamation. Linux uses field 22 of /proc/<pid>/stat;
+# macOS uses PROC_PIDTBSDINFO's microsecond birth time, never ps text or kill -0.
+# Python is optional on macOS: its absence makes the lease indeterminate.
+# token.sh sources this implementation so publisher and reader cannot drift.
 #
 # The comm field (2) is parenthesised and MAY CONTAIN SPACES AND PARENTHESES, so
 # `awk '{print $22}'` is wrong for any process whose name has one. Cut through
 # the LAST ')' and count from there: start time is field 20 of the remainder.
 _ll_starttime() {
   local pid="$1" stat rest
-  [ -r "/proc/$pid/stat" ] || return 1
-  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  case "$pid" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$(uname -s)" in
+    Darwin)
+      command -v python3 >/dev/null 2>&1 || return 2
+      python3 - "$pid" <<'PY'
+import ctypes
+import errno
+import sys
+
+pid = int(sys.argv[1])
+if pid > 2**31 - 1:
+    sys.exit(2)
+
+# Apple's public bsd/sys/proc_info.h, struct proc_bsdinfo (136 bytes).
+class BsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("prefix", ctypes.c_uint32 * 12),
+        ("comm", ctypes.c_char * 16),
+        ("name", ctypes.c_char * 32),
+        ("suffix", ctypes.c_uint32 * 6),
+        ("seconds", ctypes.c_uint64),
+        ("microseconds", ctypes.c_uint64),
+    ]
+
+try:
+    lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    probe = lib.proc_pidinfo
+    probe.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                      ctypes.c_void_p, ctypes.c_int]
+    probe.restype = ctypes.c_int
+    info = BsdInfo()
+    size = ctypes.sizeof(info)
+    if size != 136:
+        sys.exit(2)
+    count = probe(pid, 3, 0, ctypes.byref(info), size)
+    if count != size:
+        sys.exit(1 if ctypes.get_errno() == errno.ESRCH else 2)
+    if info.prefix[3] != pid or not info.seconds or info.microseconds >= 1_000_000:
+        sys.exit(2)
+    print(f"darwin:{info.seconds}:{info.microseconds}")
+except (OSError, AttributeError):
+    sys.exit(2)
+PY
+      return "$?"
+      ;;
+    Linux) [ -r /proc/self/stat ] || return 2 ;;
+    *) return 2 ;;
+  esac
+  [ -d "/proc/$pid" ] || return 1
+  [ -r "/proc/$pid/stat" ] || return 2
+  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 2
   rest="${stat##*) }"
   # shellcheck disable=SC2086
   set -- $rest
-  [ "$#" -ge 20 ] || return 1
+  [ "$#" -ge 20 ] || return 2
+  case "${20}" in ''|*[!0-9]*) return 2 ;; esac
   printf '%s\n' "${20}"
+}
+
+# A legacy or foreign-platform recording cannot prove PID reuse.
+_ll_identity_comparable() {
+  local value fields seconds micros
+  case "$1:$2" in
+    darwin:*:darwin:*)
+      for value in "$1" "$2"; do
+        fields="${value#darwin:}"
+        case "$fields" in *:*) ;; *) return 1 ;; esac
+        seconds="${fields%:*}"; micros="${fields##*:}"
+        case "$seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+        case "$micros" in ''|*[!0-9]*) return 1 ;; esac
+        [ "${#micros}" -le 6 ] || return 1
+      done
+      return 0
+      ;;
+  esac
+  case "$1" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$2" in ''|*[!0-9]*|0) return 1 ;; esac
 }
 
 # landing_lease_state — the one query. Sets LANDING_* and echoes the state.
@@ -166,7 +239,7 @@ landing_lease_state() {
     printf 'UNREADABLE\n'; return 0
   fi
 
-  local who epoch ttl pid start now age cur
+  local who epoch ttl pid start now age cur probe_rc
   who="$(sed -n 1p "$LANDING_META" 2>/dev/null)"
   epoch="$(sed -n 2p "$LANDING_META" 2>/dev/null)"
   ttl="$(sed -n 3p "$LANDING_META" 2>/dev/null)"
@@ -195,27 +268,29 @@ landing_lease_state() {
       ;;
   esac
 
-  # THE ONLY TEST THAT MAY BREAK A LEASE, and it must be uid-independent:
-  # kill -0 fails EPERM for a process that EXISTS under another uid, and
-  # reading that as ESRCH would reap a LIVE foreign-owned holder — two
-  # processes then believe they hold the lease. /proc answers existence
-  # regardless of ownership.
-  if [ ! -d "/proc/$pid" ]; then
+  if cur="$(_ll_starttime "$pid" 2>/dev/null)"; then
+    probe_rc=0
+  else
+    probe_rc=$?
+  fi
+  if [ "$probe_rc" -eq 1 ]; then
     LANDING_LIVENESS=dead
-    LANDING_EVIDENCE="/proc/$pid does not exist: the holder's process is gone"
+    LANDING_EVIDENCE="kernel process probe proves pid $pid absent"
     LANDING_STATE=BREAKABLE; printf 'BREAKABLE\n'; return 0
   fi
-  if [ -n "$start" ]; then
-    cur="$(_ll_starttime "$pid" 2>/dev/null)"
-    if [ -n "$cur" ] && [ "$cur" != "$start" ]; then
+  if [ "$probe_rc" -ne 0 ] || ! _ll_identity_comparable "$start" "$cur"; then
+    LANDING_LIVENESS=indeterminate
+    LANDING_EVIDENCE="kernel birth identity unavailable or incompatible for pid $pid; absence is not proven"
+    LANDING_STATE=BINDING; printf 'BINDING\n'; return 0
+  fi
+  if [ "$cur" != "$start" ]; then
       LANDING_LIVENESS=dead
       LANDING_EVIDENCE="pid $pid exists but its start time is $cur, not the recorded $start — the pid was REUSED by an unrelated process, so the holder itself is gone"
       LANDING_STATE=BREAKABLE; printf 'BREAKABLE\n'; return 0
-    fi
   fi
 
   LANDING_LIVENESS=alive
-  LANDING_EVIDENCE="/proc/$pid exists (ownership-independent) and its start time matches the recorded $start; the holder is running"
+  LANDING_EVIDENCE="kernel birth identity of pid $pid matches the recorded $start; the holder is running"
   LANDING_STATE=BINDING; printf 'BINDING\n'; return 0
 }
 
