@@ -692,9 +692,12 @@ mod tests {
         // fallback used before 9e85981d, and its borrowed equality posting.
         // Only the candidate selector differs; visibility, residual checks
         // and admitted rows run through the same implementation and meter.
-        // This comparison explains THREE work events and one scratch entry.
-        // The public closure pins differ by four work events: their remaining
-        // event is not attributed here, and those pins remain unchanged.
+        // The raw difference is three Work events and one ScratchEntry. Feed
+        // both routes through the production admission meter too: EVERY
+        // source event costs work, so the removed scratch event is the fourth
+        // metered work unit (fgdb-rc1017-bridge-wvze5.25). indexed_roots hides
+        // the common SnapshotRecord event from its caller; that cannot change
+        // this delta. No query result or source refusal is bypassed here.
         let snapshot = compound_snapshot(vec![
             (0..6)
                 .map(|id| VertexRow {
@@ -709,17 +712,19 @@ mod tests {
         ]);
         let predicates = [equal(KEY, CanonicalScalar::Int(0))];
         let no_equality_keys: [VertexPredicate; 0] = [];
-        let run = |select_equality| {
+        let run = |select_equality, work_limit| {
             let mut events = [0_u64; 3];
+            let mut usage = crate::gql_exec::AdmissionUsage::default();
+            let policy = fgdb_gql::GqlQueryPolicy::new(u64::MAX, u64::MAX, work_limit, u64::MAX);
             let mut control = |event| {
                 events[match event {
                     SourceEvent::Work => 0,
                     SourceEvent::ScratchEntry => 1,
                     SourceEvent::SnapshotRecord => 2,
                 }] += 1;
-                Ok::<_, ()>(())
+                usage.observe::<(), ()>(policy, event)
             };
-            let (rows, candidates) = bound_rows_with_equalities(
+            let result = bound_rows_with_equalities(
                 &snapshot,
                 || predicates.iter(),
                 || {
@@ -731,22 +736,40 @@ mod tests {
                 },
                 CommitSeq(3),
                 &mut control,
-            )
-            .unwrap()
-            .unwrap();
-            (
-                rows.iter().map(|row| row.vid).collect::<Vec<_>>(),
-                candidates,
-                events,
-            )
+            );
+            result.map(|found| {
+                let (rows, candidates) = found.unwrap();
+                (
+                    rows.iter().map(|row| row.vid).collect::<Vec<_>>(),
+                    candidates,
+                    events,
+                    [usage.work_units, usage.scratch_entries, usage.records],
+                )
+            })
         };
-        let (range_ids, range_candidates, range) = run(false);
-        let (posting_ids, posting_candidates, posting) = run(true);
+        let (range_ids, range_candidates, range, range_usage) = run(false, u64::MAX).unwrap();
+        let (posting_ids, posting_candidates, posting, posting_usage) =
+            run(true, u64::MAX).unwrap();
         assert_eq!(range_ids, vec![VId(0)]);
         assert_eq!(posting_ids, range_ids);
         assert_eq!((range_candidates, posting_candidates), (1, 1));
         assert_eq!(range, [posting[0] + 3, posting[1] + 1, posting[2]]);
         assert_eq!(posting[2], 1);
+        assert_eq!(
+            range_usage,
+            [posting_usage[0] + 4, posting_usage[1] + 1, posting_usage[2]],
+        );
+        // The smaller allowance admits the posting and refuses the live
+        // range route at its first excess Work unit. Keep scratch wide so
+        // this verifies actual work admission, not a different refusal.
+        assert_eq!(run(true, posting_usage[0]).unwrap().0, posting_ids);
+        assert!(matches!(
+            run(false, posting_usage[0]),
+            Err(fgdb_gql::GqlQueryError::Evaluator(error))
+                if error.dimension == fgdb_gql::GlaLimitDimension::WorkUnits
+                    && error.limit == posting_usage[0]
+                    && error.observed == u128::from(posting_usage[0]) + 1
+        ));
     }
 
     #[test]

@@ -332,13 +332,20 @@ fn closure_shapes_keep_their_pinned_budgets() {
 /// The same shapes read by the owner, whose closure charges its own walk:
 /// least snapshot records, evaluator work and evaluator scratch, recorded
 /// with the authorized pins (fgdb-61p1n).
+/// The borrowed equality posting introduced by 9e85981d removes three raw
+/// Work events and one ScratchEntry at the sole p=0 root. AdmissionUsage
+/// charges that scratch event as work too: four metered work units and one
+/// scratch entry disappear, with the same records and closure answers. The
+/// live range/posting comparison in source/numeric.rs exercises both through
+/// that production meter, including the separating work refusal
+/// (fgdb-rc1017-bridge-wvze5.25).
 const OWNER_PINNED: [[u64; 3]; 6] = [
-    [9, 166, 48],
-    [16, 184, 58],
-    [13, 153, 48],
-    [14, 444, 83],
-    [8, 142, 42],
-    [13, 361, 86],
+    [9, 162, 47],
+    [16, 180, 57],
+    [13, 149, 47],
+    [14, 440, 82],
+    [8, 138, 41],
+    [13, 357, 85],
 ];
 
 #[test]
