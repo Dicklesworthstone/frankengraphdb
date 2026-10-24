@@ -376,7 +376,9 @@ impl ReadValueTemplate {
                 | crate::GraphValueFunction::PathRelationships => GraphSetColumnType::Any,
                 crate::GraphValueFunction::Split => GraphSetColumnType::List,
                 crate::GraphValueFunction::PercentileDisc
-                | crate::GraphValueFunction::PercentileCont => GraphSetColumnType::Scalar,
+                | crate::GraphValueFunction::PercentileCont
+                | crate::GraphValueFunction::StDev
+                | crate::GraphValueFunction::StDevP => GraphSetColumnType::Scalar,
             },
             Self::Let { body, .. } => body.column_type(input, parameters),
             Self::Local(_) | Self::Case { .. } => GraphSetColumnType::Any,

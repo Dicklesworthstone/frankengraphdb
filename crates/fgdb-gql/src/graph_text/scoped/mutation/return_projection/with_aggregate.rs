@@ -26,11 +26,13 @@ pub(in crate::graph_text::scoped::mutation) fn function(word: &str) -> Option<Fu
     }
 }
 
-/// percentileDisc and percentileCont (fgdb-qbaex): aggregates the value
-/// reader applies after aggregation to a hidden collect of their first
-/// argument, so a grouping stage reads each as a combined item.
+/// percentileDisc and percentileCont (fgdb-qbaex), stDev and stDevP:
+/// aggregates the value reader applies after aggregation to a hidden collect
+/// of their first argument, so a grouping stage reads each as a combined item.
 fn percentile(word: &str) -> bool {
-    word.eq_ignore_ascii_case("PERCENTILEDISC") || word.eq_ignore_ascii_case("PERCENTILECONT")
+    ["PERCENTILEDISC", "PERCENTILECONT", "STDEV", "STDEVP"]
+        .iter()
+        .any(|name| word.eq_ignore_ascii_case(name))
 }
 
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {

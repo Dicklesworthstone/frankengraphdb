@@ -2447,3 +2447,45 @@ fn a_return_page_orders_by_an_entry_of_a_map_alias() {
         .collect();
     assert_eq!(ordered, [VId(1), VId(2), VId(0)]);
 }
+
+/// stDev and stDevP in an aggregating WITH stage: like the percentiles, each
+/// is a combined item over a hidden collect. NULL is skipped, a group with
+/// too few numbers is 0.0, and a value that is not a number raises. Over 10,
+/// 20, 10, 40 the mean is 20 and the squared deviations sum to 600.
+#[test]
+fn standard_deviations_aggregate_in_a_pipelines_with_stage() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1].map(CanonicalScalar::Int);
+    let rows = |text: &str| run(&prepare(text), &values, wide(), &mut || Ok(()));
+    let float = |value: &GraphValue| match value {
+        GraphValue::Scalar(CanonicalScalar::Float(value)) => value.get(),
+        other => panic!("a float deviation, got {other:?}"),
+    };
+    let both = rows(
+        "UNWIND [10, 20, null, 10, 40] AS x \
+         WITH stDev(x) AS sd, stDevP(x) AS sdp RETURN sd, sdp",
+    )
+    .unwrap()
+    .value;
+    assert_eq!(both.len(), 1);
+    assert_eq!(float(both[0].get(0).unwrap()), 200.0_f64.sqrt());
+    assert_eq!(float(both[0].get(1).unwrap()), 150.0_f64.sqrt());
+    // Per group, beside its key: a singleton group has no sample spread.
+    let grouped = rows(
+        "UNWIND [[1, 2.0], [1, 4.0], [2, 5.0]] AS r WITH r[0] AS g, r[1] AS v \
+         WITH g, stDevP(v) AS spread, stDev(v) AS sample RETURN g, spread, sample ORDER BY g",
+    )
+    .unwrap()
+    .value;
+    assert_eq!(ints(&grouped, 0), [Some(1), Some(2)]);
+    let spreads: Vec<(f64, f64)> = grouped
+        .iter()
+        .map(|row| (float(row.get(1).unwrap()), float(row.get(2).unwrap())))
+        .collect();
+    assert_eq!(spreads, [(1.0, 2.0_f64.sqrt()), (0.0, 0.0)]);
+    let failure = rows("UNWIND [1, 'two'] AS x WITH stDev(x) AS sd RETURN sd").unwrap_err();
+    assert!(
+        format!("{failure:?}").contains("IncompatibleOperands"),
+        "{failure:?}"
+    );
+}

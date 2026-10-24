@@ -2627,15 +2627,23 @@ impl<'a> Parser<'a> {
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if resolve.is_some()
-            && (self.is_word("PERCENTILEDISC") || self.is_word("PERCENTILECONT"))
+            && (self.is_word("PERCENTILEDISC")
+                || self.is_word("PERCENTILECONT")
+                || self.is_word("STDEV")
+                || self.is_word("STDEVP"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             // percentileDisc(x, p): the resolver collects x as a hidden
             // aggregate, and p reads after aggregation (fgdb-qbaex).
+            // stDev(x) and stDevP(x) take the collected list alone.
             let function = if self.is_word("PERCENTILEDISC") {
                 crate::GraphValueFunction::PercentileDisc
-            } else {
+            } else if self.is_word("PERCENTILECONT") {
                 crate::GraphValueFunction::PercentileCont
+            } else if self.is_word("STDEV") {
+                crate::GraphValueFunction::StDev
+            } else {
+                crate::GraphValueFunction::StDevP
             };
             self.advance()?;
             self.punct(b'(', "(")?;
@@ -2649,19 +2657,25 @@ impl<'a> Parser<'a> {
                 return Err(GraphSetTextError {
                     offset: at,
                     kind: GraphSetTextErrorKind::Expected(
-                        "percentileDisc or percentileCont as an aggregating RETURN item",
+                        "percentileDisc, percentileCont, stDev or stDevP as an aggregating item",
                     ),
                 });
             };
-            self.punct(b',', ",")?;
-            let p = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            let argument = if matches!(
+                function,
+                crate::GraphValueFunction::StDev | crate::GraphValueFunction::StDevP
+            ) {
+                ReadValueTemplate::Column(collected)
+            } else {
+                self.punct(b',', ",")?;
+                let p =
+                    self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+                ReadValueTemplate::List(vec![ReadValueTemplate::Column(collected), p])
+            };
             self.punct(b')', ")")?;
             ReadValueTemplate::Function {
                 function,
-                argument: Box::new(ReadValueTemplate::List(vec![
-                    ReadValueTemplate::Column(collected),
-                    p,
-                ])),
+                argument: Box::new(argument),
             }
         } else if let Some(resolve) = resolve.as_mut() {
             // Element and map entries (`x.p` of a comprehension element over

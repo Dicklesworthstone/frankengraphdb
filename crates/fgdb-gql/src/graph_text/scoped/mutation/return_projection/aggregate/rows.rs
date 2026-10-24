@@ -18,7 +18,7 @@ pub(super) enum Head<'a> {
 /// The graph aggregate facade reads neither, so such a RETURN reads its MATCH
 /// through an implicit `WITH *`, whose head gathers it (hoist_boundary_reads).
 fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> {
-    const AGGREGATES: [&str; 10] = [
+    const AGGREGATES: [&str; 12] = [
         "COUNT",
         "SUM",
         "SUM_INT",
@@ -29,6 +29,8 @@ fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> 
         "COLLECT",
         "PERCENTILEDISC",
         "PERCENTILECONT",
+        "STDEV",
+        "STDEVP",
     ];
     let saved = (parser.lexer.clone(), parser.current);
     let mut lexer = parser.lexer.clone();

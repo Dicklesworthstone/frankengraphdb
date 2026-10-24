@@ -243,6 +243,14 @@ pub enum GraphValueFunction {
     /// `relationships(x)` of a path value: its edges in order. NULL is NULL;
     /// any other value is a typed error.
     PathRelationships,
+    /// openCypher `stDev(x)`, applied after aggregation to `collect(x)`: the
+    /// sample standard deviation of the collected numbers, a Float; fewer
+    /// than two numbers give 0.0, as Neo4j answers. NULL members are skipped;
+    /// a non-number is a typed error.
+    StDev,
+    /// openCypher `stDevP(x)`: the population standard deviation, a Float;
+    /// no number gives 0.0.
+    StDevP,
 }
 
 impl GraphValueFunction {
@@ -258,13 +266,19 @@ impl GraphValueFunction {
             Self::PercentileCont => 7,
             Self::PathNodes => 8,
             Self::PathRelationships => 9,
+            Self::StDev => 10,
+            Self::StDevP => 11,
         }
     }
 
     /// How many arguments a call takes; `None` for one or more.
     pub(crate) const fn arity(self) -> Option<usize> {
         match self {
-            Self::Reverse | Self::PathNodes | Self::PathRelationships => Some(1),
+            Self::Reverse
+            | Self::PathNodes
+            | Self::PathRelationships
+            | Self::StDev
+            | Self::StDevP => Some(1),
             Self::Split
             | Self::Add
             | Self::Subtract
@@ -982,9 +996,10 @@ fn admit(
                 | GraphValueFunction::PathNodes
                 | GraphValueFunction::PathRelationships => GraphSetColumnType::Any,
                 GraphValueFunction::Split => GraphSetColumnType::List,
-                GraphValueFunction::PercentileDisc | GraphValueFunction::PercentileCont => {
-                    GraphSetColumnType::Scalar
-                }
+                GraphValueFunction::PercentileDisc
+                | GraphValueFunction::PercentileCont
+                | GraphValueFunction::StDev
+                | GraphValueFunction::StDevP => GraphSetColumnType::Scalar,
             }
         }
         // openCypher size(): a list's length or a text's character count
@@ -3020,6 +3035,12 @@ pub(crate) fn value_function<E>(
             column,
             control,
         ),
+        GraphValueFunction::StDev | GraphValueFunction::StDevP => standard_deviation(
+            function == GraphValueFunction::StDev,
+            argument,
+            column,
+            control,
+        ),
         GraphValueFunction::PathNodes | GraphValueFunction::PathRelationships => match argument {
             GraphValue::Path(path) => {
                 let value = if function == GraphValueFunction::PathNodes {
@@ -3036,6 +3057,81 @@ pub(crate) fn value_function<E>(
             _ => Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
         },
     }
+}
+
+/// openCypher stDev (`sample`) and stDevP over a collected list. The numbers
+/// sort by their binary64 values first, so neither the mean nor the sum of
+/// squared deviations depends on the collection's order; both use checked
+/// binary64 operations. NULL members are skipped, a non-number is a typed
+/// error, and too few numbers give 0.0, as Neo4j answers.
+fn standard_deviation<E>(
+    sample: bool,
+    argument: &GraphValue,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    use crate::GraphIntegerErrorKind as Kind;
+    use fgdb_types::CanonicalF64;
+    let failure = |kind| ProjectionFailure::Arithmetic {
+        column,
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
+    };
+    let arithmetic = |_| failure(Kind::Overflow);
+    let Some(members) = list_members(argument, control).map_err(ProjectionFailure::Control)? else {
+        return Err(failure(Kind::IncompatibleOperands));
+    };
+    let mut numbers: Vec<CanonicalF64> = Vec::with_capacity(members.len());
+    for member in members.iter() {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        match member {
+            GraphValue::Scalar(CanonicalScalar::Null) => {}
+            GraphValue::Scalar(CanonicalScalar::Int(value)) => {
+                numbers.push(CanonicalF64::from_i64_rounded(*value));
+            }
+            GraphValue::Scalar(CanonicalScalar::Float(value)) => numbers.push(*value),
+            _ => return Err(failure(Kind::IncompatibleOperands)),
+        }
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    let zero = CanonicalF64::from_i64_rounded(0);
+    let divisor = numbers.len().saturating_sub(usize::from(sample));
+    if divisor == 0 {
+        return Ok(GraphValue::Scalar(CanonicalScalar::Float(zero)));
+    }
+    let mut comparisons = 0_u64;
+    numbers.sort_by(|left, right| {
+        comparisons += 1;
+        left.cmp(right)
+    });
+    for _ in 0..comparisons {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    }
+    // The list bound keeps both counts far inside i64.
+    let count = CanonicalF64::from_i64_rounded(numbers.len() as i64);
+    let mut sum = zero;
+    for number in &numbers {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        sum = sum.checked_add(*number).map_err(arithmetic)?;
+    }
+    let mean = sum.checked_div(count).map_err(arithmetic)?;
+    let mut squares = zero;
+    for number in &numbers {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        let deviation = number.checked_sub(mean).map_err(arithmetic)?;
+        squares = deviation
+            .checked_mul(deviation)
+            .and_then(|square| squares.checked_add(square))
+            .map_err(arithmetic)?;
+    }
+    let variance = squares
+        .checked_div(CanonicalF64::from_i64_rounded(divisor as i64))
+        .map_err(arithmetic)?;
+    Ok(GraphValue::Scalar(CanonicalScalar::Float(
+        variance.checked_sqrt().map_err(arithmetic)?,
+    )))
 }
 
 /// openCypher percentileDisc and percentileCont over `[collected, p]`

@@ -1474,3 +1474,100 @@ fn a_terminal_aggregate_return_reads_pattern_counts() {
             .all(|row| row.values()[0].as_count() == Some(1))
     );
 }
+
+/// stDev and stDevP, the sample and population standard deviations, apply
+/// after aggregation to a hidden collect of their argument, as percentiles
+/// do: NULL is skipped, and too few numbers give 0.0. The graph facade and a
+/// pipeline's terminal RETURN agree. Over 10, 20, 10, 40 (and a NULL) the
+/// mean is 20 and the squared deviations sum to 600.
+#[test]
+fn standard_deviations_aggregate_like_percentiles() {
+    use fgdb_gql::algebra::GraphValue;
+    let input = [
+        CanonicalScalar::Int(10),
+        CanonicalScalar::Int(20),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(10),
+        CanonicalScalar::Int(40),
+    ];
+    let graph = |text: &str| {
+        fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    // A Float cell as its f64, NULL as None: scalar Debug output is redacted.
+    let cells = |rows: Vec<GraphAggregateRow>| -> Vec<Vec<Option<f64>>> {
+        rows.iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|value| match value.as_value() {
+                        Some(GraphValue::Scalar(CanonicalScalar::Float(value))) => {
+                            Some(value.get())
+                        }
+                        Some(GraphValue::Scalar(CanonicalScalar::Int(value))) => {
+                            Some(*value as f64)
+                        }
+                        Some(GraphValue::Scalar(CanonicalScalar::Null)) => None,
+                        _ => panic!("a numeric cell"),
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let expected = vec![vec![Some(200.0_f64.sqrt()), Some(150.0_f64.sqrt())]];
+    assert_eq!(
+        cells(
+            run(
+                &graph("MATCH (n) RETURN stDev(n.p) AS sd, stDevP(n.p) AS sdp"),
+                &input,
+                wide()
+            )
+            .value
+        ),
+        expected
+    );
+    assert_eq!(
+        cells(
+            run(
+                &query("MATCH (n) WITH n.p AS x RETURN stDev(x) AS sd, stDevP(x) AS sdp"),
+                &input,
+                wide()
+            )
+            .value
+        ),
+        expected
+    );
+    // No number, and one distinct number per group, are 0.0 (this host
+    // admits every vertex, so the inputs differ rather than a WHERE).
+    assert_eq!(
+        cells(
+            run(
+                &graph("MATCH (n) RETURN stDev(n.p) AS sd, stDevP(n.p) AS sdp"),
+                &[CanonicalScalar::Null, CanonicalScalar::Null],
+                wide()
+            )
+            .value
+        ),
+        vec![vec![Some(0.0), Some(0.0)]]
+    );
+    let mut grouped = cells(
+        run(
+            &graph("MATCH (n) RETURN n.p AS k, stDev(n.p) AS sd, stDevP(n.p) AS sdp"),
+            &input,
+            wide(),
+        )
+        .value,
+    );
+    grouped.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
+    assert_eq!(
+        grouped,
+        [
+            vec![None, Some(0.0), Some(0.0)],
+            vec![Some(10.0), Some(0.0), Some(0.0)],
+            vec![Some(20.0), Some(0.0), Some(0.0)],
+            vec![Some(40.0), Some(0.0), Some(0.0)]
+        ]
+    );
+}

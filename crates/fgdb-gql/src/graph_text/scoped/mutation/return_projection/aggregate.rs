@@ -180,6 +180,8 @@ impl<'a> Parser<'a> {
                             "COLLECT",
                             "PERCENTILEDISC",
                             "PERCENTILECONT",
+                            "STDEV",
+                            "STDEVP",
                         ]
                         .iter()
                         .any(|name| word.eq_ignore_ascii_case(name)) =>
