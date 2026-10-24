@@ -161,8 +161,9 @@ pub(super) fn prefix<'a>(
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         return Ok((Head::Single(Some(head)), stages, schema, depth));
     }
-    // A procedure is a source, so it can only start the pipeline, exactly as
-    // in a non-aggregate read: `CALL ... YIELD c RETURN COUNT(DISTINCT c)`.
+    // A leading procedure shares the read parser's identity binding when a
+    // following MATCH or output expression needs its yielded vertex. The
+    // aggregate must retain that real graph source and its correlations.
     let mut schema = Vec::new();
     let call = if parser.is_word("CALL") {
         let at = parser.current.at;
@@ -171,6 +172,27 @@ pub(super) fn prefix<'a>(
     } else {
         None
     };
+    if let Some(call) = &call {
+        let leading = vec![call.clone()];
+        let implied = if parser.is_word("MATCH") {
+            Vec::new()
+        } else {
+            parser.implied_call_vertices(&schema, &leading)?
+        };
+        if parser.is_word("MATCH") || !implied.is_empty() {
+            let at = parser.current.at;
+            let (part, tail) =
+                parser.leading_graph_part(statement, schema, leading, implied, true)?;
+            let schema = tail.ok_or_else(|| expected(at, "aggregate input row schema"))?;
+            let depth = part.depth();
+            return Ok((
+                Head::Multipart(Box::new(UnresolvedReadInput::from_first(part))),
+                Vec::new(),
+                schema,
+                depth,
+            ));
+        }
+    }
     if call.is_none()
         && !parser.is_word("WITH")
         && !parser.is_word("UNWIND")

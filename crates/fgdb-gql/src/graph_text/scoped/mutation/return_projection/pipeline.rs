@@ -1505,6 +1505,21 @@ impl<'a> Parser<'a> {
                 append_stage(&mut stages, page, &mut depth)?;
             }
             let at = self.current.at;
+            // Named procedures append their YIELD columns to the completed
+            // relation through the existing ProcedureCall operator. Inline
+            // CALL bodies belong to the multipart Apply parser instead.
+            if self.is_word("CALL")
+                && !matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'{' | b'(')
+                )
+            {
+                self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+                self.advance()?;
+                let stage = self.call_stage(&mut schema, at)?;
+                append_stage(&mut stages, stage, &mut depth)?;
+                continue;
+            }
             if self.is_word("UNWIND") {
                 self.word("UNWIND")?;
                 // The UNWIND expression may read a carried element's hidden
