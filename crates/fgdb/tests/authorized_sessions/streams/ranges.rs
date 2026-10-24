@@ -226,8 +226,10 @@ fn hidden_range_values_cannot_change_native_or_signed_work_thresholds() {
         };
         assert_eq!(signed(&visible), signed(&hidden));
 
-        // A later range may not remove the visible, nonnumeric first vertex
-        // before an earlier arithmetic predicate reports its native data error.
+        // A mixed-type arithmetic operand is UNKNOWN under the Boolean
+        // evaluator's existing contract. Keep that original expression and
+        // independently specify its complete visible result before testing a
+        // real arithmetic exception at the same first identity.
         for db in [&visible, &hidden] {
             let mut session = db
                 .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
@@ -239,10 +241,32 @@ fn hidden_range_values_cannot_change_native_or_signed_work_thresholds() {
                     &args,
                 )
                 .unwrap();
+            let rows = session
+                .stream(&cx, &prepared, &args)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                [VId(1), VId(u128::MAX)]
+                    .map(|id| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id)]))
+            );
+            // Only the first, Boolean-valued vertex divides by zero; every
+            // numeric row has divisor one. Pruning by the later range would
+            // incorrectly hide that exception and deliver VId(1) instead.
+            let prepared = session
+                .prepare(
+                    &cx,
+                    "MATCH (n) WHERE 10 / (CASE WHEN n.p = false THEN 0 ELSE 1 END) > 0 \
+                 AND n.p >= 7 RETURN n AS id",
+                    &args,
+                )
+                .unwrap();
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
             let first = cursor.next();
             assert!(
-                matches!(first, Some(Err(QueryError::Stream(GqlQueryError::Data(_)))),),
+                matches!(first, Some(Err(QueryError::Stream(GqlQueryError::Data(error))))
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero),
                 "earlier arithmetic must refuse before the later range: {first:?}"
             );
             assert_eq!(cursor.state(), VertexScanState::Failed);
