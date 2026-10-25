@@ -652,7 +652,8 @@ impl<'a> Parser<'a> {
 
     /// Whether the WHERE at the current token needs the value language
     /// (fgdb-1c29d): a list quantifier, a list comprehension, a list or path
-    /// function, `type(r)`, or IN over a computed list. Pattern predicates
+    /// function, `type(r)`, IN over a computed list, or a list or map value
+    /// compared, subscripted or sliced (fgdb-bqri3). Pattern predicates
     /// accept none of these, so a WHERE without one keeps its exact pattern
     /// lowering. The boolean filter cannot read a relationship's type
     /// (fgdb-fj106); the row filter reads it through the hoisted metadata
@@ -731,6 +732,26 @@ impl<'a> Parser<'a> {
                     if !key
                         && word.eq_ignore_ascii_case("IN")
                         && !matches!(next, TokenKind::Punct(b'[') | TokenKind::Parameter(_)) =>
+                {
+                    return Ok(true);
+                }
+                // A list literal, subscript or slice, or a map literal
+                // compared, that is no relationship bracket, IN's literal
+                // list or subquery body: the pattern filter compares scalars
+                // only (fgdb-bqri3), as in `n.tags = ['a']` or `n.p[0] = 1`.
+                TokenKind::Punct(b'[')
+                    if braces == 0
+                        && !existence
+                        && !matches!(previous, Some(TokenKind::Punct(b'-')))
+                        && !matches!(previous, Some(TokenKind::Word(word))
+                            if word.eq_ignore_ascii_case("IN")) =>
+                {
+                    return Ok(true);
+                }
+                TokenKind::Punct(b'{')
+                    if braces == 0
+                        && !existence
+                        && matches!(previous, Some(TokenKind::Punct(b'=' | b'<' | b'>'))) =>
                 {
                     return Ok(true);
                 }

@@ -1316,3 +1316,117 @@ fn plus_joins_a_stored_list_with_any_operand() {
         }
     });
 }
+
+/// fgdb-bqri3: WHERE compares a stored List with a list or map value, three
+/// valued, as RETURN does. The pattern filter compares scalars only, so a
+/// MATCH WHERE with a list or map literal, subscript or slice runs as a row
+/// filter after the match, as one over a list function already does; there,
+/// and after WITH, a composite comparison is one value-language test.
+#[test]
+fn where_compares_stored_lists_with_list_and_map_values() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let empty = GqlParameters::new();
+        for statement in [
+            "MATCH (n:Person {name: 'a'}) SET n.first = ['x', 'y']",
+            "MATCH (n:Person {name: 'b'}) SET n.first = ['x']",
+            "MATCH (n:Person {name: 'c'}) SET n.first = ['z']",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        let names = |statement: &str| {
+            let mut rows = cells(
+                db.query(&cx, statement, &empty, symbols, policy())
+                    .expect(statement),
+            );
+            rows.sort();
+            rows.into_iter().flatten().collect::<Vec<_>>()
+        };
+        let named = |names: &[&str]| names.iter().map(|name| text(name)).collect::<Vec<_>>();
+        for (statement, expected) in [
+            (
+                "MATCH (n:Person) WHERE n.first = ['x', 'y'] RETURN n.name AS name",
+                named(&["a"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first <> ['x', 'y'] RETURN n.name AS name",
+                named(&["b", "c"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE ['x'] = n.first RETURN n.name AS name",
+                named(&["b"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first[0] = 'x' RETURN n.name AS name",
+                named(&["a", "b"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first < ['y'] RETURN n.name AS name",
+                named(&["a", "b"]),
+            ),
+            // Values of different domains are unequal (fgdb-v6ku6).
+            (
+                "MATCH (n:Person) WHERE n.first = {k: 1} RETURN n.name AS name",
+                named(&[]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.p = [10] RETURN n.name AS name",
+                named(&[]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.p <> [10] RETURN n.name AS name",
+                named(&["a", "b", "c"]),
+            ),
+            (
+                "MATCH (n:Person) WHERE n.first = ['x'] OR n.p = 30 RETURN n.name AS name",
+                named(&["b", "c"]),
+            ),
+            // After WITH, the row filter compares the composite itself, on
+            // either side, and a leading literal's membership too.
+            (
+                "MATCH (n:Person) WITH n WHERE n.first = ['x'] RETURN n.name AS name",
+                named(&["b"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n WHERE ['x'] = n.first RETURN n.name AS name",
+                named(&["b"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n WHERE ['z'] IN [n.first] RETURN n.name AS name",
+                named(&["c"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n.first AS f, n.name AS name \
+                 WHERE f = ['x', 'y'] RETURN name",
+                named(&["a"]),
+            ),
+            (
+                "MATCH (n:Person) WITH n.first AS f, n.name AS name \
+                 WHERE f <> ['x'] RETURN name",
+                named(&["a", "c"]),
+            ),
+        ] {
+            assert_eq!(names(statement), expected, "{statement}");
+        }
+        let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        assert_eq!(
+            names("MATCH (n:Person) RETURN n.name AS name, n.first = ['x'] AS hit"),
+            vec![
+                text("a"),
+                boolean(false),
+                text("b"),
+                boolean(true),
+                text("c"),
+                boolean(false),
+            ]
+        );
+    });
+}

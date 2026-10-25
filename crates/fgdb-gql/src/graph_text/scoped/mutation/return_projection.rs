@@ -2171,6 +2171,67 @@ impl<'a> Parser<'a> {
         Ok(!tighter_than_comparison(&mut lexer)?)
     }
 
+    /// Whether a list or map literal, a list- or map-typed parameter or a
+    /// bare list-typed row column starts a membership here, `[1] IN l`. IN
+    /// binds tighter than a comparison, so a comparison's right operand may
+    /// begin with one, though never with a composite comparison of its own
+    /// (starts_composite_comparison).
+    pub(super) fn starts_composite_membership(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let after = match self.current.kind {
+            TokenKind::Parameter(name)
+                if matches!(
+                    self.parameter_types.get(name),
+                    Some(crate::GqlParameterType::List | crate::GqlParameterType::Map)
+                ) =>
+            {
+                lexer.next()?
+            }
+            TokenKind::Punct(b'{') => {
+                skip_group(&mut lexer)?;
+                after_postfix(&mut lexer)?
+            }
+            TokenKind::Punct(b'[') if !self.starts_let_operand()? => {
+                skip_group(&mut lexer)?;
+                after_postfix(&mut lexer)?
+            }
+            TokenKind::Word(_) if self.row_list_column(row)?.is_some() => lexer.next()?,
+            _ => return Ok(false),
+        };
+        Ok(matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
+    }
+
+    /// Whether a whole composite stands here as a comparison's right
+    /// operand: a list or map literal, a list- or map-typed parameter or a
+    /// bare list-typed row column, which no subscript, slice, entry read or
+    /// call, no operator binding tighter than a comparison and no further
+    /// comparison of a chain follows (fgdb-bqri3). A list comprehension is a
+    /// let operand of its own (starts_let_operand).
+    pub(super) fn composite_right_operand(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        match self.current.kind {
+            TokenKind::Punct(b'{') => skip_group(&mut lexer)?,
+            TokenKind::Punct(b'[') if !self.starts_let_operand()? => skip_group(&mut lexer)?,
+            TokenKind::Parameter(name)
+                if matches!(
+                    self.parameter_types.get(name),
+                    Some(crate::GqlParameterType::List | crate::GqlParameterType::Map)
+                ) => {}
+            TokenKind::Word(_) if self.row_list_column(row)?.is_some() => {}
+            _ => return Ok(false),
+        }
+        Ok(!matches!(
+            lexer.clone().next()?.kind,
+            TokenKind::Punct(b'[' | b'.' | b'(' | b'=' | b'!' | b'<' | b'>')
+        ) && !tighter_than_comparison(&mut lexer)?)
+    }
+
     /// starts_let_operand, or a list literal read through a subscript or
     /// slice (`[5, [6, 7], 10][1]`), whose element may be a list or a scalar
     /// (fgdb-c4i0d). A literal compared with `=` or IN was already taken by

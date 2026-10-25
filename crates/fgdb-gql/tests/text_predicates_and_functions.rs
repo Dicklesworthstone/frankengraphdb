@@ -1406,6 +1406,78 @@ fn list_literals_order_element_by_element_three_valued() {
     }
 }
 
+/// fgdb-bqri3: a composite on the right of a comparison compares as one on
+/// the left does (composite_literals_compare_three_valued): `x = [1, 2]`
+/// over a dynamic row value, a list column or parameter, an entry or a
+/// property. A composite comparison starts only at its comparison level's
+/// left operand, so `[0] + x < [1]` compares the sum, as openCypher's `+`
+/// binds tighter, and a chain compares each neighbouring pair.
+#[test]
+fn a_composite_on_the_right_compares_like_the_mirrored_comparison() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    let null = CanonicalScalar::Null;
+    for (statement, expected) in [
+        ("UNWIND [[1, 2]] AS x RETURN x = [1, 2] AS v", truth(true)),
+        ("UNWIND [[1, 2]] AS x RETURN x <> [1, 2] AS v", truth(false)),
+        ("UNWIND [[1, 2]] AS x RETURN x != [1, 3] AS v", truth(true)),
+        ("UNWIND [[1, 2]] AS x RETURN x <= [1, 2] AS v", truth(true)),
+        ("UNWIND [{k: 1}] AS x RETURN x = {k: 1} AS v", truth(true)),
+        (
+            "UNWIND [{k: null}] AS x RETURN x = {k: null} AS v",
+            null.clone(),
+        ),
+        ("UNWIND [5] AS x RETURN x = [5] AS v", truth(false)),
+        ("UNWIND [null] AS x RETURN x = [5] AS v", null.clone()),
+        (
+            "WITH [1, 2] AS l UNWIND [[1, 2]] AS x RETURN x = l AS v",
+            truth(true),
+        ),
+        ("WITH 1 AS c RETURN c = [1] AS v", truth(false)),
+        (
+            "WITH {k: [1, 2]} AS m RETURN m.k = [1, 2] AS v",
+            truth(true),
+        ),
+        ("MATCH (n) RETURN n.text = ['x'] AS v", truth(false)),
+        ("MATCH (n) RETURN n.text <> {k: 'x'} AS v", truth(true)),
+        // One operand of the Boolean operators around it.
+        (
+            "UNWIND [[1, 2]] AS x RETURN x = [1, 2] AND true AS v",
+            truth(true),
+        ),
+        (
+            "UNWIND [[1, 2]] AS x RETURN NOT x = [1, 2] AS v",
+            truth(false),
+        ),
+        // `+` binds tighter than the comparison: the sum is compared. These
+        // read `x < [1]` as the sum's operand before ([0, false]).
+        ("UNWIND [[1]] AS x RETURN [0] + x < [1] AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN [0] + x = [0, 1] AS v",
+            truth(true),
+        ),
+        ("UNWIND [1] AS x RETURN 1 + x = [2] AS v", truth(false)),
+        // IN binds tighter than the comparison on its right.
+        ("RETURN true = [1] IN [[1]] AS v", truth(true)),
+        (
+            "UNWIND [[1]] AS x RETURN false = x IN [[2]] AS v",
+            truth(true),
+        ),
+        // A chain compares each neighbouring pair (TCK Comparison3).
+        ("UNWIND [[1]] AS x RETURN [0] < x < [2] AS v", truth(true)),
+        ("UNWIND [[1]] AS x RETURN [0] < x < [1] AS v", truth(false)),
+        ("RETURN [1] = [1] = true AS v", truth(false)),
+    ] {
+        let result = execute(&prepare(statement), &text("x"), policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(result.value.len(), 1, "{statement}");
+        assert_eq!(
+            result.value[0].values()[0].as_scalar(),
+            Some(&expected),
+            "{statement}"
+        );
+    }
+}
+
 /// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
 /// optional `date` base), from ISO 8601 text, from a date or from NULL, and a
 /// date reads its fields as `d.year`. Expected days are the TCK's (Temporal1

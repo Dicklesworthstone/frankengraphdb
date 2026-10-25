@@ -267,6 +267,11 @@ impl<'a> Parser<'a> {
         ) {
             let comparison = self.comparison()?;
             let right = self.selection_value(schema)?;
+            if self.composite_compared(schema, &left, comparison, &right) {
+                return self.selection_composite_comparison(
+                    schema, selection, left, comparison, right, at,
+                );
+            }
             ReadFilterOp::Compare {
                 left: self.selection_cell(schema, selection, left, at)?,
                 comparison,
@@ -322,6 +327,109 @@ impl<'a> Parser<'a> {
             }
         };
         emit(&mut selection.code, op, at)
+    }
+
+    /// Whether the row filter cannot compare these operands itself: it
+    /// equates no two composites, orders none, and holds no map
+    /// (InvalidValueComparison). A list, map, path or element list compared
+    /// with anything but a scalar or an element under `=` or `<>` is
+    /// therefore one value-language comparison (fgdb-bqri3).
+    fn composite_compared(
+        &self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        left: &ReadValueTemplate,
+        comparison: IntegerComparison,
+        right: &ReadValueTemplate,
+    ) -> bool {
+        // The filter domain of an operand, where its template states one.
+        let domain = |value: &ReadValueTemplate| match value {
+            ReadValueTemplate::List(_) => Some(GraphSetColumnType::List),
+            ReadValueTemplate::Literal(_) => Some(GraphSetColumnType::Scalar),
+            ReadValueTemplate::Parameter { index, .. } => {
+                match self.syntax.parameters[*index].parameter_type {
+                    GqlParameterType::List => Some(GraphSetColumnType::List),
+                    GqlParameterType::Map => None,
+                    _ => Some(GraphSetColumnType::Scalar),
+                }
+            }
+            ReadValueTemplate::Column(column) => schema.get(*column).map(|(_, kind)| *kind),
+            _ => None,
+        };
+        let map = |value: &ReadValueTemplate| match value {
+            ReadValueTemplate::MapLiteral { .. } => true,
+            ReadValueTemplate::Parameter { index, .. } => {
+                self.syntax.parameters[*index].parameter_type == GqlParameterType::Map
+            }
+            _ => false,
+        };
+        let composite = |value: &ReadValueTemplate| {
+            map(value)
+                || matches!(
+                    domain(value),
+                    Some(
+                        GraphSetColumnType::Path
+                            | GraphSetColumnType::Vertices
+                            | GraphSetColumnType::Edges
+                            | GraphSetColumnType::List
+                    )
+                )
+        };
+        let atomic = |value: &ReadValueTemplate| {
+            matches!(
+                domain(value),
+                Some(
+                    GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Vertex
+                        | GraphSetColumnType::Edge
+                )
+            )
+        };
+        let equality = matches!(
+            comparison,
+            IntegerComparison::Equal | IntegerComparison::NotEqual
+        );
+        (composite(left) && !(equality && atomic(right)))
+            || (composite(right) && !(equality && atomic(left)))
+    }
+
+    /// `left <comparison> right` as one private Boolean cell compared with
+    /// TRUE (composite_compared): equality element by element, `<>` its
+    /// negation, an ordering as openCypher orders lists, each three-valued.
+    /// Out of line: selection_predicate recurses once per NOT or parenthesis.
+    #[inline(never)]
+    fn selection_composite_comparison(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        selection: &mut Selection,
+        left: ReadValueTemplate,
+        comparison: IntegerComparison,
+        right: ReadValueTemplate,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        let (left, right) = (Box::new(left), Box::new(right));
+        let value = match comparison {
+            IntegerComparison::Equal | IntegerComparison::NotEqual => {
+                ReadValueTemplate::Equal { left, right }
+            }
+            comparison => ReadValueTemplate::Ordered {
+                comparison,
+                left,
+                right,
+            },
+        };
+        let test = ReadFilterOp::Compare {
+            left: self.selection_cell(schema, selection, value, at)?,
+            comparison: IntegerComparison::Equal,
+            right: ReadFilterOperand::Literal(
+                GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                    .expect("canonical true is a bounded scalar"),
+            ),
+        };
+        emit(&mut selection.code, test, at)?;
+        if comparison == IntegerComparison::NotEqual {
+            emit(&mut selection.code, ReadFilterOp::Not, at)?;
+        }
+        Ok(())
     }
 
     fn selection_text_parameters(

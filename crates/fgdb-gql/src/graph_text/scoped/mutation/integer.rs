@@ -619,13 +619,20 @@ impl<'a> Parser<'a> {
 
     /// Whether a list or map literal (starts_composite_comparison) or a
     /// list-typed row column (list_column_compared) is compared here, or a
-    /// dynamically typed one is ordered (any_column_ordered). Out of line:
-    /// integer_unary repeats once per nested parenthesis.
+    /// dynamically typed one is ordered (any_column_ordered). Anywhere but at
+    /// the comparison level's left operand (`compared` false) only a
+    /// membership starts: a comparison's right operand may begin one
+    /// (starts_composite_membership). Out of line: integer_unary repeats once
+    /// per nested parenthesis.
     #[inline(never)]
     fn composite_comparison_follows(
         &self,
         columns: &ExpressionColumns<'_, 'a>,
+        compared: bool,
     ) -> Result<bool, GraphMutationTextError> {
+        if !compared {
+            return Ok(self.starts_composite_membership(self.routing_row(columns))?);
+        }
         if self.starts_composite_comparison()? {
             return Ok(true);
         }
@@ -908,43 +915,77 @@ impl<'a> Parser<'a> {
             // A literal, or a list-typed row column read as its value.
             self.comparison_operand(columns, nesting, at)?
         };
-        let (value, negate) = if self.take_word("IN")? {
+        if self.take_word("IN")? {
             let list = self.membership_list(columns, nesting, at)?;
             let value = ReadValueTemplate::In {
                 value: Box::new(left),
                 list: Box::new(list),
             };
-            (value, false)
-        } else {
+            return self.let_slot(program, value, at);
+        }
+        // A chain compares each neighbouring pair: `a < b <= c` is `a < b AND
+        // b <= c` (TCK Comparison3), one composite comparison per link.
+        let comparison = self.comparison()?;
+        let mut right = self.composite_comparison_right(columns, nesting, at)?;
+        self.composite_link(program, left, comparison, right.clone(), at)?;
+        while matches!(
+            self.current.kind,
+            TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
+        ) && !(self.is_punct(b'=')
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'~')))
+        {
             let comparison = self.comparison()?;
-            let mut right = self.comparison_operand(columns, nesting, at)?;
-            // IN binds tighter than a comparison, as in the scalar grammar:
-            // `[1, 2] = [3, 4] IN l` compares with the membership
-            // (openCypher Precedence3 [6]).
-            while self.take_word("IN")? {
-                let list = self.membership_list(columns, nesting, at)?;
-                right = ReadValueTemplate::In {
-                    value: Box::new(right),
-                    list: Box::new(list),
-                };
+            let next = self.composite_comparison_right(columns, nesting, at)?;
+            let left = core::mem::replace(&mut right, next.clone());
+            self.composite_link(program, left, comparison, next, at)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::And), at)?;
+        }
+        Ok(())
+    }
+
+    /// The right operand of one composite comparison. IN binds tighter than
+    /// a comparison, as in the scalar grammar: `[1, 2] = [3, 4] IN l`
+    /// compares with the membership (openCypher Precedence3 [6]).
+    fn composite_comparison_right(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let mut right = self.comparison_operand(columns, nesting, at)?;
+        while self.take_word("IN")? {
+            let list = self.membership_list(columns, nesting, at)?;
+            right = ReadValueTemplate::In {
+                value: Box::new(right),
+                list: Box::new(list),
+            };
+        }
+        Ok(right)
+    }
+
+    /// One composite comparison as a let slot: `=` element by element, `<>`
+    /// its negation, and an ordering as openCypher orders lists.
+    fn composite_link(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        left: ReadValueTemplate,
+        comparison: IntegerComparison,
+        right: ReadValueTemplate,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let (left, right) = (Box::new(left), Box::new(right));
+        let value = match comparison {
+            IntegerComparison::Equal | IntegerComparison::NotEqual => {
+                ReadValueTemplate::Equal { left, right }
             }
-            let (left, right) = (Box::new(left), Box::new(right));
-            match comparison {
-                IntegerComparison::Equal => (ReadValueTemplate::Equal { left, right }, false),
-                IntegerComparison::NotEqual => (ReadValueTemplate::Equal { left, right }, true),
-                // A list literal's `<`, `<=`, `>` or `>=`.
-                comparison => (
-                    ReadValueTemplate::Ordered {
-                        comparison,
-                        left,
-                        right,
-                    },
-                    false,
-                ),
-            }
+            comparison => ReadValueTemplate::Ordered {
+                comparison,
+                left,
+                right,
+            },
         };
         self.let_slot(program, value, at)?;
-        if negate {
+        if comparison == IntegerComparison::NotEqual {
             emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
         }
         Ok(())
@@ -1175,6 +1216,22 @@ impl<'a> Parser<'a> {
     ) -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
+        // A Product ends below the comparison level, so no composite
+        // comparison starts atop it (comparison_start): it is a list sum's
+        // operand. An Operand's caller owns the comparisons around it, but
+        // its first operand may still begin one composite comparison, read
+        // whole (`WITH x WHERE [1] = x`, `[1] IN l`).
+        match boundary {
+            ExpressionBoundary::Product => {
+                self.comparison_start = usize::MAX;
+                self.predicate_start = usize::MAX;
+            }
+            ExpressionBoundary::Operand => {
+                self.comparison_start = self.current.at;
+                self.predicate_start = self.current.at;
+            }
+            ExpressionBoundary::Whole | ExpressionBoundary::Predicate => {}
+        }
         match boundary {
             ExpressionBoundary::Whole => self.scalar_boolean(columns, 0, &mut parsed)?,
             // The graph Boolean parser owns AND/OR between its leaves. Consuming
@@ -1436,6 +1493,7 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
+        self.comparison_start = self.current.at;
         self.scalar_predicate(columns, depth, program)?;
         if matches!(
             self.current.kind,
@@ -1459,6 +1517,9 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
+        // A right operand, or a chained comparison's re-read left one, never
+        // starts a composite comparison (comparison_start).
+        self.comparison_start = usize::MAX;
         // Where the previous comparison's right operand starts, once one has
         // been read: a chained comparison reads it again as its left operand.
         let mut previous = None;
@@ -1473,7 +1534,7 @@ impl<'a> Parser<'a> {
             }
             let comparison = self.comparison()?;
             previous = Some(self.current.at);
-            self.scalar_predicate(columns, depth, program)?;
+            self.comparison_right_operand(columns, depth, program)?;
             emit(
                 program,
                 ParsedOp::Bound(GraphIntegerOp::Compare(comparison)),
@@ -1506,13 +1567,35 @@ impl<'a> Parser<'a> {
             tokens,
         };
         self.current = self.lexer.next()?;
-        self.scalar_predicate(columns, depth, program)?;
+        self.comparison_right_operand(columns, depth, program)?;
         debug_assert_eq!(
             self.current.at, resume,
             "a reread operand ends where it did"
         );
         self.lexer.tokens = tokens;
         Ok(())
+    }
+
+    /// A comparison's right operand, or a chained comparison's left one read
+    /// again. A whole list or map (composite_right_operand) is a let slot,
+    /// which the scalar program compares as the value language compares it
+    /// (fgdb-bqri3): `n.tags = ['a']`, `x <> $map`, `x = l`. Anything else is
+    /// a predicate-level operand. Out of line: comparison_tail and
+    /// chained_operand repeat once per nested parenthesis.
+    #[inline(never)]
+    fn comparison_right_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
+        if self.lets.is_some() && self.composite_right_operand(self.routing_row(columns))? {
+            let at = self.current.at;
+            let nesting = self.let_base + depth + 1;
+            let value = self.list_operand_value(columns, nesting, at)?;
+            return self.let_slot(program, value, at);
+        }
+        self.scalar_predicate(columns, depth, program)
     }
 
     /// openCypher's string, list and null predicate level: STARTS WITH,
@@ -1524,6 +1607,7 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
+        self.predicate_start = self.current.at;
         if self.lets.is_some() && self.sum_has_list(columns)? {
             // IN binds below additive list concatenation (Precedence3):
             // parse the complete left list sum before deciding membership.
@@ -1950,8 +2034,12 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         // A list or map literal compared with `=`, `<>`, `!=` or IN is one
-        // three-valued comparison in the value language (fgdb-9cawv).
-        if self.lets.is_some() && self.composite_comparison_follows(columns)? {
+        // three-valued comparison in the value language (fgdb-9cawv), read
+        // only from the operand that starts its comparison level.
+        if self.lets.is_some()
+            && (self.comparison_start == at || self.predicate_start == at)
+            && self.composite_comparison_follows(columns, self.comparison_start == at)?
+        {
             return self.composite_comparison(columns, depth, program, at, false);
         }
         // A composite operand evaluates as a let slot of this expression

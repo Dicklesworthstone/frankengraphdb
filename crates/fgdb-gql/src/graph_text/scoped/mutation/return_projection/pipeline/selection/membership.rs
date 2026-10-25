@@ -197,24 +197,23 @@ mod tests {
     /// with it is not a conflict (fgdb-v6ku6): a scalar is unequal to a list.
     #[test]
     fn conflicting_parameter_contexts_refuse_before_catalog_access() {
-        for statement in [
-            "MATCH (n:X) WITH n, $ids AS old WHERE n IN $ids RETURN n",
-            "MATCH (n:X) WITH n WHERE n IN $ids AND 1 < $ids RETURN n",
-        ] {
-            let mut calls = 0;
-            assert!(
-                PreparedGraphSetText::prepare(statement, |_, _| {
-                    calls += 1;
-                    None
-                })
-                .is_err()
-            );
-            assert_eq!(calls, 0, "{statement}");
-        }
+        let statement = "MATCH (n:X) WITH n, $ids AS old WHERE n IN $ids RETURN n";
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(statement, |_, _| {
+                calls += 1;
+                None
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 0, "{statement}");
+        // A List parameter compared with a scalar is one composite
+        // comparison, not a conflicting scalar context (fgdb-bqri3): unequal
+        // across domains, and unordered (NULL).
         let ids = GqlParameters::new()
             .with_list("ids", vec![int(2), null()])
             .unwrap();
-        for (operator, wanted) in [("=", vec![]), ("<>", expected(&[2, 2]))] {
+        for (operator, wanted) in [("=", vec![]), ("<>", expected(&[2, 2])), ("<", vec![])] {
             let statement = format!(
                 "UNWIND [1, 2, 2, 3, NULL] AS n WITH n \
                  WHERE n IN $ids AND 1 {operator} $ids RETURN n"

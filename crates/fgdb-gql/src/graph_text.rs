@@ -918,6 +918,17 @@ struct Parser<'a> {
     /// began. A composite operand continues from it plus the scalar depth,
     /// so alternating values and expressions stay within one nesting bound.
     let_base: usize,
+    /// Where the innermost comparison level's left operand starts
+    /// (scalar_comparison), or an Operand sub-expression's first operand.
+    /// Only that operand may begin a composite comparison: one read later,
+    /// after `+`, `*` or a sign, as a comparison's right operand, or atop a
+    /// list sum's Product operand (usize::MAX), is part of a tighter operand,
+    /// so `[0] + x < [1]` compares the sum.
+    comparison_start: usize,
+    /// Where the innermost predicate-level operand starts (scalar_predicate):
+    /// a comparison's right operand may begin a composite membership, which
+    /// binds tighter than the comparison (`true = [1] IN l`).
+    predicate_start: usize,
     /// Set for exactly the next value read: it is the list operand of `IN`,
     /// which ends at the concatenation level, so a following AND, OR or
     /// comparison stays outside it (fgdb-klah2).
@@ -1068,6 +1079,8 @@ impl<'a> Parser<'a> {
             elements: Vec::new(),
             lets: None,
             let_base: 0,
+            comparison_start: usize::MAX,
+            predicate_start: usize::MAX,
             membership_list: false,
             projected_sources: None,
             existence_reads: None,
