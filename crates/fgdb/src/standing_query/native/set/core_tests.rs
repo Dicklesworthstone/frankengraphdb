@@ -140,6 +140,22 @@ fn oracle(db: &Database<MemVfs>) -> ZSet<Vec<QueryValue>> {
     .unwrap()
 }
 
+/// The oracle with its two columns swapped: a body completed by an implicit
+/// `RETURN *` orders them by name, node before shell (fgdb-7jja3).
+fn node_first(set: &ZSet<Vec<QueryValue>>) -> ZSet<Vec<QueryValue>> {
+    ZSet::from_updates(
+        set.iter().map(|(row, weight)| {
+            (
+                vec![row[1].clone(), row[0].clone()],
+                weight.checked_clone(LIMBS).unwrap(),
+            )
+        }),
+        LIMBS,
+        &mut |_| Ok::<_, ()>(()),
+    )
+    .unwrap()
+}
+
 #[test]
 fn core_calls_and_downstream_stages_match_independent_induced_subgraph_oracle() {
     let ((), report) = run_async_under_lab(0x6e6b_6101, |root| async move {
@@ -358,7 +374,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
         assert_eq!(db.standing_queries.len(), before);
         let (mut subscriber, baseline) = prepared
             .subscribe_replaying(&mut db, &cx, &params, setup, |columns, batch| {
-                assert_eq!(columns, ["shell", "node"]);
+                assert_eq!(columns, ["node", "shell"]);
                 Ok::<_, SubscriptionError>(Arc::clone(batch))
             })
             .unwrap();
@@ -368,7 +384,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
             .rows()
             .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
             .unwrap();
-        assert_eq!(delivered, oracle(&db));
+        assert_eq!(delivered, node_first(&oracle(&db)));
         subscriber.acknowledge(baseline.receipt()).unwrap();
         let mut expected = Vec::new();
         for tick in 0..4 {
@@ -392,7 +408,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
                 }
             }
             let at = db.write(&commit, change).await.unwrap();
-            expected.push((at, oracle(&db)));
+            expected.push((at, node_first(&oracle(&db))));
         }
         let mut after = start;
         for (tick, (at, expected)) in expected.iter().enumerate() {
@@ -422,7 +438,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
         subscriber.restart_from_current().unwrap();
         let fresh = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
         assert!(fresh.is_snapshot());
-        assert_eq!(fresh.rows(), &oracle(&db));
+        assert_eq!(fresh.rows(), &node_first(&oracle(&db)));
         subscriber.acknowledge(fresh.receipt()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");

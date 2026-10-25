@@ -151,16 +151,17 @@ fn repeated_identity_aliases_reuse_existing_keys_and_hide_private_columns() {
         "WITH r.p AS known, count(*) AS n, r AS __fg_boundary_0, r AS again \
          WHERE __fg_boundary_0.p > 0 AND again.q > 0 RETURN *",
     );
-    assert_eq!(query.columns(), &["known", "n", "__fg_boundary_0", "again"]);
+    // RETURN *'s columns are in name order (fgdb-7jja3).
+    assert_eq!(query.columns(), &["__fg_boundary_0", "again", "known", "n"]);
     assert_eq!(query.bindings().len(), 3);
     let row = edge_row(&query, FIRST, 4, 9);
     assert_eq!(
         values(finish(&query, vec![row.clone(), row], 1).unwrap()),
         vec![vec![
-            int(4),
-            int(2),
             GraphValue::Edge(FIRST),
-            GraphValue::Edge(FIRST)
+            GraphValue::Edge(FIRST),
+            int(4),
+            int(2)
         ],]
     );
 }

@@ -1226,6 +1226,11 @@ impl<'a> Parser<'a> {
                 let at = self.mutation_projection(&mut inputs, variable, None)?;
                 outputs.push((variable, ReadValueTemplate::Column(at)));
             }
+            // openCypher orders RETURN *'s columns by name (fgdb-7jja3);
+            // WITH * keeps the bindings' order.
+            if !with {
+                outputs.sort_by(|(a, _), (b, _)| a.text.cmp(b.text));
+            }
         } else {
             loop {
                 self.capacity(

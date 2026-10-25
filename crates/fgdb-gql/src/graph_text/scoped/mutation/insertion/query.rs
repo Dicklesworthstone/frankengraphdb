@@ -612,6 +612,16 @@ impl<'a> Parser<'a> {
                     "named MATCH, CREATE or UNWIND bindings for RETURN *",
                 ));
             }
+            // openCypher orders RETURN *'s columns by name (fgdb-7jja3); each
+            // still reads its own binding. WITH * keeps the row's order.
+            if !head {
+                let mut named: Vec<_> = core::mem::take(&mut returning.projection)
+                    .into_iter()
+                    .zip(core::mem::take(&mut output))
+                    .collect();
+                named.sort_by(|(_, (a, _)), (_, (b, _))| a.text.cmp(b.text));
+                (returning.projection, output) = named.into_iter().unzip();
+            }
         } else {
             let entries = self.resolved_entries;
             let items = self.write_return_items(&mut InsertLeaves {

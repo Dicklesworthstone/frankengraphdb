@@ -1855,7 +1855,13 @@ impl<'a> Parser<'a> {
         let mut next_schema: RowSchema<'a> = Vec::new();
         if self.take(b'*')? {
             let visible = self.visible_width(schema);
-            for (index, &(name, kind)) in schema[..visible].iter().enumerate() {
+            let mut columns: Vec<_> = schema[..visible].iter().copied().enumerate().collect();
+            // openCypher orders RETURN *'s columns by name (fgdb-7jja3);
+            // WITH * keeps the row's order.
+            if returning {
+                columns.sort_by(|(_, (a, _)), (_, (b, _))| a.text.cmp(b.text));
+            }
+            for (index, (name, kind)) in columns {
                 projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),
                     value: ReadValueTemplate::Column(index),

@@ -1173,6 +1173,11 @@ impl<'a> Parser<'a> {
         let mut outputs = Vec::new();
         if implicit || self.take(b'*')? {
             outputs = self.star_outputs(incoming, &mut inputs)?;
+            // openCypher orders RETURN *'s columns by name (fgdb-7jja3);
+            // WITH *, written or implicit, keeps the row's order.
+            if !with {
+                outputs.sort_by(|(a, _), (b, _)| a.text.cmp(b.text));
+            }
         } else {
             loop {
                 self.capacity(

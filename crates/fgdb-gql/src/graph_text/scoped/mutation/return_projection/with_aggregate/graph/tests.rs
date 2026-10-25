@@ -258,7 +258,8 @@ fn only_a_kept_binding_in_the_grouping_scope_reads_through_the_grouped_row() {
         symbols,
     )
     .unwrap();
-    assert_eq!(query.columns(), &["n", "c"]);
+    // RETURN *'s columns are in name order (fgdb-7jja3).
+    assert_eq!(query.columns(), &["c", "n"]);
     // A later stage sees the grouped row, where the kept key is a vertex
     // value: its `n.q` reads through the host's element reader, as for any
     // element value (multipart_reads

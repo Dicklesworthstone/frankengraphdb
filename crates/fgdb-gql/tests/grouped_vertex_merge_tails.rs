@@ -107,15 +107,16 @@ fn duplicate_aliases_and_existing_property_keys_keep_hidden_fields_private() {
         "WITH n.p AS known, n AS __fg_boundary_0, n AS other, count(*) AS c \
          WHERE __fg_boundary_0.p > 0 AND other.q > 0 RETURN *",
     );
-    assert_eq!(query.columns(), &["known", "__fg_boundary_0", "other", "c"]);
+    // RETURN *'s columns are in name order (fgdb-7jja3).
+    assert_eq!(query.columns(), &["__fg_boundary_0", "c", "known", "other"]);
     assert_eq!(query.bindings().len(), 3);
     assert_eq!(
         values(finish(&query, 6, 1).unwrap()),
         vec![vec![
+            GraphValue::Vertex(V),
+            int(1),
             int(6),
-            GraphValue::Vertex(V),
-            GraphValue::Vertex(V),
-            int(1)
+            GraphValue::Vertex(V)
         ],]
     );
 }

@@ -1741,6 +1741,10 @@ impl<'a> Parser<'a> {
                     collect: None,
                 });
             }
+            // openCypher orders RETURN *'s columns by name (fgdb-7jja3).
+            self.syntax
+                .columns
+                .sort_by(|a, b| a.alias.text.cmp(b.alias.text));
         } else {
             loop {
                 self.capacity(
@@ -3388,7 +3392,8 @@ mod tests {
     #[test]
     fn lexical_boundaries_unicode_space_and_repeated_nodes_preserve_identity() {
         let source = "\u{2003}match (n:L:L)-[:R]->(m:L)-[:S]->(n) return distinct *";
-        assert_eq!(query(source).columns(), &["n", "m"]);
+        // RETURN *'s columns are in name order (fgdb-7jja3).
+        assert_eq!(query(source).columns(), &["m", "n"]);
         // Every UTF-8 prefix must be parsed or refused without invalid slicing.
         for at in (0..=source.len()).filter(|at| source.is_char_boundary(*at)) {
             let _ = PreparedGraphText::prepare(&source[..at], symbols);

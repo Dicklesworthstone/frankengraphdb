@@ -857,6 +857,7 @@ impl<'a> Parser<'a> {
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
+        let mut star = true;
         if let Some(row) = row
             && self.take(b'*')?
         {
@@ -905,6 +906,7 @@ impl<'a> Parser<'a> {
                 .into());
             }
         } else {
+            star = false;
             let items = self.write_return_items(&mut MutationLeaves {
                 returning: &mut returning,
                 columns: &mut *columns,
@@ -915,6 +917,16 @@ impl<'a> Parser<'a> {
             returning.grouping = items.grouping;
             output = items.output;
             spellings = items.spellings;
+        }
+        // openCypher orders RETURN *'s columns by name (fgdb-7jja3); each
+        // still reads its own binding. WITH * keeps the row's order.
+        if star && !head {
+            let mut named: Vec<_> = core::mem::take(&mut returning.projection)
+                .into_iter()
+                .zip(core::mem::take(&mut output))
+                .collect();
+            named.sort_by(|(_, (a, _)), (_, (b, _))| a.text.cmp(b.text));
+            (returning.projection, output) = named.into_iter().unzip();
         }
         // Pages address the completed projection, not its incoming WITH row.
         // Equal widths do not make those two column spaces interchangeable.

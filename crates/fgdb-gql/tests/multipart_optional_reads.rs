@@ -204,13 +204,14 @@ fn unmatched_parts_preserve_carried_values_and_keep_private_join_columns_hidden(
     let text = "MATCH (a) WHERE a.score=40 WITH a,a.score AS saved \
         OPTIONAL MATCH (a)-[:R]->(b) RETURN *";
     let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
-    assert_eq!(prepared.columns(), &["a", "saved", "b"]);
+    // RETURN *'s columns are in name order (fgdb-7jja3).
+    assert_eq!(prepared.columns(), &["a", "b", "saved"]);
     assert_eq!(
         rows(text),
         vec![GraphValueRow::from_owned_values(vec![
             GraphValue::Vertex(VId(4)),
-            GraphValue::Scalar(CanonicalScalar::Int(40)),
             GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(40)),
         ])]
     );
     assert_eq!(

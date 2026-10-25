@@ -2489,3 +2489,42 @@ fn standard_deviations_aggregate_in_a_pipelines_with_stage() {
         "{failure:?}"
     );
 }
+
+/// openCypher orders RETURN *'s columns by name (fgdb-7jja3; TCK Unwind1
+/// [13], With1 [2] and WithSkipLimit2 [3] expect it, as do all 19 TCK
+/// RETURN * scenarios with a header). Each value follows its column. A
+/// WITH * keeps the row's order for the stage after it.
+#[test]
+fn return_star_orders_columns_by_name() {
+    use fgdb_gql::algebra::GraphValue;
+    for (text, columns) in [
+        ("MATCH (x)-[r:R]->(a) RETURN *", &["a", "r", "x"][..]),
+        (
+            "WITH [1, 2] AS xs, [3, 4] AS ys, [5, 6] AS zs \
+             UNWIND xs AS x UNWIND ys AS y UNWIND zs AS z RETURN *",
+            &["x", "xs", "y", "ys", "z", "zs"][..],
+        ),
+        (
+            "MATCH (a) WITH a MATCH (x), (a)-[:R]->(b) RETURN *",
+            &["a", "b", "x"][..],
+        ),
+        (
+            "MATCH (n) WITH n LIMIT 1 MATCH (m), (n)-[:R]->(x) RETURN *",
+            &["m", "n", "x"][..],
+        ),
+        ("WITH 1 AS z, 2 AS a WITH * RETURN z, a", &["z", "a"][..]),
+    ] {
+        assert_eq!(prepare(text).columns(), columns, "{text}");
+    }
+    let text = "WITH 1 AS z, 2 AS a RETURN *";
+    let query = prepare(text);
+    assert_eq!(query.columns(), &["a", "z"]);
+    let rows = run(&query, &[], wide(), &mut || Ok(())).unwrap();
+    assert_eq!(
+        rows.value[0].values(),
+        &[
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+        ]
+    );
+}

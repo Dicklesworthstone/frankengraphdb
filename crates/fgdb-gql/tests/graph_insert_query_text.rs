@@ -356,16 +356,17 @@ fn empty_sources_never_allocate_and_return_star_has_only_visible_bindings() {
         assert!(batch.insertion().intents().is_empty());
         assert!(batch.returning().value.is_empty());
     }
+    // RETURN *'s columns are in name order (fgdb-7jja3).
     let query = prepare("UNWIND [2] AS x CREATE (a)-[e:R]->(b),() RETURN *");
-    assert_eq!(query.columns(), &["x", "a", "b", "e"]);
+    assert_eq!(query.columns(), &["a", "b", "e", "x"]);
     let batch = run(&query).unwrap();
     assert_eq!(
         values(&batch),
         vec![vec![
-            int(2),
             GraphValue::Vertex(VId(100)),
             GraphValue::Vertex(VId(101)),
-            GraphValue::Edge(EId(1_000))
+            GraphValue::Edge(EId(1_000)),
+            int(2),
         ]]
     );
     assert_eq!(
@@ -1002,11 +1003,11 @@ fn imported_match_preserves_uncorrelated_bags_and_keeps_anonymous_bindings_priva
         ]
     );
     let query = prepare("UNWIND [7] AS x MATCH () CREATE (c) RETURN *");
-    assert_eq!(query.columns(), &["x", "c"]);
+    assert_eq!(query.columns(), &["c", "x"]);
     let batch = run_matched(&query, &[VId(1)], &[], &Props::new()).unwrap();
     assert_eq!(
         values(&batch),
-        vec![vec![int(7), GraphValue::Vertex(VId(100))]]
+        vec![vec![GraphValue::Vertex(VId(100)), int(7)]]
     );
 }
 
