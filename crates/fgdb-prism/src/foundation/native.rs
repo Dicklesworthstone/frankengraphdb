@@ -113,6 +113,82 @@ pub(super) fn degree<C>(
     ))
 }
 
+/// Directed degree uses division, unlike the undirected foundation's reciprocal
+/// multiplication. The witness names this native kernel, not an unwitnessed
+/// standalone fnx call. Incoming counts borrow CSR; no second graph is built.
+pub(crate) fn directed_degree<C>(
+    graph: &SnapshotGraphView,
+    incoming: bool,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    let n = graph.node_count();
+    let mut arithmetic = Arithmetic::new(checkpoint);
+    let mut counts = reserve(if incoming { n } else { 0 })?;
+    if incoming {
+        for _ in 0..n {
+            arithmetic.step()?;
+            counts.push(0usize);
+        }
+        for source in 0..n {
+            arithmetic.step()?;
+            for &target in graph
+                .neighbors_indices(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+            {
+                arithmetic.step()?;
+                let count = counts
+                    .get_mut(target)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                *count = count
+                    .checked_add(1)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+            }
+        }
+    }
+    let mut values = reserve(n)?;
+    for vertex in 0..n {
+        arithmetic.step()?;
+        let degree = if incoming {
+            *counts
+                .get(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+        } else {
+            graph
+                .neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                .len()
+        };
+        values.push(if n == 1 {
+            1.0
+        } else {
+            degree as f64 / (n - 1) as f64
+        });
+    }
+    let workspace = vector_bytes(&counts)?
+        .checked_add(vector_bytes(&values)?)
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    arithmetic.finish()?;
+    Ok((
+        KernelOutput {
+            values: KernelValues::Scores(values),
+            row_count: n,
+            witness: ComplexityWitness {
+                algorithm: if incoming {
+                    "fgdb_in_degree_centrality"
+                } else {
+                    "fgdb_out_degree_centrality"
+                }
+                .to_owned(),
+                complexity_claim: "O(|V| + |E|)".to_owned(),
+                nodes_touched: n,
+                edges_scanned: if incoming { graph.edge_count() } else { 0 },
+                queue_peak: 0,
+            },
+        },
+        workspace,
+    ))
+}
+
 pub(super) fn core<C>(
     graph: &SnapshotGraphView,
     checkpoint: &mut impl FnxMeter<C>,

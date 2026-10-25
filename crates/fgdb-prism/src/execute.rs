@@ -25,6 +25,8 @@ pub struct FnxExecutionLimits {
     /// passes and result conversion, including a zero-iteration result.
     /// Directed clustering includes weak-neighbor preparation and bounds each
     /// forward intersection by the smaller endpoint's incidence degree.
+    /// Directed degree admits 3*n+arcs for incoming counts and conversion, or
+    /// n for outgoing degree-directory reads; projection admission is separate.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -1023,6 +1025,10 @@ impl FnxCallSpec {
             FnxAlgorithm::DirectedClusteringCoefficient => Some(
                 crate::directed_clustering::estimated_work(graph, &mut checkpoint)?,
             ),
+            FnxAlgorithm::InDegreeCentrality => {
+                n.checked_mul(3).and_then(|nodes| nodes.checked_add(arcs))
+            }
+            FnxAlgorithm::OutDegreeCentrality => Some(n),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }
@@ -1044,7 +1050,10 @@ impl FnxCallSpec {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
             // Native catalog kernels return their reserved vector peak.
-            FnxAlgorithm::Foundation(_) | FnxAlgorithm::DirectedClusteringCoefficient => 0,
+            FnxAlgorithm::Foundation(_)
+            | FnxAlgorithm::DirectedClusteringCoefficient
+            | FnxAlgorithm::InDegreeCentrality
+            | FnxAlgorithm::OutDegreeCentrality => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1104,6 +1113,15 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(algorithm) => {
                 let (output, workspace_bytes) =
                     crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
+                let (output, workspace_bytes) = crate::foundation::directed_degree(
+                    graph,
+                    matches!(algorithm, FnxAlgorithm::InDegreeCentrality),
+                    &mut checkpoint,
+                )?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }

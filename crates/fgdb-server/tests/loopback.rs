@@ -3227,6 +3227,26 @@ fn writes_that_return_answer_their_rows_with_the_commit() {
             .await
             .unwrap();
         assert_eq!(read.rows, [[text("Ann"), text("Bob")]]);
+        for (procedure, ann, bob) in [
+            ("in_degree_centrality", 0.0, 1.0),
+            ("out_degree_centrality", 1.0, 0.0),
+        ] {
+            let query = format!(
+                "CALL fnx.{procedure}() YIELD vertex AS n, score RETURN n.name AS name, score ORDER BY name"
+            );
+            let degree = client
+                .execute(cx, ExecuteMode::Read, &query, vec![])
+                .await
+                .unwrap();
+            assert_eq!(degree.columns, ["name", "score"]);
+            assert_eq!(
+                degree.rows,
+                [
+                    [text("Ann"), WireValue::Float(ann)],
+                    [text("Bob"), WireValue::Float(bob)],
+                ]
+            );
+        }
         client.close(cx).await.unwrap();
 
         let mut writer = Client::connect(cx, addr, token(&grant(Rights::Write)))

@@ -479,6 +479,8 @@ fn query_projection_cannot_widen_capability_scope_or_observe_hidden_weights() {
              missing => 'unit') YIELD node, distance RETURN node, distance ORDER BY node",
             "CALL fnx.weakly_connected_components(relation => 'S') \
              YIELD node, component RETURN node, component ORDER BY node",
+            "CALL fnx.in_degree_centrality() YIELD node, score RETURN node, score ORDER BY node",
+            "CALL fnx.out_degree_centrality() YIELD node, score RETURN node, score ORDER BY node",
         ] {
             let read = |database: &Database<MemVfs>| {
                 database
@@ -497,10 +499,19 @@ fn query_projection_cannot_widen_capability_scope_or_observe_hidden_weights() {
             };
             let actual = read(&db);
             assert_eq!(actual, read(&control), "{text}");
-            assert!(
-                !rows(actual).is_empty(),
-                "non-vacuous visible projection: {text}"
-            );
+            let actual = rows(actual);
+            assert!(!actual.is_empty(), "non-vacuous visible projection: {text}");
+            if text.contains("in_degree_centrality") {
+                assert_eq!(
+                    actual,
+                    expected_distances(&[(1, 0.0), (2, 1.0 / 3.0), (3, 1.0 / 3.0), (5, 0.0)])
+                );
+            } else if text.contains("out_degree_centrality") {
+                assert_eq!(
+                    actual,
+                    expected_distances(&[(1, 1.0 / 3.0), (2, 1.0 / 3.0), (3, 0.0), (5, 0.0)])
+                );
+            }
         }
         let actual = db
             .query_authorized(

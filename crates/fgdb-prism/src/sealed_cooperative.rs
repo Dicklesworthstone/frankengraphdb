@@ -109,6 +109,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::StronglyConnectedComponents
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::InDegreeCentrality
+                | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -316,6 +318,23 @@ impl FnxCallSpec {
             }
             let pass = execution_pass_work(self, graph)?;
             let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+                FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
+                    admission.rows(n)?;
+                    let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
+                    (
+                        if incoming {
+                            "fgdb-prism/sealed-in-degree-cooperative-v1"
+                        } else {
+                            "fgdb-prism/sealed-out-degree-directory-cooperative-v1"
+                        },
+                        pass,
+                        mul(
+                            n,
+                            size_of::<f64>() + if incoming { size_of::<usize>() } else { 0 },
+                        )?,
+                        None,
+                    )
+                }
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                     admission.rows(n)?;
                     (
@@ -396,6 +415,14 @@ impl FnxCallSpec {
                 yield_now,
             };
             let output = match self.algorithm() {
+                FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
+                    directed_degree_centrality(
+                        graph,
+                        matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality),
+                        &mut control,
+                    )
+                    .await?
+                }
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                     degree_centrality(graph, &mut control).await?
                 }
@@ -464,6 +491,50 @@ where
     }
     control.tick().await?;
     output.finish()
+}
+
+async fn directed_degree_centrality<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    incoming: bool,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    control.tick().await?;
+    let n = graph.node_count();
+    let mut counts = reserve(if incoming { n } else { 0 })?;
+    let mut edges = 0usize;
+    if incoming {
+        for _ in 0..n {
+            control.tick().await?;
+            counts.push(0usize);
+        }
+        for source in 0..n {
+            control.tick().await?;
+            let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+            while let Some((target, _)) = control.next(&mut row).await? {
+                control.tick().await?;
+                let count = counts
+                    .get_mut(target)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
+                *count = add(*count, 1)?;
+                edges = add(edges, 1)?;
+            }
+        }
+    }
+    let mut output = DegreeCentrality::new(n)?;
+    for vertex in 0..n {
+        control.tick().await?;
+        output.push_directed(if incoming {
+            counts.get(vertex).copied()
+        } else {
+            graph.degree(vertex)
+        })?;
+    }
+    control.tick().await?;
+    output.finish_directed(incoming, edges)
 }
 
 // The heap and its exclusively borrowed repair both belong to this future.

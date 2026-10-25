@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 16] = [
+const CALLS: [(&str, &str, &str, bool); 18] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -83,6 +83,8 @@ const CALLS: [(&str, &str, &str, bool); 16] = [
     // the fixture has no reciprocal pair, so in+out incidences equal neighbors.
     ("cdlp", "3", "component", false),
     ("directed_clustering_coefficient", "", "score", false),
+    ("in_degree_centrality", "", "score", false),
+    ("out_degree_centrality", "", "score", false),
 ];
 
 /// The whole graph spelled out field by field, independent of

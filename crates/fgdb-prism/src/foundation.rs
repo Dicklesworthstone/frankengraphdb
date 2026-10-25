@@ -19,6 +19,7 @@ mod brandes;
 mod distance;
 mod eigenvector;
 mod native;
+pub(crate) use native::directed_degree;
 
 #[cfg(test)]
 use crate::FNX_METER_RUN;
