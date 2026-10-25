@@ -637,9 +637,13 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         let row = self.routing_row(columns);
+        // Two bare graph elements compared (element_compared). A resolved
+        // scope's WITH WHERE keeps its own element filter.
         Ok(self.list_column_compared(row)?
             || self.any_column_ordered(row)?
-            || self.local_ordered(row)?)
+            || self.local_ordered(row)?
+            || (!matches!(columns, ExpressionColumns::Resolved(_))
+                && self.element_compared(self.route(columns))?))
     }
 
     /// Whether a bare list-comprehension element (fgdb-20foe) is ordered

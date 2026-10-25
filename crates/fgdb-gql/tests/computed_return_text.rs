@@ -822,3 +822,56 @@ fn unknown_subscript_bases_refuse_without_reentering_the_scalar_compiler() {
         );
     }
 }
+
+/// Vertices compare by identity in a projection, as in WHERE: `a = b` and
+/// `a <> b` in RETURN, parenthesized, in a CASE condition and after WITH. A
+/// chain compares each neighbouring pair, and a vertex against a scalar is
+/// unequal. Relationships and paths: relationship_predicates.
+#[test]
+fn vertices_compare_by_identity_in_projections() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let truth = |value: bool| GraphValue::Scalar(CanonicalScalar::Bool(value));
+    for (text, expected) in [
+        (
+            "MATCH (a), (b) WHERE a.p = 1 AND b.p = 2 RETURN a = b AS x, a <> b AS y, a = a AS z",
+            vec![truth(false), truth(true), truth(true)],
+        ),
+        (
+            "MATCH (a), (b) WHERE a.p = 1 AND b.p = 2 RETURN a != a AS x, (a = b) AS y",
+            vec![truth(false), truth(false)],
+        ),
+        (
+            "MATCH (a), (b) WHERE a.p = 1 AND b.p = 2 \
+             RETURN CASE WHEN a = b THEN 1 ELSE 0 END AS c",
+            vec![GraphValue::Scalar(CanonicalScalar::Int(0))],
+        ),
+        (
+            "MATCH (a), (b) WHERE a.p = 1 AND b.p = 2 WITH a, b RETURN a = b AS x, b = b AS y",
+            vec![truth(false), truth(true)],
+        ),
+        (
+            "MATCH (a), (b) WHERE a.p = 1 AND b.p = 2 RETURN a = a = false AS x",
+            vec![truth(false)],
+        ),
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let props = Props::from([
+            (
+                (VId(1), P),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+            ),
+            (
+                (VId(2), P),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(2)),
+            ),
+        ]);
+        let execution = run(&query, &[VId(1), VId(2)], &[], &props)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(execution.value.len(), 1, "{text}");
+        assert_eq!(execution.value[0].values(), expected.as_slice(), "{text}");
+    }
+}

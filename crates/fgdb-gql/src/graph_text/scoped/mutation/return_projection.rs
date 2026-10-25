@@ -2113,6 +2113,43 @@ impl<'a> Parser<'a> {
             .position(|(name, kind)| name.text == word && accepts(*kind)))
     }
 
+    /// Whether a bare graph element is compared here with `=`, `<>` or `!=`
+    /// against another bare element, ending the comparison: `a = b`, `r <>
+    /// s`, `p = q` (TCK Comparison1 [14]). The scalar program holds no
+    /// element, so the comparison is one value-language test read whole
+    /// (composite_comparison): elements compare by identity and paths step
+    /// by step (membership::equal). Both operands are bare elements, which
+    /// the composite reader takes directly, never handing one back.
+    pub(super) fn element_compared(
+        &self,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let element =
+            |token: Token<'a>, lexer: &Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+                if matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word))
+                    || matches!(lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+                {
+                    return Ok(false);
+                }
+                element_column_at(token, lexer, route)
+            };
+        if !element(self.current, &self.lexer)? {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let follows = match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => true,
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            _ => false,
+        };
+        if !follows {
+            return Ok(false);
+        }
+        let right = lexer.next()?;
+        Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
+    }
+
     /// Whether a list-typed row column (row_list_column) is compared here
     /// with `=`, `<>`, `!=`, `<`, `<=`, `>`, `>=` or IN, as in TCK
     /// WithOrderBy1 [45] `orderedX = range(0, n - 1)` (fgdb-9cawv): one
@@ -2340,7 +2377,17 @@ impl<'a> Parser<'a> {
         // the scalar expression, not the whole value: `size(l) > 0`, `[0] +
         // n.tags`. A resolved scope compiles it over its own leaves, so
         // `size(collect(x)) + 1` reads its aggregate (composite_value).
-        let scalar = operators && self.composite_operand_continues()?;
+        // A bare MATCH element compared with another (`RETURN a = b`) is
+        // such an operand too: the scalar compiler routes the comparison
+        // (element_compared), where read whole here it would end at `=`.
+        let scalar = operators
+            && (self.composite_operand_continues()?
+                || (inputs.is_some()
+                    && resolve.is_none()
+                    && self.element_compared(Route {
+                        row: None,
+                        graph: Some(self),
+                    })?));
         let comprehension = self.is_punct(b'[') && {
             let mut lexer = self.lexer.clone();
             matches!(lexer.next()?.kind, TokenKind::Word(_))

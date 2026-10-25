@@ -237,3 +237,54 @@ fn relationship_match_predicates_keep_budgets_and_cancellation_atomic() {
         assert_eq!(seen, stop);
     }
 }
+
+/// Relationships and paths compare by identity in a projection, as in WHERE:
+/// parallel relationships between the same endpoints are different, a path
+/// compares node by node and relationship by relationship, so a self-loop
+/// traversed either way is one path (TCK Comparison1 [14]).
+#[test]
+fn relationships_and_paths_compare_by_identity_in_projections() {
+    let truth = |value: bool| {
+        GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Bool(value))])
+    };
+    let bag = |text: &str| {
+        let mut rows = execute(text);
+        rows.sort();
+        rows
+    };
+    // Same endpoints: 11 and 12 are parallel, 13 and the loop 14 alone.
+    assert_eq!(
+        bag("MATCH (a)-[r:R]->(b) MATCH (a)-[s:R]->(b) RETURN r = s AS same"),
+        vec![
+            truth(false),
+            truth(false),
+            truth(true),
+            truth(true),
+            truth(true),
+            truth(true)
+        ]
+    );
+    assert_eq!(
+        bag("MATCH (a)-[r:R]->(b) MATCH (a)-[s:R]->(b) RETURN r <> s AS different"),
+        vec![
+            truth(false),
+            truth(false),
+            truth(false),
+            truth(false),
+            truth(true),
+            truth(true)
+        ]
+    );
+    assert_eq!(
+        bag("MATCH (a)-[r:R]->(b) RETURN CASE WHEN r = r THEN true ELSE false END AS c"),
+        vec![truth(true); 4]
+    );
+    assert_eq!(
+        bag("MATCH p = (a)-[:R]->(b) RETURN p = p AS same"),
+        vec![truth(true); 4]
+    );
+    assert_eq!(
+        bag("MATCH p1 = (a)-[:R]->(a) MATCH p2 = (a)<-[:R]-(a) RETURN p1 = p2 AS same"),
+        vec![truth(true)]
+    );
+}
