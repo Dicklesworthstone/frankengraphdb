@@ -605,6 +605,22 @@ impl GraphValue {
         value: &CanonicalPropertyValue,
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
+        Self::charge_property_value(value, control)?;
+        Self::from_property_value(value).ok_or_else(|| {
+            E::from(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::StoredValueBounds,
+            })
+        })
+    }
+
+    /// The admission charge of admit_property_value, before any copy: a
+    /// scratch entry per node and per key quantum, and work and scratch per
+    /// scalar payload quantum.
+    pub(crate) fn charge_property_value<E>(
+        value: &CanonicalPropertyValue,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
         fn charge<E>(
             value: &CanonicalPropertyValue,
             control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
@@ -638,12 +654,46 @@ impl GraphValue {
                 control(crate::GlaExecutionEvent::ScratchEntry)
             })?;
         }
-        Self::from_property_value(value).ok_or_else(|| {
-            E::from(crate::GraphIntegerError {
-                instruction: 0,
-                kind: crate::GraphIntegerErrorKind::StoredValueBounds,
-            })
-        })
+        Ok(())
+    }
+
+    /// [`Self::payload_units`] of the value a stored property admits to,
+    /// counted in place: `None` beyond the bounds from_property_value
+    /// enforces, where admission raises StoredValueBounds. Only the traversal
+    /// stack allocates.
+    #[must_use]
+    pub(crate) fn stored_payload_units(value: &CanonicalPropertyValue) -> Option<usize> {
+        let mut total = 0usize;
+        let mut remaining = Self::MAX_LIST_NODES;
+        let mut pending = vec![(value, 0usize)];
+        while let Some((value, depth)) = pending.pop() {
+            if depth > Self::MAX_LIST_DEPTH || remaining == 0 {
+                return None;
+            }
+            remaining -= 1;
+            total = total.saturating_add(1);
+            match value {
+                CanonicalPropertyValue::Scalar(scalar) => {
+                    total = total.saturating_add(scalar_leaf_units(scalar));
+                }
+                CanonicalPropertyValue::List(list) => {
+                    pending.extend(list.values().iter().map(|value| (value, depth + 1)));
+                }
+                CanonicalPropertyValue::Map(map) => {
+                    for entry in map.entries() {
+                        total = total.saturating_add(
+                            entry
+                                .key()
+                                .as_str()
+                                .len()
+                                .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                        );
+                        pending.push((entry.value(), depth + 1));
+                    }
+                }
+            }
+        }
+        Some(total)
     }
 
     /// Whether a property could hold this value (fgdb-k3nub): a scalar, or a
@@ -952,14 +1002,7 @@ impl GraphValue {
 
     fn leaf_payload_units(&self) -> usize {
         let sizes = match self {
-            Self::Scalar(CanonicalScalar::Text(value)) => [
-                value.len(),
-                value.canonical_sort_key().map_or(0, <[u8]>::len),
-            ],
-            Self::Scalar(CanonicalScalar::Bytes(value)) => [value.as_slice().len(), 0],
-            Self::Scalar(CanonicalScalar::Timestamp(value)) => {
-                [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
-            }
+            Self::Scalar(scalar) => return scalar_leaf_units(scalar),
             Self::Path(value) => [core::mem::size_of_val(value.steps()), 0],
             Self::Vertices(value) => [core::mem::size_of_val(value.as_ref()), 0],
             Self::Edges(value) => [core::mem::size_of_val(value.as_ref()), 0],
@@ -1252,6 +1295,26 @@ impl core::fmt::Debug for GraphValueRow {
 /// scratch entry before copying. This is not an allocator-byte/peak-memory cap.
 pub const GRAPH_VALUE_PAYLOAD_UNIT_BYTES: usize = 64;
 
+/// A scalar's variable payload quanta, as GraphValue::payload_units counts a
+/// scalar leaf: a text's characters and comparison key, bytes, a zone name.
+fn scalar_leaf_units(scalar: &CanonicalScalar) -> usize {
+    let sizes = match scalar {
+        CanonicalScalar::Text(value) => [
+            value.len(),
+            value.canonical_sort_key().map_or(0, <[u8]>::len),
+        ],
+        CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
+        CanonicalScalar::Timestamp(value) => {
+            [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
+        }
+        _ => [0, 0],
+    };
+    sizes
+        .into_iter()
+        .map(|n| n.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES))
+        .sum()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ValueRef<'a> {
     Scalar(&'a CanonicalScalar),
@@ -1265,6 +1328,20 @@ pub(crate) enum ValueRef<'a> {
         keys: &'a [Box<str>],
         values: &'a [GraphValue],
     },
+    /// A stored List or Map property read in place (fgdb-bqri3). The
+    /// aggregation fast path borrows its group keys and extrema from the
+    /// snapshot, where a collection is a CanonicalPropertyValue, not a
+    /// GraphValue. It orders as the List or Map it holds
+    /// (cmp_orderability); row identity and retention never meet it.
+    Stored(&'a CanonicalPropertyValue),
+}
+
+impl<'a> ValueRef<'a> {
+    /// A stored value read in place: a scalar as itself, a List or Map as
+    /// Stored.
+    pub(crate) fn stored(value: &'a CanonicalPropertyValue) -> Self {
+        value.as_scalar().map_or(Self::Stored(value), Self::Scalar)
+    }
 }
 
 impl ValueRef<'_> {
@@ -1285,6 +1362,27 @@ impl ValueRef<'_> {
                 return values
                     .iter()
                     .fold(keys, |n, v| n.saturating_add(v.payload_units()));
+            }
+            // As the GraphValue it admits to (GraphValue::payload_units).
+            Self::Stored(CanonicalPropertyValue::List(list)) => {
+                return list.values().iter().fold(0usize, |n, v| {
+                    n.saturating_add(ValueRef::stored(v).payload_units())
+                });
+            }
+            Self::Stored(CanonicalPropertyValue::Map(map)) => {
+                return map.entries().iter().fold(0usize, |n, entry| {
+                    n.saturating_add(
+                        entry
+                            .key()
+                            .as_str()
+                            .len()
+                            .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                    )
+                    .saturating_add(ValueRef::stored(entry.value()).payload_units())
+                });
+            }
+            Self::Stored(CanonicalPropertyValue::Scalar(scalar)) => {
+                return Self::Scalar(scalar).payload_units();
             }
             _ => {}
         }
@@ -1316,6 +1414,7 @@ impl ValueRef<'_> {
                 keys: keys.into(),
                 values: values.into(),
             },
+            Self::Stored(_) => unreachable!("a stored value orders in place, never retained"),
         }
     }
 }

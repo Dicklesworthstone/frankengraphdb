@@ -1430,3 +1430,100 @@ fn where_compares_stored_lists_with_list_and_map_values() {
         );
     });
 }
+
+/// fgdb-bqri3: an aggregate reads a stored List property as the value it
+/// holds: a group key (TCK Return5 [5]), a DISTINCT argument, a COLLECT
+/// member and an extremum, as `WITH n.first AS f` already did. Lists order as
+/// openCypher orders them, element by element.
+#[test]
+fn aggregates_group_count_and_collect_stored_lists() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let empty = GqlParameters::new();
+        for statement in [
+            "MATCH (n:Person {name: 'a'}) SET n.first = ['red']",
+            "MATCH (n:Person {name: 'b'}) SET n.first = ['blue']",
+            "MATCH (n:Person {name: 'c'}) SET n.first = ['red']",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        let rows = |statement: &str| {
+            let mut rows = cells(
+                db.query(&cx, statement, &empty, symbols, policy())
+                    .expect(statement),
+            );
+            rows.sort();
+            rows
+        };
+        let red = || list([text("red")]);
+        let blue = || list([text("blue")]);
+        // Grouping keys, with and without DISTINCT, and through WITH.
+        for statement in [
+            "MATCH (n:Person) RETURN n.first AS f, count(*) AS c",
+            "MATCH (n:Person) RETURN DISTINCT n.first AS f, count(*) AS c",
+            "MATCH (n:Person) WITH n.first AS f RETURN f, count(*) AS c",
+        ] {
+            let found = rows(statement);
+            assert_eq!(found.len(), 2, "{statement}");
+            assert_eq!(found[0][0], blue(), "{statement}");
+            assert_eq!(found[1][0], red(), "{statement}");
+        }
+        // collect() keeps every member, as owned values.
+        let collected = rows("MATCH (n:Person) RETURN collect(n.first) AS l");
+        let [row] = collected.as_slice() else {
+            panic!("one row: {collected:?}");
+        };
+        let GraphValue::List(members) = &row[0] else {
+            panic!("a list: {row:?}");
+        };
+        let mut members = members.to_vec();
+        members.sort();
+        assert_eq!(members, vec![blue(), red(), red()]);
+        assert_eq!(
+            rows("MATCH (n:Person) RETURN collect(DISTINCT n.first) AS l")[0][0]
+                .as_list()
+                .map(<[GraphValue]>::len),
+            Some(2)
+        );
+        // DISTINCT counts each stored List once, by value.
+        let distinct = db
+            .query(
+                &cx,
+                "MATCH (n:Person) RETURN count(DISTINCT n.first) AS n",
+                &empty,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { rows: distinct, .. } = distinct else {
+            panic!("a row result");
+        };
+        assert_eq!(distinct, vec![vec![QueryValue::Count(2)]]);
+        // Extrema order lists element by element: 'blue' < 'red'.
+        assert_eq!(
+            rows("MATCH (n:Person) RETURN min(n.first) AS lo, max(n.first) AS hi"),
+            vec![vec![blue(), red()]]
+        );
+        // ORDER BY a stored-list key.
+        let ordered = cells(
+            db.query(
+                &cx,
+                "MATCH (n:Person) RETURN n.first AS f, count(*) AS c ORDER BY f DESC",
+                &empty,
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ordered[0][0], red());
+        assert_eq!(ordered[1][0], blue());
+    });
+}

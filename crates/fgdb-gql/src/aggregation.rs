@@ -1285,12 +1285,28 @@ impl PreparedGraphAggregate {
                                 Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
-                            // Group keys borrow the source; a stored List or
-                            // Map refuses here rather than read as NULL
-                            // (fgdb-k3nub).
-                            let value = crate::integer_expression::stored_scalar(value)
-                                .map_err(GqlQueryError::from)?;
-                            ValueRef::Scalar(value.unwrap_or(&NULL))
+                            // Group keys borrow the source, a stored List or
+                            // Map as itself (fgdb-bqri3), never as NULL
+                            // (fgdb-k3nub). Beyond the admission bounds it
+                            // refuses as admission does.
+                            match value {
+                                None => ValueRef::Scalar(&NULL),
+                                Some(value) => match value.as_scalar() {
+                                    Some(scalar) => ValueRef::Scalar(scalar),
+                                    None if GraphValue::stored_payload_units(value).is_some() => {
+                                        ValueRef::Stored(value)
+                                    }
+                                    None => {
+                                        return Err(GqlQueryError::from(
+                                            crate::GraphIntegerError {
+                                                instruction: 0,
+                                                kind:
+                                                    crate::GraphIntegerErrorKind::StoredValueBounds,
+                                            },
+                                        ));
+                                    }
+                                },
+                            }
                         }
                         ValueProjection::Path { .. }
                         | ValueProjection::EdgeProperty { .. }
@@ -1368,6 +1384,12 @@ enum ValueRef<'a> {
     Edges(&'a [EId]),
     Edge(EId),
     List(&'a [GraphValue]),
+    /// A stored List or Map property the vertex fast path borrows in place
+    /// (fgdb-bqri3): a group key, a DISTINCT argument or a COLLECT member,
+    /// copied out as the GraphValue it admits to. Beside List, so a property
+    /// column (Scalar, Vertex or Stored) groups in the projected path's
+    /// order for flat lists of scalars.
+    Stored(&'a fgdb_types::CanonicalPropertyValue),
     Map {
         keys: &'a [Box<str>],
         values: &'a [GraphValue],
@@ -1377,6 +1399,7 @@ impl<'a> ValueRef<'a> {
     fn orderability_value(self) -> crate::algebra::ValueRef<'a> {
         use crate::algebra::ValueRef as Value;
         match self {
+            Self::Stored(value) => Value::stored(value),
             Self::Scalar(value) => Value::Scalar(value),
             Self::Vertex(value) => Value::Vertex(value),
             Self::Edge(value) => Value::Edge(value),
@@ -1396,6 +1419,30 @@ impl<'a> ValueRef<'a> {
             return values.iter().fold(values.len(), |units, value| {
                 units.saturating_add(value.payload_units())
             });
+        }
+        // As the List or Map arm counts the GraphValue it admits to. Read
+        // only within the admission bounds (stored_payload_units).
+        let stored = |value| GraphValue::stored_payload_units(value).unwrap_or(usize::MAX);
+        match self {
+            Self::Stored(fgdb_types::CanonicalPropertyValue::List(list)) => {
+                return list.values().iter().fold(list.len(), |units, value| {
+                    units.saturating_add(stored(value))
+                });
+            }
+            Self::Stored(fgdb_types::CanonicalPropertyValue::Map(map)) => {
+                return map.entries().iter().fold(map.len(), |units, entry| {
+                    units
+                        .saturating_add(
+                            entry
+                                .key()
+                                .as_str()
+                                .len()
+                                .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                        )
+                        .saturating_add(stored(entry.value()))
+                });
+            }
+            _ => {}
         }
         if let Self::Map { keys, values } = self {
             let keys = keys.iter().fold(values.len(), |units, key| {
@@ -1424,6 +1471,11 @@ impl<'a> ValueRef<'a> {
         self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphValue, E> {
+        if let Self::Stored(value) = self {
+            GraphValue::charge_property_value(value, control)?;
+            return Ok(GraphValue::from_property_value(value)
+                .expect("the fast path reads a stored value within the admission bounds"));
+        }
         if let Self::List(values) = self {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -1461,7 +1513,7 @@ impl<'a> ValueRef<'a> {
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
             Self::Edge(value) => GraphValue::Edge(value),
-            Self::List(_) | Self::Map { .. } => {
+            Self::List(_) | Self::Map { .. } | Self::Stored(_) => {
                 unreachable!("list and map copying is recursively governed above")
             }
         })

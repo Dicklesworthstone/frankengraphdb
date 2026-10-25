@@ -168,3 +168,63 @@ fn every_nested_comparison_checkpoint_can_stop_without_mutation() {
         assert_eq!(value.canonical_bytes().unwrap(), before);
     }
 }
+
+/// fgdb-bqri3: a stored List or Map read in place orders exactly as the
+/// GraphValue it admits to, against another stored value, against an
+/// admitted one, and against scalars and graph elements.
+#[test]
+fn stored_values_order_as_the_values_they_admit_to() {
+    let map = |entries: Vec<(&str, GraphValue)>| {
+        GraphValue::map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (Box::<str>::from(key), value))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let values = [
+        null(),
+        int(1),
+        float(2.5),
+        text("a"),
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Edge(EId(1)),
+        list(vec![]),
+        list(vec![null()]),
+        list(vec![int(1)]),
+        list(vec![int(1), int(2)]),
+        list(vec![text("a"), int(1)]),
+        list(vec![list(vec![int(1)]), text("b")]),
+        list(vec![map(vec![("k", int(1))])]),
+        map(vec![]),
+        map(vec![("k", int(1))]),
+        map(vec![("k", int(2))]),
+        map(vec![("j", list(vec![int(1)])), ("k", null())]),
+    ];
+    let stored: Vec<Option<CanonicalPropertyValue>> =
+        values.iter().map(GraphValue::to_property_value).collect();
+    let in_place = |at: usize| match &stored[at] {
+        Some(value) => ValueRef::stored(value),
+        None => ValueRef::from(&values[at]),
+    };
+    for left in 0..values.len() {
+        for right in 0..values.len() {
+            let admitted = values[left].compare_orderability(&values[right]);
+            assert_eq!(
+                in_place(left).cmp_orderability(in_place(right)),
+                admitted,
+                "{:?} / {:?}",
+                values[left],
+                values[right]
+            );
+            assert_eq!(
+                in_place(left).cmp_orderability(ValueRef::from(&values[right])),
+                admitted,
+                "{:?} / {:?}",
+                values[left],
+                values[right]
+            );
+        }
+    }
+}

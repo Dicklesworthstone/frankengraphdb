@@ -13,7 +13,7 @@ use crate::{GlaExecutionEvent, GraphExactAverage};
 use core::cmp::Ordering;
 use core::convert::Infallible;
 use core::num::NonZeroU64;
-use fgdb_types::{CanonicalF64, CanonicalScalar};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar};
 
 #[derive(Clone, Copy)]
 pub(crate) enum OrderableNumber {
@@ -86,7 +86,7 @@ impl GraphValue {
     }
 }
 
-impl ValueRef<'_> {
+impl<'a> ValueRef<'a> {
     /// openCypher orderability: map < node < relationship < list < path <
     /// zoned datetime < local datetime < date < zoned time < local time <
     /// duration < string < boolean < number < null. The gaps keep the
@@ -94,6 +94,11 @@ impl ValueRef<'_> {
     /// (fgdb-txbg9).
     fn orderability_rank(self) -> u8 {
         match self {
+            Self::Stored(CanonicalPropertyValue::Scalar(scalar)) => {
+                Self::Scalar(scalar).orderability_rank()
+            }
+            Self::Stored(CanonicalPropertyValue::Map(_)) => 0,
+            Self::Stored(CanonicalPropertyValue::List(_)) => 3,
             Self::Map { .. } => 0,
             Self::Vertex(_) => 1,
             Self::Edge(_) => 2,
@@ -117,6 +122,7 @@ impl ValueRef<'_> {
 
     fn list_len(self) -> Option<usize> {
         match self {
+            Self::Stored(CanonicalPropertyValue::List(list)) => Some(list.len()),
             Self::List(values) => Some(values.len()),
             Self::Vertices(values) => Some(values.len()),
             Self::Edges(values) => Some(values.len()),
@@ -126,10 +132,33 @@ impl ValueRef<'_> {
 
     fn list_cell(self, at: usize) -> Self {
         match self {
+            Self::Stored(CanonicalPropertyValue::List(list)) => Self::stored(&list.values()[at]),
             Self::List(values) => Self::from(&values[at]),
             Self::Vertices(values) => Self::Vertex(values[at]),
             Self::Edges(values) => Self::Edge(values[at]),
             _ => unreachable!("only admitted list variants have list cells"),
+        }
+    }
+
+    /// The entry count of a map, in memory or stored (fgdb-bqri3).
+    fn map_len(self) -> Option<usize> {
+        match self {
+            Self::Map { keys, .. } => Some(keys.len()),
+            Self::Stored(CanonicalPropertyValue::Map(map)) => Some(map.len()),
+            _ => None,
+        }
+    }
+
+    /// A map's `at`-th key and value. Both representations keep their keys
+    /// sorted and unique.
+    fn map_entry(self, at: usize) -> (&'a str, Self) {
+        match self {
+            Self::Map { keys, values } => (&keys[at], Self::from(&values[at])),
+            Self::Stored(CanonicalPropertyValue::Map(map)) => {
+                let entry = &map.entries()[at];
+                (entry.key().as_str(), Self::stored(entry.value()))
+            }
+            _ => unreachable!("only maps have entries"),
         }
     }
 
@@ -161,37 +190,31 @@ impl ValueRef<'_> {
             }
             return Ok(a.cmp(&b));
         }
-        match (self, other) {
-            (
-                Self::Map {
-                    keys: ak,
-                    values: av,
-                },
-                Self::Map {
-                    keys: bk,
-                    values: bv,
-                },
-            ) => {
-                // Canonical constructors already sort and uniquify map keys.
-                let size = ak.len().cmp(&bk.len());
-                if size != Ordering::Equal {
-                    return Ok(size);
-                }
-                for (a, b) in ak.iter().zip(bk) {
-                    payload_work(a.len().max(b.len()), control)?;
-                    let order = a.cmp(b);
-                    if order != Ordering::Equal {
-                        return Ok(order);
-                    }
-                }
-                for (a, b) in av.iter().zip(bv) {
-                    let order = a.compare_orderability_with_control(b, control)?;
-                    if order != Ordering::Equal {
-                        return Ok(order);
-                    }
-                }
-                Ok(av.len().cmp(&bv.len()))
+        // A map in memory or stored (fgdb-bqri3). Canonical constructors
+        // already sort and uniquify map keys.
+        if let (Some(a), Some(b)) = (self.map_len(), other.map_len()) {
+            let size = a.cmp(&b);
+            if size != Ordering::Equal {
+                return Ok(size);
             }
+            for at in 0..a {
+                let ((a, _), (b, _)) = (self.map_entry(at), other.map_entry(at));
+                payload_work(a.len().max(b.len()), control)?;
+                let order = a.cmp(b);
+                if order != Ordering::Equal {
+                    return Ok(order);
+                }
+            }
+            for at in 0..a {
+                let ((_, a), (_, b)) = (self.map_entry(at), other.map_entry(at));
+                let order = a.cmp_orderability_with_control(b, control)?;
+                if order != Ordering::Equal {
+                    return Ok(order);
+                }
+            }
+            return Ok(Ordering::Equal);
+        }
+        match (self, other) {
             (Self::Scalar(a), Self::Scalar(b)) => {
                 if let (Some(a), Some(b)) = (OrderableNumber::scalar(a), OrderableNumber::scalar(b))
                 {
