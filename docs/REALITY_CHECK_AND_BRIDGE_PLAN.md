@@ -177,7 +177,7 @@ evidence. Broad target groups are deliberately not assigned a percentage.
 | 10 | Strict replay of the complete retained execution/authority closure | PARTIAL. Native read certificates and replay bind supported plans/results/cuts. Complete executable, authority, index/policy epochs, archive leases and all statement classes remain outside that proof. | W5 replay, verification epic, bridge `.17`/`.28` |
 | 11 | Every adaptive consumer emits an epoch-bound card with lawful fallback | PARTIAL/UNWIRED. Calibration/card mechanisms exist, but `fgdb-calibrate` is absent from all three product manifest closures. Fixed operator maintenance intervals are configuration, not a calibrated adaptive controller. | `fgdb-consumer-census-law-5pjdc`, calibration owners |
 | 12 | Broad authorized FNX analytics with honest resource/copy boundaries | PARTIAL, advanced. Sixteen registered signatures; compressed and buffered/cooperative execution are real. Buffered calls can avoid a resident Snapshot, but still stage selected IDs/build derived images and have separately bounded image/kernel/output work. This is not universal zero-copy or external-memory execution. | W8, `fgdb-w8-projection-sd7`, bridge `.29` |
-| 13 | Durable transactional, historical and branch-scoped search indexes | PARTIAL. Real BM25/HNSW/hybrid and synchronously maintained resident registrations. `query_beacon/resident/maintained.rs` scopes registrations to an opened database; durable catalog, branch scope and general planner reuse remain. Graph-only demand access is a separate useful improvement. | W7, `fgdb-t38fv`, `fgdb-5jyok` |
+| 13 | Durable transactional, historical and branch-scoped search indexes | PARTIAL. Real BM25/HNSW/hybrid, synchronously maintained resident registrations and compatible privileged exact-cut query reuse. Approximate/masked/staged paths deliberately retain their source build. Registrations remain opened-database-local; durable catalog/generation lifecycle and branch scope remain. | W7, `fgdb-t38fv`, `fgdb-5jyok` |
 | 14 | Mandatory governance plus final key/audit/revocation/time/privacy lifecycle | PARTIAL. Real capability validation and pre-source masking. Warden retirement is local/cooperative; server output guards explicitly do not claim durable audit release, time-authority evidence or final revocation barriers. | W9, `fgdb-w4-secure-view-v87`, protected-output/audit owners |
 | 15 | B6 agents fork/write/merge with provenance and retained retrieval replay | PARTIAL. Useful governed retrieval and host-resolved branch reads exist. `query_branch.rs` explicitly grants no persistent catalog, fork, merge or branch write. | W2 branch owners, W7/W9 |
 | 16 | Served replication/HA, exact backup and independent restore | UNWIRED IN PRODUCT. Real Raft/catch-up/publication mechanisms in `fgdb-order`/`fgdb-repl`. The latter still requires real transport/pins/fences/Chronicle publication adapters and is absent from the product closures. | W11 and backup/restore owners |
@@ -218,6 +218,14 @@ The source difference from the previous frozen audit spans 233 files, with
 - Native collection/composite operands, aggregate ordering, carried-element
   reads and the vertex-history source cursor advanced. Old TCK wrong-answer
   counts cannot describe this cut without a new corpus run.
+- An older open task's statement that native retrieval never consults
+  maintained indexes is stale. `fd2690bc1`/`455850e2b` already connect compatible
+  privileged exact current-cut and pinned-view reuse. `lookup_exact` retains
+  definition/encoding/corpus/sequence and fresh-work checks. Approximate,
+  masked, staged and older-selector paths deliberately build their own source;
+  retained ANN links and a rebuild need not produce the same candidates.
+  `fgdb-t38fv`'s residual acceptance was refined without reimplementing this
+  connection or granting masked reads a global corpus.
 - Served subscription retirement has a 129-cycle source test; fixed
   maintenance/recovery and gate FD/include-discovery repairs also landed.
   A test's presence or an older passing cut is not a fresh complete verdict.
@@ -338,7 +346,7 @@ The skill's frozen generation/refinement requirements were applied to the
 existing granular tasks. No duplicate task or completion-count padding was
 needed. Through `br` only, this audit appended current source, rationale,
 implementation boundaries and executable acceptance to `.16`, `.21`, `.24`,
-`.29` and `.30`. No task status or structural dependency was changed, and no
+`.29`, `.30` and `fgdb-t38fv`. No task status or structural dependency was changed, and no
 issue was closed. Peer-assigned `.23`, `.25` and `.27` work was preserved.
 
 Three ambition passes strengthened the existing bridge in place:
@@ -381,7 +389,7 @@ is navigation, not evidence that a feature is broken or finished.
 | Current full TCK, §17 comparisons, external-authority/HA, installer/Python acceptance | Not rerun by the local static checks above. Historical results are not current results. |
 
 Pending terminal evidence is not a passing gate. The audit changes only this
-existing report and append-only notes on the five existing tasks; it changes
+existing report and append-only notes on the six existing tasks; it changes
 no engine, test expectation, gate, baseline, registry activation or normative
 requirement.
 
