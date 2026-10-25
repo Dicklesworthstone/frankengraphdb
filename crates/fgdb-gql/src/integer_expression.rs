@@ -566,15 +566,22 @@ pub(crate) enum ExpressionCell<'a> {
     Count(u64),
     Integer(i128),
     Average(crate::GraphExactAverage),
-    /// A List only evaluate_value_with_control loads (fgdb-bqri3). `+` joins
-    /// it (list_plus); every other instruction refuses it, NonScalar, as the
-    /// scalar loader refuses it.
-    List(Cow<'a, GraphValue>),
+    /// A List or Map only evaluate_value_with_control loads (fgdb-bqri3).
+    /// `+` joins a List (list_plus), a comparison compares either as the
+    /// value language does (compare_cells), and a text predicate over either
+    /// is NULL; every other instruction refuses it, NonScalar or NonText, as
+    /// the scalar loader refuses it.
+    Composite(Cow<'a, GraphValue>),
 }
 
 impl ExpressionCell<'_> {
     pub(crate) fn is_null(&self) -> bool {
         matches!(self, Self::Scalar(value) if matches!(value.as_ref(), CanonicalScalar::Null))
+    }
+
+    /// A loaded or joined List, which `+` concatenates with.
+    fn is_list(&self) -> bool {
+        matches!(self, Self::Composite(value) if value.as_list().is_some())
     }
 
     pub(crate) fn integer(&self) -> Result<Option<i128>, GraphIntegerErrorKind> {
@@ -583,7 +590,7 @@ impl ExpressionCell<'_> {
             Self::Count(value) => Ok(Some(i128::from(*value))),
             Self::Integer(value) => Ok(Some(*value)),
             Self::Average(_) => Err(GraphIntegerErrorKind::NonInteger),
-            Self::List(_) => Err(GraphIntegerErrorKind::NonScalar),
+            Self::Composite(_) => Err(GraphIntegerErrorKind::NonScalar),
         }
     }
 
@@ -856,8 +863,9 @@ impl GraphIntegerExpression {
     /// As evaluate_scalar_with_control, except that a List input may meet
     /// `+` (fgdb-bqri3): openCypher concatenates two lists and appends or
     /// prepends any other value, so `n.tags + 'x'` and `n.ids + 5` answer a
-    /// List when the stored property holds one. A List anywhere else refuses
-    /// as the scalar loader does. The owned result is reserved as a copy.
+    /// List when the stored property holds one. A text predicate over a List
+    /// or Map input is NULL, as over any non-text value. Anywhere else a List
+    /// or Map refuses as the scalar loader does.
     pub fn evaluate_value_with_control<E>(
         &self,
         values: &[GraphValue],
@@ -867,7 +875,9 @@ impl GraphIntegerExpression {
             values.len(),
             |column| match values.get(column) {
                 Some(GraphValue::Scalar(value)) => Ok(ExpressionCell::Scalar(Cow::Borrowed(value))),
-                Some(value @ GraphValue::List(_)) => Ok(ExpressionCell::List(Cow::Borrowed(value))),
+                Some(value @ (GraphValue::List(_) | GraphValue::Map { .. })) => {
+                    Ok(ExpressionCell::Composite(Cow::Borrowed(value)))
+                }
                 Some(_) => Err(GraphIntegerErrorKind::NonScalar),
                 None => Err(GraphIntegerErrorKind::MissingColumn),
             },
@@ -881,12 +891,12 @@ impl GraphIntegerExpression {
                 }
                 Ok(GraphValue::Scalar(value.into_owned()))
             }
-            // Only a join (list_plus) makes a List result. A List an input
-            // only passes through (coalesce, CASE) still refuses, as the
-            // scalar loader does, so only a joining program, which value_type
-            // admits as Stored, ever answers a List.
-            ExpressionCell::List(Cow::Owned(value)) => Ok(value),
-            ExpressionCell::List(Cow::Borrowed(_)) => {
+            // Only a join (list_plus) makes a composite result. A List or Map
+            // an input only passes through (coalesce, CASE) still refuses, as
+            // the scalar loader does, so only a joining program, which
+            // value_type admits as Stored, ever answers a List.
+            ExpressionCell::Composite(Cow::Owned(value)) => Ok(value),
+            ExpressionCell::Composite(Cow::Borrowed(_)) => {
                 Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
                     instruction: self.code.len(),
                     kind: GraphIntegerErrorKind::NonScalar,
@@ -1013,10 +1023,7 @@ impl GraphIntegerExpression {
                 Instruction::Binary(op) | Instruction::NumericBinary(op) => {
                     let mut right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
-                    if *op == GraphIntegerBinary::Add
-                        && (matches!(left, ExpressionCell::List(_))
-                            || matches!(right, ExpressionCell::List(_)))
-                    {
+                    if *op == GraphIntegerBinary::Add && (left.is_list() || right.is_list()) {
                         let joined = list_plus(left, &right, at, control)?;
                         *left = joined;
                         at += 1;
@@ -1225,10 +1232,7 @@ impl GraphIntegerExpression {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
                     // `n.tags + 'x'` compiles to Concat; over a List it appends.
-                    if matches!(op, Instruction::Concat)
-                        && (matches!(left, ExpressionCell::List(_))
-                            || matches!(right, ExpressionCell::List(_)))
-                    {
+                    if matches!(op, Instruction::Concat) && (left.is_list() || right.is_list()) {
                         let joined = list_plus(left, &right, at, control)?;
                         *left = joined;
                         at += 1;
@@ -1760,7 +1764,7 @@ fn binary64(
             CanonicalScalar::Float(value) => *value,
             _ => return Err(GraphIntegerErrorKind::IncompatibleOperands),
         },
-        ExpressionCell::List(_) => return Err(GraphIntegerErrorKind::NonScalar),
+        ExpressionCell::Composite(_) => return Err(GraphIntegerErrorKind::NonScalar),
     }))
 }
 
@@ -1802,7 +1806,7 @@ fn to_boolean<E>(
         ExpressionCell::Average(_) => {
             return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
         }
-        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
+        ExpressionCell::Composite(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => CanonicalScalar::Null,
             CanonicalScalar::Bool(value) => CanonicalScalar::Bool(*value),
@@ -1840,7 +1844,7 @@ fn convert<E>(
             let float = CanonicalScalar::Float(average.binary64()).into();
             return convert(&float, to_text, instruction, control);
         }
-        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
+        ExpressionCell::Composite(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(value) => match value.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
             CanonicalScalar::Int(value) => i128::from(*value),
@@ -1990,7 +1994,7 @@ fn numeric<E>(
         ExpressionCell::Count(value) => integer(i128::from(*value)),
         ExpressionCell::Integer(value) => integer(*value),
         ExpressionCell::Average(average) => average.binary64(),
-        ExpressionCell::List(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
+        ExpressionCell::Composite(_) => return Err(failure(GraphIntegerErrorKind::NonScalar)),
         ExpressionCell::Scalar(scalar) => match scalar.as_ref() {
             CanonicalScalar::Null => return Ok(CanonicalScalar::Null),
             CanonicalScalar::Int(value) => integer(i128::from(*value)),
@@ -2142,13 +2146,16 @@ fn list_plus<'a, E>(
                 CanonicalScalar::Int(i64::try_from(*value).map_err(|_| overflow())?)
             }
             ExpressionCell::Average(average) => CanonicalScalar::Float(average.binary64()),
-            ExpressionCell::List(_) => unreachable!("lists join by their members"),
+            ExpressionCell::Composite(_) => unreachable!("composites join as values below"),
         }))
     };
     let mut joined = Vec::new();
     for cell in [left, right] {
-        if let ExpressionCell::List(list) = cell {
-            let members = list.as_list().expect("a List cell holds a list");
+        if let ExpressionCell::Composite(value) = cell {
+            // A List joins by its members; a Map is one member.
+            let members = value
+                .as_list()
+                .unwrap_or_else(|| core::slice::from_ref(value.as_ref()));
             for value in members {
                 joined.push(
                     value
@@ -2167,7 +2174,7 @@ fn list_plus<'a, E>(
         }
     }
     control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
-    Ok(ExpressionCell::List(Cow::Owned(GraphValue::List(
+    Ok(ExpressionCell::Composite(Cow::Owned(GraphValue::List(
         joined.into_boxed_slice(),
     ))))
 }
@@ -2187,12 +2194,23 @@ fn compare_cells<E>(
     if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
         return compare_scalars(comparison, left, right, instruction, control);
     }
-    // A List compares only in the value language (membership).
-    if matches!(left, ExpressionCell::List(_)) || matches!(right, ExpressionCell::List(_)) {
-        return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
-            instruction,
-            kind: GraphIntegerErrorKind::NonScalar,
-        }));
+    // A List or Map compares as the value language compares it: two of them
+    // element by element, and either against any other non-null value is
+    // unequal (fgdb-v6ku6) and unordered.
+    if let (ExpressionCell::Composite(left), ExpressionCell::Composite(right)) = (left, right) {
+        use crate::set_ops::projection::membership;
+        return match comparison {
+            IntegerComparison::Equal => membership::equal(left, right, control),
+            IntegerComparison::NotEqual => {
+                membership::equal(left, right, control).map(|equal| equal.map(|equal| !equal))
+            }
+            _ => membership::order(comparison, left, right, control),
+        }
+        .map_err(GraphIntegerEvaluationError::Control);
+    }
+    if matches!(left, ExpressionCell::Composite(_)) || matches!(right, ExpressionCell::Composite(_))
+    {
+        return Ok(comparison.across_domains());
     }
     // Every other cell is a number: a count, a wide sum or an exact average.
     // It is unequal to a scalar of another domain (fgdb-v6ku6).

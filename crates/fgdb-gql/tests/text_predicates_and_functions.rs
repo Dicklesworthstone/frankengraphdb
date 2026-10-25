@@ -3759,3 +3759,36 @@ fn named_time_zones_resolve_through_the_pinned_tzdb_only() {
         prepare(text).canonical_bytes()
     );
 }
+
+/// STARTS WITH, ENDS WITH and CONTAINS over a value that is not text answer
+/// NULL, lists and maps included (TCK String8/9/10 [8], fgdb-bqri3): only
+/// text against text decides. An UNWIND element is dynamically typed, so each
+/// row reaches the scalar program with its own kind.
+#[test]
+fn text_predicates_over_non_text_operands_are_null() {
+    let query = prepare(
+        "MATCH (n) UNWIND [1, 'ab', [], ['a'], {}, null] AS op \
+         RETURN op STARTS WITH 'a' AS s, op ENDS WITH 'b' AS e, op CONTAINS '' AS c",
+    );
+    let result = execute(&query, &text("x"), policy()).unwrap();
+    let rows: Vec<Vec<CanonicalScalar>> = result
+        .value
+        .iter()
+        .map(|row| {
+            row.values()
+                .iter()
+                .map(|value| value.as_scalar().expect("a Boolean or NULL").clone())
+                .collect()
+        })
+        .collect();
+    // Only 'ab' is text: every predicate holds for it, and the other five
+    // rows (1, [], ['a'], {}, null) are NULL throughout.
+    assert_eq!(rows.len(), 6);
+    let count = |expected: CanonicalScalar| {
+        rows.iter()
+            .filter(|row| row.iter().all(|value| *value == expected))
+            .count()
+    };
+    assert_eq!(count(CanonicalScalar::Bool(true)), 1);
+    assert_eq!(count(CanonicalScalar::Null), 5);
+}

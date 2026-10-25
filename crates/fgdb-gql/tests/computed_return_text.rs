@@ -759,6 +759,54 @@ fn indexed_scalar_operands_keep_parameter_types_nulls_and_typed_failures() {
     ));
 }
 
+/// A List or Map operand of the scalar program compares as the value
+/// language compares it (fgdb-bqri3): two of them element by element, and
+/// either against any other non-null value unequal and unordered.
+#[test]
+fn composite_operands_compare_as_the_value_language_compares_them() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let scalar = |value: CanonicalScalar| GraphValue::Scalar(value);
+    for (expression, expected) in [
+        // openCypher Precedence3 [5]: IN takes a list needle.
+        (
+            "(([1]+[2]) IN [3])+[4]",
+            GraphValue::List(
+                vec![
+                    scalar(CanonicalScalar::Bool(false)),
+                    scalar(CanonicalScalar::Int(4)),
+                ]
+                .into_boxed_slice(),
+            ),
+        ),
+        ("items[0] IN [3, 1]", scalar(CanonicalScalar::Bool(false))),
+        ("items[0] = items[1]", scalar(CanonicalScalar::Bool(true))),
+        ("items[0] <> items[2]", scalar(CanonicalScalar::Bool(true))),
+        ("items[0] < items[2]", scalar(CanonicalScalar::Bool(true))),
+        ("items[0] = items[3]", scalar(CanonicalScalar::Bool(false))),
+        ("items[0] <> items[3]", scalar(CanonicalScalar::Bool(true))),
+        ("items[0] < items[3]", scalar(CanonicalScalar::Null)),
+        ("items[0] = items[4]", scalar(CanonicalScalar::Null)),
+        ("items[5] = items[6]", scalar(CanonicalScalar::Bool(false))),
+        (
+            "CASE items[0] WHEN items[2] THEN 1 WHEN items[1] THEN 2 END",
+            scalar(CanonicalScalar::Int(2)),
+        ),
+    ] {
+        let text = format!(
+            "MATCH (n) WITH [[1,2],[1,2],[1,3],1,null,{{a:1}},[1]] AS items \
+             RETURN {expression} AS result"
+        );
+        let query = PreparedGraphSetText::prepare(&text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let execution = run(&query, &[VId(1)], &[], &Props::new())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(execution.value[0].values(), &[expected], "{text}");
+    }
+}
+
 #[test]
 fn unknown_subscript_bases_refuse_without_reentering_the_scalar_compiler() {
     for text in [
