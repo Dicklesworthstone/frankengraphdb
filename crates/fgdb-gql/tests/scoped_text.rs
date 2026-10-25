@@ -744,3 +744,70 @@ fn exists_function_on_a_pattern_is_the_pattern_predicate() {
         &["b"]
     );
 }
+
+/// fgdb-fj106 design 1: a relationship type test in a scoped WHERE (an
+/// EXISTS body, an OPTIONAL MATCH) narrows that clause's edge, as the typed
+/// pattern does: `type(r) = 'R'`, `'R' = type(r)`, `r:R` and `type(r) IN
+/// [...]`. A type no catalog names matches nothing, and a test that the
+/// written type excludes leaves nothing; neither is an error. Under OR or NOT
+/// the test is no flat conjunct and refuses (TCK ExistentialSubquery1 [4]).
+#[test]
+fn scoped_relationship_type_tests_narrow_their_edge() {
+    use fgdb_types::EId;
+    let edges = [
+        (EId(10), VId(0), R, VId(1)),
+        (EId(11), VId(0), S, VId(2)),
+        (EId(12), VId(1), S, VId(2)),
+    ];
+    let rows = |text: &str| {
+        let mut rows = ids(&query(text)
+            .plan()
+            .execute_governed_with_identified_properties(
+                5,
+                [VId(0), VId(1), VId(2)],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value);
+        rows.sort();
+        rows
+    };
+    let typed = rows("MATCH (a) WHERE EXISTS { (a)-[r:R]->() } RETURN a");
+    assert_eq!(typed, vec![vec![Some(VId(0))]]);
+    for test in ["type(r) = 'R'", "'R' = type(r)", "r:R", "type(r) IN ['R']"] {
+        let text = format!("MATCH (a) WHERE EXISTS {{ (a)-[r]->() WHERE {test} }} RETURN a");
+        assert_eq!(rows(&text), typed, "{text}");
+    }
+    assert_eq!(
+        rows("MATCH (a) WHERE EXISTS { (a)-[r]->() WHERE type(r) IN ['R', 'S'] } RETURN a"),
+        vec![vec![Some(VId(0))], vec![Some(VId(1))]]
+    );
+    for empty in [
+        "MATCH (a) WHERE EXISTS { (a)-[r]->() WHERE type(r) = 'NA' } RETURN a",
+        "MATCH (a) WHERE EXISTS { (a)-[r:R]->() WHERE type(r) = 'S' } RETURN a",
+        "MATCH (a) WHERE EXISTS { (a)-[r]->() WHERE type(r) IN [] } RETURN a",
+    ] {
+        assert!(rows(empty).is_empty(), "{empty}");
+    }
+    assert_eq!(
+        rows("MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WHERE type(r) = 'S' RETURN a, b"),
+        vec![
+            vec![Some(VId(0)), Some(VId(2))],
+            vec![Some(VId(1)), Some(VId(2))],
+            vec![Some(VId(2)), None],
+        ]
+    );
+    for refused in [
+        "MATCH (a) WHERE EXISTS { (a)-[r]->() WHERE type(r) = 'R' OR a.n = 1 } RETURN a",
+        "MATCH (a) WHERE EXISTS { (a)-[r]->() WHERE NOT type(r) = 'R' } RETURN a",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(refused, symbols).is_err(),
+            "{refused}"
+        );
+    }
+}

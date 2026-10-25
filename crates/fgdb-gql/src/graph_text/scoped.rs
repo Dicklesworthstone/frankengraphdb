@@ -181,8 +181,9 @@ fn resolve_pattern_with_captures<'a>(
             builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
         )?;
     }
+    let mut numeric = Vec::new();
     for (edge_at, edge) in edges.iter().enumerate() {
-        let relation = match edge.relation {
+        let mut admitted = match edge.relation {
             Some(name) => {
                 let mut relations = Vec::with_capacity(1 + edge.alternatives.len());
                 for name in core::iter::once(name).chain(edge.alternatives.iter().copied()) {
@@ -192,17 +193,62 @@ fn resolve_pattern_with_captures<'a>(
                     };
                     relations.push(relation);
                 }
-                // The parser bounded the alternation; duplicates collapse.
-                EdgeRelation::alternation(&relations).ok_or_else(|| {
-                    error(
-                        name.at,
-                        GraphPatternTextErrorKind::Expected(
-                            "at most 8 relationship types in an alternation",
-                        ),
-                    )
-                })?
+                Some((name, relations))
             }
+            None => None,
+        };
+        // A WHERE's type tests intersect with the written type. A type no
+        // catalog names matches nothing, as in the row filter; it is no
+        // error (fgdb-fj106).
+        for test in &edge.type_tests {
+            let mut relations = Vec::with_capacity(test.len());
+            for &name in test {
+                match symbol(GraphSymbolKind::Relation, name) {
+                    Ok(GraphSymbol::Relation(relation)) => relations.push(relation),
+                    Ok(_) => unreachable!("symbol domain is checked by the shared resolver"),
+                    Err(error)
+                        if error.kind
+                            == GraphPatternTextErrorKind::UnknownSymbol(
+                                GraphSymbolKind::Relation,
+                            ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let at = test.first().map_or(edge.source, |name| *name);
+            admitted = Some(match admitted {
+                None => (at, relations),
+                Some((at, written)) => (
+                    at,
+                    written
+                        .into_iter()
+                        .filter(|relation| relations.contains(relation))
+                        .collect(),
+                ),
+            });
+        }
+        let relation = match admitted {
             None => EdgeRelation::Any,
+            // No type is admitted: the clause matches nothing.
+            Some((_, relations)) if relations.is_empty() => {
+                numeric.push(BoundFilter::Boolean(
+                    boolean::BoundBooleanTemplate::resolve(
+                        vec![boolean::SyntaxItem::Truth(Some(false))],
+                        0,
+                        edges,
+                        symbol,
+                    )?,
+                ));
+                EdgeRelation::Any
+            }
+            // The parser bounded the alternation; duplicates collapse.
+            Some((name, relations)) => EdgeRelation::alternation(&relations).ok_or_else(|| {
+                error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "at most 8 relationship types in an alternation",
+                    ),
+                )
+            })?,
         };
         let result = match edge.walk {
             Some(bounds) if edge.search == GraphWalkSearch::AllShortest => builder.shortest_walk(
@@ -260,7 +306,6 @@ fn resolve_pattern_with_captures<'a>(
             built(variable.at, builder.capture_edge(variable.text, edge_at))?;
         }
     }
-    let mut numeric = Vec::new();
     for filter in filters {
         let edge_property = |name: Name<'_>| {
             edges.iter().any(|edge| {
@@ -1020,6 +1065,7 @@ impl<'a> Parser<'a> {
                     source: left,
                     relation,
                     alternatives,
+                    type_tests: Vec::new(),
                     destination: right,
                     direction: match (incoming, outgoing) {
                         (true, false) => GlaDirection::Reverse,
